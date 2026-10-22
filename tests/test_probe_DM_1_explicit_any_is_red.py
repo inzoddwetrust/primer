@@ -2,16 +2,19 @@
 
 ``mypy --strict`` alone accepts ``def f(x: Any) -> Any`` (measured on the pinned
 mypy 2.4.0); the line's strictness comes from ``disallow_any_explicit``. The
-probe runs mypy with the repository config on a module with an explicit ``Any``,
-which must be red with ``[explicit-any]``, and on its twin without ``Any``, which
-must be green, so a config that rejects everything does not pass either.
+probe runs mypy through the runner with the repository config on a module with
+an explicit ``Any``, which must exit with code 1 and report ``[explicit-any]``,
+and on its twin without ``Any``, which must exit with code 0, so a config that
+rejects everything does not pass either.
 """
 
-import subprocess
 import sys
 from pathlib import Path
 
+from pridem.runner import Stream, SubprocessRunner
+
 _CONFIG = Path(__file__).resolve().parent.parent / "pyproject.toml"
+_TIMEOUT_SECONDS = 120.0
 
 _WITH_ANY = """from typing import Any
 
@@ -25,9 +28,14 @@ _WITHOUT_ANY = """def f(x: int) -> int:
 """
 
 
-def _mypy(module: Path, cache_dir: Path) -> subprocess.CompletedProcess[str]:
-    # runner appears in DM-5; this test pins tooling, not machine behaviour
-    return subprocess.run(  # noqa: S603
+def _mypy(module: Path, cache_dir: Path, expect: tuple[int, ...]) -> list[str]:
+    stdout: list[str] = []
+
+    def collect(stream: Stream, line: str) -> None:
+        if stream is Stream.STDOUT:
+            stdout.append(line)
+
+    SubprocessRunner().run(
         [
             sys.executable,
             "-m",
@@ -38,10 +46,11 @@ def _mypy(module: Path, cache_dir: Path) -> subprocess.CompletedProcess[str]:
             str(cache_dir),
             str(module),
         ],
-        capture_output=True,
-        text=True,
-        check=False,
+        expect=expect,
+        timeout=_TIMEOUT_SECONDS,
+        on_line=collect,
     )
+    return stdout
 
 
 def test_probe_DM_1_explicit_any_is_red(tmp_path: Path) -> None:
@@ -51,9 +60,7 @@ def test_probe_DM_1_explicit_any_is_red(tmp_path: Path) -> None:
     without_any.write_text(_WITHOUT_ANY)
     cache_dir = tmp_path / "mypy_cache"
 
-    red = _mypy(with_any, cache_dir)
-    assert red.returncode == 1, red.stdout + red.stderr
-    assert "[explicit-any]" in red.stdout, red.stdout + red.stderr
+    red = _mypy(with_any, cache_dir, expect=(1,))
+    assert any("[explicit-any]" in line for line in red), "\n".join(red)
 
-    green = _mypy(without_any, cache_dir)
-    assert green.returncode == 0, green.stdout + green.stderr
+    _mypy(without_any, cache_dir, expect=(0,))
