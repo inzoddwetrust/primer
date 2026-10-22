@@ -4,7 +4,8 @@ A file is checked in two layers. Field layer: the pydantic models, strict and
 closed (an unknown key at any depth is an error), plus the fields the contract
 names as forbidden (rule 1 ``value``/``fixed``, rule 5 ``file``, rule 9
 ``branch``), reported with their rule. Rule layer: cross-field rules of the
-contract, run only when the field layer is clean, each collecting every
+contract (rule 3 single-point pins, rule 4, 10, 11, 13 and the referential
+checks), run only when the field layer is clean, each collecting every
 violation. Every problem names the path in the file.
 
 ``python -m pridem.stacks.schema --export`` writes the JSON Schema of
@@ -18,7 +19,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
-from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.specifiers import InvalidSpecifier, Specifier, SpecifierSet
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -42,6 +43,11 @@ from pridem.stacks.loader import (
 
 RULES = {
     "R1.value": (1, "values never live in primer.yaml, only sources"),
+    "R3.single-point": (
+        3,
+        "a dependency is declared as a range; a pin (== or ===) is a lock "
+        "around primer.lock",
+    ),
     "R3.lock-set": (3, "primer.lock pins exactly the dependencies of primer.yaml"),
     "R3.lock-range": (3, "the locked version lies in the declared range"),
     "R3.lock-tag": (3, "a dependency is a release tag vX.Y.Z equal to its version"),
@@ -58,6 +64,7 @@ RULES = {
     "R11.edition-enum": (11, "enum: editions needs editions declared"),
     "R13.remote-seam": (13, "a remote dependency provides through the passport"),
     "S.seam-from": (0, "a seam names a stack this stack can be wired to"),
+    "S.mount-dependency": (0, "a package mount names a declared dependency"),
 }
 
 
@@ -332,6 +339,30 @@ def problem_at(path: Sequence[int | str], code: str, detail: str) -> Problem:
     return Problem(render_path(path), code, rule_message(code, detail))
 
 
+def _is_pin(specifier: Specifier) -> bool:
+    """``==X`` and ``===X`` pin one version; ``==X.*`` is a range and stays."""
+    if specifier.operator == "===":
+        return True
+    return specifier.operator == "==" and not specifier.version.endswith(".*")
+
+
+def _r3_single_point(stack: Product | Service) -> list[Problem]:
+    if not isinstance(stack, Product):
+        return []
+    out: list[Problem] = []
+    for name, dependency in stack.dependencies.items():
+        pins = sorted(str(s) for s in SpecifierSet(dependency.version) if _is_pin(s))
+        if pins:
+            out.append(
+                problem_at(
+                    ("dependencies", name, "version"),
+                    "R3.single-point",
+                    f"{', '.join(pins)} in {dependency.version!r}",
+                )
+            )
+    return out
+
+
 def _r4_route_domains(stack: Product | Service) -> list[Problem]:
     if not isinstance(stack, Product) or stack.host is None:
         return []
@@ -405,6 +436,36 @@ def _r10_mounts(stack: Product | Service) -> list[Problem]:
     ]
 
 
+def _s_mount_dependency(stack: Product | Service) -> list[Problem]:
+    if not isinstance(stack, Product):
+        return []
+    out: list[Problem] = []
+    for name, package in stack.packages.items():
+        for index, mount in enumerate(package.mount):
+            if mount.dependency is None:
+                continue
+            path = ("packages", name, "mount", index, "dependency")
+            dependency = stack.dependencies.get(mount.dependency)
+            if dependency is None:
+                out.append(
+                    problem_at(
+                        path,
+                        "S.mount-dependency",
+                        f"{mount.dependency!r} is not in dependencies",
+                    )
+                )
+            elif dependency.topology == "remote":
+                out.append(
+                    problem_at(
+                        path,
+                        "R13.remote-seam",
+                        f"{mount.dependency!r} is remote; "
+                        "a package cannot be copied to another box",
+                    )
+                )
+    return out
+
+
 def _r11_editions(stack: Product | Service) -> list[Problem]:
     out: list[Problem] = []
     if isinstance(stack, Product):
@@ -463,8 +524,10 @@ def _r13_seams(stack: Product | Service) -> list[Problem]:
 
 
 RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
+    _r3_single_point,
     _r4_route_domains,
     _r10_mounts,
+    _s_mount_dependency,
     _r11_editions,
     _r13_seams,
 )

@@ -203,6 +203,50 @@ def test_dependency_topology_and_branch(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "version", [">=3.0,<4", "!=3.0.0", "~=3.0", "==3.*", "==3.0.*", ">=3.0,!=3.1.0"]
+)
+def test_dependency_range_without_pin_passes(tmp_path: Path, version: str) -> None:
+    data = example("product.yaml")
+    node(data, "dependencies", "comms")["version"] = version
+    assert yaml_problems(tmp_path, data) == []
+
+
+@pytest.mark.parametrize(
+    ("version", "pins"),
+    [
+        ("==3.0.0", "==3.0.0"),
+        ("== 3.0.0", "==3.0.0"),
+        ("===3.0.0", "===3.0.0"),
+        (">=3.0,==3.0.0", "==3.0.0"),
+        (" ==3.0.0 , <4", "==3.0.0"),
+        ("==3.0.0,==3.0.1", "==3.0.0, ==3.0.1"),
+        ("===3.*", "===3.*"),
+    ],
+)
+def test_dependency_pin_is_rule_3(tmp_path: Path, version: str, pins: str) -> None:
+    """A pin anywhere in the range is one rule-3 problem naming every pin."""
+    data = example("product.yaml")
+    node(data, "dependencies", "comms")["version"] = version
+    assert yaml_problems(tmp_path, data) == [
+        ("dependencies.comms.version", "R3.single-point")
+    ]
+    assert yaml_messages(tmp_path, data) == [
+        "contract rule 3: a dependency is declared as a range; a pin (== or ===) "
+        f"is a lock around primer.lock: {pins} in {version!r}"
+    ]
+
+
+def test_dependency_pins_are_reported_per_dependency(tmp_path: Path) -> None:
+    data = example("product.yaml")
+    node(data, "dependencies", "comms")["version"] = "==3.0.0"
+    node(data, "dependencies", "meet")["version"] = "===1.0.0"
+    assert yaml_problems(tmp_path, data) == [
+        ("dependencies.comms.version", "R3.single-point"),
+        ("dependencies.meet.version", "R3.single-point"),
+    ]
+
+
 # --- editions ----------------------------------------------------------------------
 
 
@@ -317,6 +361,65 @@ def test_package_needs_a_mount(tmp_path: Path) -> None:
     data = example("product.yaml")
     node(data, "packages", "skin")["mount"] = []
     assert yaml_problems(tmp_path, data) == [("packages.skin.mount", "too_short")]
+
+
+def test_mount_dependency_must_be_declared(tmp_path: Path) -> None:
+    """Every undeclared mount.dependency is reported at its own element."""
+    data = example("product.yaml")
+    texts = node(data, "packages", "texts")["mount"]
+    assert isinstance(texts, list)
+    texts.append({"dependency": "billing", "env": "A"})
+    node(data, "packages", "skin")["mount"] = [
+        {"dependency": "billing", "env": "B"},
+        {"dependency": "comms", "env": "C"},
+    ]
+    assert yaml_problems(tmp_path, data) == [
+        ("packages.skin.mount[0].dependency", "S.mount-dependency"),
+        ("packages.texts.mount[2].dependency", "S.mount-dependency"),
+    ]
+    assert yaml_messages(tmp_path, data)[0] == (
+        "a package mount names a declared dependency: 'billing' is not in dependencies"
+    )
+
+
+def test_mount_dependency_on_remote_is_rule_13(tmp_path: Path) -> None:
+    data = example("product.yaml")
+    node(data, "packages", "texts", "mount", 1)["dependency"] = "meet"
+    assert yaml_problems(tmp_path, data) == [
+        ("packages.texts.mount[1].dependency", "R13.remote-seam")
+    ]
+    assert yaml_messages(tmp_path, data)[0].startswith("contract rule 13:")
+
+
+def test_mount_dependency_without_dependencies_at_all(tmp_path: Path) -> None:
+    data = example("product.yaml")
+    del data["dependencies"]
+    del data["editions"]
+    env = node(data, "env")
+    for key in [k for k, v in env.items() if isinstance(v, dict) and "from" in v]:
+        del env[key]
+    del env["EDITION"]
+    assert yaml_problems(tmp_path, data) == [
+        ("packages.texts.mount[1].dependency", "S.mount-dependency")
+    ]
+
+
+def test_mount_dependency_reference_adds_to_rule_10(tmp_path: Path) -> None:
+    """A malformed mount to an unknown dependency gets both problems."""
+    data = example("product.yaml")
+    node(data, "packages", "skin")["mount"] = [{"dependency": "billing"}]
+    assert yaml_problems(tmp_path, data) == [
+        ("packages.skin.mount[0]", "R10.mount"),
+        ("packages.skin.mount[0].dependency", "S.mount-dependency"),
+    ]
+
+
+def test_empty_mount_dependency_stops_at_field_layer(tmp_path: Path) -> None:
+    data = example("product.yaml")
+    node(data, "packages", "texts", "mount", 1)["dependency"] = ""
+    assert yaml_problems(tmp_path, data) == [
+        ("packages.texts.mount[1].dependency", "string_too_short")
+    ]
 
 
 # --- seams (rule 13 and references) ----------------------------------------------
