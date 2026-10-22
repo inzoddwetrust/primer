@@ -45,8 +45,8 @@ RULES = {
     "R1.value": (1, "values never live in primer.yaml, only sources"),
     "R3.single-point": (
         3,
-        "a dependency is declared as a range; a pin (== or ===) is a lock "
-        "around primer.lock",
+        "a range is half-open, lower bound inclusive and upper exclusive; "
+        "==, === and <= pin one version around primer.lock",
     ),
     "R3.lock-set": (3, "primer.lock pins exactly the dependencies of primer.yaml"),
     "R3.lock-range": (3, "the locked version lies in the declared range"),
@@ -340,10 +340,18 @@ def problem_at(path: Sequence[int | str], code: str, detail: str) -> Problem:
 
 
 def _is_pin(specifier: Specifier) -> bool:
-    """``==X`` and ``===X`` pin one version; ``==X.*`` is a range and stays."""
-    if specifier.operator == "===":
+    """``==X``, ``===X`` and ``<=X`` pin one version; ``==X.*`` is a range."""
+    if specifier.operator in ("===", "<="):
         return True
     return specifier.operator == "==" and not specifier.version.endswith(".*")
+
+
+def _range_pins(path: tuple[int | str, ...], declared: str) -> list[Problem]:
+    """One rule-3 problem for the range at ``path`` naming every pin in it."""
+    pins = sorted(str(s) for s in SpecifierSet(declared) if _is_pin(s))
+    if not pins:
+        return []
+    return [problem_at(path, "R3.single-point", f"{', '.join(pins)} in {declared!r}")]
 
 
 def _r3_single_point(stack: Product | Service) -> list[Problem]:
@@ -351,15 +359,9 @@ def _r3_single_point(stack: Product | Service) -> list[Problem]:
         return []
     out: list[Problem] = []
     for name, dependency in stack.dependencies.items():
-        pins = sorted(str(s) for s in SpecifierSet(dependency.version) if _is_pin(s))
-        if pins:
-            out.append(
-                problem_at(
-                    ("dependencies", name, "version"),
-                    "R3.single-point",
-                    f"{', '.join(pins)} in {dependency.version!r}",
-                )
-            )
+        out += _range_pins(("dependencies", name, "version"), dependency.version)
+    for name, package in stack.packages.items():
+        out += _range_pins(("packages", name, "contract"), package.contract)
     return out
 
 

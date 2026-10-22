@@ -225,15 +225,21 @@ def test_dependency_range_without_pin_passes(tmp_path: Path, version: str) -> No
     ],
 )
 def test_dependency_pin_is_rule_3(tmp_path: Path, version: str, pins: str) -> None:
-    """A pin anywhere in the range is one rule-3 problem naming every pin."""
+    """A pin anywhere in the range is one rule-3 problem naming every pin.
+
+    The message carries the number and text of rule 3. The text follows the
+    contract's edition: DM-32 asserted the wording of 1.5, DM-33 the wording
+    of 1.6 (half-open range, ``<=`` is a pin); the property is unchanged.
+    """
     data = example("product.yaml")
     node(data, "dependencies", "comms")["version"] = version
     assert yaml_problems(tmp_path, data) == [
         ("dependencies.comms.version", "R3.single-point")
     ]
     assert yaml_messages(tmp_path, data) == [
-        "contract rule 3: a dependency is declared as a range; a pin (== or ===) "
-        f"is a lock around primer.lock: {pins} in {version!r}"
+        "contract rule 3: a range is half-open, lower bound inclusive and upper "
+        f"exclusive; ==, === and <= pin one version around primer.lock: {pins} in "
+        f"{version!r}"
     ]
 
 
@@ -245,6 +251,70 @@ def test_dependency_pins_are_reported_per_dependency(tmp_path: Path) -> None:
         ("dependencies.comms.version", "R3.single-point"),
         ("dependencies.meet.version", "R3.single-point"),
     ]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [("dependencies", "comms", "version"), ("packages", "skin", "contract")],
+    ids=["dependency", "package"],
+)
+@pytest.mark.parametrize(
+    ("declared", "pins"),
+    [
+        ("<=3.0.0", "<=3.0.0"),
+        (">=3.0.0,<=3.0.0", "<=3.0.0"),
+        (">=3,<=4", "<=4"),
+        (" >=3 , <=4", "<=4"),
+        (">=3.0.0,<=3.0.0,==3.0.0", "<=3.0.0, ==3.0.0"),
+        ("===3.0.0", "===3.0.0"),
+    ],
+)
+def test_range_upper_inclusive_is_pin(
+    tmp_path: Path, field: tuple[str, str, str], declared: str, pins: str
+) -> None:
+    """Rule 3 of 1.6: ``<=`` is a pin anywhere, in both ranged fields."""
+    data = example("product.yaml")
+    node(data, *field[:-1])[field[-1]] = declared
+    path = ".".join(field)
+    assert yaml_problems(tmp_path, data) == [(path, "R3.single-point")]
+    message = yaml_messages(tmp_path, data)[0]
+    assert message.startswith("contract rule 3:")
+    assert message.endswith(f"{pins} in {declared!r}")
+
+
+@pytest.mark.parametrize(
+    "declared", [">=3.0,<4", ">3.0", "<4", "~=3.0", "!=3.0.0", "==3.*", "==3.0.*"]
+)
+def test_package_contract_without_pin_passes(tmp_path: Path, declared: str) -> None:
+    data = example("product.yaml")
+    node(data, "packages", "skin")["contract"] = declared
+    assert yaml_problems(tmp_path, data) == []
+
+
+def test_range_pins_accumulate_across_fields(tmp_path: Path) -> None:
+    """Every pinned field is reported, dependencies before packages."""
+    data = example("product.yaml")
+    node(data, "dependencies", "meet")["version"] = "<=1.0"
+    node(data, "packages", "skin")["contract"] = "<=1.0"
+    node(data, "packages", "texts")["contract"] = "==1.0"
+    assert yaml_problems(tmp_path, data) == [
+        ("dependencies.meet.version", "R3.single-point"),
+        ("packages.skin.contract", "R3.single-point"),
+        ("packages.texts.contract", "R3.single-point"),
+    ]
+
+
+@pytest.mark.parametrize("declared", ["", " ", "latest"])
+def test_package_contract_must_parse(tmp_path: Path, declared: str) -> None:
+    data = example("product.yaml")
+    node(data, "packages", "skin")["contract"] = declared
+    assert yaml_problems(tmp_path, data) == [("packages.skin.contract", "value_error")]
+
+
+def test_package_contract_is_required(tmp_path: Path) -> None:
+    data = example("product.yaml")
+    del node(data, "packages", "skin")["contract"]
+    assert yaml_problems(tmp_path, data) == [("packages.skin.contract", "missing")]
 
 
 # --- editions ----------------------------------------------------------------------
