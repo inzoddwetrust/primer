@@ -1,0 +1,35 @@
+# Contract 3 v1.4, section 2, verbatim.
+schema: 1
+name: comms
+kind: service
+
+stacks:
+  comms:
+    compose: deploy/docker-compose.yml
+    app:     { service: comms-app, port: 8000, health: /health, ready: /ready }
+    migrate: alembic upgrade head
+    test:    python -m pytest tests/ --junitxml=/tmp/junit.xml
+
+env:
+  SECRET_KEY:          { source: minted }
+  POSTGRES_PASSWORD:   { source: minted }
+  TELEGRAM_BOT_TOKEN:  { source: asked }                 # принадлежит comms: он её проверяет
+  MAILGUN_API_KEY:     { source: asked }
+  TELEGRAM_BOT_URL:    { source: derived, run: comms derive bot-url }
+  PRODUCT_WEBHOOK_URL: { source: seam, from: product }
+
+provides: [COMMS_API_URL, COMMS_SERVICE_TOKEN, TELEGRAM_BOT_URL]
+requires: [PRODUCT_WEBHOOK_URL]
+
+update_window:                        # только у релизов с мажором
+  validate: comms validate --profile      # сухая проверка целевым образом до единого перезапуска
+  before:   [comms drain, comms drain --apply]
+  after:    [comms vacuum]
+  drops:    [scheduled_jobs]              # что окно уничтожает; у продукта обязана быть пара replay
+
+host:
+  domains: [mail]                       # внутренний сервис: routes нет, домен -- для почты
+  ports: []                             # сырые порты хоста, если сервис -- не HTTP (медиа-сервер:
+                                        # [{proto: udp, port: 10000}]); машина открывает файрвол
+
+report: { health: /health, ready: /ready, logs: json, junit: true }

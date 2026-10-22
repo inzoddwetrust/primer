@@ -1,0 +1,7 @@
+# Contract 3 v1.4, section 5, verbatim.
+schema: 1
+resolved_at: 2026-10-22T10:00:00Z
+dependencies:
+  comms:    { version: "3.0.0", tag: v3.0.0, commit: b27c57c }
+  payments: { version: "1.0.2", tag: v1.0.2, commit: 6cddb08 }
+  meet:     { version: "1.0.0", tag: v1.0.0, commit: 1a2b3c4 }   # remote тоже пинится: сверка с /health.release

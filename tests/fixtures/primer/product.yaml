@@ -1,0 +1,74 @@
+# Contract 3 v1.4, section 1, verbatim.
+schema: 1
+name: aivis
+kind: product
+
+dependencies:                         # сервисы; точные версии -- в primer.lock
+  comms:    { repo: git@github.com:aivis-one/comms.git,    version: ">=3.0,<4" }
+  payments: { repo: git@github.com:aivis-one/payments.git, version: ">=1.0,<2" }
+  meet:     { repo: git@github.com:VELO2026-app/velo-meet.git, version: ">=1.0,<2",
+              topology: remote }        # общий сервис на своём боксе; шов -- через паспорт [Р 22.10]
+
+editions:                             # проверенные наборы модулей; какие сервисы нужны каждому [Р 22.10]
+  core:            { services: [comms] }
+  school:          { services: [comms] }
+  school-payments: { services: [comms, payments] }
+  full:            { services: [comms, payments] }
+
+stacks:                               # собственные стеки продукта; обычно один
+  aivis:
+    compose: docker-compose.yml
+    app:      { service: app, port: 8000, health: /health, ready: /ready }
+    frontend: { service: frontend, port: 80, build_args: [VITE_API_BASE_URL] }
+    migrate:  python -m alembic upgrade head
+    test:     python -m pytest tests/ --junitxml=/tmp/junit.xml
+    types:    { openapi: /openapi.json, out: frontend/src/api/generated.ts, commit_as: aivis-bot }
+    seeds:    { bootstrap: python -m app.seed bootstrap, demo: python -m app.seed demo }
+  storage:                            # стек с незаменимыми данными (файлы людей) [Р 22.10]
+    compose: deploy/storage-compose.yml
+    persistent: true                  # тома переживают destroy и reinstall (п.14)
+
+env:                                  # схема окружения; только источники
+  SECRET_KEY:            { source: minted }
+  POSTGRES_PASSWORD:     { source: minted }
+  EDITION:               { source: passport, key: edition, enum: editions }   # проверяется до сборки
+  VITE_API_BASE_URL:     { source: passport, key: domains.api }
+  COMMS_API_URL:         { source: seam, from: comms }
+  COMMS_SERVICE_TOKEN:   { source: seam, from: comms }
+  TELEGRAM_BOT_URL:      { source: seam, from: comms }            # производное считает comms
+  PAYMENTS_API_URL:      { source: seam, from: payments }
+
+provides:                             # что продукт отдаёт сервисам
+  PRODUCT_WEBHOOK_URL: { from: domains.api, path: /internal/comms/webhook }
+  PRODUCT_REPLAY:      { verb: replay }                           # пара к drops сервиса
+
+replay:                               # что продукт умеет переслать после окна сервиса
+  scheduled_jobs: python -m app.cli replay-reminders
+
+packages:                             # пакеты данных инстанса; какой пакет и версия -- в паспорте [Р 22.10]
+  skin:
+    contract: ">=1,<2"                # версия контракта пакета, которую понимает продукт
+    validate: velo validate-skin <dir>   # проверка целевым образом до переключения
+    mount:
+      - { service: frontend, path: /srv/skin }           # в контейнер своего стека -- путём
+  texts:
+    contract: ">=1,<2"
+    validate: velo validate-texts <dir>
+    mount:
+      - { service: frontend, from: ui, path: /srv/texts/ui }
+      - { dependency: comms, from: comms, env: PROFILE_OVERLAY_DIR }   # в сервис -- копией, путь швом
+
+host:
+  domains: [frontend, api]            # имена; значения -- в паспорте
+  routes:
+    frontend: { to: frontend:80 }
+    api:      { to: app:8000, max_body: 100M, read_timeout: 300s }   # сверяется с /health.limits.max_upload_mb
+  headers:
+    csp: "default-src 'self'; script-src 'self' https://telegram.org https://*.telegram.org; …"
+
+verbs:                                # глаголы продукта; машина их исполняет, не понимая
+  setrole:      { run: python -m app.cli setrole, args: [tg, role], roles: [test, prod] }   # роли ⊆ test|prod|preview; нет -- все
+  storage:      { run: python -m app.cli storage, args: [action], roles: [test, prod] }
+  email-status: { run: python -m app.cli email-status }
+
+report: { health: /health, ready: /ready, logs: json, junit: true }

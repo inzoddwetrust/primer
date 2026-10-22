@@ -1,0 +1,901 @@
+{
+  "$defs": {
+    "App": {
+      "additionalProperties": false,
+      "properties": {
+        "health": {
+          "pattern": "^/",
+          "title": "Health",
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "ready": {
+          "pattern": "^/",
+          "title": "Ready",
+          "type": "string"
+        },
+        "service": {
+          "minLength": 1,
+          "title": "Service",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "port",
+        "health",
+        "ready"
+      ],
+      "title": "App",
+      "type": "object"
+    },
+    "Asked": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "asked",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "Asked",
+      "type": "object"
+    },
+    "Dependency": {
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "minLength": 1,
+          "title": "Repo",
+          "type": "string"
+        },
+        "topology": {
+          "default": "co-located",
+          "enum": [
+            "co-located",
+            "remote"
+          ],
+          "title": "Topology",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "version"
+      ],
+      "title": "Dependency",
+      "type": "object"
+    },
+    "Derived": {
+      "additionalProperties": false,
+      "properties": {
+        "run": {
+          "minLength": 1,
+          "title": "Run",
+          "type": "string"
+        },
+        "source": {
+          "const": "derived",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "run"
+      ],
+      "title": "Derived",
+      "type": "object"
+    },
+    "Edition": {
+      "additionalProperties": false,
+      "properties": {
+        "services": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Services",
+          "type": "array"
+        }
+      },
+      "required": [
+        "services"
+      ],
+      "title": "Edition",
+      "type": "object"
+    },
+    "Frontend": {
+      "additionalProperties": false,
+      "properties": {
+        "build_args": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Build Args",
+          "type": "array"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "service": {
+          "minLength": 1,
+          "title": "Service",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "port"
+      ],
+      "title": "Frontend",
+      "type": "object"
+    },
+    "Headers": {
+      "additionalProperties": false,
+      "properties": {
+        "csp": {
+          "minLength": 1,
+          "title": "Csp",
+          "type": "string"
+        }
+      },
+      "title": "Headers",
+      "type": "object"
+    },
+    "HostPort": {
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "proto": {
+          "enum": [
+            "tcp",
+            "udp"
+          ],
+          "title": "Proto",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proto",
+        "port"
+      ],
+      "title": "HostPort",
+      "type": "object"
+    },
+    "Minted": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "minted",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "Minted",
+      "type": "object"
+    },
+    "Mount": {
+      "additionalProperties": false,
+      "description": "Checked as a whole by rule 10 in the rule layer.",
+      "properties": {
+        "dependency": {
+          "minLength": 1,
+          "title": "Dependency",
+          "type": "string"
+        },
+        "env": {
+          "minLength": 1,
+          "title": "Env",
+          "type": "string"
+        },
+        "from": {
+          "title": "From",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "service": {
+          "minLength": 1,
+          "title": "Service",
+          "type": "string"
+        }
+      },
+      "title": "Mount",
+      "type": "object"
+    },
+    "Package": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "title": "Contract",
+          "type": "string"
+        },
+        "mount": {
+          "items": {
+            "$ref": "#/$defs/Mount"
+          },
+          "minItems": 1,
+          "title": "Mount",
+          "type": "array"
+        },
+        "validate": {
+          "minLength": 1,
+          "title": "Validate",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "validate",
+        "mount"
+      ],
+      "title": "Package",
+      "type": "object"
+    },
+    "Passport": {
+      "additionalProperties": false,
+      "properties": {
+        "enum": {
+          "const": "editions",
+          "title": "Enum",
+          "type": "string"
+        },
+        "key": {
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "source": {
+          "const": "passport",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "key"
+      ],
+      "title": "Passport",
+      "type": "object"
+    },
+    "Product": {
+      "additionalProperties": false,
+      "properties": {
+        "dependencies": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Dependency"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Dependencies",
+          "type": "object"
+        },
+        "editions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Edition"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Editions",
+          "type": "object"
+        },
+        "env": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "asked": "#/$defs/Asked",
+                "derived": "#/$defs/Derived",
+                "minted": "#/$defs/Minted",
+                "passport": "#/$defs/Passport",
+                "seam": "#/$defs/Seam"
+              },
+              "propertyName": "source"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Minted"
+              },
+              {
+                "$ref": "#/$defs/Asked"
+              },
+              {
+                "$ref": "#/$defs/Derived"
+              },
+              {
+                "$ref": "#/$defs/Passport"
+              },
+              {
+                "$ref": "#/$defs/Seam"
+              }
+            ]
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "host": {
+          "$ref": "#/$defs/ProductHost"
+        },
+        "kind": {
+          "const": "product",
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "packages": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Package"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Packages",
+          "type": "object"
+        },
+        "provides": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProvideUrl"
+              },
+              {
+                "$ref": "#/$defs/ProvideVerb"
+              }
+            ]
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Provides",
+          "type": "object"
+        },
+        "replay": {
+          "additionalProperties": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Replay",
+          "type": "object"
+        },
+        "report": {
+          "$ref": "#/$defs/Report"
+        },
+        "schema": {
+          "const": 1,
+          "title": "Schema",
+          "type": "integer"
+        },
+        "stacks": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Stack"
+          },
+          "minProperties": 1,
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Stacks",
+          "type": "object"
+        },
+        "verbs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Verb"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Verbs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema",
+        "name",
+        "stacks",
+        "report",
+        "kind"
+      ],
+      "title": "Product",
+      "type": "object"
+    },
+    "ProductHost": {
+      "additionalProperties": false,
+      "properties": {
+        "domains": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Domains",
+          "type": "array"
+        },
+        "headers": {
+          "$ref": "#/$defs/Headers"
+        },
+        "routes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Route"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Routes",
+          "type": "object"
+        }
+      },
+      "title": "ProductHost",
+      "type": "object"
+    },
+    "ProvideUrl": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "minLength": 1,
+          "title": "From",
+          "type": "string"
+        },
+        "path": {
+          "pattern": "^/",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "path"
+      ],
+      "title": "ProvideUrl",
+      "type": "object"
+    },
+    "ProvideVerb": {
+      "additionalProperties": false,
+      "properties": {
+        "verb": {
+          "minLength": 1,
+          "title": "Verb",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verb"
+      ],
+      "title": "ProvideVerb",
+      "type": "object"
+    },
+    "Report": {
+      "additionalProperties": false,
+      "properties": {
+        "health": {
+          "pattern": "^/",
+          "title": "Health",
+          "type": "string"
+        },
+        "junit": {
+          "title": "Junit",
+          "type": "boolean"
+        },
+        "logs": {
+          "const": "json",
+          "title": "Logs",
+          "type": "string"
+        },
+        "ready": {
+          "pattern": "^/",
+          "title": "Ready",
+          "type": "string"
+        }
+      },
+      "required": [
+        "health",
+        "ready",
+        "logs",
+        "junit"
+      ],
+      "title": "Report",
+      "type": "object"
+    },
+    "Route": {
+      "additionalProperties": false,
+      "properties": {
+        "max_body": {
+          "pattern": "^\\d+[kKmMgG]?$",
+          "title": "Max Body",
+          "type": "string"
+        },
+        "read_timeout": {
+          "pattern": "^\\d+(ms|s|m|h)?$",
+          "title": "Read Timeout",
+          "type": "string"
+        },
+        "to": {
+          "pattern": "^[^\\s:]+:\\d+$",
+          "title": "To",
+          "type": "string"
+        }
+      },
+      "required": [
+        "to"
+      ],
+      "title": "Route",
+      "type": "object"
+    },
+    "Seam": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "minLength": 1,
+          "title": "From",
+          "type": "string"
+        },
+        "source": {
+          "const": "seam",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "from"
+      ],
+      "title": "Seam",
+      "type": "object"
+    },
+    "Service": {
+      "additionalProperties": false,
+      "properties": {
+        "env": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "asked": "#/$defs/Asked",
+                "derived": "#/$defs/Derived",
+                "minted": "#/$defs/Minted",
+                "passport": "#/$defs/Passport",
+                "seam": "#/$defs/Seam"
+              },
+              "propertyName": "source"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Minted"
+              },
+              {
+                "$ref": "#/$defs/Asked"
+              },
+              {
+                "$ref": "#/$defs/Derived"
+              },
+              {
+                "$ref": "#/$defs/Passport"
+              },
+              {
+                "$ref": "#/$defs/Seam"
+              }
+            ]
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "host": {
+          "$ref": "#/$defs/ServiceHost"
+        },
+        "kind": {
+          "const": "service",
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "provides": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Provides",
+          "type": "array"
+        },
+        "report": {
+          "$ref": "#/$defs/Report"
+        },
+        "requires": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Requires",
+          "type": "array"
+        },
+        "schema": {
+          "const": 1,
+          "title": "Schema",
+          "type": "integer"
+        },
+        "stacks": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Stack"
+          },
+          "minProperties": 1,
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Stacks",
+          "type": "object"
+        },
+        "update_window": {
+          "$ref": "#/$defs/UpdateWindow"
+        }
+      },
+      "required": [
+        "schema",
+        "name",
+        "stacks",
+        "report",
+        "kind"
+      ],
+      "title": "Service",
+      "type": "object"
+    },
+    "ServiceHost": {
+      "additionalProperties": false,
+      "properties": {
+        "domains": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Domains",
+          "type": "array"
+        },
+        "ports": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HostPort"
+          },
+          "title": "Ports",
+          "type": "array"
+        }
+      },
+      "title": "ServiceHost",
+      "type": "object"
+    },
+    "Stack": {
+      "additionalProperties": false,
+      "properties": {
+        "app": {
+          "$ref": "#/$defs/App"
+        },
+        "compose": {
+          "title": "Compose",
+          "type": "string"
+        },
+        "frontend": {
+          "$ref": "#/$defs/Frontend"
+        },
+        "migrate": {
+          "minLength": 1,
+          "title": "Migrate",
+          "type": "string"
+        },
+        "persistent": {
+          "default": false,
+          "title": "Persistent",
+          "type": "boolean"
+        },
+        "repo": {
+          "minLength": 1,
+          "title": "Repo",
+          "type": "string"
+        },
+        "seeds": {
+          "additionalProperties": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Seeds",
+          "type": "object"
+        },
+        "test": {
+          "minLength": 1,
+          "title": "Test",
+          "type": "string"
+        },
+        "types": {
+          "$ref": "#/$defs/Types"
+        }
+      },
+      "required": [
+        "compose"
+      ],
+      "title": "Stack",
+      "type": "object"
+    },
+    "Types": {
+      "additionalProperties": false,
+      "properties": {
+        "commit_as": {
+          "minLength": 1,
+          "title": "Commit As",
+          "type": "string"
+        },
+        "openapi": {
+          "pattern": "^/",
+          "title": "Openapi",
+          "type": "string"
+        },
+        "out": {
+          "title": "Out",
+          "type": "string"
+        }
+      },
+      "required": [
+        "openapi",
+        "out",
+        "commit_as"
+      ],
+      "title": "Types",
+      "type": "object"
+    },
+    "UpdateWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "After",
+          "type": "array"
+        },
+        "before": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Before",
+          "type": "array"
+        },
+        "drops": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Drops",
+          "type": "array"
+        },
+        "validate": {
+          "minLength": 1,
+          "title": "Validate",
+          "type": "string"
+        }
+      },
+      "required": [
+        "validate"
+      ],
+      "title": "UpdateWindow",
+      "type": "object"
+    },
+    "Verb": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "destructive": {
+          "default": false,
+          "title": "Destructive",
+          "type": "boolean"
+        },
+        "roles": {
+          "items": {
+            "enum": [
+              "test",
+              "prod",
+              "preview"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Roles",
+          "type": "array"
+        },
+        "run": {
+          "minLength": 1,
+          "title": "Run",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run"
+      ],
+      "title": "Verb",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "product": "#/$defs/Product",
+      "service": "#/$defs/Service"
+    },
+    "propertyName": "kind"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Product"
+    },
+    {
+      "$ref": "#/$defs/Service"
+    }
+  ],
+  "title": "primer.yaml v1"
+}
