@@ -115,21 +115,38 @@ def test_killed_by_signal_is_negative_code() -> None:
     assert result.code == -15
 
 
-def test_failure_carries_last_lines_with_streams() -> None:
+def test_failure_carries_the_last_lines_of_one_stream() -> None:
+    script = "import sys\nfor i in range(30): print(i)\nsys.exit(1)\n"
+    with pytest.raises(CommandFailed) as failed:
+        SubprocessRunner().run([PY, "-c", script], timeout=TIMEOUT, on_line=Lines())
+    assert failed.value.tail == tuple((Stream.STDOUT, str(i)) for i in range(10, 30))
+    assert len(failed.value.tail) == TAIL_LINES
+
+
+def test_failure_tail_labels_both_streams() -> None:
+    """The tail keeps both streams with labels; their mutual order is not asserted.
+
+    The earlier form wrote 30 stdout lines and then one stderr line and expected
+    the stderr line among the last 20. That held only where the child's stdout
+    was unbuffered (PYTHONUNBUFFERED=1 in the sandbox): on the CI runner stdout
+    is block-buffered in a pipe, flushed at exit after stderr, and the stderr line
+    left the tail. The order between streams is arrival order, not write order,
+    so the test now fits both streams into the tail and checks only labels.
+    """
     script = (
         "import sys\n"
-        "for i in range(30): print(i)\n"
+        "for i in range(TAIL_LINES - 1): print(i)\n"
         "sys.stderr.write('last\\n')\n"
         "sys.exit(1)\n"
-    )
+    ).replace("TAIL_LINES", str(TAIL_LINES))
     with pytest.raises(CommandFailed) as failed:
         SubprocessRunner().run([PY, "-c", script], timeout=TIMEOUT, on_line=Lines())
     tail = failed.value.tail
     assert len(tail) == TAIL_LINES
-    assert (Stream.STDOUT, "29") in tail
-    assert (Stream.STDOUT, "9") not in tail
     assert (Stream.STDERR, "last") in tail
+    assert (Stream.STDOUT, "0") in tail
     assert "[stderr] last" in str(failed.value)
+    assert "[stdout] 0" in str(failed.value)
 
 
 # --- output ------------------------------------------------------------------
