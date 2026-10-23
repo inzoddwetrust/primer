@@ -1,5 +1,6 @@
 """State grid of the contract-file loader (DM-3): file, YAML, duplicates, merge."""
 
+import traceback
 from pathlib import Path
 
 import pytest
@@ -91,3 +92,46 @@ def test_error_text_names_file_path_and_code(tmp_path: Path) -> None:
         load_yaml_mapping(file)
     assert str(file) in str(error.value)
     assert "a: [Y.duplicate]" in str(error.value)
+
+
+MARKER = "LEAK-MARKER-5f3a"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f'a:\n  T: "{MARKER}\n',  # unterminated quote
+        f"a:\n  T: [{MARKER}\n",  # unclosed flow sequence
+        f"a:\n  T: {MARKER}: x\n",  # mapping value where none is allowed
+        f"a:\n  T: !!python/object:os.system {MARKER}\n",  # unknown tag
+        f"a:\n  T: !!int {MARKER}\n",  # construction fails, ValueError
+        f"a:\n  !!int {MARKER}: x\n",  # key construction fails in the walk
+        f"a:\n  T: !!timestamp {MARKER}\n",  # construction fails, AttributeError
+        f"a: !!omap [{MARKER}]\n",  # construction fails, ConstructorError
+        "a:\n  T: 2026-13-45\n",  # implicit timestamp that is not a date
+    ],
+)
+def test_yaml_error_never_quotes_the_source(tmp_path: Path, text: str) -> None:
+    """A contract file may hold secrets: no snippet, no chained parser error.
+
+    The problem names the line where the parser can tell it; the source text
+    reaches neither the message nor a traceback.
+    """
+    file = tmp_path / "passport.yaml"
+    file.write_text(text)
+    with pytest.raises(ContractError) as caught:
+        load_yaml_mapping(file)
+    error = caught.value
+    assert [p.code for p in error.problems] == ["Y.syntax"]
+    assert error.problems[0].message
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    printed = str(error) + "".join(traceback.format_exception(error))
+    assert MARKER not in printed
+
+
+def test_yaml_error_names_line_and_column(tmp_path: Path) -> None:
+    [problem] = _problems(tmp_path, "a: 1\nb: c: d\n")
+    assert problem.message == (
+        "not valid YAML at line 2, column 5: mapping values are not allowed here"
+    )

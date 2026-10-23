@@ -1,0 +1,51 @@
+# Contract 1 v1.4, section 1, verbatim.
+schema: 1
+version: 7                        # версия паспорта; растёт при каждой правке
+
+server:
+  name: aivis-test                # уникально в проекте primer
+  role: test                      # test | prod | preview
+  os: ubuntu-24.04                # единственный LTS; install.sh проверяет равенство
+  # expires_at: 2026-11-01T00:00:00Z   # только у preview: по истечении бокс сам выполняет destroy
+
+edition: full                     # редакция продукта; ∈ editions корневого primer.yaml (контракт 3 п.11)
+
+product:
+  repo: git@github.com:aivis-one/aivis.git   # корень проекта; его primer.yaml называет сервисы
+  ref: main                       # test: ветка; prod: тег релиза
+
+domains:                          # значения для имён, объявленных в host.domains корня и сервисов
+  frontend: test.aivis.one
+  api: api-test.aivis.one
+  mail: mail-test.aivis.one       # имя объявлено comms, значение — здесь
+
+access:
+  mode: deploy-keys               # машина чеканит ключ на каждый репо; владелец вставляет в GitHub
+
+asked:                            # ответы на asked каждого стека; принадлежат стеку, который их проверяет
+  comms:
+    TELEGRAM_BOT_TOKEN: "…"
+    MAILGUN_API_KEY: "…"
+  payments:
+    STRIPE_SECRET_KEY: "…"
+  velo:
+    MEET_URL: "https://meet.velo…"  # provides remote-сервиса приходят сюда (контракт 3 п.13)
+    MEET_JWT_SECRET: "…"
+  aivis: {}
+
+policies:
+  ssl: letsencrypt                # letsencrypt | self-signed | defer | provided
+  # tls: { cert: "…", key: "…" }  # только при ssl: provided -- PEM wildcard-сертификата и ключа
+  gc:
+    keep_releases: 2
+    builder_cache_budget: 3G
+  backup:
+    enabled: false                # test — вручную; prod — расписание и хранение
+  timers:
+    gc: daily
+
+packages:                         # только пакеты, объявленные продуктом (контракт 3 п.10)
+  skin:  { repo: git@github.com:partner-x/velo-look.git, version: "1.4.2" }
+  texts: { repo: git@github.com:partner-x/velo-look.git, version: "1.4.2", subpath: texts }
+
+cloud: {}                         # розетка: provider, type, region, image; пусто — бокс создан руками

@@ -1,0 +1,302 @@
+{
+  "$defs": {
+    "Access": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "deploy-keys",
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "Access",
+      "type": "object"
+    },
+    "Backup": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "title": "Backup",
+      "type": "object"
+    },
+    "Cloud": {
+      "additionalProperties": false,
+      "description": "A socket: its fields arrive with the first provider; until then, empty.",
+      "properties": {},
+      "title": "Cloud",
+      "type": "object"
+    },
+    "Gc": {
+      "additionalProperties": false,
+      "properties": {
+        "builder_cache_budget": {
+          "pattern": "^[1-9][0-9]*[KMG]$",
+          "title": "Builder Cache Budget",
+          "type": "string"
+        },
+        "keep_releases": {
+          "minimum": 1,
+          "title": "Keep Releases",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "keep_releases",
+        "builder_cache_budget"
+      ],
+      "title": "Gc",
+      "type": "object"
+    },
+    "Package": {
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "minLength": 1,
+          "title": "Repo",
+          "type": "string"
+        },
+        "subpath": {
+          "title": "Subpath",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "version"
+      ],
+      "title": "Package",
+      "type": "object"
+    },
+    "Policies": {
+      "additionalProperties": false,
+      "properties": {
+        "backup": {
+          "$ref": "#/$defs/Backup"
+        },
+        "gc": {
+          "$ref": "#/$defs/Gc"
+        },
+        "ssl": {
+          "enum": [
+            "letsencrypt",
+            "self-signed",
+            "defer",
+            "provided"
+          ],
+          "title": "Ssl",
+          "type": "string"
+        },
+        "timers": {
+          "$ref": "#/$defs/Timers"
+        },
+        "tls": {
+          "$ref": "#/$defs/Tls"
+        }
+      },
+      "required": [
+        "ssl",
+        "gc",
+        "backup",
+        "timers"
+      ],
+      "title": "Policies",
+      "type": "object"
+    },
+    "ProductRef": {
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "minLength": 1,
+          "title": "Ref",
+          "type": "string"
+        },
+        "repo": {
+          "minLength": 1,
+          "title": "Repo",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "ref"
+      ],
+      "title": "ProductRef",
+      "type": "object"
+    },
+    "Server": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "title": "Name",
+          "type": "string"
+        },
+        "os": {
+          "const": "ubuntu-24.04",
+          "title": "Os",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "test",
+            "prod",
+            "preview"
+          ],
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "role",
+        "os"
+      ],
+      "title": "Server",
+      "type": "object"
+    },
+    "Timers": {
+      "additionalProperties": false,
+      "properties": {
+        "gc": {
+          "const": "daily",
+          "title": "Gc",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gc"
+      ],
+      "title": "Timers",
+      "type": "object"
+    },
+    "Tls": {
+      "additionalProperties": false,
+      "properties": {
+        "cert": {
+          "format": "password",
+          "title": "Cert",
+          "type": "string",
+          "writeOnly": true
+        },
+        "key": {
+          "format": "password",
+          "title": "Key",
+          "type": "string",
+          "writeOnly": true
+        }
+      },
+      "required": [
+        "cert",
+        "key"
+      ],
+      "title": "Tls",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "access": {
+      "$ref": "#/$defs/Access"
+    },
+    "asked": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "format": "password",
+          "type": "string",
+          "writeOnly": true
+        },
+        "propertyNames": {
+          "minLength": 1
+        },
+        "type": "object"
+      },
+      "propertyNames": {
+        "minLength": 1
+      },
+      "title": "Asked",
+      "type": "object"
+    },
+    "cloud": {
+      "$ref": "#/$defs/Cloud"
+    },
+    "domains": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "propertyNames": {
+        "minLength": 1
+      },
+      "title": "Domains",
+      "type": "object"
+    },
+    "edition": {
+      "minLength": 1,
+      "title": "Edition",
+      "type": "string"
+    },
+    "packages": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Package"
+      },
+      "propertyNames": {
+        "minLength": 1
+      },
+      "title": "Packages",
+      "type": "object"
+    },
+    "policies": {
+      "$ref": "#/$defs/Policies"
+    },
+    "product": {
+      "$ref": "#/$defs/ProductRef"
+    },
+    "schema": {
+      "const": 1,
+      "title": "Schema",
+      "type": "integer"
+    },
+    "server": {
+      "$ref": "#/$defs/Server"
+    },
+    "version": {
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema",
+    "version",
+    "server",
+    "product",
+    "domains",
+    "access",
+    "asked",
+    "policies",
+    "packages",
+    "cloud"
+  ],
+  "title": "Passport",
+  "type": "object"
+}

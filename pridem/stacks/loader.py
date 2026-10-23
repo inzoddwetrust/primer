@@ -5,6 +5,11 @@ key (``<<``) override fields; both hide a mistake in a contract file. The
 loader walks the composed YAML graph first and reports every duplicate key
 (with both lines) and every merge key, all at once; only then is the document
 constructed. Anchors and aliases without merge are allowed.
+
+A contract file may hold secrets (the passport does), so no problem quotes the
+source: a YAML error is reported by line, column and the parser's own words,
+never by pyyaml's snippet of the offending line, and ``ContractError`` is
+raised outside ``except`` so no traceback prints the parser's exception.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -90,36 +95,68 @@ def _walk(
             _walk(value_node, (*path, label), seen, out)
 
 
+def _yaml_error_text(error: yaml.YAMLError) -> str:
+    """The parser's words and position, without the snippet of the source line."""
+    if isinstance(error, yaml.MarkedYAMLError):
+        words = "; ".join(part for part in (error.context, error.problem) if part)
+        mark = error.problem_mark or error.context_mark
+        if mark is None:
+            return f"not valid YAML: {words}"
+        where = f"line {mark.line + 1}, column {mark.column + 1}"
+        return f"not valid YAML at {where}: {words}"
+    if isinstance(error, yaml.reader.ReaderError):
+        return f"not valid YAML at position {error.position}: {error.reason}"
+    return "not valid YAML"
+
+
+def _read(file: Path) -> tuple[dict[str, object], list[Problem]]:
+    """Parse ``file``; every failure is a problem, nothing is raised from here.
+
+    Construction runs after the walk: an implicit scalar may still fail to
+    construct (``2026-13-45`` is a timestamp by pattern and not a date), and
+    so may a value under an explicit tag; such errors carry the value in their
+    text, so only their type is reported.
+    """
+    try:
+        text = file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        return {}, [Problem("", "Y.syntax", f"not UTF-8: {error}")]
+    try:
+        node = yaml.compose(text, Loader=yaml.SafeLoader)
+    except yaml.YAMLError as error:
+        return {}, [Problem("", "Y.syntax", _yaml_error_text(error))]
+    if node is None:
+        return {}, [Problem("", "Y.empty", "file is empty")]
+    if not isinstance(node, yaml.MappingNode):
+        return {}, [Problem("", "Y.root", "top level must be a mapping")]
+    problems: list[Problem] = []
+    try:
+        _walk(node, (), set(), problems)
+        if problems:
+            return {}, problems
+        data = yaml.safe_load(text)
+    except yaml.MarkedYAMLError as error:
+        return {}, [Problem("", "Y.syntax", _yaml_error_text(error))]
+    except (yaml.YAMLError, ValueError, TypeError, AttributeError) as error:
+        return {}, [
+            Problem(
+                "",
+                "Y.syntax",
+                f"a value could not be constructed ({type(error).__name__})",
+            )
+        ]
+    if not isinstance(data, dict):
+        return {}, [Problem("", "Y.root", "top level must be a mapping")]
+    return data, []
+
+
 def load_yaml_mapping(file: Path) -> dict[str, object]:
     """Read ``file`` as one YAML mapping, rejecting duplicates and merge keys."""
     if not file.is_file():
         raise ContractError(file, [Problem("", "Y.missing", "file not found")])
-    try:
-        text = file.read_text(encoding="utf-8")
-        node = yaml.compose(text, Loader=yaml.SafeLoader)
-    except UnicodeDecodeError as error:
-        raise ContractError(
-            file, [Problem("", "Y.syntax", f"not UTF-8: {error}")]
-        ) from error
-    except yaml.YAMLError as error:
-        raise ContractError(
-            file, [Problem("", "Y.syntax", f"not valid YAML: {error}")]
-        ) from error
-    if node is None:
-        raise ContractError(file, [Problem("", "Y.empty", "file is empty")])
-    if not isinstance(node, yaml.MappingNode):
-        raise ContractError(
-            file, [Problem("", "Y.root", "top level must be a mapping")]
-        )
-    problems: list[Problem] = []
-    _walk(node, (), set(), problems)
+    data, problems = _read(file)
     if problems:
         raise ContractError(file, problems)
-    data = yaml.safe_load(text)
-    if not isinstance(data, dict):
-        raise ContractError(
-            file, [Problem("", "Y.root", "top level must be a mapping")]
-        )
     return data
 
 
