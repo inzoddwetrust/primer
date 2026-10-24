@@ -44,6 +44,11 @@
           "title": "Builder Cache Budget",
           "type": "string"
         },
+        "journal_budget": {
+          "pattern": "^[1-9][0-9]*[KMG]$",
+          "title": "Journal Budget",
+          "type": "string"
+        },
         "keep_releases": {
           "minimum": 1,
           "title": "Keep Releases",
@@ -52,7 +57,8 @@
       },
       "required": [
         "keep_releases",
-        "builder_cache_budget"
+        "builder_cache_budget",
+        "journal_budget"
       ],
       "title": "Gc",
       "type": "object"

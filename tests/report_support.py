@@ -1,4 +1,4 @@
-"""Contract 2 section 1 example as data and a verdict builder for tests (DM-4)."""
+"""Contract 2 v1.3 section 1 example as data and a verdict builder for tests."""
 
 import copy
 import json
@@ -43,6 +43,7 @@ _EXAMPLE: dict[str, Json] = {
         {
             "stack": "aivis",
             "name": "fetch_sources",
+            "phase": "main",
             "order": 4,
             "status": "ok",
             "started": "2026-10-15T10:42:08Z",
@@ -52,6 +53,7 @@ _EXAMPLE: dict[str, Json] = {
         {
             "stack": "aivis",
             "name": "up_app",
+            "phase": "main",
             "order": 10,
             "status": "ok",
             "started": "2026-10-15T10:48:00Z",
@@ -66,6 +68,7 @@ _EXAMPLE: dict[str, Json] = {
         {
             "stack": "aivis",
             "name": "tests",
+            "phase": "main",
             "order": 11,
             "status": "skipped",
             "reason": "role prod",

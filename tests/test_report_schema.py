@@ -113,7 +113,14 @@ def test_result_follows_from_exit_code() -> None:
 def test_failed_step_makes_code_1() -> None:
     data = example()
     items(data, "steps").append(
-        {"stack": "aivis", "name": "gc", "order": 20, "status": "failed", "reason": "x"}
+        {
+            "stack": "aivis",
+            "name": "gc",
+            "phase": "finally",
+            "order": 20,
+            "status": "failed",
+            "reason": "x",
+        }
     )
     assert "a failed step makes the exit code 1" in _errors(data)
     data["exit_code"], data["result"] = 1, "red"

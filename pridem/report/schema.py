@@ -52,7 +52,7 @@ from pridem.contract import (
     Strict,
     schema_text,
 )
-from pridem.events import Fact, Json, PlanOutcome, Secrets, StepRecord
+from pridem.events import Fact, Json, Phase, PlanOutcome, Secrets, StepRecord
 from pridem.report.codes import ExitCode
 
 Result = Literal["green", "red", "incomplete"]
@@ -144,6 +144,7 @@ class Actor(Strict):
 class Step(Strict):
     stack: Text
     name: Text
+    phase: Literal["main", "restore", "finally"]
     order: int
     status: Literal["ok", "failed", "skipped"]
     reason: Text | None = Field(default=None, exclude_if=_is_none)
@@ -262,10 +263,11 @@ def _stamp(moment: datetime) -> str:
     return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _step(record: StepRecord) -> dict[str, Json]:
+def _step(phase: Phase, record: StepRecord) -> dict[str, Json]:
     raw: dict[str, Json] = {
         "stack": record.stack,
         "name": record.name,
+        "phase": phase,
         "order": record.order,
         "status": record.status,
     }
@@ -300,9 +302,9 @@ def build_verdict(
     """The verdict of a plan, cleaned of ``secrets`` before it is validated.
 
     ``steps`` are the main ladder, then ``restore``, then ``finally``, in the
-    order they ran. A restore that is needed past the point of no return is an
-    ``incomplete`` entry at code 1; an interrupted run is the failed step whose
-    reason says ``interrupted``.
+    order they ran, each with the phase of its tuple. A restore that is needed
+    past the point of no return is an ``incomplete`` entry at code 1; an
+    interrupted run is the failed step whose reason says ``interrupted``.
     """
     incomplete: list[Json] = [
         {"what": item.what, "why": item.why} for item in outcome.incomplete
@@ -334,8 +336,9 @@ def build_verdict(
         "composition_before": dict(composition_before),
         "composition_after": dict(composition_after),
         "steps": [
-            _step(record)
-            for record in (*outcome.steps, *outcome.restore, *outcome.finally_)
+            *(_step("main", record) for record in outcome.steps),
+            *(_step("restore", record) for record in outcome.restore),
+            *(_step("finally", record) for record in outcome.finally_),
         ],
         "report": report,
         "log_ref": f"journal/{run_id}.jsonl",

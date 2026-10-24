@@ -431,3 +431,28 @@ def test_secret_not_in_repr_or_json(tmp_path: Path) -> None:
     assert passport.asked["comms"]["TELEGRAM_BOT_TOKEN"].get_secret_value() == MARKER
     assert MARKER not in repr(passport)
     assert MARKER not in passport.model_dump_json()
+
+
+# --- policies.gc.journal_budget (contract 1 v1.6) ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "found"),
+    [
+        (None, [("policies.gc.journal_budget", "missing")]),
+        ("0", [("policies.gc.journal_budget", "string_pattern_mismatch")]),
+        ("0M", [("policies.gc.journal_budget", "string_pattern_mismatch")]),
+        ("200MB", [("policies.gc.journal_budget", "string_pattern_mismatch")]),
+        ("1K", []),
+    ],
+)
+def test_journal_budget_is_required_and_sized(
+    tmp_path: Path, value: str | None, found: list[tuple[str, str]]
+) -> None:
+    """No default in code: a passport without the budget is refused."""
+    data = passport_example()
+    gc = section(data, "policies", "gc")
+    del gc["journal_budget"]
+    if value is not None:
+        gc["journal_budget"] = value
+    assert passport_problems(tmp_path, data) == found

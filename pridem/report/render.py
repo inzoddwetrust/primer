@@ -6,7 +6,8 @@ of the journal lines of the run): nothing is stored, the source is one.
 - ``summary_line`` -- the one line the console prints at the end;
 - ``render_json`` -- the verdict object for scripts and the Panel;
 - ``render_report`` -- the breakage report in markdown, sections in the order
-  of the contract; the output of a failed command comes from the journal;
+  of the contract; the output of a failed command comes from the journal,
+  matched to the step by ``(phase, stack, name)``;
 - ``render_llm`` -- the same report without the green part (``ok`` steps and
   role skips; skips after a failure become one line with their count) and with
   foreign lines cut: a line to ``LINE_LIMIT`` characters, a block to
@@ -109,7 +110,7 @@ def _output(step: Step, journal: Sequence[LogLine], secrets: Secrets) -> list[st
     return [
         secrets.text(f"[{item.stream}] {item.line}")
         for item in journal
-        if (item.stack, item.name) == (step.stack, step.name)
+        if (item.phase, item.stack, item.name) == (step.phase, step.stack, step.name)
     ]
 
 

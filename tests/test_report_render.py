@@ -59,7 +59,7 @@ def _failure(message: str) -> dict[str, Json]:
 
 
 def _journal(*lines: str) -> list[LogLine]:
-    return [LogLine("aivis", "up", Stream.STDERR, line) for line in lines]
+    return [LogLine("main", "aivis", "up", Stream.STDERR, line) for line in lines]
 
 
 def test_summary_line_is_the_contract_example() -> None:

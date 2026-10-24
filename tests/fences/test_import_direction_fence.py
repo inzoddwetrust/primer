@@ -70,6 +70,7 @@ LAYERS: Layers = (
             "pridem.stacks.lock",
             "pridem.stacks.passport",
             "pridem.stacks.schema",
+            "pridem.stacks.stack",
             "pridem.steps",
             "pridem.steps.base",
         ),

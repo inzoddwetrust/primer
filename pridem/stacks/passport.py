@@ -202,9 +202,19 @@ class Tls(Strict):
     ]
 
 
+Size = Annotated[str, Field(pattern=r"^[1-9][0-9]*[KMG]$")]
+_UNITS = {"K": 1024, "M": 1024**2, "G": 1024**3}
+
+
+def size_bytes(size: str) -> int:
+    """``200M`` -> bytes; binary units, as docker reads ``--keep-storage``."""
+    return int(size[:-1]) * _UNITS[size[-1]]
+
+
 class Gc(Strict):
     keep_releases: Annotated[int, Field(ge=1)]
-    builder_cache_budget: Annotated[str, Field(pattern=r"^[1-9][0-9]*[KMG]$")]
+    builder_cache_budget: Size
+    journal_budget: Size
 
 
 class Backup(Strict):

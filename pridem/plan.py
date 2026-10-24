@@ -34,6 +34,7 @@ from pridem.events import (
     Fact,
     Incomplete,
     LogLine,
+    Phase,
     PlanFinished,
     PlanMode,
     PlanOutcome,
@@ -161,12 +162,14 @@ class Plan:
         if self._mode == "doctor":
             return self._doctor()
         state = _Run()
-        steps = self._ladder(self._steps, state, stop_on_failure=True)
+        steps = self._ladder("main", self._steps, state, stop_on_failure=True)
         main_failed = any(record.status == "failed" for record in steps)
         restore: list[StepRecord] = []
         if main_failed and not state.crossed:
-            restore = self._ladder(self._restore, state, stop_on_failure=True)
-        final = self._ladder(self._finally, state, stop_on_failure=False)
+            restore = self._ladder(
+                "restore", self._restore, state, stop_on_failure=True
+            )
+        final = self._ladder("finally", self._finally, state, stop_on_failure=False)
         records = (*steps, *restore, *final)
         incomplete = tuple(state.incomplete)
         codes = [ExitCode.OK]
@@ -191,22 +194,28 @@ class Plan:
         self._sink.emit(PlanFinished(outcome))
         return outcome
 
-    def _context(self, stack: str, step: Step) -> StepContext:
+    def _context(self, phase: Phase, stack: str, step: Step) -> StepContext:
         def on_line(stream: Stream, line: str) -> None:
-            self._sink.emit(LogLine(stack, step.name, stream, line))
+            self._sink.emit(LogLine(phase, stack, step.name, stream, line))
 
         mode: Mode = "deploy" if self._mode == "doctor" else self._mode
         return StepContext(self._runner, mode, self._role, stack, on_line)
 
-    def _record(self, record: StepRecord) -> StepRecord:
-        self._sink.emit(StepFinished(record))
+    def _record(self, phase: Phase, record: StepRecord) -> StepRecord:
+        self._sink.emit(StepFinished(phase, record))
         return record
 
-    def _skipped(self, stack: str, step: Step, reason: str) -> StepRecord:
-        return self._record(StepRecord(stack, step.name, step.order, "skipped", reason))
+    def _skipped(self, phase: Phase, stack: str, step: Step, reason: str) -> StepRecord:
+        record = StepRecord(stack, step.name, step.order, "skipped", reason)
+        return self._record(phase, record)
 
     def _ladder(
-        self, steps: Sequence[tuple[str, Step]], state: _Run, *, stop_on_failure: bool
+        self,
+        phase: Phase,
+        steps: Sequence[tuple[str, Step]],
+        state: _Run,
+        *,
+        stop_on_failure: bool,
     ) -> list[StepRecord]:
         records: list[StepRecord] = []
         stopped: StepRecord | None = None
@@ -214,13 +223,13 @@ class Plan:
             if stopped is not None:
                 records.append(
                     self._skipped(
-                        stack, step, after_failure(stopped.stack, stopped.name)
+                        phase, stack, step, after_failure(stopped.stack, stopped.name)
                     )
                 )
             elif step.roles is not None and self._role not in step.roles:
-                records.append(self._skipped(stack, step, role_skip(self._role)))
+                records.append(self._skipped(phase, stack, step, role_skip(self._role)))
             else:
-                record = self._execute(stack, step, state)
+                record = self._execute(phase, stack, step, state)
                 records.append(record)
                 if record.status == "failed" and (
                     stop_on_failure or state.interrupt is not None
@@ -228,11 +237,11 @@ class Plan:
                     stopped = record
         return records
 
-    def _execute(self, stack: str, step: Step, state: _Run) -> StepRecord:
+    def _execute(self, phase: Phase, stack: str, step: Step, state: _Run) -> StepRecord:
         started = self._now()
         begin = self._clock()
-        self._sink.emit(StepStarted(stack, step.name, step.order, started))
-        ctx = self._context(stack, step)
+        self._sink.emit(StepStarted(phase, stack, step.name, step.order, started))
+        ctx = self._context(phase, stack, step)
         fact: Fact = {}
         reason: str | None = None
         try:
@@ -257,9 +266,10 @@ class Plan:
         status: Status = "ok" if reason is None else "failed"
         duration = self._clock() - begin
         return self._record(
+            phase,
             StepRecord(
                 stack, step.name, step.order, status, reason, started, duration, fact
-            )
+            ),
         )
 
     def _doctor(self) -> PlanOutcome:
@@ -268,17 +278,19 @@ class Plan:
         interrupt: KeyboardInterrupt | None = None
         for stack, step in self._steps:
             if interrupt is not None:
-                records.append(self._skipped(stack, step, AFTER_INTERRUPT))
+                records.append(self._skipped("main", stack, step, AFTER_INTERRUPT))
                 continue
             if step.roles is not None and self._role not in step.roles:
-                records.append(self._skipped(stack, step, role_skip(self._role)))
+                records.append(
+                    self._skipped("main", stack, step, role_skip(self._role))
+                )
                 continue
             check: CheckResult | None = None
             reason: str | None = None
             started = self._now()
             begin = self._clock()
             try:
-                check = step.check(self._context(stack, step))
+                check = step.check(self._context("main", stack, step))
             except KeyboardInterrupt as error:
                 interrupt = error
                 reason = "interrupted"
@@ -287,6 +299,7 @@ class Plan:
             if reason is not None:
                 records.append(
                     self._record(
+                        "main",
                         StepRecord(
                             stack,
                             step.name,
@@ -295,7 +308,7 @@ class Plan:
                             reason,
                             started,
                             self._clock() - begin,
-                        )
+                        ),
                     )
                 )
             elif check is not None and check.needed:

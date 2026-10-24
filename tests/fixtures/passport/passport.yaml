@@ -1,4 +1,4 @@
-# Contract 1 v1.5, section 1, verbatim.
+# Contract 1 v1.6, section 1, verbatim.
 schema: 1
 version: 7                        # версия паспорта; растёт при каждой правке
 
@@ -39,6 +39,7 @@ policies:
   gc:
     keep_releases: 2
     builder_cache_budget: 3G
+    journal_budget: 200M          # объём journal/ на боксе; старые журналы режутся первыми (контракт 2 §3)
   backup:
     enabled: false                # test — вручную; prod — расписание и хранение
   timers:

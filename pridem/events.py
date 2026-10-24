@@ -1,11 +1,14 @@
 """Everything a plan reports leaves through events; the records are their data.
 
-A step record has the fields of a step in contract 2 (verdict) v1.1: ``stack``,
-``name``, ``order`` (the phase number of the step, not a running index),
-``status``, ``reason`` (required for ``skipped`` and ``failed``), ``started``,
-``duration_s``, ``verify`` (the facts the step read back). Events are built
-from these records, never from a step object, so a sink sees only what the
-step itself put into its fact.
+A step record has the fields of a step in contract 2 (verdict) v1.3 but the
+phase: ``stack``, ``name``, ``order`` (the phase number of the step, not a
+running index), ``status``, ``reason`` (required for ``skipped`` and
+``failed``), ``started``, ``duration_s``, ``verify`` (the facts the step read
+back). The plan phase a step ran in (``main``, ``restore``, ``finally``) is a
+field of every step event and log line, so a journal tells same-named steps of
+different phases apart; the outcome keeps one tuple per phase. Events are
+built from these records, never from a step object, so a sink sees only what
+the step itself put into its fact.
 
 Known secrets (``asked`` and ``tls`` of the passport, ``minted``) are cleaned by
 exact match with ``Secrets`` -- the one function the verdict and the console use
@@ -28,6 +31,7 @@ type Json = None | bool | int | float | str | list[Json] | dict[str, Json]
 type Fact = Mapping[str, Json]
 
 Status = Literal["ok", "failed", "skipped"]
+Phase = Literal["main", "restore", "finally"]
 PlanMode = Literal["install", "deploy", "doctor", "reinstall"]
 
 REDACTED = "[redacted]"
@@ -144,6 +148,7 @@ class PlanOutcome:
 
 @dataclass(frozen=True)
 class StepStarted:
+    phase: Phase
     stack: str
     name: str
     order: int
@@ -152,6 +157,7 @@ class StepStarted:
 
 @dataclass(frozen=True)
 class StepFinished:
+    phase: Phase
     record: StepRecord
 
 
@@ -159,6 +165,7 @@ class StepFinished:
 class LogLine:
     """One output line of a command a step ran."""
 
+    phase: Phase
     stack: str
     name: str
     stream: Stream
@@ -182,11 +189,6 @@ class EventSink(Protocol):
 
 
 _MARK = {"ok": "✓", "failed": "✗", "skipped": "–"}
-_RESULT = {
-    ExitCode.OK: "green",
-    ExitCode.FAILED: "red",
-    ExitCode.INCOMPLETE: "incomplete",
-}
 
 
 def _fact_line(fact: Fact) -> str:
@@ -200,10 +202,12 @@ def _fact_line(fact: Fact) -> str:
 
 
 class ConsoleSink:
-    """The step ladder as it runs: one line per finished step, then the result.
+    """The step ladder as it runs: one line per finished step.
 
     Output lines of commands are not printed here; they belong to the journal.
-    A step's ``reason`` and ``verify`` are cleaned of known secrets.
+    The closing line is the summary line of the verdict (contract 2 section 4),
+    printed by whoever holds the verdict, not by this sink. A step's ``reason``
+    and ``verify`` are cleaned of known secrets.
     """
 
     def __init__(self, stream: TextIO, secrets: Secrets) -> None:
@@ -213,8 +217,6 @@ class ConsoleSink:
     def emit(self, event: Event) -> None:
         if isinstance(event, StepFinished):
             self._step(event.record)
-        elif isinstance(event, PlanFinished):
-            self._result(event.outcome)
 
     def _write(self, line: str) -> None:
         self._stream.write(line + "\n")
@@ -229,15 +231,3 @@ class ConsoleSink:
         if record.reason:
             line += f" — {self._secrets.text(record.reason)}"
         self._write(line)
-
-    def _result(self, outcome: PlanOutcome) -> None:
-        line = f"{outcome.mode} → {_RESULT[outcome.code]}"
-        if outcome.interrupted:
-            line += " · interrupted"
-        self._write(line)
-        for item in outcome.incomplete:
-            self._write(f"  incomplete: {item.what} — {item.why}")
-        for diff in outcome.doctor_diff:
-            self._write(f"  would do: {diff.stack} · {diff.name} — {diff.what}")
-        if outcome.needs_restore:
-            self._write("  past the point of no return: restore from backup is needed")

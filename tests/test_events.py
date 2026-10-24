@@ -11,6 +11,7 @@ from pridem.events import (
     PlanFinished,
     PlanOutcome,
     Secrets,
+    StepFinished,
     StepRecord,
 )
 from pridem.plan import StackSteps
@@ -19,16 +20,12 @@ from pridem.report.codes import ExitCode
 NO_SECRETS = Secrets(())
 
 
-def _render(*events: object) -> str:
-    out = io.StringIO()
-    sink = ConsoleSink(out, NO_SECRETS)
-    for event in events:
-        assert isinstance(event, PlanFinished)
-        sink.emit(event)
-    return out.getvalue()
+def test_console_prints_the_ladder() -> None:
+    """One line per finished step and nothing after the last one.
 
-
-def test_console_prints_the_ladder_and_the_result() -> None:
+    Until DM-7 the sink also printed ``deploy → red`` at the end; the closing
+    line is now the summary line of the verdict (contract 2 section 4).
+    """
     journal = Journal()
     out = io.StringIO()
     run, sink = plan(
@@ -57,26 +54,33 @@ def test_console_prints_the_ladder_and_the_result() -> None:
         "✓ aivis · build · 1.0 s · image_id=sha256:ab, ports=[80]",
         "✗ aivis · up · 1.0 s · seen=x — up read back the wrong state",
         "– aivis · health — after failed aivis/up",
-        "deploy → red",
     ]
 
 
-def test_console_prints_incomplete_doctor_diff_and_restore_need() -> None:
+def test_console_leaves_the_outcome_to_the_verdict() -> None:
+    """The outcome of a plan prints nothing on the console by the way.
+
+    Replaces the DM-6 test of ``ConsoleSink._result`` (removed in DM-7): what it
+    printed -- result, incomplete, doctor diff, need of restore -- is the
+    summary line and the breakage report of the verdict now. The pair: a
+    finished step of the same run does print.
+    """
+    record = StepRecord("aivis", "migrate", 5, "failed", "boom")
     outcome = PlanOutcome(
         mode="deploy",
         code=ExitCode.FAILED,
-        steps=(StepRecord("aivis", "migrate", 5, "failed", "boom"),),
+        steps=(record,),
         incomplete=(Incomplete("ssl", "deferred"),),
         doctor_diff=(DoctorItem("comms", "env", "render env"),),
         needs_restore=True,
         interrupted=True,
     )
-    assert _render(PlanFinished(outcome)).splitlines() == [
-        "deploy → red · interrupted",
-        "  incomplete: ssl — deferred",
-        "  would do: comms · env — render env",
-        "  past the point of no return: restore from backup is needed",
-    ]
+    out = io.StringIO()
+    sink = ConsoleSink(out, NO_SECRETS)
+    sink.emit(PlanFinished(outcome))
+    assert out.getvalue() == ""
+    sink.emit(StepFinished("main", record))
+    assert out.getvalue() == "✗ aivis · migrate — boom\n"
 
 
 def test_console_ignores_command_output_lines() -> None:

@@ -283,6 +283,15 @@
           "title": "Order",
           "type": "integer"
         },
+        "phase": {
+          "enum": [
+            "main",
+            "restore",
+            "finally"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
         "reason": {
           "minLength": 1,
           "title": "Reason",
@@ -318,6 +327,7 @@
       "required": [
         "stack",
         "name",
+        "phase",
         "order",
         "status"
       ],
