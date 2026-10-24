@@ -48,6 +48,8 @@ class StepFailed(Exception):
     """``verify`` read back a fact that contradicts what the step promised."""
 
     def __init__(self, reason: str, fact: Fact | None = None) -> None:
+        if not reason:
+            raise ValueError("StepFailed needs a reason: it is the step's reason")
         super().__init__(reason)
         self.reason = reason
         self.fact: Fact = dict(fact or {})

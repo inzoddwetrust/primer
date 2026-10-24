@@ -3,33 +3,47 @@
 The ladder runs the dependencies of the box's root stack in the order given,
 then the root stack last; there is exactly one root, of any kind (a box of a
 shared remote service has a service as its root). Inside a stack, steps run by
-``order``.
+``order``; ``restore`` and ``finally`` steps are chosen the same way, by
+``order`` and by ``modes``.
 
 In ``install``, ``deploy`` and ``reinstall`` every step runs ``check``, then
 ``act`` if needed, then ``verify``. The first failed step stops the ladder: the
 rest are ``skipped`` with the reason. If the plan has not yet started the
 ``act`` of a point-of-no-return step, the caller's ``restore`` steps run; after
 that point nothing automatic is done and the outcome says a restore is needed.
-``finally`` steps run every time, after everything else. ``doctor`` runs only
-``check`` of the ``deploy`` steps and reports what would be done.
+``finally`` steps run every time, after everything else; a failed ``finally``
+step never stops the others, only an interrupt during a ``finally`` step does.
+``doctor`` runs only ``check`` of the ``deploy`` steps and reports what would be
+done.
 
 A step never crashes a plan: any exception from a phase is that step's failure.
-``KeyboardInterrupt`` fails the step as interrupted, still runs ``restore`` and
-``finally``, emits the outcome and is then raised again.
+An interrupt (``KeyboardInterrupt``, and a ``SIGTERM`` turned into one) is an
+interrupt of the run wherever it lands -- in a step, between steps, while an
+event is written: the rest of the current ladder is skipped, ``restore`` (before
+the point of no return) and ``finally`` still run, the outcome is emitted and
+kept in ``Plan.outcome``, and the interrupt is raised again.
 
-The reason of a step a command let down names the command and its exit code
-(or its timeout), never its output: the output went to the journal line by
-line, and a reason ends up in the verdict, which lives forever (contract 2).
+A sink never crashes a plan either: its first failure is ``{journal, journal
+write failed}`` in the outcome and the sink is not called again; an event cut
+by an interrupt is such a failure too (a half-written line ends the journal).
+
+The reason of a step a command let down is the text of the runner's error --
+the command and its exit code, timeout or why it did not start, never its
+output (contract 2). The reason of any other unexpected exception is its type
+name only; its text goes to the journal as ``stderr`` lines, where known
+secrets are cleaned. A step with its own reason raises ``StepFailed``.
 """
 
 import time
+import traceback
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from pridem.events import (
     AFTER_INTERRUPT,
     DoctorItem,
+    Event,
     EventSink,
     Fact,
     Incomplete,
@@ -46,7 +60,7 @@ from pridem.events import (
     role_skip,
 )
 from pridem.report.codes import ExitCode, worst
-from pridem.runner import CommandFailed, CommandTimedOut, Runner, Stream
+from pridem.runner import Runner, RunnerError, Stream
 from pridem.steps.base import (
     MODES,
     CheckResult,
@@ -61,12 +75,14 @@ from pridem.steps.base import (
 def _failure_reason(error: Exception) -> str:
     """The reason of a step that raised ``error``.
 
-    The text of a runner's command error is its one format, already without
-    the command's output; any other error is named by its type.
+    A runner's command error is its text: one form for the whole family, the
+    command and what happened to it, never its output. Any other error is its
+    type name: its text may quote anything, a secret included, and the verdict
+    lives forever; the text goes to the journal instead.
     """
-    if isinstance(error, CommandFailed | CommandTimedOut):
+    if isinstance(error, RunnerError):
         return str(error)
-    return f"{type(error).__name__}: {error}"
+    return type(error).__name__
 
 
 @dataclass(frozen=True)
@@ -119,6 +135,20 @@ class _Run:
     crossed: bool = False
     interrupt: KeyboardInterrupt | None = None
     incomplete: list[Incomplete] = field(default_factory=list)
+    sink_failed: bool = False
+
+
+SINK_FAILED = Incomplete("journal", "journal write failed")
+
+
+def _chosen(stacks: Sequence[StackSteps], mode: Mode) -> list[tuple[str, Step]]:
+    """The steps of ``stacks`` for ``mode``, by ``order`` inside each stack."""
+    return [
+        (stack.name, step)
+        for stack in stacks
+        for step in sorted(stack.steps, key=lambda s: s.order)
+        if mode in step.modes
+    ]
 
 
 class Plan:
@@ -144,107 +174,173 @@ class Plan:
         self._sink = sink
         self._clock = clock
         self._now = now
-        self._steps = [
-            (stack.name, step)
-            for stack in ladder(stacks)
-            for step in sorted(stack.steps, key=lambda s: s.order)
-            if selected in step.modes
-        ]
+        self._run = _Run()
+        self.outcome: PlanOutcome | None = None
+        """The outcome of the run, also when ``run`` ends by raising an interrupt."""
+        self._steps = _chosen(ladder(stacks), selected)
         if not self._steps:
             raise ValueError(f"no step of the plan runs in mode {mode!r}")
         for extra in (*restore, *finally_):
             _validate_steps(extra)
-        self._restore = [(s.name, step) for s in restore for step in s.steps]
-        self._finally = [(s.name, step) for s in finally_ for step in s.steps]
+        self._restore = _chosen(restore, selected)
+        self._finally = _chosen(finally_, selected)
 
-    def run(self) -> PlanOutcome:
-        """Run the plan; emit every event; return the outcome."""
-        if self._mode == "doctor":
-            return self._doctor()
-        state = _Run()
-        steps = self._ladder("main", self._steps, state, stop_on_failure=True)
-        main_failed = any(record.status == "failed" for record in steps)
-        restore: list[StepRecord] = []
-        if main_failed and not state.crossed:
-            restore = self._ladder(
-                "restore", self._restore, state, stop_on_failure=True
-            )
-        final = self._ladder("finally", self._finally, state, stop_on_failure=False)
-        records = (*steps, *restore, *final)
-        incomplete = tuple(state.incomplete)
-        codes = [ExitCode.OK]
-        codes += [ExitCode.FAILED for record in records if record.status == "failed"]
-        codes += [ExitCode.INCOMPLETE for _ in incomplete]
-        outcome = PlanOutcome(
-            mode=self._mode,
-            code=worst(codes),
-            steps=tuple(steps),
-            restore=tuple(restore),
-            finally_=tuple(final),
-            incomplete=incomplete,
-            needs_restore=main_failed and state.crossed,
-            interrupted=state.interrupt is not None,
-        )
-        self._finish(outcome)
-        if state.interrupt is not None:
-            raise state.interrupt
-        return outcome
+    # --- events ---------------------------------------------------------------
+
+    def _emit(self, event: Event) -> None:
+        """Hand ``event`` to the sink; its failure is recorded, never raised.
+
+        An interrupt while the sink writes is an interrupt of the run, and the
+        event is lost like any failed write: the sink is not called again.
+        """
+        if self._run.sink_failed:
+            return
+        try:
+            self._sink.emit(event)
+        except KeyboardInterrupt as interrupt:
+            self._run.sink_failed = True
+            self._run.interrupt = interrupt
+        except Exception:  # disk full, I/O error: the plan goes on (contract 2)
+            self._run.sink_failed = True
 
     def _finish(self, outcome: PlanOutcome) -> PlanOutcome:
-        self._sink.emit(PlanFinished(outcome))
+        """Emit the outcome; a sink that fails on it still shows in the outcome."""
+        failed_before = self._run.sink_failed
+        self._emit(PlanFinished(outcome))
+        if self._run.sink_failed and not failed_before:
+            interrupted = self._run.interrupt is not None
+            codes = [outcome.code, ExitCode.INCOMPLETE]
+            outcome = replace(
+                outcome,
+                code=worst([*codes, ExitCode.FAILED] if interrupted else codes),
+                incomplete=(*outcome.incomplete, SINK_FAILED),
+                interrupted=interrupted,
+            )
+        self.outcome = outcome
         return outcome
 
     def _context(self, phase: Phase, stack: str, step: Step) -> StepContext:
         def on_line(stream: Stream, line: str) -> None:
-            self._sink.emit(LogLine(phase, stack, step.name, stream, line))
+            before = self._run.interrupt
+            self._emit(LogLine(phase, stack, step.name, stream, line))
+            if self._run.interrupt is not None and self._run.interrupt is not before:
+                raise self._run.interrupt  # the runner stops the command's group
 
         mode: Mode = "deploy" if self._mode == "doctor" else self._mode
         return StepContext(self._runner, mode, self._role, stack, on_line)
 
     def _record(self, phase: Phase, record: StepRecord) -> StepRecord:
-        self._sink.emit(StepFinished(phase, record))
+        self._emit(StepFinished(phase, record))
         return record
 
     def _skipped(self, phase: Phase, stack: str, step: Step, reason: str) -> StepRecord:
         record = StepRecord(stack, step.name, step.order, "skipped", reason)
         return self._record(phase, record)
 
+    def _unexpected(
+        self, phase: Phase, stack: str, step: Step, error: Exception
+    ) -> str:
+        """The reason of ``error``; the text of a non-runner error goes to the log."""
+        if not isinstance(error, RunnerError):
+            for text in traceback.format_exception_only(error):
+                for line in text.rstrip("\n").split("\n"):
+                    self._emit(LogLine(phase, stack, step.name, Stream.STDERR, line))
+        return _failure_reason(error)
+
+    # --- the run --------------------------------------------------------------
+
+    def run(self) -> PlanOutcome:
+        """Run the plan; emit every event; return the outcome."""
+        if self._mode == "doctor":
+            return self._doctor()
+        state = self._run
+        steps = self._ladder("main", self._steps, stop_on_failure=True)
+        main_failed = any(record.status == "failed" for record in steps)
+        stopped = main_failed or state.interrupt is not None
+        restore: list[StepRecord] = []
+        if stopped and not state.crossed:
+            restore = self._ladder("restore", self._restore, stop_on_failure=True)
+        final = self._ladder("finally", self._finally, stop_on_failure=False)
+        records = (*steps, *restore, *final)
+        if state.sink_failed:
+            state.incomplete.append(SINK_FAILED)
+        incomplete = tuple(state.incomplete)
+        codes = [ExitCode.OK]
+        codes += [ExitCode.FAILED for record in records if record.status == "failed"]
+        codes += [ExitCode.INCOMPLETE for _ in incomplete]
+        if state.interrupt is not None:
+            codes.append(ExitCode.FAILED)
+        outcome = self._finish(
+            PlanOutcome(
+                mode=self._mode,
+                code=worst(codes),
+                steps=tuple(steps),
+                restore=tuple(restore),
+                finally_=tuple(final),
+                incomplete=incomplete,
+                needs_restore=stopped and state.crossed,
+                interrupted=state.interrupt is not None,
+            )
+        )
+        if state.interrupt is not None:
+            raise state.interrupt
+        return outcome
+
     def _ladder(
         self,
         phase: Phase,
         steps: Sequence[tuple[str, Step]],
-        state: _Run,
         *,
         stop_on_failure: bool,
     ) -> list[StepRecord]:
+        """Run ``steps``; an interrupt anywhere in this ladder stops it.
+
+        A failed step stops the ladder when ``stop_on_failure``; ``finally``
+        runs with it off, so only an interrupt stops it.
+        """
+        state = self._run
         records: list[StepRecord] = []
-        stopped: StepRecord | None = None
+        stopped: str | None = None
         for stack, step in steps:
             if stopped is not None:
-                records.append(
-                    self._skipped(
-                        phase, stack, step, after_failure(stopped.stack, stopped.name)
+                records.append(self._skipped(phase, stack, step, stopped))
+                continue
+            before = state.interrupt
+            count = len(records)
+            try:
+                if step.roles is not None and self._role not in step.roles:
+                    records.append(
+                        self._skipped(phase, stack, step, role_skip(self._role))
                     )
-                )
-            elif step.roles is not None and self._role not in step.roles:
-                records.append(self._skipped(phase, stack, step, role_skip(self._role)))
-            else:
-                record = self._execute(phase, stack, step, state)
+                    continue
+                record = self._execute(phase, stack, step)
                 records.append(record)
-                if record.status == "failed" and (
-                    stop_on_failure or state.interrupt is not None
-                ):
-                    stopped = record
+            except KeyboardInterrupt as interrupt:  # between steps, not in one
+                state.interrupt = interrupt
+                if len(records) == count:
+                    records.append(self._skipped(phase, stack, step, AFTER_INTERRUPT))
+                stopped = AFTER_INTERRUPT
+                continue
+            if record.status == "failed" and (
+                stop_on_failure or state.interrupt is not before
+            ):
+                stopped = after_failure(stack, step.name)
+            elif state.interrupt is not before:  # cut while its event was written
+                stopped = AFTER_INTERRUPT
         return records
 
-    def _execute(self, phase: Phase, stack: str, step: Step, state: _Run) -> StepRecord:
-        started = self._now()
-        begin = self._clock()
-        self._sink.emit(StepStarted(phase, stack, step.name, step.order, started))
-        ctx = self._context(phase, stack, step)
+    def _execute(self, phase: Phase, stack: str, step: Step) -> StepRecord:
+        state = self._run
+        before = state.interrupt
         fact: Fact = {}
         reason: str | None = None
+        started = self._now()
+        begin = self._clock()
         try:
+            self._emit(StepStarted(phase, stack, step.name, step.order, started))
+            if state.interrupt is not before:
+                raise state.interrupt or KeyboardInterrupt()
+            ctx = self._context(phase, stack, step)
             check = step.check(ctx)
             if check.needed:
                 if step.point_of_no_return:
@@ -262,7 +358,7 @@ class Plan:
             state.interrupt = interrupt
             reason = "interrupted"
         except Exception as error:  # a step never crashes the plan; it fails
-            reason = _failure_reason(error)
+            reason = self._unexpected(phase, stack, step, error)
         status: Status = "ok" if reason is None else "failed"
         duration = self._clock() - begin
         return self._record(
@@ -273,57 +369,77 @@ class Plan:
         )
 
     def _doctor(self) -> PlanOutcome:
+        state = self._run
         records: list[StepRecord] = []
         diff: list[DoctorItem] = []
-        interrupt: KeyboardInterrupt | None = None
         for stack, step in self._steps:
-            if interrupt is not None:
+            if state.interrupt is not None:
                 records.append(self._skipped("main", stack, step, AFTER_INTERRUPT))
                 continue
-            if step.roles is not None and self._role not in step.roles:
-                records.append(
-                    self._skipped("main", stack, step, role_skip(self._role))
-                )
-                continue
-            check: CheckResult | None = None
-            reason: str | None = None
-            started = self._now()
-            begin = self._clock()
+            count = len(records)
             try:
-                check = step.check(self._context("main", stack, step))
-            except KeyboardInterrupt as error:
-                interrupt = error
-                reason = "interrupted"
-            except Exception as error:  # a check never crashes doctor; it fails
-                reason = _failure_reason(error)
-            if reason is not None:
-                records.append(
-                    self._record(
-                        "main",
-                        StepRecord(
-                            stack,
-                            step.name,
-                            step.order,
-                            "failed",
-                            reason,
-                            started,
-                            self._clock() - begin,
-                        ),
+                if step.roles is not None and self._role not in step.roles:
+                    records.append(
+                        self._skipped("main", stack, step, role_skip(self._role))
                     )
-                )
-            elif check is not None and check.needed:
-                diff.append(DoctorItem(stack, step.name, check.what))
+                    continue
+                self._check(stack, step, records, diff)
+            except KeyboardInterrupt as interrupt:  # between checks, not in one
+                state.interrupt = interrupt
+                if len(records) == count:
+                    records.append(self._skipped("main", stack, step, AFTER_INTERRUPT))
+        if state.sink_failed:
+            state.incomplete.append(SINK_FAILED)
         codes = [ExitCode.OK]
         codes += [ExitCode.FAILED for record in records if record.status == "failed"]
         codes += [ExitCode.INCOMPLETE for _ in diff]
-        outcome = PlanOutcome(
-            mode="doctor",
-            code=worst(codes),
-            steps=tuple(records),
-            doctor_diff=tuple(diff),
-            interrupted=interrupt is not None,
+        codes += [ExitCode.INCOMPLETE for _ in state.incomplete]
+        if state.interrupt is not None:
+            codes.append(ExitCode.FAILED)
+        outcome = self._finish(
+            PlanOutcome(
+                mode="doctor",
+                code=worst(codes),
+                steps=tuple(records),
+                incomplete=tuple(state.incomplete),
+                doctor_diff=tuple(diff),
+                interrupted=state.interrupt is not None,
+            )
         )
-        self._finish(outcome)
-        if interrupt is not None:
-            raise interrupt
+        if state.interrupt is not None:
+            raise state.interrupt
         return outcome
+
+    def _check(
+        self,
+        stack: str,
+        step: Step,
+        records: list[StepRecord],
+        diff: list[DoctorItem],
+    ) -> None:
+        """One ``doctor`` check: a failed check is a record, a needed one a diff."""
+        state = self._run
+        check: CheckResult | None = None
+        reason: str | None = None
+        started = self._now()
+        begin = self._clock()
+        try:
+            check = step.check(self._context("main", stack, step))
+        except KeyboardInterrupt as interrupt:
+            state.interrupt = interrupt
+            reason = "interrupted"
+        except Exception as error:  # a check never crashes doctor; it fails
+            reason = self._unexpected("main", stack, step, error)
+        if reason is not None:
+            record = StepRecord(
+                stack,
+                step.name,
+                step.order,
+                "failed",
+                reason,
+                started,
+                self._clock() - begin,
+            )
+            records.append(self._record("main", record))
+        elif check is not None and check.needed:
+            diff.append(DoctorItem(stack, step.name, check.what))

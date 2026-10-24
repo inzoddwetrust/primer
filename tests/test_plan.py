@@ -1,12 +1,23 @@
 """State grid of the plan (DM-6): modes, phases, roles, restore, finally, interrupt."""
 
-import pytest
-from plan_support import NOW, Journal, ScriptedStep, plan, red
+from pathlib import Path
 
-from pridem.events import Incomplete, PlanFinished, StepStarted
-from pridem.plan import StackSteps
+import pytest
+from plan_support import NOW, Journal, ListSink, ScriptedStep, plan, red
+
+from pridem.events import (
+    Event,
+    Incomplete,
+    LogLine,
+    PlanFinished,
+    Secrets,
+    StepStarted,
+)
+from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, Stream
+from pridem.state import JournalSink
+from pridem.steps.base import CheckResult, Mode, StepContext, StepFailed, Verified
 
 
 def _root(*steps: ScriptedStep) -> list[StackSteps]:
@@ -86,17 +97,24 @@ def test_not_needed_still_verifies() -> None:
 
 
 def test_doctor_without_drift_is_green_and_check_failure_is_red() -> None:
+    """A failed check is red; its reason is the exception's type name.
+
+    Until DM-37 the reason carried ``RuntimeError: no docker``; the text of an
+    unexpected exception now goes to the journal only (contract 2 v1.4).
+    """
     journal = Journal()
     clean = plan(_root(ScriptedStep("up", 1, journal, needed=False)), "doctor")[0]
     result = clean.run()
     assert (result.code, result.doctor_diff, result.steps) == (ExitCode.OK, (), ())
     broken = ScriptedStep("up", 1, journal, check_raises=RuntimeError("no docker"))
     drift = ScriptedStep("env", 2, journal)
-    outcome = plan(_root(broken, drift), "doctor")[0].run()
+    run, sink = plan(_root(broken, drift), "doctor")
+    outcome = run.run()
     assert outcome.code is ExitCode.FAILED
     assert [(r.name, r.status, r.reason) for r in outcome.steps] == [
-        ("up", "failed", "RuntimeError: no docker")
+        ("up", "failed", "RuntimeError")
     ]
+    assert [line.line for line in sink.lines()] == ["RuntimeError: no docker"]
     assert [d.name for d in outcome.doctor_diff] == ["env"]
     assert not any(entry.endswith((":act", ":verify")) for entry in journal)
 
@@ -118,14 +136,19 @@ def test_doctor_runs_no_restore_and_no_finally() -> None:
 
 
 def test_check_raises() -> None:
+    """Reason: the type name; the text ``OSError: boom`` is a ``stderr`` log line.
+
+    Until DM-37 the reason was ``OSError: boom`` (contract 2 v1.4 changed it).
+    """
     journal = Journal()
-    outcome = plan(_root(ScriptedStep("up", 1, journal, check_raises=OSError("boom"))))[
-        0
-    ].run()
-    assert (outcome.steps[0].status, outcome.steps[0].reason) == (
-        "failed",
-        "OSError: boom",
+    run, sink = plan(
+        _root(ScriptedStep("up", 1, journal, check_raises=OSError("boom")))
     )
+    outcome = run.run()
+    assert (outcome.steps[0].status, outcome.steps[0].reason) == ("failed", "OSError")
+    assert [(line.stream, line.line) for line in sink.lines()] == [
+        (Stream.STDERR, "OSError: boom")
+    ]
     assert journal == ["aivis/up:check"]
 
 
@@ -396,3 +419,129 @@ def test_events_carry_start_time_and_order_of_execution() -> None:
     assert [r.started for r in outcome.steps] == [NOW, NOW]
     assert all(r.duration_s == 1.0 for r in outcome.steps)
     assert isinstance(sink.events[-1], PlanFinished)
+
+
+# --- DM-37 ----------------------------------------------------------------------
+
+
+class _EmptyReason(ScriptedStep):
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        raise StepFailed("")
+
+
+def test_step_failed_without_a_reason_is_a_failed_step() -> None:
+    with pytest.raises(ValueError, match="needs a reason"):
+        StepFailed("")
+    journal = Journal()
+    run, sink = plan(
+        _root(_EmptyReason("up", 1, journal)),
+        finally_=[StackSteps("aivis", [ScriptedStep("gc", 1, journal)])],
+    )
+    outcome = run.run()
+    assert [(r.name, r.status, r.reason) for r in outcome.steps] == [
+        ("up", "failed", "ValueError")
+    ]
+    assert [r.name for r in outcome.finally_] == ["gc"]
+    assert isinstance(sink.events[-1], PlanFinished)
+
+
+def test_restore_and_finally_run_by_order_and_mode() -> None:
+    journal = Journal()
+
+    def stack(*steps: ScriptedStep) -> list[StackSteps]:
+        return [StackSteps("aivis", list(steps))]
+
+    install_only: frozenset[Mode] = frozenset({"install"})
+    run, _ = plan(
+        _root(red("up", 1, journal)),
+        restore=stack(
+            ScriptedStep("second", 2, journal),
+            ScriptedStep("only_install", 3, journal, modes=install_only),
+            ScriptedStep("first", 1, journal),
+        ),
+        finally_=stack(
+            ScriptedStep("late", 9, journal),
+            ScriptedStep("early", 1, journal),
+            ScriptedStep("install_gc", 5, journal, modes=install_only),
+        ),
+    )
+    outcome = run.run()
+    assert [r.name for r in outcome.restore] == ["first", "second"]
+    assert [r.name for r in outcome.finally_] == ["early", "late"]
+    assert not any("install" in entry for entry in journal)
+
+
+def test_command_not_started_reason_is_the_runner_text() -> None:
+    """The whole RunnerError family keeps its text: the command, never output."""
+    runner = FakeRunner(FakeCall(("b", "x y"), outcome="not_started"))
+    with runner:
+        run, sink = plan(
+            _root(ScriptedStep("up", 1, Journal(), act_argv=["b", "x y"])),
+            runner=runner,
+        )
+        outcome = run.run()
+    assert (
+        outcome.steps[0].reason == "command not started: b 'x y': scripted: not started"
+    )
+    assert sink.lines() == []
+
+
+def test_interrupt_inside_finally_stops_the_rest_of_finally() -> None:
+    journal = Journal()
+    run, _ = plan(
+        _root(ScriptedStep("up", 1, journal, act_raises=KeyboardInterrupt())),
+        finally_=[
+            StackSteps(
+                "aivis",
+                [
+                    ScriptedStep("gc", 1, journal, act_raises=KeyboardInterrupt()),
+                    ScriptedStep("timers", 2, journal),
+                ],
+            )
+        ],
+    )
+    with pytest.raises(KeyboardInterrupt):
+        run.run()
+    assert run.outcome is not None
+    assert [(r.name, r.status, r.reason) for r in run.outcome.finally_] == [
+        ("gc", "failed", "interrupted"),
+        ("timers", "skipped", "after failed aivis/gc"),
+    ]
+
+
+def test_journal_sink_never_creates_its_file(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        JournalSink(tmp_path / "missing.jsonl", Secrets(()))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_interrupt_while_a_log_line_is_written_stops_the_step() -> None:
+    """Ctrl-C during a command's output: the command stops, the step is interrupted."""
+
+    class CutOnLog(ListSink):
+        def emit(self, event: Event) -> None:
+            if isinstance(event, LogLine):
+                raise KeyboardInterrupt
+            super().emit(event)
+
+    journal = Journal()
+    step = ScriptedStep("up", 1, journal, act_argv=["make", "up"])
+    runner = FakeRunner(
+        FakeCall(("make", "up"), lines=((Stream.STDOUT, "a"), (Stream.STDOUT, "b")))
+    )
+    built = Plan(
+        _root(step),
+        mode="deploy",
+        role="test",
+        runner=runner,
+        sink=CutOnLog(),
+        clock=lambda: 0.0,
+        now=lambda: NOW,
+    )
+    with runner, pytest.raises(KeyboardInterrupt):
+        built.run()
+    assert built.outcome is not None
+    assert [(r.status, r.reason) for r in built.outcome.steps] == [
+        ("failed", "interrupted")
+    ]
+    assert "aivis/up:verify" not in journal

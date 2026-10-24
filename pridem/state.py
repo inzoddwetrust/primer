@@ -305,7 +305,9 @@ class JournalSink:
 
     def __init__(self, path: Path, secrets: Secrets) -> None:
         self._secrets = secrets
-        self._handle: TextIO = path.open("a", encoding="utf-8")
+        # the journal exists (open_journal created it, 0600); never create one here
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+        self._handle: TextIO = os.fdopen(fd, "a", encoding="utf-8")
 
     def emit(self, event: Event) -> None:
         if not isinstance(event, StepStarted | StepFinished | LogLine):
