@@ -80,7 +80,7 @@ def test_probe_DM_7_orphan_journal_becomes_red_verdict(tmp_path: Path) -> None:
     with box.lock("next"):
         box.open_journal(header(run_id(2)), SECRETS).close()
         box.write_verdict(verdict(run_id(2)))
-        recovered = box.recover(SECRETS, "0.3.1")
+        recovered = box.recover(SECRETS, "0.3.1").verdicts
     assert [v.run_id for v in recovered] == [run]
     (red,) = recovered
     assert (red.exit_code, red.result) == (1, "red")

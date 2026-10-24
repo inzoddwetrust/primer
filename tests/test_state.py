@@ -22,6 +22,7 @@ from pridem.state import (
     BoxState,
     JournalDamaged,
     NotLocked,
+    Recovery,
     read_journal,
 )
 
@@ -127,19 +128,31 @@ def test_state_is_read_strictly_from_json(tmp_path: Path) -> None:
         box.read_state()
 
 
-def test_verdict_records_the_last_run_of_its_verb(tmp_path: Path) -> None:
+def test_verdict_without_state_json_writes_history_only(tmp_path: Path) -> None:
+    """``state.json`` is finalize's to create; a verdict never creates it.
+
+    Replaces the DM-7 test that had ``write_verdict`` create ``state.json`` from
+    the verdict: after a red first ``install`` that file named a composition
+    the box did not have (FIX DM-7).
+    """
     box = Box(tmp_path)
     with box.lock("a"):
         box.write_verdict(verdict(run_id(2)))
-        created = box.read_state()
-        assert created is not None
-        assert created.composition == verdict(run_id(2)).composition_after
-        assert created.last_run == {"deploy": run_id(2)}
-        box.write_state(created.model_copy(update={"current": {"aivis": "r/1"}}))
+    assert box.read_state() is None
+    assert not (tmp_path / "state.json").exists()
+    assert box.history_ids() == [run_id(2)]
+
+
+def test_verdict_records_the_last_run_of_its_verb(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    with box.lock("a"):
+        box.write_state(state())
+        box.write_verdict(verdict(run_id(2)))
         box.write_verdict(verdict(run_id(3), verb="doctor"))
         box.write_verdict(verdict(run_id(1)))  # older than the recorded deploy
     final = box.read_state()
-    assert final is not None and final.current == {"aivis": "r/1"}
+    assert final is not None
+    assert final.model_copy(update={"last_run": {}}) == state()
     assert final.last_run == {"deploy": run_id(2), "doctor": run_id(3)}
     assert box.history_ids() == [run_id(1), run_id(2), run_id(3)]
 
@@ -180,24 +193,28 @@ def test_journal_is_header_then_events_with_phase_and_no_secret(
     ]
 
 
-def test_torn_last_line_is_dropped_damage_elsewhere_is_refused(
+def test_torn_last_line_is_dropped_damage_elsewhere_is_named(
     tmp_path: Path,
 ) -> None:
+    """A torn last line is dropped; a damaged line in the middle ends the events
+    and is named; a damaged header raises (FIX DM-7: damage no longer raises
+    past the header, so a damaged journal still gets its verdict)."""
     box = Box(tmp_path)
     run = run_id(1)
     with box.lock("a"):
         sink = box.open_journal(header(run), SECRETS)
         sink.emit(LogLine("main", "aivis", "up", Stream.STDOUT, "one"))
+        sink.emit(LogLine("main", "aivis", "up", Stream.STDOUT, "two"))
         sink.close()
     path = tmp_path / "journal" / f"{run}.jsonl"
     whole = path.read_text(encoding="utf-8")
     path.write_text(whole + '{"event": "log", "phase": "ma', encoding="utf-8")
     journal = read_journal(path)
-    assert journal.torn and len(journal.events) == 1
+    assert journal.torn and len(journal.events) == 2 and journal.damaged_at is None
     lines = whole.splitlines()
-    path.write_text("\n".join([lines[0], "{oops", lines[1]]) + "\n", encoding="utf-8")
-    with pytest.raises(JournalDamaged, match=":2:"):
-        read_journal(path)
+    path.write_text("\n".join([lines[0], lines[1], "{oops", lines[2]]) + "\n")
+    journal = read_journal(path)
+    assert journal.damaged_at == 3 and len(journal.events) == 1
     path.write_text(lines[1] + "\n", encoding="utf-8")
     with pytest.raises(JournalDamaged, match=":1:"):
         read_journal(path)
@@ -250,7 +267,7 @@ def test_run_dead_before_its_first_step_is_red_from_the_header(
     with box.lock("dead"):
         box.open_journal(header(run, args={"token": MARKER}), SECRETS).close()
     with box.lock("next"):
-        (recovered,) = box.recover(SECRETS, "0.3.1")
+        (recovered,) = box.recover(SECRETS, "0.3.1").verdicts
     assert recovered.result == "red" and recovered.steps == []
     assert [(i.what, i.why) for i in recovered.report.incomplete] == [
         ("run", "no verdict found; journal ends at step the start")
@@ -269,8 +286,9 @@ def test_recovery_runs_once_and_skips_runs_with_a_verdict(tmp_path: Path) -> Non
         box.open_journal(header(run_id(1)), SECRETS).close()
         box.open_journal(header(run_id(2)), SECRETS).close()
         box.write_verdict(verdict(run_id(2)))
-        assert [v.run_id for v in box.recover(SECRETS, "0.3.1")] == [run_id(1)]
-        assert box.recover(SECRETS, "0.3.1") == []
+        done = box.recover(SECRETS, "0.3.1")
+        assert [v.run_id for v in done.verdicts] == [run_id(1)]
+        assert box.recover(SECRETS, "0.3.1") == Recovery((), ())
     assert box.history_ids() == [run_id(1), run_id(2)]
 
 
@@ -318,3 +336,72 @@ def test_state_model_has_no_null(tmp_path: Path) -> None:
                 }
             )
         )
+
+
+# --- FIX DM-7: a damaged journal never blocks the box ---------------------------
+
+
+def _orphan(box: Box, run: str) -> Path:
+    """A run that finished one step, logged a line and died."""
+    sink = box.open_journal(header(run), SECRETS)
+    record = StepRecord("aivis", "build", 6, "ok", None, None, 1.0, {"id": "x"})
+    sink.emit(StepFinished("main", record))
+    sink.emit(LogLine("main", "aivis", "up", Stream.STDOUT, "working"))
+    sink.close()
+    return box.journals / f"{run}.jsonl"
+
+
+def test_damage_after_the_header_is_its_own_red_verdict(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    with box.lock("dying"):
+        damaged = _orphan(box, run_id(1))
+        _orphan(box, run_id(2))
+    lines = damaged.read_text(encoding="utf-8").splitlines()
+    damaged.write_text("\n".join([lines[0], lines[1], "{oops", lines[2]]) + "\n")
+    with box.lock("next"):
+        done = box.recover(SECRETS, "0.3.1")
+    assert done.quarantined == ()
+    first, second = done.verdicts
+    assert [(i.what, i.why) for i in first.report.incomplete] == [
+        ("run", "no verdict found; journal damaged at line 3")
+    ]
+    assert [(s.phase, s.name) for s in first.steps] == [("main", "build")]
+    assert second.report.incomplete[0].why == (
+        "no verdict found; journal ends at step main aivis/build"
+    )
+    with box.lock("after"):  # the box is not blocked
+        assert box.recover(SECRETS, "0.3.1") == Recovery((), ())
+    assert box.history_ids() == [run_id(1), run_id(2)]
+
+
+def test_damaged_header_is_quarantined_and_recovery_goes_on(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    with box.lock("dying"):
+        bad = _orphan(box, run_id(1))
+        _orphan(box, run_id(2))
+    bad.write_text("{not a header\n" + "\n".join(bad.read_text().splitlines()[1:]))
+    with box.lock("next"):
+        done = box.recover(SECRETS, "0.3.1")
+    assert done.quarantined == (run_id(1),)
+    assert [v.run_id for v in done.verdicts] == [run_id(2)]
+    quarantine = box.journals / f"{run_id(1)}.jsonl.damaged"
+    assert quarantine.exists() and not bad.exists()
+    with box.lock("again"):
+        assert box.recover(SECRETS, "0.3.1") == Recovery((), ())
+    assert quarantine.exists()
+    assert box.history_ids() == [run_id(2)]
+
+
+def test_eviction_counts_quarantine_oldest_first(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    with box.lock("a"):
+        _orphan(box, run_id(1)).rename(box.journals / f"{run_id(1)}.jsonl.damaged")
+        _orphan(box, run_id(2))
+        _orphan(box, run_id(3))
+        sizes = sorted(p.stat().st_size for p in box.journals.iterdir())
+        fact = box.evict_journals(sizes[0] + sizes[1], keep=run_id(3))
+    assert fact["evicted"] == [run_id(1)]
+    assert sorted(p.name for p in box.journals.iterdir()) == [
+        f"{run_id(2)}.jsonl",
+        f"{run_id(3)}.jsonl",
+    ]

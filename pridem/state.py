@@ -18,19 +18,27 @@
   temp + link before the first step, so no journal exists without one; then
   one JSON line per step event and log line, each with its plan phase. Known
   secrets are cleaned on write. A line is flushed when written; the file is
-  fsynced on every finished step and when closed. A reader accepts only a torn
-  last line (the writer died in it); damage anywhere else is ``JournalDamaged``.
-  Journals are evicted oldest ``run_id`` first down to the passport's budget;
-  the journal of the current run is never evicted, and a verdict outlives its
-  journal.
+  fsynced on every finished step and when closed. A reader drops a torn last
+  line (the writer died in it) and stops at the first damaged line after the
+  header, naming it; a damaged header is ``JournalDamaged``. Journals are
+  evicted oldest ``run_id`` first down to the passport's budget, quarantined
+  ones (``<run_id>.jsonl.damaged``) with them; the journal of the current run is
+  never evicted, and a verdict outlives its journal.
 
 A run that ended without a verdict (journal, no verdict) is recovered under
 the lock before a new journal opens: a red verdict whose steps are the
 finished steps of the journal and whose ``incomplete`` names the last step the
-journal reached (contract 2 rule 4). Its ``composition_before`` is the header's;
-its ``composition_after`` is what ``state.json`` holds at recovery -- a run may
-die between ``finalize`` writing ``state.json`` and its verdict, so only the
-header knows the composition before.
+journal reached, or the line where it is damaged (contract 2 rule 4). Its
+``composition_before`` is the header's; its ``composition_after`` is what
+``state.json`` holds at recovery -- a run may die between ``finalize`` writing
+``state.json`` and its verdict, so only the header knows the composition
+before. A journal whose header is damaged cannot give a verdict (no verb, no
+actor): it is quarantined and recovery goes on, so one bad file never blocks
+the box.
+
+``state.json`` is created by ``finalize`` only. ``write_verdict`` records the
+last run of a verb in an existing ``state.json`` and writes nothing else: a
+red first ``install`` must not leave a composition the box does not have.
 """
 
 import fcntl
@@ -76,6 +84,7 @@ LOCK = "lock"
 HISTORY = "history"
 JOURNAL = "journal"
 _TEMP_SUFFIX = ".tmp"
+_QUARANTINE_SUFFIX = ".damaged"
 
 RunId = Annotated[str, Field(pattern=f"^{RUN_ID.pattern}$")]
 JournalEvent = StepStarted | StepFinished | LogLine
@@ -98,7 +107,7 @@ class HistoryExists(FileExistsError):
 
 
 class JournalDamaged(ValueError):
-    """A journal line other than the last is not a valid journal line."""
+    """The header line of a journal is not a valid journal header."""
 
 
 class BoxState(Strict):
@@ -164,6 +173,16 @@ class Journal:
     torn: bool
     written: datetime
     """When the journal was last written (its mtime)."""
+    damaged_at: int | None = None
+    """The first damaged line after the header; ``events`` end before it."""
+
+
+@dataclass(frozen=True)
+class Recovery:
+    """What ``recover`` did: verdicts written, journals put in quarantine."""
+
+    verdicts: tuple[Verdict, ...]
+    quarantined: tuple[str, ...]
 
 
 def _stamp(moment: datetime) -> str:
@@ -283,7 +302,11 @@ class JournalSink:
 
 
 def read_journal(path: Path) -> Journal:
-    """The journal at ``path``; a torn last line is dropped, other damage raises."""
+    """The journal at ``path``.
+
+    A torn last line is dropped; the first damaged line after the header ends
+    the events and is named in ``damaged_at``; a damaged header raises.
+    """
     lines = path.read_text(encoding="utf-8").split("\n")
     torn = lines[-1] != ""
     body = lines if torn else lines[:-1]
@@ -295,15 +318,21 @@ def read_journal(path: Path) -> Journal:
     except (IndexError, ValueError) as error:
         raise JournalDamaged(f"{path}:1: {error}") from error
     events: list[JournalEvent] = []
+    damaged_at: int | None = None
     for number, text in enumerate(body[1:], start=2):
         try:
             events.append(_event(_LINE.validate_json(text)))
-        except ValidationError as error:
-            if torn and number == len(body):
-                break
-            raise JournalDamaged(f"{path}:{number}: {error}") from error
+        except ValidationError:
+            if not (torn and number == len(body)):
+                damaged_at = number
+            break
     written = datetime.fromtimestamp(path.stat().st_mtime, UTC)
-    return Journal(header, tuple(events), torn, written)
+    return Journal(header, tuple(events), torn, written, damaged_at)
+
+
+def _run_of(path: Path) -> str:
+    """The run id of a journal file, quarantined or not."""
+    return path.name.partition(".")[0]
 
 
 def _actor(actor: Actor) -> Mapping[str, str]:
@@ -388,12 +417,7 @@ class Box:
             raise HistoryExists(f"history already holds {verdict.run_id}") from error
         state = self.read_state()
         if state is None:
-            state = BoxState(
-                composition=verdict.composition_after,
-                passport_version=verdict.passport_version,
-                current={},
-                last_run={},
-            )
+            return  # state.json is finalize's to create
         last = state.last_run.get(verdict.verb)
         if last is None or last < verdict.run_id:
             runs = {**state.last_run, verdict.verb: verdict.run_id}
@@ -423,35 +447,53 @@ class Box:
         exceeds the budget every other journal goes and the fact says so.
         """
         self._require_lock()
-        files = sorted(self.journals.glob("*.jsonl"), key=lambda path: path.stem)
+        files = sorted(self._journal_files(), key=_run_of)
         sizes = {path: path.stat().st_size for path in files}
         total = sum(sizes.values())
         evicted: list[Json] = []
         for path in files:
             if total <= budget:
                 break
-            if path.stem == keep:
+            if path.name == f"{keep}.jsonl":
                 continue
             path.unlink()
             total -= sizes[path]
-            evicted.append(path.stem)
+            evicted.append(_run_of(path))
         if evicted:
             _fsync_dir(self.journals)
         return {"evicted": evicted, "kept_bytes": total, "over_budget": total > budget}
 
     # --- a run that ended without a verdict ---------------------------------------
 
-    def recover(self, secrets: Secrets, machine_version: str) -> list[Verdict]:
-        """Write a red verdict for every journal that has none (contract 2 rule 4)."""
+    def _journal_files(self) -> list[Path]:
+        return [
+            *self.journals.glob("*.jsonl"),
+            *self.journals.glob(f"*.jsonl{_QUARANTINE_SUFFIX}"),
+        ]
+
+    def recover(self, secrets: Secrets, machine_version: str) -> Recovery:
+        """Write a red verdict for every journal that has none (contract 2 rule 4).
+
+        A journal whose header is damaged is renamed ``<run_id>.jsonl.damaged``
+        and listed in the result; recovery goes on with the next journal.
+        """
         self._require_lock()
-        recovered = []
-        for path in sorted(self.journals.glob("*.jsonl"), key=lambda p: p.stem):
+        verdicts: list[Verdict] = []
+        quarantined: list[str] = []
+        for path in sorted(self.journals.glob("*.jsonl"), key=_run_of):
             if (self.history / f"{path.stem}.json").exists():
                 continue
-            verdict = self._orphan_verdict(read_journal(path), secrets, machine_version)
+            try:
+                journal = read_journal(path)
+            except JournalDamaged:
+                path.rename(path.with_name(path.name + _QUARANTINE_SUFFIX))
+                _fsync_dir(self.journals)
+                quarantined.append(path.stem)
+                continue
+            verdict = self._orphan_verdict(journal, secrets, machine_version)
             self.write_verdict(verdict)
-            recovered.append(verdict)
-        return recovered
+            verdicts.append(verdict)
+        return Recovery(tuple(verdicts), tuple(quarantined))
 
     def _orphan_verdict(
         self, journal: Journal, secrets: Secrets, machine_version: str
@@ -469,15 +511,17 @@ class Box:
             elif isinstance(event, StepFinished):
                 phases[event.phase].append(event.record)
                 last = f"{event.phase} {event.record.stack}/{event.record.name}"
+        if journal.damaged_at is not None:
+            ended = f"journal damaged at line {journal.damaged_at}"
+        else:
+            ended = f"journal ends at step {last}"
         outcome = PlanOutcome(
             mode=header.mode,
             code=ExitCode.FAILED,
             steps=tuple(phases["main"]),
             restore=tuple(phases["restore"]),
             finally_=tuple(phases["finally"]),
-            incomplete=(
-                Incomplete("run", f"no verdict found; journal ends at step {last}"),
-            ),
+            incomplete=(Incomplete("run", f"no verdict found; {ended}"),),
         )
         state = self.read_state()
         after = state.composition if state else {"pridem": machine_version}
