@@ -28,6 +28,7 @@ from pridem.state import (
     NotLocked,
     Recovery,
     StateDamaged,
+    VerdictDamaged,
     read_journal,
 )
 
@@ -508,3 +509,25 @@ def test_damaged_state_outside_the_lock_is_an_error_and_stays(tmp_path: Path) ->
         assert box.read_state() is None and box.state_quarantined
     assert (tmp_path / "state.json.damaged").read_text(encoding="utf-8") == content
     assert box.read_state() is None
+
+
+DAMAGED_VERDICTS = [
+    b"\xff\xfe" + MARKER.encode(),
+    b"not json " + MARKER.encode(),
+    b'{"schema": 1, "run_id": "' + MARKER.encode() + b'"}',
+]
+
+
+@pytest.mark.parametrize("content", DAMAGED_VERDICTS, ids=["utf8", "json", "schema"])
+def test_damaged_verdict_is_named_not_quoted(tmp_path: Path, content: bytes) -> None:
+    """FIX DM-36: reading history/ quotes no file, as journal and state.json."""
+    box = Box(tmp_path)
+    with box.lock("a"):
+        box.write_verdict(verdict(run_id(1)))
+    (box.history / f"{run_id(2)}.json").write_bytes(content)
+    with pytest.raises(VerdictDamaged) as damaged:
+        box.read_verdict(run_id(2))
+    shown = "".join(traceback.format_exception(damaged.value))
+    assert MARKER not in shown
+    assert str(damaged.value).startswith(str(box.history / f"{run_id(2)}.json") + ": ")
+    assert box.read_verdict(run_id(1)) == verdict(run_id(1))

@@ -112,6 +112,10 @@ class JournalDamaged(ValueError):
     """The header line of a journal is not a valid journal header."""
 
 
+class VerdictDamaged(ValueError):
+    """A file in ``history/`` cannot be read as a verdict; the text never quotes it."""
+
+
 class StateDamaged(ValueError):
     """``state.json`` is there but cannot be read; read outside the lock.
 
@@ -437,8 +441,17 @@ class Box:
     # --- history/ ---------------------------------------------------------------
 
     def read_verdict(self, run_id: str) -> Verdict:
+        """The verdict of ``run_id``; a damaged file is ``VerdictDamaged``.
+
+        History is append-only, so a damaged verdict stays where it is; the
+        error names the kind of damage only, never the file's content.
+        """
         path = self.history / f"{_RUN_ID.validate_python(run_id)}.json"
-        return Verdict.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            return Verdict.model_validate_json(path.read_bytes().decode("utf-8"))
+        except ValueError as error:  # ValidationError and UnicodeDecodeError alike
+            kind = type(error).__name__
+        raise VerdictDamaged(f"{path}: {kind}") from None
 
     def history_ids(self) -> list[str]:
         """Run ids in history, oldest first."""
