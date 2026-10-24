@@ -12,16 +12,18 @@ rest are ``skipped`` with the reason. If the plan has not yet started the
 ``act`` of a point-of-no-return step, the caller's ``restore`` steps run; after
 that point nothing automatic is done and the outcome says a restore is needed.
 ``finally`` steps run every time, after everything else; a failed ``finally``
-step never stops the others, only an interrupt during a ``finally`` step does.
+step never stops the others, only an interrupt during a ``finally`` step does
+-- one between its steps is kept, and the clean-up goes on to its end.
 ``doctor`` runs only ``check`` of the ``deploy`` steps and reports what would be
 done.
 
 A step never crashes a plan: any exception from a phase is that step's failure.
 An interrupt (``KeyboardInterrupt``, and a ``SIGTERM`` turned into one) is an
 interrupt of the run wherever it lands -- in a step, between steps, while an
-event is written: the rest of the current ladder is skipped, ``restore`` (before
-the point of no return) and ``finally`` still run, the outcome is emitted and
-kept in ``Plan.outcome``, and the interrupt is raised again.
+event is written: the rest of the main ladder or ``restore`` is skipped,
+``restore`` (before the point of no return) and ``finally`` still run, the
+outcome is emitted and kept in ``Plan.outcome``, and the interrupt is raised
+again.
 
 A sink never crashes a plan either: its first failure is ``{journal, journal
 write failed}`` in the outcome and the sink is not called again; an event cut
@@ -136,6 +138,8 @@ class _Run:
     interrupt: KeyboardInterrupt | None = None
     incomplete: list[Incomplete] = field(default_factory=list)
     sink_failed: bool = False
+    cut: bool = False
+    """The step just executed was interrupted while it ran."""
 
 
 SINK_FAILED = Incomplete("journal", "journal write failed")
@@ -293,10 +297,14 @@ class Plan:
         *,
         stop_on_failure: bool,
     ) -> list[StepRecord]:
-        """Run ``steps``; an interrupt anywhere in this ladder stops it.
+        """Run ``steps``.
 
-        A failed step stops the ladder when ``stop_on_failure``; ``finally``
-        runs with it off, so only an interrupt stops it.
+        An interrupt during a step (in its phases or while its start is
+        written) stops any ladder; the rest is skipped. The main ladder and
+        ``restore`` (``stop_on_failure``) also stop on a failed step and on an
+        interrupt between steps. ``finally`` stops on nothing else: an interrupt
+        between its steps is kept for the final raise and the clean-up goes on
+        to its last step.
         """
         state = self._run
         records: list[StepRecord] = []
@@ -306,31 +314,41 @@ class Plan:
                 records.append(self._skipped(phase, stack, step, stopped))
                 continue
             before = state.interrupt
-            count = len(records)
-            try:
-                if step.roles is not None and self._role not in step.roles:
-                    records.append(
-                        self._skipped(phase, stack, step, role_skip(self._role))
-                    )
-                    continue
-                record = self._execute(phase, stack, step)
-                records.append(record)
-            except KeyboardInterrupt as interrupt:  # between steps, not in one
-                state.interrupt = interrupt
-                if len(records) == count:
-                    records.append(self._skipped(phase, stack, step, AFTER_INTERRUPT))
-                stopped = AFTER_INTERRUPT
-                continue
-            if record.status == "failed" and (
-                stop_on_failure or state.interrupt is not before
-            ):
+            recorded = False
+            while not recorded:
+                count = len(records)
+                try:
+                    if step.roles is not None and self._role not in step.roles:
+                        record = self._skipped(
+                            phase, stack, step, role_skip(self._role)
+                        )
+                    else:
+                        record = self._execute(phase, stack, step)
+                    records.append(record)
+                    recorded = True
+                except KeyboardInterrupt as interrupt:  # between steps, not in one
+                    state.interrupt = interrupt
+                    if len(records) > count:
+                        recorded = True  # the step ran; only its bookkeeping was cut
+                        record = records[-1]
+                    elif stop_on_failure:
+                        record = self._skipped(phase, stack, step, AFTER_INTERRUPT)
+                        records.append(record)
+                        recorded = True
+                    # finally: the step has not run yet; run it now
+            if state.cut:
                 stopped = after_failure(stack, step.name)
-            elif state.interrupt is not before:  # cut while its event was written
+            elif not stop_on_failure:
+                continue
+            elif record.status == "failed":
+                stopped = after_failure(stack, step.name)
+            elif state.interrupt is not before:  # between steps or after its record
                 stopped = AFTER_INTERRUPT
         return records
 
     def _execute(self, phase: Phase, stack: str, step: Step) -> StepRecord:
         state = self._run
+        state.cut = False
         before = state.interrupt
         fact: Fact = {}
         reason: str | None = None
@@ -356,6 +374,7 @@ class Plan:
             reason, fact = error.reason, dict(error.fact)
         except KeyboardInterrupt as interrupt:
             state.interrupt = interrupt
+            state.cut = True
             reason = "interrupted"
         except Exception as error:  # a step never crashes the plan; it fails
             reason = self._unexpected(phase, stack, step, error)

@@ -17,7 +17,14 @@ from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, Stream
 from pridem.state import JournalSink
-from pridem.steps.base import CheckResult, Mode, StepContext, StepFailed, Verified
+from pridem.steps.base import (
+    CheckResult,
+    Mode,
+    Role,
+    StepContext,
+    StepFailed,
+    Verified,
+)
 
 
 def _root(*steps: ScriptedStep) -> list[StackSteps]:
@@ -545,3 +552,48 @@ def test_interrupt_while_a_log_line_is_written_stops_the_step() -> None:
         ("failed", "interrupted")
     ]
     assert "aivis/up:verify" not in journal
+
+
+class _RolesInterruptOnce(ScriptedStep):
+    """Its roles are read by the ladder between steps; the first read is cut."""
+
+    cut = False
+
+    @property
+    def roles(self) -> frozenset[Role] | None:
+        if not _RolesInterruptOnce.cut:
+            _RolesInterruptOnce.cut = True
+            raise KeyboardInterrupt
+        return None
+
+    @roles.setter
+    def roles(self, value: object) -> None:
+        pass
+
+
+def test_interrupt_between_finally_steps_lets_the_clean_up_finish() -> None:
+    """FIX DM-37: SIGTERM between two clean-up steps; both still run, then raise."""
+    _RolesInterruptOnce.cut = False
+    journal = Journal()
+    run, _ = plan(
+        _root(ScriptedStep("up", 1, journal)),
+        finally_=[
+            StackSteps(
+                "aivis",
+                [
+                    ScriptedStep("gc", 1, journal),
+                    _RolesInterruptOnce("timers", 2, journal),
+                    ScriptedStep("logs", 3, journal),
+                ],
+            )
+        ],
+    )
+    with pytest.raises(KeyboardInterrupt):
+        run.run()
+    assert run.outcome is not None and run.outcome.interrupted
+    assert [(r.name, r.status) for r in run.outcome.finally_] == [
+        ("gc", "ok"),
+        ("timers", "ok"),
+        ("logs", "ok"),
+    ]
+    assert "aivis/timers:verify" in journal and "aivis/logs:verify" in journal
