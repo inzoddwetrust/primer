@@ -141,7 +141,7 @@ def test_state_is_read_strictly_from_json(tmp_path: Path) -> None:
 
 
 def test_verdict_without_state_json_writes_history_only(tmp_path: Path) -> None:
-    """``state.json`` is finalize's to create; a verdict never creates it.
+    """Only ``Box.write_state`` writes ``state.json``; a verdict never creates it.
 
     Replaces the DM-7 test that had ``write_verdict`` create ``state.json`` from
     the verdict: after a red first ``install`` that file named a composition

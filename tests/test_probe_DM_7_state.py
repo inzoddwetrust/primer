@@ -62,7 +62,7 @@ def test_probe_DM_7_history_is_append_only(tmp_path: Path) -> None:
 
 
 def test_probe_DM_7_orphan_journal_becomes_red_verdict(tmp_path: Path) -> None:
-    """The run died inside ``up`` after ``finalize`` had already written state.json."""
+    """The run died inside ``up`` after state.json had already been written."""
     box = Box(tmp_path)
     run = run_id(1)
     with box.lock("dying"):

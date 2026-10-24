@@ -30,15 +30,15 @@ the lock before a new journal opens: a red verdict whose steps are the
 finished steps of the journal and whose ``incomplete`` names the last step the
 journal reached, or the line where it is damaged (contract 2 rule 4). Its
 ``composition_before`` is the header's; its ``composition_after`` is what
-``state.json`` holds at recovery -- a run may die between ``finalize`` writing
-``state.json`` and its verdict, so only the header knows the composition
-before. A journal whose header is damaged cannot give a verdict (no verb, no
+``state.json`` holds at recovery -- a run may die between writing
+``state.json`` and writing its verdict, so only the header knows the
+composition before. A journal whose header is damaged cannot give a verdict (no verb, no
 actor): it is quarantined and recovery goes on, so one bad file never blocks
 the box.
 
-``state.json`` is created by ``finalize`` only. ``write_verdict`` records the
-last run of a verb in an existing ``state.json`` and writes nothing else: a
-red first ``install`` must not leave a composition the box does not have.
+``state.json`` is written only by ``Box.write_state``. ``write_verdict``
+records the last run of a verb in an existing ``state.json`` and never creates
+it: a red first ``install`` must not leave a composition the box does not have.
 """
 
 import fcntl
@@ -469,7 +469,7 @@ class Box:
             raise HistoryExists(f"history already holds {verdict.run_id}") from error
         state = self.read_state()
         if state is None:
-            return  # state.json is finalize's to create
+            return  # write_verdict never creates state.json
         last = state.last_run.get(verdict.verb)
         if last is None or last < verdict.run_id:
             runs = {**state.last_run, verdict.verb: verdict.run_id}
