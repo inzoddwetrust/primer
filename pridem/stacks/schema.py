@@ -13,7 +13,6 @@ violation. Every problem names the path in the file.
 """
 
 import argparse
-import json
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
@@ -22,17 +21,20 @@ from typing import Annotated, Literal
 from packaging.specifiers import InvalidSpecifier, Specifier, SpecifierSet
 from pydantic import (
     AfterValidator,
-    BaseModel,
     BeforeValidator,
-    ConfigDict,
     Field,
     TypeAdapter,
     ValidationError,
-    model_validator,
 )
-from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
-from pydantic_core import PydanticCustomError, core_schema
+from pydantic_core import PydanticCustomError
 
+from pridem.contract import (
+    SCHEMA_DIR,
+    ContractSchema,
+    SchemaVersion,
+    Strict,
+    schema_text,
+)
 from pridem.stacks.loader import (
     ContractError,
     Problem,
@@ -81,32 +83,6 @@ def _rule_error(code: str, detail: str) -> PydanticCustomError:
     )
 
 
-class Strict(BaseModel):
-    """Closed, strict, frozen; an explicit null is an error, absence is not."""
-
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _no_explicit_null(cls, data: object) -> object:
-        if isinstance(data, dict):
-            nulls = sorted(str(key) for key, value in data.items() if value is None)
-            if nulls:
-                raise PydanticCustomError(
-                    "null_forbidden",
-                    "explicit null is not allowed (omit the key instead): {keys}",
-                    {"keys": ", ".join(nulls)},
-                )
-        return data
-
-
-def _exact_int(value: object) -> object:
-    """Literal[1] alone accepts True and 1.0 (equality); the file must say 1."""
-    if type(value) is not int:
-        raise PydanticCustomError("int_type", "Input should be the integer 1")
-    return value
-
-
 def _specifier(value: str) -> str:
     if not value.strip():
         raise ValueError("an empty range would accept any version")
@@ -126,7 +102,6 @@ def _relative_path(value: str) -> str:
     return value
 
 
-SchemaVersion = Annotated[Literal[1], BeforeValidator(_exact_int)]
 Name = Annotated[str, Field(min_length=1)]
 Command = Annotated[str, Field(min_length=1)]
 UrlPath = Annotated[str, Field(pattern=r"^/")]
@@ -553,41 +528,15 @@ def load_primer_yaml(file: Path) -> Product | Service:
     return stack
 
 
-class ContractSchema(GenerateJsonSchema):
-    """Optional fields are absent-or-typed; the models reject explicit null."""
-
-    def nullable_schema(self, schema: core_schema.NullableSchema) -> JsonSchemaValue:
-        return self.generate_inner(schema["schema"])
-
-    def default_schema(self, schema: core_schema.WithDefaultSchema) -> JsonSchemaValue:
-        generated = super().default_schema(schema)
-        if "default" in generated and generated["default"] is None:
-            del generated["default"]
-        return generated
-
-
-SCHEMA_DIR = Path(__file__).resolve().parents[2] / "contract" / "schema"
 PRIMER_YAML_SCHEMA = "primer-yaml.v1.json"
 
 
-def schema_text(schema: JsonSchemaValue, title: str) -> str:
-    """Serialize a JSON Schema the one way the repository keeps it."""
-    document = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": title,
-        **schema,
-    }
-    return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-
-
-def rendered_schemas() -> dict[str, str]:
-    """File name -> JSON Schema text of ``primer.yaml``, exported from the models."""
-    return {
-        PRIMER_YAML_SCHEMA: schema_text(
-            PRIMER_YAML.json_schema(mode="validation", schema_generator=ContractSchema),
-            "primer.yaml v1",
-        ),
-    }
+def rendered_schema() -> str:
+    """The JSON Schema text of ``primer.yaml``, exported from the models."""
+    return schema_text(
+        PRIMER_YAML.json_schema(mode="validation", schema_generator=ContractSchema),
+        "primer.yaml v1",
+    )
 
 
 def main(argv: Sequence[str]) -> int:
@@ -596,9 +545,9 @@ def main(argv: Sequence[str]) -> int:
     parser.add_argument("--export", action="store_true", required=True)
     parser.parse_args(argv)
     SCHEMA_DIR.mkdir(parents=True, exist_ok=True)
-    for name, text in rendered_schemas().items():
-        (SCHEMA_DIR / name).write_text(text, encoding="utf-8")
-        print(f"wrote {SCHEMA_DIR / name}")
+    target = SCHEMA_DIR / PRIMER_YAML_SCHEMA
+    target.write_text(rendered_schema(), encoding="utf-8")
+    print(f"wrote {target}")
     return 0
 
 

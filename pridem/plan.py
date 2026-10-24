@@ -16,14 +16,20 @@ that point nothing automatic is done and the outcome says a restore is needed.
 A step never crashes a plan: any exception from a phase is that step's failure.
 ``KeyboardInterrupt`` fails the step as interrupted, still runs ``restore`` and
 ``finally``, emits the outcome and is then raised again.
+
+The reason of a step a command let down names the command and its exit code
+(or its timeout), never its output: the output went to the journal line by
+line, and a reason ends up in the verdict, which lives forever (contract 2).
 """
 
+import shlex
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from pridem.events import (
+    AFTER_INTERRUPT,
     DoctorItem,
     EventSink,
     Fact,
@@ -36,9 +42,11 @@ from pridem.events import (
     StepFinished,
     StepRecord,
     StepStarted,
+    after_failure,
+    role_skip,
 )
 from pridem.report.codes import ExitCode, worst
-from pridem.runner import Runner, Stream
+from pridem.runner import CommandFailed, CommandTimedOut, Runner, Stream
 from pridem.steps.base import (
     MODES,
     CheckResult,
@@ -48,6 +56,15 @@ from pridem.steps.base import (
     StepContext,
     StepFailed,
 )
+
+
+def _failure_reason(error: Exception) -> str:
+    """The reason of a step that raised ``error``; command output stays out."""
+    if isinstance(error, CommandFailed):
+        return f"command failed: {shlex.join(error.argv)}: exit code {error.code}"
+    if isinstance(error, CommandTimedOut):
+        return f"command timed out after {error.timeout} s: {shlex.join(error.argv)}"
+    return f"{type(error).__name__}: {error}"
 
 
 @dataclass(frozen=True)
@@ -196,11 +213,11 @@ class Plan:
             if stopped is not None:
                 records.append(
                     self._skipped(
-                        stack, step, f"after failed {stopped.stack}/{stopped.name}"
+                        stack, step, after_failure(stopped.stack, stopped.name)
                     )
                 )
             elif step.roles is not None and self._role not in step.roles:
-                records.append(self._skipped(stack, step, f"role {self._role}"))
+                records.append(self._skipped(stack, step, role_skip(self._role)))
             else:
                 record = self._execute(stack, step, state)
                 records.append(record)
@@ -235,7 +252,7 @@ class Plan:
             state.interrupt = interrupt
             reason = "interrupted"
         except Exception as error:  # a step never crashes the plan; it fails
-            reason = f"{type(error).__name__}: {error}"
+            reason = _failure_reason(error)
         status: Status = "ok" if reason is None else "failed"
         duration = self._clock() - begin
         return self._record(
@@ -250,10 +267,10 @@ class Plan:
         interrupt: KeyboardInterrupt | None = None
         for stack, step in self._steps:
             if interrupt is not None:
-                records.append(self._skipped(stack, step, "after interrupt"))
+                records.append(self._skipped(stack, step, AFTER_INTERRUPT))
                 continue
             if step.roles is not None and self._role not in step.roles:
-                records.append(self._skipped(stack, step, f"role {self._role}"))
+                records.append(self._skipped(stack, step, role_skip(self._role)))
                 continue
             check: CheckResult | None = None
             reason: str | None = None
@@ -265,7 +282,7 @@ class Plan:
                 interrupt = error
                 reason = "interrupted"
             except Exception as error:  # a check never crashes doctor; it fails
-                reason = f"{type(error).__name__}: {error}"
+                reason = _failure_reason(error)
             if reason is not None:
                 records.append(
                     self._record(

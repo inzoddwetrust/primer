@@ -15,8 +15,8 @@ from passport_support import (
     section,
 )
 
+from pridem.contract import SCHEMA_DIR
 from pridem.stacks.passport import PASSPORT_SCHEMA, rendered_schema
-from pridem.stacks.schema import SCHEMA_DIR
 
 AT = datetime(2026, 11, 1, tzinfo=UTC)
 CERT = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"

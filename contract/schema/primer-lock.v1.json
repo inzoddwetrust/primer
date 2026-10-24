@@ -57,6 +57,6 @@
     "schema",
     "resolved_at"
   ],
-  "title": "Lock",
+  "title": "primer.lock v1",
   "type": "object"
 }

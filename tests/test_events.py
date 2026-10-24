@@ -10,15 +10,18 @@ from pridem.events import (
     Incomplete,
     PlanFinished,
     PlanOutcome,
+    Secrets,
     StepRecord,
 )
 from pridem.plan import StackSteps
 from pridem.report.codes import ExitCode
 
+NO_SECRETS = Secrets(())
+
 
 def _render(*events: object) -> str:
     out = io.StringIO()
-    sink = ConsoleSink(out)
+    sink = ConsoleSink(out, NO_SECRETS)
     for event in events:
         assert isinstance(event, PlanFinished)
         sink.emit(event)
@@ -46,7 +49,7 @@ def test_console_prints_the_ladder_and_the_result() -> None:
             )
         ]
     )
-    console = ConsoleSink(out)
+    console = ConsoleSink(out, NO_SECRETS)
     run.run()
     for event in sink.events:
         console.emit(event)
@@ -82,7 +85,7 @@ def test_console_ignores_command_output_lines() -> None:
 
     runner = FakeRunner(FakeCall(("make",), lines=((Stream.STDOUT, "SECRET=hunter2"),)))
     out = io.StringIO()
-    console = ConsoleSink(out)
+    console = ConsoleSink(out, NO_SECRETS)
     with runner:
         run, sink = plan(
             [

@@ -51,9 +51,12 @@ LAYERS: Layers = (
         "leaf",
         (
             "pridem",
+            "pridem.contract",
             "pridem.events",
             "pridem.report",
             "pridem.report.codes",
+            "pridem.report.render",
+            "pridem.report.schema",
             "pridem.runner",
             "pridem.state",
         ),

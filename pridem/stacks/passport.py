@@ -36,6 +36,13 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from pridem.contract import (
+    SCHEMA_DIR,
+    ContractSchema,
+    SchemaVersion,
+    Strict,
+    schema_text,
+)
 from pridem.stacks.loader import (
     ContractError,
     Problem,
@@ -44,13 +51,8 @@ from pridem.stacks.loader import (
     render_path,
 )
 from pridem.stacks.schema import (
-    SCHEMA_DIR,
-    ContractSchema,
     Name,
     RepoPath,
-    SchemaVersion,
-    Strict,
-    schema_text,
 )
 
 RULES = {

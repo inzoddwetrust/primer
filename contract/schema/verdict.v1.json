@@ -1,0 +1,436 @@
+{
+  "$defs": {
+    "Actor": {
+      "additionalProperties": false,
+      "properties": {
+        "on_behalf_of": {
+          "minLength": 1,
+          "title": "On Behalf Of",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "owner",
+            "engineer",
+            "dispatcher",
+            "executor",
+            "machine"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "via": {
+          "enum": [
+            "local",
+            "panel",
+            "timer"
+          ],
+          "title": "Via",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "via"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "DnsCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "domain": {
+          "minLength": 1,
+          "title": "Domain",
+          "type": "string"
+        },
+        "expected": {
+          "minLength": 1,
+          "title": "Expected",
+          "type": "string"
+        },
+        "resolves_to": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Resolves To",
+          "type": "array"
+        }
+      },
+      "required": [
+        "domain",
+        "resolves_to",
+        "expected"
+      ],
+      "title": "DnsCheck",
+      "type": "object"
+    },
+    "DoctorDiff": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        },
+        "what": {
+          "minLength": 1,
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stack",
+        "name",
+        "what"
+      ],
+      "title": "DoctorDiff",
+      "type": "object"
+    },
+    "ExitCode": {
+      "description": "Exit code of a pridem command.",
+      "enum": [
+        0,
+        1,
+        2
+      ],
+      "title": "ExitCode",
+      "type": "integer"
+    },
+    "Failure": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "minLength": 1,
+          "title": "File",
+          "type": "string"
+        },
+        "line": {
+          "minimum": 1,
+          "title": "Line",
+          "type": "integer"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "request_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Request Ids",
+          "type": "array"
+        },
+        "test": {
+          "minLength": 1,
+          "title": "Test",
+          "type": "string"
+        },
+        "traceback_project_frames": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Traceback Project Frames",
+          "type": "array"
+        }
+      },
+      "required": [
+        "test",
+        "file",
+        "line",
+        "message",
+        "traceback_project_frames",
+        "request_ids"
+      ],
+      "title": "Failure",
+      "type": "object"
+    },
+    "Incomplete": {
+      "additionalProperties": false,
+      "properties": {
+        "what": {
+          "minLength": 1,
+          "title": "What",
+          "type": "string"
+        },
+        "why": {
+          "minLength": 1,
+          "title": "Why",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "why"
+      ],
+      "title": "Incomplete",
+      "type": "object"
+    },
+    "Json": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/Json"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Json"
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "Junit": {
+      "additionalProperties": false,
+      "properties": {
+        "failed": {
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "skipped": {
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "total": {
+          "minimum": 0,
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "failed",
+        "skipped"
+      ],
+      "title": "Junit",
+      "type": "object"
+    },
+    "Report": {
+      "additionalProperties": false,
+      "properties": {
+        "dns": {
+          "items": {
+            "$ref": "#/$defs/DnsCheck"
+          },
+          "title": "Dns",
+          "type": "array"
+        },
+        "doctor_diff": {
+          "items": {
+            "$ref": "#/$defs/DoctorDiff"
+          },
+          "title": "Doctor Diff",
+          "type": "array"
+        },
+        "failures": {
+          "items": {
+            "$ref": "#/$defs/Failure"
+          },
+          "title": "Failures",
+          "type": "array"
+        },
+        "incomplete": {
+          "items": {
+            "$ref": "#/$defs/Incomplete"
+          },
+          "title": "Incomplete",
+          "type": "array"
+        }
+      },
+      "required": [
+        "failures",
+        "incomplete"
+      ],
+      "title": "Report",
+      "type": "object"
+    },
+    "Step": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_s": {
+          "minimum": 0,
+          "title": "Duration S",
+          "type": "number"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "title": "Order",
+          "type": "integer"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        },
+        "started": {
+          "format": "date-time",
+          "title": "Started",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "failed",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "verify": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Json"
+          },
+          "title": "Verify",
+          "type": "object"
+        }
+      },
+      "required": [
+        "stack",
+        "name",
+        "order",
+        "status"
+      ],
+      "title": "Step",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What a pridem command ends with (contract 2 section 1).",
+  "properties": {
+    "actor": {
+      "$ref": "#/$defs/Actor"
+    },
+    "args": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Json"
+      },
+      "title": "Args",
+      "type": "object"
+    },
+    "composition_after": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Composition After",
+      "type": "object"
+    },
+    "composition_before": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Composition Before",
+      "type": "object"
+    },
+    "exit_code": {
+      "$ref": "#/$defs/ExitCode"
+    },
+    "finished": {
+      "format": "date-time",
+      "title": "Finished",
+      "type": "string"
+    },
+    "junit": {
+      "$ref": "#/$defs/Junit"
+    },
+    "log_ref": {
+      "minLength": 1,
+      "title": "Log Ref",
+      "type": "string"
+    },
+    "passport_version": {
+      "minimum": 1,
+      "title": "Passport Version",
+      "type": "integer"
+    },
+    "report": {
+      "$ref": "#/$defs/Report"
+    },
+    "result": {
+      "enum": [
+        "green",
+        "red",
+        "incomplete"
+      ],
+      "title": "Result",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z-[0-9a-f]{4}",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema": {
+      "const": 1,
+      "title": "Schema",
+      "type": "integer"
+    },
+    "started": {
+      "format": "date-time",
+      "title": "Started",
+      "type": "string"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/Step"
+      },
+      "title": "Steps",
+      "type": "array"
+    },
+    "verb": {
+      "pattern": "^[a-z][a-z0-9-]*( [a-z][a-z0-9-]*)*$",
+      "title": "Verb",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "run_id",
+    "verb",
+    "args",
+    "actor",
+    "started",
+    "finished",
+    "exit_code",
+    "result",
+    "passport_version",
+    "composition_before",
+    "composition_after",
+    "steps",
+    "report",
+    "log_ref"
+  ],
+  "title": "verdict v1",
+  "type": "object"
+}

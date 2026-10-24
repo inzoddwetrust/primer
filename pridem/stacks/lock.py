@@ -22,6 +22,13 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 from pydantic import Field, TypeAdapter, ValidationError
 
+from pridem.contract import (
+    SCHEMA_DIR,
+    ContractSchema,
+    SchemaVersion,
+    Strict,
+    schema_text,
+)
 from pridem.stacks.loader import (
     ContractError,
     Problem,
@@ -29,14 +36,9 @@ from pridem.stacks.loader import (
     load_yaml_mapping,
 )
 from pridem.stacks.schema import (
-    SCHEMA_DIR,
-    ContractSchema,
     Name,
     Product,
-    SchemaVersion,
-    Strict,
     problem_at,
-    schema_text,
 )
 
 _COMMIT = re.compile(r"[0-9a-f]{7,40}")

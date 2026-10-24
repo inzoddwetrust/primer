@@ -130,6 +130,12 @@ def test_check_raises() -> None:
 
 
 def test_runner_failure_in_act_is_the_step_failure() -> None:
+    """The reason names the command and its exit code; its output is not in it.
+
+    Before DM-4 the reason carried the runner's message with the command's tail
+    output; the output now reaches only the journal (contract 2 v1.2), so the
+    test checks the exact reason and finds the output among the log lines.
+    """
     journal = Journal()
     runner = FakeRunner(
         FakeCall(
@@ -140,11 +146,12 @@ def test_runner_failure_in_act_is_the_step_failure() -> None:
     )
     with runner:
         step = ScriptedStep("up", 1, journal, act_argv=["docker", "compose", "up"])
-        outcome = plan(_root(step), runner=runner)[0].run()
+        run, sink = plan(_root(step), runner=runner)
+        outcome = run.run()
     record = outcome.steps[0]
     assert record.status == "failed"
-    assert record.reason is not None and record.reason.startswith("CommandFailed:")
-    assert "no space left" in record.reason
+    assert record.reason == "command failed: docker compose up: exit code 1"
+    assert [line.line for line in sink.lines()] == ["no space left"]
     assert journal == ["aivis/up:check", "aivis/up:act"]
 
 

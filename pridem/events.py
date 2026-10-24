@@ -6,13 +6,20 @@ A step record has the fields of a step in contract 2 (verdict) v1.1: ``stack``,
 ``duration_s``, ``verify`` (the facts the step read back). Events are built
 from these records, never from a step object, so a sink sees only what the
 step itself put into its fact.
+
+Known secrets (``asked`` and ``tls`` of the passport, ``minted``) are cleaned by
+exact match with ``Secrets`` -- the one function the verdict and the console use
+(contract 2 rule 2). The skip reasons a plan writes are built here, so the
+renderers that tell a role skip from a skip after a failure read the same text.
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Protocol, TextIO
+
+from pydantic import SecretStr
 
 from pridem.report.codes import ExitCode
 from pridem.runner import Stream
@@ -22,6 +29,61 @@ type Fact = Mapping[str, Json]
 
 Status = Literal["ok", "failed", "skipped"]
 PlanMode = Literal["install", "deploy", "doctor", "reinstall"]
+
+REDACTED = "[redacted]"
+ROLE_SKIP = "role "
+AFTER_FAILURE = "after failed "
+AFTER_INTERRUPT = "after interrupt"
+
+
+def role_skip(role: str) -> str:
+    """The reason of a step skipped because the box's role does not run it."""
+    return f"{ROLE_SKIP}{role}"
+
+
+def after_failure(stack: str, name: str) -> str:
+    """The reason of a step skipped because an earlier step failed."""
+    return f"{AFTER_FAILURE}{stack}/{name}"
+
+
+class Secrets:
+    """Known secret values and the exact-match cleaning of text and facts.
+
+    Longer values are replaced first, so a secret that contains another is
+    replaced whole. An empty value is an error: it matches everywhere.
+    """
+
+    def __init__(self, values: Iterable[SecretStr]) -> None:
+        plain = {value.get_secret_value() for value in values}
+        if "" in plain:
+            raise ValueError("an empty secret would match every position of a text")
+        self._values = tuple(sorted(plain, key=len, reverse=True))
+
+    def text(self, value: str) -> str:
+        """``value`` with every known secret replaced by ``[redacted]``."""
+        for secret in self._values:
+            value = value.replace(secret, REDACTED)
+        return value
+
+    def value(self, value: Json) -> Json:
+        """``value`` with every string in it, keys included, cleaned."""
+        if isinstance(value, str):
+            return self.text(value)
+        if isinstance(value, list):
+            return [self.value(item) for item in value]
+        if isinstance(value, dict):
+            return self.fact(value)
+        return value
+
+    def fact(self, fact: Fact) -> dict[str, Json]:
+        """A cleaned copy of ``fact``; two keys equal after cleaning are an error."""
+        out: dict[str, Json] = {}
+        for key, item in fact.items():
+            clean = self.text(key)
+            if clean in out:
+                raise ValueError(f"two keys are {clean!r} after cleaning secrets")
+            out[clean] = self.value(item)
+        return out
 
 
 @dataclass(frozen=True)
@@ -141,10 +203,12 @@ class ConsoleSink:
     """The step ladder as it runs: one line per finished step, then the result.
 
     Output lines of commands are not printed here; they belong to the journal.
+    A step's ``reason`` and ``verify`` are cleaned of known secrets.
     """
 
-    def __init__(self, stream: TextIO) -> None:
+    def __init__(self, stream: TextIO, secrets: Secrets) -> None:
         self._stream = stream
+        self._secrets = secrets
 
     def emit(self, event: Event) -> None:
         if isinstance(event, StepFinished):
@@ -161,9 +225,9 @@ class ConsoleSink:
         if record.duration_s is not None:
             line += f" · {record.duration_s:.1f} s"
         if record.verify:
-            line += f" · {_fact_line(record.verify)}"
+            line += f" · {_fact_line(self._secrets.fact(record.verify))}"
         if record.reason:
-            line += f" — {record.reason}"
+            line += f" — {self._secrets.text(record.reason)}"
         self._write(line)
 
     def _result(self, outcome: PlanOutcome) -> None:

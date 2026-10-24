@@ -11,8 +11,11 @@ from pathlib import Path
 
 from contract_support import example, lock_problems, node, yaml_messages, yaml_problems
 
-from pridem.stacks.lock import PRIMER_LOCK_SCHEMA, rendered_schema
-from pridem.stacks.schema import PRIMER_YAML_SCHEMA, SCHEMA_DIR, rendered_schemas
+from pridem.contract import SCHEMA_DIR
+from pridem.stacks.lock import PRIMER_LOCK_SCHEMA
+from pridem.stacks.lock import rendered_schema as lock_schema
+from pridem.stacks.schema import PRIMER_YAML_SCHEMA
+from pridem.stacks.schema import rendered_schema as yaml_schema
 
 
 def test_probe_DM_3_yaml_values_forbidden(tmp_path: Path) -> None:
@@ -102,12 +105,11 @@ def test_probe_DM_3_schema_export_matches_model() -> None:
     DM-34 rejects; the probe still checks both files, each with its own
     regeneration command.
     """
-    yaml_rendered = rendered_schemas()
-    assert sorted(yaml_rendered) == [PRIMER_YAML_SCHEMA] == ["primer-yaml.v1.json"]
+    assert PRIMER_YAML_SCHEMA == "primer-yaml.v1.json"
     assert PRIMER_LOCK_SCHEMA == "primer-lock.v1.json"
     exports = [
-        (PRIMER_YAML_SCHEMA, yaml_rendered[PRIMER_YAML_SCHEMA], "pridem.stacks.schema"),
-        (PRIMER_LOCK_SCHEMA, rendered_schema(), "pridem.stacks.lock"),
+        (PRIMER_YAML_SCHEMA, yaml_schema(), "pridem.stacks.schema"),
+        (PRIMER_LOCK_SCHEMA, lock_schema(), "pridem.stacks.lock"),
     ]
     for name, text, owner in exports:
         on_disk = (SCHEMA_DIR / name).read_text(encoding="utf-8")
