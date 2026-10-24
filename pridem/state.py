@@ -539,8 +539,12 @@ class Box:
         and listed in the result; recovery goes on with the next journal.
         ``state.json`` is read once, before the journals: a damaged one is
         quarantined then, and every verdict written here carries
-        ``{state, state damaged; quarantined}`` beside ``{run, ...}`` -- its
-        ``composition_after`` is the bare ``{pridem}`` for that reason.
+        ``{what: state, code: quarantined}`` after its ``run`` entry -- its
+        ``composition_after`` is the bare ``{pridem}`` for that reason. The
+        ``run`` entry is ``{what: run, code: no-verdict, ended_at}`` (the last
+        step the journal reached, ``null`` before the first) or ``{what: run,
+        code: journal-damaged, line}``. A code without a text in ``catalog`` is
+        refused, as ``build_verdict`` refuses it.
         """
         self._require_lock()
         state = self.read_state()

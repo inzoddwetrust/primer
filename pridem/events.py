@@ -29,7 +29,7 @@ from typing import Literal, Protocol, TextIO
 from pydantic import SecretStr
 
 from pridem.contract import SECRET_MIN_LENGTH
-from pridem.report.catalog import ENGLISH, Catalog, text
+from pridem.report.catalog import ENGLISH, Catalog, say, text
 from pridem.report.codes import RESERVED_PARAMS, ExitCode
 from pridem.runner import Stream
 
@@ -237,17 +237,14 @@ class EventSink(Protocol):
         ...
 
 
-_MARK = {"ok": "✓", "failed": "✗", "skipped": "–"}
-
-
-def _fact_line(fact: Fact) -> str:
+def _fact_line(fact: Fact, catalog: Catalog) -> str:
     parts = []
     for key, value in fact.items():
         shown = (
             value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         )
-        parts.append(f"{key}={shown}")
-    return ", ".join(parts)
+        parts.append(say(catalog, "@fact", key=key, value=shown))
+    return say(catalog, "@fact.sep").join(parts)
 
 
 class ConsoleSink:
@@ -255,9 +252,9 @@ class ConsoleSink:
 
     Output lines of commands are not printed here; they belong to the journal.
     The closing line is the summary line of the verdict (contract 2 section 4),
-    printed by whoever holds the verdict, not by this sink. A step's ``reason``
-    is put in words by ``catalog``; it and ``verify`` are cleaned of known
-    secrets.
+    printed by whoever holds the verdict, not by this sink. Every word and mark
+    of a line comes from ``catalog``, the step's ``reason`` included; the line's
+    ``reason`` and ``verify`` are cleaned of known secrets.
     """
 
     def __init__(
@@ -276,12 +273,18 @@ class ConsoleSink:
         self._stream.flush()
 
     def _step(self, record: StepRecord) -> None:
-        line = f"{_MARK[record.status]} {record.stack} · {record.name}"
+        catalog = self._catalog
+        mark = say(catalog, f"@mark.{record.status}")
+        line = say(
+            catalog, "@console.step", mark=mark, stack=record.stack, name=record.name
+        )
         if record.duration_s is not None:
-            line += f" · {record.duration_s:.1f} s"
+            seconds = say(catalog, "@seconds", s=f"{record.duration_s:.1f}")
+            line += say(catalog, "@console.duration", seconds=seconds)
         if record.verify:
-            line += f" · {_fact_line(self._secrets.fact(record.verify))}"
+            fact = _fact_line(self._secrets.fact(record.verify), catalog)
+            line += say(catalog, "@console.fact", fact=fact)
         if record.reason is not None:
-            words = text(self._catalog, record.reason.code, record.reason.params)
-            line += f" — {self._secrets.text(words)}"
+            words = text(catalog, record.reason.code, record.reason.params)
+            line += say(catalog, "@console.reason", reason=self._secrets.text(words))
         self._write(line)

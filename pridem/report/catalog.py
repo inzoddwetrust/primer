@@ -6,9 +6,12 @@ reason code, ``what/code`` of a machine incomplete entry, or a step code
 ``<step>:<code>``. Parameters are presented before formatting: a list of
 strings (``argv``) is joined as a shell would read it, ``ended_at`` through the
 ``@at`` template, and a ``null`` parameter by its ``@null:<name>`` word, so a
-template never branches. ``ENGLISH`` is the default catalog; another language
-is another mapping with the same keys, and the data of a verdict does not
-change with it. Steps bring the texts of their own codes (``with_steps``).
+template never branches. Keys starting with ``@`` are the renderers' own
+words and layout -- headings, labels, the summary line, units, the console's
+marks -- filled by ``say``; no renderer writes a word of its own. ``ENGLISH``
+is the default catalog; another language is another mapping with the same
+keys, and the data of a verdict does not change with it. Steps bring the
+texts of their own codes (``with_steps``).
 This module imports only the standard library and ``report.codes``.
 """
 
@@ -41,6 +44,53 @@ ENGLISH: Catalog = {
     "@at": "{phase} {stack} · {name}",
     "@null:ended_at": "the start",
     "@null:errno": "no errno",
+    # --- the renderers' words and layout ---
+    "@summary": "{head} → {result} · {duration} · {composition} · {passport}",
+    "@summary.sep": " · ",
+    "@passport": "passport v{version}",
+    "@composition.same": "{name} {value}",
+    "@composition.changed": "{name} {before}→{after}",
+    "@missing": "—",
+    "@duration.h": "{h}h{m}m{s}s",
+    "@duration.m": "{m}m{s}s",
+    "@duration.s": "{s}s",
+    "@seconds": "{s} s",
+    "@fact": "{key}={value}",
+    "@fact.sep": ", ",
+    "@output": "[{stream}] {line}",
+    "@block.cut": "… {count} earlier lines cut",
+    "@block.info": "text",
+    "@report.title": "# {summary}",
+    "@failed.heading": "## Failed steps",
+    "@failed.title": "### {stack} · {name} · order {order}",
+    "@failed.no-journal": "Command output unavailable: this run has no journal left.",
+    "@failed.no-output": "No command output in the journal for this step.",
+    "@failures.heading": "## Failed tests",
+    "@failure.title": "### {test}",
+    "@failure.where": "{file}:{line}",
+    "@failure.requests": "Request ids: {ids}",
+    "@list.sep": ", ",
+    "@incomplete.heading": "## Incomplete",
+    "@incomplete.item": "- {what} — {words}",
+    "@doctor.heading": "## Doctor diff",
+    "@doctor.item": "- {stack} · {name} — {words}",
+    "@steps.heading": "## Steps",
+    "@steps.header": "| stack | step | order | status | duration | fact or reason |",
+    "@steps.rule": "|---|---|---|---|---|---|",
+    "@steps.after": "{count} steps skipped after the failure.",
+    "@composition.heading": "## Composition",
+    "@composition.header": "| | before | after |",
+    "@composition.rule": "|---|---|---|",
+    "@closing.passport": "Passport v{version}",
+    "@closing.junit": "JUnit: {total} total, {failed} failed, {skipped} skipped",
+    "@closing.log": "Log: {log_ref}",
+    "@console.step": "{mark} {stack} · {name}",
+    "@console.duration": " · {seconds}",
+    "@console.fact": " · {fact}",
+    "@console.reason": " — {reason}",
+    "@mark.ok": "✓",
+    "@mark.failed": "✗",
+    "@mark.skipped": "–",
 }
 
 
@@ -62,6 +112,11 @@ def text(
     return template.format(
         **{name: _present(catalog, name, value) for name, value in params.items()}
     )
+
+
+def say(catalog: Catalog, key: str, /, **values: object) -> str:
+    """A renderer's own words: the template of ``key`` with ``values`` as given."""
+    return catalog[key].format(**values)
 
 
 def with_steps(

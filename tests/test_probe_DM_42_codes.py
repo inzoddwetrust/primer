@@ -32,6 +32,7 @@ from pridem.events import (
     Event,
     Incomplete,
     Json,
+    LogLine,
     PlanOutcome,
     Secrets,
     StepFinished,
@@ -48,9 +49,15 @@ from pridem.report.codes import (
     ExitCode,
     catalog_key,
 )
-from pridem.report.render import render_llm, render_report, words
+from pridem.report.render import (
+    duration,
+    render_llm,
+    render_report,
+    summary_line,
+    words,
+)
 from pridem.report.schema import INCOMPLETE_MODELS, REASON_MODELS, Verdict
-from pridem.runner import CommandNotStarted, FakeCall, FakeRunner
+from pridem.runner import TAIL_LINES, CommandNotStarted, FakeCall, FakeRunner, Stream
 from pridem.stacks import passport, schema
 from pridem.state import Box
 from pridem.steps.base import StepFailed, local_code
@@ -249,31 +256,113 @@ def test_probe_DM_42_verdict_carries_no_prose(tmp_path: Path) -> None:
     assert errnos == {"ENOENT", None}
 
 
+def _swapped(catalog: Catalog) -> dict[str, str]:
+    """Every text replaced by ``§n§`` and its fields: no word of ``catalog`` left."""
+    out: dict[str, str] = {}
+    for n, (key, template) in enumerate(sorted(catalog.items())):
+        fields = [f for _, f, _, _ in Formatter().parse(template) if f]
+        out[key] = f"§{n}§" + "".join(" {" + f + "}" for f in fields)
+    return out
+
+
+def _catalog_texts(catalog: Catalog) -> set[str]:
+    """The literal pieces of every template: what a reader sees of the catalog."""
+    pieces = {
+        literal.strip()
+        for template in catalog.values()
+        for literal, _, _, _ in Formatter().parse(template)
+    }
+    return {p for p in pieces if any(c.isalpha() or c in "→—·✓✗–…" for c in p)}
+
+
+def _english_left(said: str, data: str) -> list[str]:
+    """Pieces of the default catalog in ``said``, but those that are data too
+    (a status ``skipped`` is data, the word of a heading is not)."""
+    return sorted(p for p in _catalog_texts(CATALOG) if p not in data and p in said)
+
+
+def _rich_verdicts(tmp_path: Path) -> list[tuple[Verdict, list[LogLine] | None]]:
+    """The scenarios, one with a journal long enough to be cut, and the contract's
+    example with a failed test and ``junit`` -- every section a report has."""
+    plans = _plan_verdicts()
+    first = plans[0]
+    lines = [
+        LogLine("main", "aivis", "build", Stream.STDERR, f"line {n}")
+        for n in range(TAIL_LINES + 2)
+    ]
+    data = example()
+    section(data, "report")["failures"] = [
+        {
+            "test": "tests/test_api.py::test_login",
+            "file": "tests/test_api.py",
+            "line": 42,
+            "message": "assert 1 == 2",
+            "traceback_project_frames": ["app/api.py:10 in login"],
+            "request_ids": ["r-1", "r-2"],
+        }
+    ]
+    rich: list[tuple[Verdict, list[LogLine] | None]] = [
+        (first, lines),
+        (load(data), None),
+    ]
+    rich += [(verdict, None) for verdict in plans[1:]]
+    rich += [(verdict, None) for verdict in _recovered_verdicts(tmp_path)]
+    return rich
+
+
 def test_probe_DM_42_render_text_comes_from_catalog(tmp_path: Path) -> None:
-    swapped: Catalog = {key: f"§{key}§ {template}" for key, template in CATALOG.items()}
-    verdicts = [*_plan_verdicts(), *_recovered_verdicts(tmp_path)]
-    for verdict in verdicts:
+    """A swapped catalog changes every word the renderers print, and the data not.
+
+    FIX DM-42: not only the texts of codes -- headings, labels, units, the summary
+    line and the console's marks are the catalog's too; under a swapped catalog
+    no piece of the default one is left in any output.
+    """
+    swapped = _swapped(CATALOG)
+    marks = {key: value.split(" ", 1)[0] for key, value in swapped.items()}
+    for verdict, journal in _rich_verdicts(tmp_path):
         data = verdict.model_dump_json()
-        english = render_report(verdict, None, NO_SECRETS, CATALOG)
-        other = render_report(verdict, None, NO_SECRETS, swapped)
-        llm = render_llm(verdict, None, NO_SECRETS, swapped)
+        seen = data + "".join(line.line for line in journal or [])
+        english = render_report(verdict, journal, NO_SECRETS, CATALOG)
+        outputs = {
+            "summary": summary_line(verdict, swapped),
+            "report": render_report(verdict, journal, NO_SECRETS, swapped),
+            "llm": render_llm(verdict, journal, NO_SECRETS, swapped),
+        }
         assert "§" not in english
+        assert _english_left(english, seen), "the check sees the default catalog"
+        for name, said in outputs.items():
+            assert _english_left(said, seen) == [], name
+        if any(step.duration_s is not None for step in verdict.steps):
+            assert marks["@seconds"] in outputs["report"]  # a unit, too short to seek
         for kind, item in _entries(verdict):
             dump = item.model_dump()
             what = dump.get("what") if kind == "incomplete" else None
-            mark = f"§{catalog_key(str(dump['code']), what)}§"
-            assert mark in other, (kind, mark)
-            assert words(swapped, item) in other
+            mark = marks[catalog_key(str(dump["code"]), what)]
+            assert mark in outputs["report"], (kind, mark)
             if kind != "reason":
-                assert mark in llm
+                assert mark in outputs["llm"]
         assert verdict.model_dump_json() == data  # the data does not follow
+    # units are single letters, too short to look for in text: checked directly
+    assert duration(42, swapped) == f"{marks['@duration.s']} 42"
+    assert duration(432, swapped) == f"{marks['@duration.m']} 7 12"
+    assert duration(3903, swapped) == f"{marks['@duration.h']} 1 05 03"
     out = io.StringIO()
-    run, sink = plan(_root(ScriptedStep("probe", 1, Journal(), fact={})))
+    run, sink = plan(
+        _root(
+            ScriptedStep("tests", 1, Journal(), roles=frozenset({"prod"})),
+            ScriptedStep("build", 2, Journal(), fact={"id": "x"}),
+            ScriptedStep("probe", 3, Journal(), fact={}),
+        )
+    )
     run.run()
     console = ConsoleSink(out, NO_SECRETS, swapped)
     for event in sink.events:
         console.emit(event)
-    assert "§no-fact§ verify returned no fact" in out.getvalue()
+    printed = out.getvalue()
+    assert marks["no-fact"] in printed and marks["@mark.failed"] in printed
+    assert marks["@seconds"] in printed
+    facts = "".join(str(e) for e in sink.events)
+    assert _english_left(printed, facts) == []
 
 
 def test_every_machine_code_has_a_text_for_every_parameter() -> None:
