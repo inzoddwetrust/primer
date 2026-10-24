@@ -48,7 +48,8 @@ LINE_LIMIT = 65536
 """Longest output line handed to ``on_line``, in characters of decoded text.
 
 A longer line arrives as consecutive pieces of this length and a remainder,
-each its own call: nothing is dropped, and joined they are the line. Pending
+each its own call, every piece but the last with ``continued``: nothing is
+dropped, and joined they are the line. Pending
 text never exceeds this, so a command printing without newlines costs neither
 unbounded memory nor quadratic copying. Characters, not bytes: a piece never
 cuts a UTF-8 character.
@@ -66,7 +67,9 @@ class Stream(StrEnum):
     STDERR = "stderr"
 
 
-OnLine = Callable[[Stream, str], None]
+# ``on_line(stream, line, continued)``: ``continued`` -- this is a piece of a line
+# longer than ``LINE_LIMIT`` and more of the same line follows.
+OnLine = Callable[[Stream, str, bool], None]
 Tail = tuple[tuple[Stream, str], ...]
 
 
@@ -179,9 +182,9 @@ class SubprocessRunner:
         deadline = time.monotonic() + timeout
         tail: deque[tuple[Stream, str]] = deque(maxlen=TAIL_LINES)
 
-        def emit(stream: Stream, line: str) -> None:
+        def emit(stream: Stream, line: str, continued: bool) -> None:
             tail.append((stream, line))
-            on_line(stream, line)
+            on_line(stream, line, continued)
 
         try:
             process = subprocess.Popen(
@@ -227,8 +230,8 @@ class _Splitter:
         self.pending = ""
         self._held_cr = False
 
-    def feed(self, text: str) -> list[str]:
-        """The lines completed by ``text``; the rest stays pending."""
+    def feed(self, text: str) -> list[tuple[str, bool]]:
+        """``(line, continued)`` completed by ``text``; the rest stays pending."""
         if self._held_cr:
             self._held_cr = False
             if text.startswith("\n"):
@@ -237,26 +240,26 @@ class _Splitter:
             self._held_cr = True
             text = text[:-1] + "\n"
         *lines, rest = _BREAK.split(text)
-        out: list[str] = []
+        out: list[tuple[str, bool]] = []
         for line in lines:
             out.extend(self._take(line, complete=True))
         out.extend(self._take(rest, complete=False))
         return out
 
-    def finish(self) -> list[str]:
+    def finish(self) -> list[tuple[str, bool]]:
         """The unterminated last line, if there is one."""
         rest, self.pending = self.pending, ""
-        return [rest] if rest else []
+        return [(rest, False)] if rest else []
 
-    def _take(self, part: str, *, complete: bool) -> list[str]:
+    def _take(self, part: str, *, complete: bool) -> list[tuple[str, bool]]:
         """Join ``part`` to the pending text; emit what is complete or full."""
-        out: list[str] = []
+        out: list[tuple[str, bool]] = []
         room = LINE_LIMIT - len(self.pending)
         while len(part) > room:
-            out.append(self.pending + part[:room])
+            out.append((self.pending + part[:room], True))
             self.pending, part, room = "", part[room:], LINE_LIMIT
         if complete:
-            out.append(self.pending + part)
+            out.append((self.pending + part, False))
             self.pending = ""
         else:
             self.pending += part
@@ -264,7 +267,11 @@ class _Splitter:
 
 
 def _pump(process: "subprocess.Popen[bytes]", deadline: float, emit: OnLine) -> bool:
-    """Read both pipes to EOF, emitting whole lines; False if the deadline passed."""
+    """Read both pipes to EOF, emitting lines; False if the deadline passed.
+
+    At the deadline the unterminated line of each stream is emitted before the
+    return: output is cut, never lost.
+    """
     # Popen was called with stdout=PIPE and stderr=PIPE, so both are set.
     pipes = {
         cast("IO[bytes]", process.stdout).fileno(): Stream.STDOUT,
@@ -281,18 +288,24 @@ def _pump(process: "subprocess.Popen[bytes]", deadline: float, emit: OnLine) -> 
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                # the cut output of a hung command is not lost: hand over what
+                # each stream holds, its last undecoded bytes included
+                for stream, splitter in splitters.items():
+                    text = decoders[stream].decode(b"", final=True)
+                    for line, continued in [*splitter.feed(text), *splitter.finish()]:
+                        emit(stream, line, continued)
                 return False
             for key, _ in selector.select(timeout=remaining):
                 stream = pipes[key.fd]
                 chunk = os.read(key.fd, _READ_SIZE)
                 text = decoders[stream].decode(chunk, final=not chunk)
                 splitter = splitters[stream]
-                for line in splitter.feed(text):
-                    emit(stream, line)
+                for line, continued in splitter.feed(text):
+                    emit(stream, line, continued)
                 if not chunk:
                     selector.unregister(key.fd)
-                    for line in splitter.finish():
-                        emit(stream, line)
+                    for line, continued in splitter.finish():
+                        emit(stream, line, continued)
     return True
 
 
@@ -380,7 +393,7 @@ class FakeRunner:
         tail: deque[tuple[Stream, str]] = deque(maxlen=TAIL_LINES)
         for stream, line in head.lines:
             tail.append((stream, line))
-            on_line(stream, line)
+            on_line(stream, line, False)
         if head.outcome == "timeout":
             raise CommandTimedOut(command, timeout, tuple(tail))
         if head.outcome == "not_started":

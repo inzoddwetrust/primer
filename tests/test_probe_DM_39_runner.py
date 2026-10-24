@@ -19,15 +19,15 @@ def _split(pieces: list[str]) -> list[str]:
     splitter = _Splitter()
     out: list[str] = []
     for piece in pieces:
-        out += splitter.feed(piece)
-    return out + splitter.finish()
+        out += [line for line, _ in splitter.feed(piece)]
+    return out + [line for line, _ in splitter.finish()]
 
 
 class _Lines:
     def __init__(self) -> None:
         self.got: list[tuple[Stream, str]] = []
 
-    def __call__(self, stream: Stream, line: str) -> None:
+    def __call__(self, stream: Stream, line: str, continued: bool) -> None:
         self.got.append((stream, line))
 
 
@@ -36,9 +36,9 @@ def test_probe_DM_39_endless_line_is_bounded() -> None:
     splitter = _Splitter()
     emitted: list[str] = []
     for _ in range(160):  # 10 Mi characters, no newline
-        emitted += splitter.feed(piece)
+        emitted += [line for line, _ in splitter.feed(piece)]
         assert len(splitter.pending) <= LINE_LIMIT
-    emitted += splitter.finish()
+    emitted += [line for line, _ in splitter.finish()]
     assert all(len(line) <= LINE_LIMIT for line in emitted)
     assert "".join(emitted) == piece * 160  # nothing dropped
     assert [len(x) for x in _split(["y" * LINE_LIMIT + "\n"])] == [LINE_LIMIT]

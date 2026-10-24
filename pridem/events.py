@@ -21,6 +21,7 @@ writes are built here.
 """
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -107,6 +108,34 @@ class Secrets:
             raise ValueError("an empty secret would match every position of a text")
         forms = set().union(*(_forms(secret) for secret in plain))
         self._values = tuple(sorted(forms, key=len, reverse=True))
+        self._pattern = (
+            re.compile("|".join(re.escape(form) for form in self._values))
+            if self._values
+            else None
+        )
+
+    @property
+    def longest(self) -> int:
+        """Length of the longest form; 0 when no secret is known."""
+        return len(self._values[0]) if self._values else 0
+
+    def safe_cut(self, text: str) -> int:
+        """Where ``text`` may be cut when more text follows it.
+
+        Everything before the cut can be cleaned now: no form found in ``text``
+        crosses the cut, and a form completed by text still to come starts in
+        the last ``longest - 1`` characters, which stay after the cut.
+        """
+        cut = len(text) - max(self.longest - 1, 0)
+        if cut <= 0:
+            return 0
+        if self._pattern is not None:
+            for match in self._pattern.finditer(text):
+                if match.start() >= cut:
+                    break
+                if match.end() > cut:
+                    return match.start()
+        return cut
 
     def text(self, value: str) -> str:
         """``value`` with every known secret replaced by ``[redacted]``."""
@@ -212,13 +241,18 @@ class StepFinished:
 
 @dataclass(frozen=True)
 class LogLine:
-    """One output line of a command a step ran."""
+    """One output line of a command a step ran.
+
+    ``continued``: the line is longer than the runner's limit, this is one of
+    its pieces, and more of the same line follows.
+    """
 
     phase: Phase
     stack: str
     name: str
     stream: Stream
     line: str
+    continued: bool = False
 
 
 @dataclass(frozen=True)

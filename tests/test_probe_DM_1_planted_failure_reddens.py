@@ -33,7 +33,7 @@ def test_probe_DM_1_planted_failure_reddens() -> None:
     else:
         stdout: list[str] = []
 
-        def collect(stream: Stream, line: str) -> None:
+        def collect(stream: Stream, line: str, continued: bool) -> None:
             if stream is Stream.STDOUT:
                 stdout.append(line)
 

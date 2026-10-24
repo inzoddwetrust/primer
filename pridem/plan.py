@@ -18,12 +18,11 @@ step never stops the others, only an interrupt during a ``finally`` step does
 done.
 
 A step never crashes a plan: any exception from a phase is that step's failure.
-An interrupt (``KeyboardInterrupt``, and a ``SIGTERM`` turned into one) is an
-interrupt of the run wherever it lands -- in a step, between steps, while an
-event is written: the rest of the main ladder or ``restore`` is skipped,
-``restore`` (before the point of no return) and ``finally`` still run, the
-outcome is emitted and kept in ``Plan.outcome``, and the interrupt is raised
-again.
+A ``KeyboardInterrupt`` is an interrupt of the run wherever it lands -- in a
+step, between steps, while an event is written: the rest of the main ladder or
+``restore`` is skipped, ``restore`` (before the point of no return) and
+``finally`` still run, the outcome is emitted and kept in ``Plan.outcome``, and
+the interrupt is raised again.
 
 A sink never crashes a plan either: its first failure is ``{what: journal,
 code: write-failed}`` in the outcome and the sink is not called again; an event
@@ -269,9 +268,9 @@ class Plan:
         return outcome
 
     def _context(self, phase: Phase, stack: str, step: Step) -> StepContext:
-        def on_line(stream: Stream, line: str) -> None:
+        def on_line(stream: Stream, line: str, continued: bool) -> None:
             before = self._run.interrupt
-            self._emit(LogLine(phase, stack, step.name, stream, line))
+            self._emit(LogLine(phase, stack, step.name, stream, line, continued))
             if self._run.interrupt is not None and self._run.interrupt is not before:
                 raise self._run.interrupt  # the runner stops the command's group
 

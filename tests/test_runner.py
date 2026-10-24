@@ -38,7 +38,7 @@ class Lines:
     def __init__(self) -> None:
         self.seen: list[tuple[Stream, str]] = []
 
-    def __call__(self, stream: Stream, line: str) -> None:
+    def __call__(self, stream: Stream, line: str, continued: bool) -> None:
         self.seen.append((stream, line))
 
     def of(self, stream: Stream) -> list[str]:
@@ -202,7 +202,7 @@ def test_multibyte_character_split_between_reads_is_kept() -> None:
 def test_lines_arrive_while_the_command_runs() -> None:
     arrived: list[float] = []
 
-    def stamp(stream: Stream, line: str) -> None:
+    def stamp(stream: Stream, line: str, continued: bool) -> None:
         arrived.append(time.monotonic())
 
     script = (
@@ -256,7 +256,7 @@ def test_on_line_error_stops_the_command_and_propagates() -> None:
     (DM-39: it hung for 300 s); the command prints its pid for the clean-up."""
     seen: list[int] = []
 
-    def explode(stream: Stream, line: str) -> None:
+    def explode(stream: Stream, line: str, continued: bool) -> None:
         seen.append(int(line))
         raise RuntimeError("sink failed")
 

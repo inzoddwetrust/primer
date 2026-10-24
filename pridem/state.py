@@ -45,9 +45,9 @@ it: a red first ``install`` must not leave a composition the box does not have.
 import fcntl
 import json
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal, TextIO
@@ -174,6 +174,7 @@ class _Log(Strict):
     name: Text
     stream: Literal["stdout", "stderr"]
     line: str
+    continued: bool = False
 
 
 _RUN_ID: TypeAdapter[str] = TypeAdapter(RunId)
@@ -282,6 +283,8 @@ def _event_line(event: JournalEvent, secrets: Secrets) -> str:
             "stream": event.stream.value,
             "line": secrets.text(event.line),
         }
+        if event.continued:
+            raw["continued"] = True
     return json.dumps(raw, ensure_ascii=False) + "\n"
 
 
@@ -304,14 +307,34 @@ def _event(line: _Started | _Finished | _Log) -> JournalEvent:
             line.verify,
         )
         return StepFinished(line.phase, record)
-    return LogLine(line.phase, line.stack, line.name, Stream(line.stream), line.line)
+    return LogLine(
+        line.phase,
+        line.stack,
+        line.name,
+        Stream(line.stream),
+        line.line,
+        line.continued,
+    )
+
+
+_LineKey = tuple[Phase, str, str, Stream]
 
 
 class JournalSink:
-    """The journal of the current run as an event sink; cleans secrets on write."""
+    """The journal of the current run as an event sink; cleans secrets on write.
+
+    A line longer than the runner's limit arrives in pieces, and a known secret
+    may be cut by a piece boundary. The sink holds back the end of every piece
+    that is ``continued`` -- the last ``longest - 1`` characters, more if a
+    found secret crosses there -- and cleans it joined to the next piece, so no
+    written piece carries a secret whole or in parts. What is held is written
+    with the last piece of the line, at ``StepFinished`` of its step (a line cut
+    by a timeout or an interrupt) and at ``close``: nothing is lost.
+    """
 
     def __init__(self, path: Path, secrets: Secrets) -> None:
         self._secrets = secrets
+        self._held: dict[_LineKey, str] = {}
         # the journal exists (open_journal created it, 0600); never create one here
         fd = os.open(path, os.O_WRONLY | os.O_APPEND)
         self._handle: TextIO = os.fdopen(fd, "a", encoding="utf-8")
@@ -319,15 +342,47 @@ class JournalSink:
     def emit(self, event: Event) -> None:
         if not isinstance(event, StepStarted | StepFinished | LogLine):
             return  # the outcome belongs to the verdict, not to the journal
-        self._handle.write(_event_line(event, self._secrets))
+        if isinstance(event, LogLine):
+            self._log(event)
+        else:
+            if isinstance(event, StepFinished):
+                record = event.record
+                self._release(
+                    key
+                    for key in self._held
+                    if key[:3] == (event.phase, record.stack, record.name)
+                )
+            self._write(event)
         self._handle.flush()
         if isinstance(event, StepFinished):
             os.fsync(self._handle.fileno())
 
     def close(self) -> None:
+        self._release(self._held)
         self._handle.flush()
         os.fsync(self._handle.fileno())
         self._handle.close()
+
+    def _write(self, event: JournalEvent) -> None:
+        self._handle.write(_event_line(event, self._secrets))
+
+    def _log(self, event: LogLine) -> None:
+        key = (event.phase, event.stack, event.name, event.stream)
+        text = self._held.pop(key, "") + event.line
+        if not event.continued:
+            self._write(replace(event, line=text))
+            return
+        cut = self._secrets.safe_cut(text)
+        if cut < len(text):
+            self._held[key] = text[cut:]
+        if cut:
+            self._write(replace(event, line=text[:cut]))
+
+    def _release(self, keys: Iterable[_LineKey]) -> None:
+        """Write what is held for ``keys``: the end of a line that will not go on."""
+        for key in list(keys):
+            phase, stack, name, stream = key
+            self._write(LogLine(phase, stack, name, stream, self._held.pop(key)))
 
 
 def read_journal(path: Path) -> Journal:

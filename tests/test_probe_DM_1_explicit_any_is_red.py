@@ -31,7 +31,7 @@ _WITHOUT_ANY = """def f(x: int) -> int:
 def _mypy(module: Path, cache_dir: Path, expect: tuple[int, ...]) -> list[str]:
     stdout: list[str] = []
 
-    def collect(stream: Stream, line: str) -> None:
+    def collect(stream: Stream, line: str, continued: bool) -> None:
         if stream is Stream.STDOUT:
             stdout.append(line)
 

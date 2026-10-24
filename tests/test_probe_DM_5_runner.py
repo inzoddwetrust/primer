@@ -25,7 +25,7 @@ class Lines:
     def __init__(self) -> None:
         self.seen: list[tuple[Stream, str]] = []
 
-    def __call__(self, stream: Stream, line: str) -> None:
+    def __call__(self, stream: Stream, line: str, continued: bool) -> None:
         self.seen.append((stream, line))
 
     def of(self, stream: Stream) -> list[str]:
