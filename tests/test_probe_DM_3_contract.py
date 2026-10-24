@@ -11,7 +11,8 @@ from pathlib import Path
 
 from contract_support import example, lock_problems, node, yaml_messages, yaml_problems
 
-from pridem.stacks.schema import SCHEMA_DIR, rendered_schemas
+from pridem.stacks.lock import PRIMER_LOCK_SCHEMA, rendered_schema
+from pridem.stacks.schema import PRIMER_YAML_SCHEMA, SCHEMA_DIR, rendered_schemas
 
 
 def test_probe_DM_3_yaml_values_forbidden(tmp_path: Path) -> None:
@@ -93,12 +94,24 @@ def test_probe_DM_3_remote_dependency_has_no_local_seam(tmp_path: Path) -> None:
 
 
 def test_probe_DM_3_schema_export_matches_model() -> None:
-    rendered = rendered_schemas()
-    assert sorted(rendered) == ["primer-lock.v1.json", "primer-yaml.v1.json"]
-    for name, text in rendered.items():
+    """Both contract 3 schema files equal the export of the module that owns them.
+
+    ``primer.yaml`` is exported by ``pridem.stacks.schema``, ``primer.lock`` by
+    ``pridem.stacks.lock``. One exporter for both made ``schema`` import
+    ``lock`` while ``lock`` imports ``schema``, a cycle the import fence of
+    DM-34 rejects; the probe still checks both files, each with its own
+    regeneration command.
+    """
+    yaml_rendered = rendered_schemas()
+    assert sorted(yaml_rendered) == [PRIMER_YAML_SCHEMA] == ["primer-yaml.v1.json"]
+    assert PRIMER_LOCK_SCHEMA == "primer-lock.v1.json"
+    exports = [
+        (PRIMER_YAML_SCHEMA, yaml_rendered[PRIMER_YAML_SCHEMA], "pridem.stacks.schema"),
+        (PRIMER_LOCK_SCHEMA, rendered_schema(), "pridem.stacks.lock"),
+    ]
+    for name, text, owner in exports:
         on_disk = (SCHEMA_DIR / name).read_text(encoding="utf-8")
         assert on_disk == text, (
-            f"{name} differs from the models; "
-            "regenerate: python -m pridem.stacks.schema --export"
+            f"{name} differs from the models; regenerate: python -m {owner} --export"
         )
         assert json.loads(on_disk)["$defs"]

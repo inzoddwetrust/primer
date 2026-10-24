@@ -5,9 +5,15 @@ a release: version ``X.Y.Z``, tag ``vX.Y.Z`` equal to it, commit sha. Remote
 dependencies are pinned too (the machine compares the pin with ``/health.release``
 of the live service). That tags exist and point at the commits is checked
 against git later, not here.
+
+``python -m pridem.stacks.lock --export`` writes the JSON Schema of
+``primer.lock`` to ``contract/schema/``.
 """
 
+import argparse
 import re
+import sys
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -23,11 +29,14 @@ from pridem.stacks.loader import (
     load_yaml_mapping,
 )
 from pridem.stacks.schema import (
+    SCHEMA_DIR,
+    ContractSchema,
     Name,
     Product,
     SchemaVersion,
     Strict,
     problem_at,
+    schema_text,
 )
 
 _COMMIT = re.compile(r"[0-9a-f]{7,40}")
@@ -111,3 +120,30 @@ def check_lock(product: Product, lock: Lock) -> list[Problem]:
                 )
             )
     return out
+
+
+PRIMER_LOCK_SCHEMA = "primer-lock.v1.json"
+
+
+def rendered_schema() -> str:
+    """The JSON Schema text of ``primer.lock``, exported from the model."""
+    return schema_text(
+        PRIMER_LOCK.json_schema(mode="validation", schema_generator=ContractSchema),
+        "primer.lock v1",
+    )
+
+
+def main(argv: Sequence[str]) -> int:
+    """``--export`` writes the ``primer.lock`` schema to ``contract/schema/``."""
+    parser = argparse.ArgumentParser(prog="python -m pridem.stacks.lock")
+    parser.add_argument("--export", action="store_true", required=True)
+    parser.parse_args(argv)
+    SCHEMA_DIR.mkdir(parents=True, exist_ok=True)
+    target = SCHEMA_DIR / PRIMER_LOCK_SCHEMA
+    target.write_text(rendered_schema(), encoding="utf-8")
+    print(f"wrote {target}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

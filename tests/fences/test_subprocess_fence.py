@@ -20,22 +20,27 @@ nothing cannot pass. ruff ``S`` does not replace this fence: it misses
 ``os.posix_spawn``, ``asyncio.create_subprocess_*`` and ``pty`` and every rule
 can be silenced with ``noqa`` (measured on ruff 0.17.1).
 
-KNOWN CEILING: process start the fence cannot see.
-1. Mechanics: the fence reads names and constant strings in the AST. A module
-   or attribute name built at run time (``getattr(os, "sys" + "tem")``,
-   ``importlib.import_module(name)``), a call through ``ctypes`` into libc
-   ``system``/``execve``, or code loaded from outside ``pridem/`` and ``tests/``
-   starts a process without a trace in the AST.
+Loading code by a computed name or from a string, and ``ctypes``, are forbidden
+in ``pridem/`` and ``tests/`` by ``tests/fences/test_import_direction_fence.py``.
+
+KNOWN CEILING: ``getattr`` on a module with a computed attribute name.
+1. Mechanics: the fence reads names and constant strings in the AST.
+   ``getattr(os, "sys" + "tem")`` takes an attribute whose name is built at run
+   time from a module the fence knows, and starts a process without a trace in
+   the AST.
 2. Status: acknowledged by design.
-3. Task: none -- no code in the line builds module names at run time or uses
-   ``ctypes``; the ceiling is a property of static analysis, not a backlog item.
-4. Trigger: a file under ``pridem/`` or ``tests/`` imports ``ctypes`` or calls
-   ``importlib.import_module``, ``__import__`` or ``getattr`` with a non-constant
-   name argument.
-5. Agreed fix: on the trigger, the fence reports that form itself (``ctypes``
-   import, non-constant dynamic access) as a violation outside ``runner.py``.
-6. Rejected: ``multiprocessing`` and ``concurrent.futures.ProcessPoolExecutor``
-   are not fenced -- they start Python workers, not external commands (dispatcher
+3. Task: none -- ``getattr`` with a computed name is an ordinary construct that
+   cannot be forbidden as a whole; no file under ``pridem/`` or ``tests/``
+   calls ``getattr``.
+4. Trigger: a file under ``pridem/`` or ``tests/`` calls ``getattr`` with an
+   imported module (or its alias) as the first argument and a non-constant name
+   as the second.
+5. Agreed fix: on the trigger, the fence reports that call itself as a violation
+   outside ``runner.py``.
+6. Rejected: forbidding ``getattr`` with a computed name everywhere -- it is an
+   ordinary construct (dispatcher answer to the DM-34 gate);
+   ``multiprocessing`` and ``concurrent.futures.ProcessPoolExecutor`` are not
+   fenced -- they start Python workers, not external commands (dispatcher
    answer to the DM-5 gate); a runtime audit hook (``sys.addaudithook`` on
    ``subprocess.Popen``/``os.system``) is rejected because it sees only the paths
    a test run happens to execute, while the fence must cover the whole tree.

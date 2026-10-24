@@ -9,7 +9,7 @@ checks), run only when the field layer is clean, each collecting every
 violation. Every problem names the path in the file.
 
 ``python -m pridem.stacks.schema --export`` writes the JSON Schema of
-``primer.yaml`` and ``primer.lock`` to ``contract/schema/``.
+``primer.yaml`` to ``contract/schema/``; ``pridem.stacks.lock`` exports its own.
 """
 
 import argparse
@@ -568,7 +568,6 @@ class ContractSchema(GenerateJsonSchema):
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "contract" / "schema"
 PRIMER_YAML_SCHEMA = "primer-yaml.v1.json"
-PRIMER_LOCK_SCHEMA = "primer-lock.v1.json"
 
 
 def schema_text(schema: JsonSchemaValue, title: str) -> str:
@@ -582,23 +581,17 @@ def schema_text(schema: JsonSchemaValue, title: str) -> str:
 
 
 def rendered_schemas() -> dict[str, str]:
-    """File name -> JSON Schema text, exported from the models."""
-    from pridem.stacks.lock import PRIMER_LOCK  # lock imports this module
-
+    """File name -> JSON Schema text of ``primer.yaml``, exported from the models."""
     return {
         PRIMER_YAML_SCHEMA: schema_text(
             PRIMER_YAML.json_schema(mode="validation", schema_generator=ContractSchema),
             "primer.yaml v1",
         ),
-        PRIMER_LOCK_SCHEMA: schema_text(
-            PRIMER_LOCK.json_schema(mode="validation", schema_generator=ContractSchema),
-            "primer.lock v1",
-        ),
     }
 
 
 def main(argv: Sequence[str]) -> int:
-    """``--export`` writes the schemas to ``contract/schema/``."""
+    """``--export`` writes the ``primer.yaml`` schema to ``contract/schema/``."""
     parser = argparse.ArgumentParser(prog="python -m pridem.stacks.schema")
     parser.add_argument("--export", action="store_true", required=True)
     parser.parse_args(argv)
