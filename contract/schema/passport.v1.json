@@ -194,12 +194,14 @@
       "properties": {
         "cert": {
           "format": "password",
+          "minLength": 16,
           "title": "Cert",
           "type": "string",
           "writeOnly": true
         },
         "key": {
           "format": "password",
+          "minLength": 16,
           "title": "Key",
           "type": "string",
           "writeOnly": true
@@ -223,6 +225,7 @@
       "additionalProperties": {
         "additionalProperties": {
           "format": "password",
+          "minLength": 16,
           "type": "string",
           "writeOnly": true
         },

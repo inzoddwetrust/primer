@@ -3,7 +3,8 @@
 A passport is checked in two layers, as ``primer.yaml`` is. Field layer: the
 models, strict and closed, plus the names rule 1 forbids (``minted``, the
 composition, derived values), reported with their rule wherever the passport
-would hold them, and rule 9 (a package is pinned to an exact version). Rule
+would hold them, rule 9 (a package is pinned to an exact version) and rule 12
+(every value of ``asked`` and ``policies.tls`` is at least 16 characters). Rule
 layer, only when the field layer is clean: rule 4 (``product.ref`` by role),
 rule 5 (``policies.tls`` exactly when ``ssl: provided``), rule 10
 (``server.expires_at`` exactly on ``preview``); each collects every violation.
@@ -55,6 +56,13 @@ from pridem.stacks.schema import (
     RepoPath,
 )
 
+SECRET_MIN_LENGTH = 16
+"""Shortest secret value, in code points, as written (contract 1 rule 12).
+
+Secrets are cleaned out of a verdict by exact match; a short value would match
+parts of a run id, a version or a time and the verdict could not be built.
+"""
+
 RULES = {
     "R1.minted": (
         1,
@@ -72,6 +80,11 @@ RULES = {
     "R10.expires": (
         10,
         "server.expires_at is required on role preview and forbidden on other roles",
+    ),
+    "R12.secret-length": (
+        12,
+        f"a secret of the passport (asked, policies.tls) is at least "
+        f"{SECRET_MIN_LENGTH} characters",
     ),
 }
 
@@ -110,6 +123,17 @@ def _not_empty_secret(value: SecretStr) -> SecretStr:
     return value
 
 
+def _secret_length(value: SecretStr) -> SecretStr:
+    """Rule 12; the message names the rule only, never the value or its length."""
+    if len(value.get_secret_value()) < SECRET_MIN_LENGTH:
+        raise PydanticCustomError(
+            "R12.secret-length",
+            "{message}",
+            {"message": rule_message("R12.secret-length", "the value is shorter")},
+        )
+    return value
+
+
 def _pem(kind: str) -> Callable[[SecretStr], SecretStr]:
     def check(value: SecretStr) -> SecretStr:
         first = value.get_secret_value().lstrip().partition("\n")[0]
@@ -131,7 +155,13 @@ def _exact_version(value: str) -> str:
 
 
 HostName = Annotated[str, AfterValidator(_host_name)]
-AskedValue = Annotated[SecretStr, AfterValidator(_not_empty_secret)]
+_SECRET_SCHEMA = Field(json_schema_extra={"minLength": SECRET_MIN_LENGTH})
+AskedValue = Annotated[
+    SecretStr,
+    AfterValidator(_not_empty_secret),
+    AfterValidator(_secret_length),
+    _SECRET_SCHEMA,
+]
 ExactVersion = Annotated[
     str,
     AfterValidator(_exact_version),
@@ -155,9 +185,21 @@ class Access(Strict):
     mode: Literal["deploy-keys"]
 
 
+# Length before PEM: a value under 16 characters is never PEM, so the rule-12
+# code would be unreachable if PEM were checked first.
 class Tls(Strict):
-    cert: Annotated[SecretStr, AfterValidator(_pem("CERTIFICATE"))]
-    key: Annotated[SecretStr, AfterValidator(_pem("PRIVATE KEY"))]
+    cert: Annotated[
+        SecretStr,
+        AfterValidator(_secret_length),
+        AfterValidator(_pem("CERTIFICATE")),
+        _SECRET_SCHEMA,
+    ]
+    key: Annotated[
+        SecretStr,
+        AfterValidator(_secret_length),
+        AfterValidator(_pem("PRIVATE KEY")),
+        _SECRET_SCHEMA,
+    ]
 
 
 class Gc(Strict):

@@ -22,7 +22,6 @@ The reason of a step a command let down names the command and its exit code
 line, and a reason ends up in the verdict, which lives forever (contract 2).
 """
 
-import shlex
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -59,11 +58,13 @@ from pridem.steps.base import (
 
 
 def _failure_reason(error: Exception) -> str:
-    """The reason of a step that raised ``error``; command output stays out."""
-    if isinstance(error, CommandFailed):
-        return f"command failed: {shlex.join(error.argv)}: exit code {error.code}"
-    if isinstance(error, CommandTimedOut):
-        return f"command timed out after {error.timeout} s: {shlex.join(error.argv)}"
+    """The reason of a step that raised ``error``.
+
+    The text of a runner's command error is its one format, already without
+    the command's output; any other error is named by its type.
+    """
+    if isinstance(error, CommandFailed | CommandTimedOut):
+        return str(error)
     return f"{type(error).__name__}: {error}"
 
 

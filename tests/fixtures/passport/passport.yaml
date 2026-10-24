@@ -1,4 +1,4 @@
-# Contract 1 v1.4, section 1, verbatim.
+# Contract 1 v1.5, section 1, verbatim.
 schema: 1
 version: 7                        # версия паспорта; растёт при каждой правке
 
@@ -24,13 +24,13 @@ access:
 
 asked:                            # ответы на asked каждого стека; принадлежат стеку, который их проверяет
   comms:
-    TELEGRAM_BOT_TOKEN: "…"
-    MAILGUN_API_KEY: "…"
+    TELEGRAM_BOT_TOKEN: "<secret: 16+ chars>"
+    MAILGUN_API_KEY: "<secret: 16+ chars>"
   payments:
-    STRIPE_SECRET_KEY: "…"
+    STRIPE_SECRET_KEY: "<secret: 16+ chars>"
   velo:
     MEET_URL: "https://meet.velo…"  # provides remote-сервиса приходят сюда (контракт 3 п.13)
-    MEET_JWT_SECRET: "…"
+    MEET_JWT_SECRET: "<secret: 16+ chars>"
   aivis: {}
 
 policies:

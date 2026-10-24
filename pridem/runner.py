@@ -10,11 +10,17 @@ is stopped and ``CommandTimedOut`` is raised.
 tests: calls must arrive in the scripted order, an unplanned call fails at the
 moment it is made, and an expectation left unconsumed fails when the script is
 closed.
+
+The text of ``CommandFailed`` and ``CommandTimedOut`` names the command and its
+exit code or timeout, never its output: the last lines are the ``tail``
+attribute, for the journal. A step that wraps the text of the error in its own
+cannot carry the output into a reason, and a reason lives in the verdict.
 """
 
 import codecs
 import os
 import selectors
+import shlex
 import signal
 import subprocess
 import time
@@ -82,10 +88,7 @@ class CommandFailed(RunnerError):
         self.code = code
         self.expect = expect
         self.tail = tail
-        super().__init__(
-            f"command failed: {list(argv)}: exit code {code}, expected one of "
-            f"{list(expect)}{_format_tail(tail)}"
-        )
+        super().__init__(f"command failed: {shlex.join(argv)}: exit code {code}")
 
 
 class CommandTimedOut(RunnerError):
@@ -95,9 +98,7 @@ class CommandTimedOut(RunnerError):
         self.argv = argv
         self.timeout = timeout
         self.tail = tail
-        super().__init__(
-            f"command timed out after {timeout} s: {list(argv)}{_format_tail(tail)}"
-        )
+        super().__init__(f"command timed out after {timeout} s: {shlex.join(argv)}")
 
 
 class UnplannedCommand(AssertionError):
@@ -106,12 +107,6 @@ class UnplannedCommand(AssertionError):
 
 class UnconsumedExpectation(AssertionError):
     """A ``FakeRunner`` was closed with scripted calls that never arrived."""
-
-
-def _format_tail(tail: Tail) -> str:
-    if not tail:
-        return "\n(no output)"
-    return "\n" + "\n".join(f"[{stream}] {line}" for stream, line in tail)
 
 
 class Runner(Protocol):

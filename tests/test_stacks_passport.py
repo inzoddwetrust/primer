@@ -21,6 +21,7 @@ from pridem.stacks.passport import load_passport
 AT = datetime(2026, 11, 1, tzinfo=UTC)
 CERT = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
 KEY = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"
+PLACEHOLDER = "<secret: 16+ chars>"  # noqa: S105 -- contract 1 v1.5 example value
 
 
 def _with_role(data: Data, role: str, ref: str) -> Data:
@@ -34,8 +35,9 @@ def _with_role(data: Data, role: str, ref: str) -> Data:
 def test_example_loads_with_secrets_hidden(tmp_path: Path) -> None:
     passport = load_passport(write_passport(tmp_path, passport_example()))
     assert passport.server.role == "test"
-    assert passport.asked["comms"]["TELEGRAM_BOT_TOKEN"].get_secret_value() == "…"
-    assert "…" not in repr(passport.asked)
+    value = passport.asked["comms"]["TELEGRAM_BOT_TOKEN"].get_secret_value()
+    assert value == PLACEHOLDER
+    assert value not in repr(passport.asked)
     assert set(passport.packages) == {"skin", "texts"}
 
 
@@ -122,6 +124,26 @@ def test_expires_is_an_aware_timestamp(
     assert passport_problems(tmp_path, data) == [("server.expires_at", code)]
 
 
+# --- rule 12: secret length, as written ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "found"),
+    [
+        ("  short-secret  ", []),  # 16 as written, 12 without the spaces
+        (" short-secret  ", [("asked.comms.X", "R12.secret-length")]),
+        ("ё" * 15, [("asked.comms.X", "R12.secret-length")]),  # 30 bytes, 15 points
+    ],
+)
+def test_secret_length_counts_the_value_as_written(
+    tmp_path: Path, value: str, found: list[tuple[str, str]]
+) -> None:
+    """Cleaning finds a secret by exact match, so its length is measured as is."""
+    data = passport_example()
+    section(data, "asked", "comms")["X"] = value
+    assert passport_problems(tmp_path, data) == found
+
+
 # --- rule 5: tls exactly with ssl provided ---------------------------------------
 
 
@@ -139,7 +161,11 @@ def test_tls_iff_provided(tmp_path: Path, ssl: str, has_tls: bool) -> None:
 @pytest.mark.parametrize(
     ("tls", "found"),
     [
-        ({"cert": "nope", "key": KEY}, [("policies.tls.cert", "value_error")]),
+        # 16+ characters, so the PEM check is reached (shorter is rule 12, DM-35)
+        (
+            {"cert": "not a PEM block at all", "key": KEY},
+            [("policies.tls.cert", "value_error")],
+        ),
         (
             {"cert": KEY, "key": CERT},
             [("policies.tls.cert", "value_error"), ("policies.tls.key", "value_error")],
@@ -184,7 +210,8 @@ def test_unknown_ssl_mode(tmp_path: Path) -> None:
         ),
         (("asked", "comms"), "minted", "b", [("asked.comms.minted", "R1.minted")]),
         ((), "VITE_API_BASE_URL", "x", [("VITE_API_BASE_URL", "extra_forbidden")]),
-        (("asked", "comms"), "SECRET_KEY", "x", []),  # composition, P1
+        # composition, P1; the value is 16+ characters for rule 12 (DM-35)
+        (("asked", "comms"), "SECRET_KEY", "x" * 16, []),
     ],
 )
 def test_rule_1_names(

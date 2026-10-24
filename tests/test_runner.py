@@ -1,5 +1,6 @@
 """State grid of the runner (DM-5): inputs, exit codes, output, time, FakeRunner."""
 
+import shlex
 import sys
 import threading
 import time
@@ -132,6 +133,10 @@ def test_failure_tail_labels_both_streams() -> None:
     is block-buffered in a pipe, flushed at exit after stderr, and the stderr line
     left the tail. The order between streams is arrival order, not write order,
     so the test now fits both streams into the tail and checks only labels.
+
+    The text of the error used to carry the tail too; since DM-35 it names the
+    command and its exit code only (the output is for the journal), so the
+    labels are checked on ``tail`` and the text is checked exactly.
     """
     script = (
         "import sys\n"
@@ -139,14 +144,14 @@ def test_failure_tail_labels_both_streams() -> None:
         "sys.stderr.write('last\\n')\n"
         "sys.exit(1)\n"
     ).replace("TAIL_LINES", str(TAIL_LINES))
+    argv = [PY, "-c", script]
     with pytest.raises(CommandFailed) as failed:
-        SubprocessRunner().run([PY, "-c", script], timeout=TIMEOUT, on_line=Lines())
+        SubprocessRunner().run(argv, timeout=TIMEOUT, on_line=Lines())
     tail = failed.value.tail
     assert len(tail) == TAIL_LINES
     assert (Stream.STDERR, "last") in tail
     assert (Stream.STDOUT, "0") in tail
-    assert "[stderr] last" in str(failed.value)
-    assert "[stdout] 0" in str(failed.value)
+    assert str(failed.value) == f"command failed: {shlex.join(argv)}: exit code 1"
 
 
 # --- output ------------------------------------------------------------------
