@@ -515,15 +515,24 @@ def rule_problems(stack: Product | Service) -> list[Problem]:
     return [problem for check in RULE_CHECKS for problem in check(stack)]
 
 
-def load_primer_yaml(file: Path) -> Product | Service:
-    """Load and check ``primer.yaml``; raise ``ContractError`` with every problem."""
-    data = load_yaml_mapping(file)
+def _check(data: dict[str, object]) -> tuple[Product | Service | None, list[Problem]]:
+    """Both layers; returns problems instead of raising, so nothing is chained.
+
+    A ``ValidationError`` carries the file's values (``input_value``); raised
+    inside ``except`` or ``from`` it, ``ContractError`` would print them in a
+    traceback.
+    """
     try:
         stack = PRIMER_YAML.validate_python(data)
     except ValidationError as error:
-        raise ContractError(file, field_problems(data, error)) from error
-    problems = rule_problems(stack)
-    if problems:
+        return None, field_problems(data, error)
+    return stack, rule_problems(stack)
+
+
+def load_primer_yaml(file: Path) -> Product | Service:
+    """Load and check ``primer.yaml``; raise ``ContractError`` with every problem."""
+    stack, problems = _check(load_yaml_mapping(file))
+    if problems or stack is None:
         raise ContractError(file, problems)
     return stack
 

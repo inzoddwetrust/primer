@@ -83,15 +83,24 @@ def entry_problems(lock: Lock) -> list[Problem]:
     return out
 
 
-def load_primer_lock(file: Path) -> Lock:
-    """Load ``primer.lock``; raise ``ContractError`` with every problem."""
-    data = load_yaml_mapping(file)
+def _check(data: dict[str, object]) -> tuple[Lock | None, list[Problem]]:
+    """Both layers; returns problems instead of raising, so nothing is chained.
+
+    A ``ValidationError`` carries the file's values (``input_value``); raised
+    inside ``except`` or ``from`` it, ``ContractError`` would print them in a
+    traceback.
+    """
     try:
         lock = PRIMER_LOCK.validate_python(data)
     except ValidationError as error:
-        raise ContractError(file, field_problems(data, error)) from error
-    problems = entry_problems(lock)
-    if problems:
+        return None, field_problems(data, error)
+    return lock, entry_problems(lock)
+
+
+def load_primer_lock(file: Path) -> Lock:
+    """Load ``primer.lock``; raise ``ContractError`` with every problem."""
+    lock, problems = _check(load_yaml_mapping(file))
+    if problems or lock is None:
         raise ContractError(file, problems)
     return lock
 
