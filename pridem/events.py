@@ -24,6 +24,7 @@ from typing import Literal, Protocol, TextIO
 
 from pydantic import SecretStr
 
+from pridem.contract import SECRET_MIN_LENGTH
 from pridem.report.codes import ExitCode
 from pridem.runner import Stream
 
@@ -50,18 +51,33 @@ def after_failure(stack: str, name: str) -> str:
     return f"{AFTER_FAILURE}{stack}/{name}"
 
 
+def _forms(secret: str) -> set[str]:
+    """The exact forms of ``secret`` that are cleaned (contract 2 rule 2).
+
+    The value whole, at any length; the value without whitespace at its edges
+    and each of its lines (a PEM, a YAML block) when at least
+    ``SECRET_MIN_LENGTH`` long. A shorter derived form is left alone, as the
+    owner accepted (the short tail of a PEM body): it would match ordinary text.
+    """
+    derived = {secret.strip(), *secret.splitlines()}
+    return {secret} | {form for form in derived if len(form) >= SECRET_MIN_LENGTH}
+
+
 class Secrets:
     """Known secret values and the exact-match cleaning of text and facts.
 
-    Longer values are replaced first, so a secret that contains another is
-    replaced whole. An empty value is an error: it matches everywhere.
+    Every secret contributes its forms (``_forms``); the forms of all secrets
+    are one set, replaced longest first, so a secret that contains another --
+    or contains its own lines -- is replaced whole, with no pieces left. An
+    empty value is an error: it matches everywhere.
     """
 
     def __init__(self, values: Iterable[SecretStr]) -> None:
         plain = {value.get_secret_value() for value in values}
         if "" in plain:
             raise ValueError("an empty secret would match every position of a text")
-        self._values = tuple(sorted(plain, key=len, reverse=True))
+        forms = set().union(*(_forms(secret) for secret in plain))
+        self._values = tuple(sorted(forms, key=len, reverse=True))
 
     def text(self, value: str) -> str:
         """``value`` with every known secret replaced by ``[redacted]``."""

@@ -39,6 +39,7 @@ from pydantic_core import PydanticCustomError
 
 from pridem.contract import (
     SCHEMA_DIR,
+    SECRET_MIN_LENGTH,
     ContractSchema,
     SchemaVersion,
     Strict,
@@ -55,13 +56,6 @@ from pridem.stacks.schema import (
     Name,
     RepoPath,
 )
-
-SECRET_MIN_LENGTH = 16
-"""Shortest secret value, in code points, as written (contract 1 rule 12).
-
-Secrets are cleaned out of a verdict by exact match; a short value would match
-parts of a run id, a version or a time and the verdict could not be built.
-"""
 
 RULES = {
     "R1.minted": (

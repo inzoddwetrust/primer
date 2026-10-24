@@ -20,6 +20,14 @@ from pydantic_core import PydanticCustomError, core_schema
 
 SCHEMA_DIR = Path(__file__).resolve().parents[1] / "contract" / "schema"
 
+SECRET_MIN_LENGTH = 16
+"""Shortest secret, in code points, as written: the passport's values (contract 1
+rule 12) and every derived form ``Secrets`` cleans (contract 2 rule 2).
+
+Secrets are cleaned out of a verdict by exact match; a short form would match
+parts of a run id, a version or a time and the verdict could not be built.
+"""
+
 
 class Strict(BaseModel):
     """Closed, strict, frozen; an explicit null is an error, absence is not."""
