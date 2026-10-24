@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from deadline_support import deadline
 from plan_support import Journal as Phases
 from plan_support import ScriptedStep, plan
 from pydantic import SecretStr, ValidationError
@@ -36,9 +37,11 @@ from pridem.state import (
 
 
 def test_second_command_is_refused_with_the_holder(tmp_path: Path) -> None:
+    """Refused, not waiting: a blocking lock is red by assertion within the deadline
+    (DM-39: without it the second ``flock`` of one thread hung forever)."""
     first, second = Box(tmp_path), Box(tmp_path)
     with first.lock("deploy 2026-10-15T10:42:01Z-a3f9 pid 41"):
-        with pytest.raises(BoxBusy) as busy, second.lock("doctor"):
+        with deadline(5.0), pytest.raises(BoxBusy) as busy, second.lock("doctor"):
             pass
         assert busy.value.holder == "deploy 2026-10-15T10:42:01Z-a3f9 pid 41"
     with second.lock("doctor"):

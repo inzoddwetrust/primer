@@ -1,12 +1,16 @@
 """State grid of the runner (DM-5): inputs, exit codes, output, time, FakeRunner."""
 
+import contextlib
+import os
 import shlex
+import signal
 import sys
 import threading
 import time
 from pathlib import Path
 
 import pytest
+from deadline_support import deadline
 
 from pridem import runner
 from pridem.runner import (
@@ -240,15 +244,30 @@ def test_output_larger_than_pipe_buffer_on_both_streams_does_not_deadlock() -> N
     assert len(lines.of(Stream.STDOUT)) == 1024
 
 
+def _kill(*pids: int) -> None:
+    """Clean-up by pid, never by group: a broken runner may share pytest's group."""
+    for pid in pids:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
 def test_on_line_error_stops_the_command_and_propagates() -> None:
+    """The deadline turns a runner that cannot stop the command red by assertion
+    (DM-39: it hung for 300 s); the command prints its pid for the clean-up."""
+    seen: list[int] = []
+
     def explode(stream: Stream, line: str) -> None:
+        seen.append(int(line))
         raise RuntimeError("sink failed")
 
     started = time.monotonic()
-    script = "import time\nprint('x', flush=True)\ntime.sleep(300)"
-    with pytest.raises(RuntimeError, match="sink failed"):
-        SubprocessRunner().run([PY, "-c", script], timeout=TIMEOUT, on_line=explode)
-    assert time.monotonic() - started < TIMEOUT
+    script = "import os, time\nprint(os.getpid(), flush=True)\ntime.sleep(300)"
+    try:
+        with deadline(15.0), pytest.raises(RuntimeError, match="sink failed"):
+            SubprocessRunner().run([PY, "-c", script], timeout=TIMEOUT, on_line=explode)
+        assert time.monotonic() - started < TIMEOUT
+    finally:
+        _kill(*seen)
 
 
 # --- cwd, env, stdin -----------------------------------------------------------
@@ -286,32 +305,46 @@ def test_stdin_is_closed() -> None:
 
 
 def test_timeout_kills_the_whole_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deadline makes a runner that cannot reach the group red by assertion.
+
+    The shell prints its own pid and the sleeper's, so a test that hit its
+    deadline still kills both (DM-39: it used to hang for 300 s).
+    """
     monkeypatch.setattr(runner, "KILL_GRACE_SECONDS", 1.0)
     lines = Lines()
-    with pytest.raises(CommandTimedOut) as timed_out:
-        SubprocessRunner().run(
-            [SH, "-c", "sleep 300 & echo $!; wait"], timeout=1.0, on_line=lines
-        )
-    grandchild = int(lines.of(Stream.STDOUT)[0])
-    assert _dead_or_zombie(grandchild)
-    assert timed_out.value.tail == ((Stream.STDOUT, str(grandchild)),)
+    try:
+        with deadline(10.0), pytest.raises(CommandTimedOut) as timed_out:
+            SubprocessRunner().run(
+                [SH, "-c", "sleep 300 & echo $$ $!; wait"], timeout=1.0, on_line=lines
+            )
+        shell, grandchild = map(int, lines.of(Stream.STDOUT)[0].split())
+        assert _dead_or_zombie(grandchild)
+        assert timed_out.value.tail == ((Stream.STDOUT, f"{shell} {grandchild}"),)
+    finally:
+        _kill(*map(int, " ".join(lines.of(Stream.STDOUT)[:1]).split()))
 
 
 def test_timeout_escalates_to_sigkill_after_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A command ignoring SIGTERM dies by SIGKILL after the grace; red by assertion
+    within the deadline if it does not (DM-39: it used to hang for 300 s)."""
     monkeypatch.setattr(runner, "KILL_GRACE_SECONDS", 1.0)
     script = (
-        "import signal, time\n"
+        "import os, signal, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "print('ignoring TERM', flush=True)\n"
+        "print(os.getpid(), flush=True)\n"
         "time.sleep(300)\n"
     )
+    lines = Lines()
     started = time.monotonic()
-    with pytest.raises(CommandTimedOut):
-        SubprocessRunner().run([PY, "-c", script], timeout=1.0, on_line=Lines())
-    elapsed = time.monotonic() - started
-    assert 1.9 <= elapsed < 10.0
+    try:
+        with deadline(10.0), pytest.raises(CommandTimedOut):
+            SubprocessRunner().run([PY, "-c", script], timeout=1.0, on_line=lines)
+        elapsed = time.monotonic() - started
+        assert 1.9 <= elapsed < 10.0
+    finally:
+        _kill(*map(int, lines.of(Stream.STDOUT)[:1]))
 
 
 def test_descendant_holding_the_pipe_is_a_timeout(
@@ -386,3 +419,33 @@ def test_both_runners_satisfy_the_protocol() -> None:
     """mypy checks this assignment; the runtime part only shows it is not empty."""
     runners: list[Runner] = [SubprocessRunner(), FakeRunner()]
     assert len(runners) == 2
+
+
+def test_an_emptied_group_gets_no_sigkill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DM-39: once the group is gone its id may be someone else's; no SIGKILL.
+
+    The pair: a group still alive when the grace ends does get SIGKILL.
+    """
+    monkeypatch.setattr(runner, "KILL_GRACE_SECONDS", 1.0)
+    sent: list[int] = []
+    real = os.killpg
+
+    def recording(pgid: int, sig: int) -> None:
+        sent.append(sig)
+        real(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording)
+    with deadline(10.0), pytest.raises(CommandTimedOut):
+        SubprocessRunner().run(
+            [PY, "-c", "import time; time.sleep(300)"], timeout=0.5, on_line=Lines()
+        )
+    assert sent[0] == signal.SIGTERM and signal.SIGKILL not in sent
+    sent.clear()
+    stubborn = (
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(300)\n"
+    )
+    with deadline(10.0), pytest.raises(CommandTimedOut):
+        SubprocessRunner().run([PY, "-c", stubborn], timeout=1.5, on_line=Lines())
+    assert sent[0] == signal.SIGTERM and sent[-1] == signal.SIGKILL

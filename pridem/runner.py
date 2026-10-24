@@ -20,6 +20,7 @@ cannot carry the output into a reason, and a reason lives in the verdict.
 
 import codecs
 import os
+import re
 import selectors
 import shlex
 import signal
@@ -43,7 +44,18 @@ follows for whatever is still alive when the grace ends.
 TAIL_LINES = 20
 """Number of last output lines carried by ``CommandFailed`` and ``CommandTimedOut``."""
 
+LINE_LIMIT = 65536
+"""Longest output line handed to ``on_line``, in characters of decoded text.
+
+A longer line arrives as consecutive pieces of this length and a remainder,
+each its own call: nothing is dropped, and joined they are the line. Pending
+text never exceeds this, so a command printing without newlines costs neither
+unbounded memory nor quadratic copying. Characters, not bytes: a piece never
+cuts a UTF-8 character.
+"""
+
 _READ_SIZE = 65536
+_BREAK = re.compile(r"\r\n|\r|\n")
 _POLL_SECONDS = 0.05
 
 
@@ -202,6 +214,55 @@ class SubprocessRunner:
         return _check(command, code, expect, tuple(tail))
 
 
+class _Splitter:
+    """Decoded output of one stream -> lines.
+
+    ``\n``, ``\r`` and ``\r\n`` each end a line (progress bars of pip, apt and
+    docker rewrite a line with a bare ``\r``); a ``\r`` at the very end of a
+    piece is held until the next piece tells whether ``\n`` follows. A line
+    longer than ``LINE_LIMIT`` is emitted in pieces of that length.
+    """
+
+    def __init__(self) -> None:
+        self.pending = ""
+        self._held_cr = False
+
+    def feed(self, text: str) -> list[str]:
+        """The lines completed by ``text``; the rest stays pending."""
+        if self._held_cr:
+            self._held_cr = False
+            if text.startswith("\n"):
+                text = text[1:]
+        if text.endswith("\r"):
+            self._held_cr = True
+            text = text[:-1] + "\n"
+        *lines, rest = _BREAK.split(text)
+        out: list[str] = []
+        for line in lines:
+            out.extend(self._take(line, complete=True))
+        out.extend(self._take(rest, complete=False))
+        return out
+
+    def finish(self) -> list[str]:
+        """The unterminated last line, if there is one."""
+        rest, self.pending = self.pending, ""
+        return [rest] if rest else []
+
+    def _take(self, part: str, *, complete: bool) -> list[str]:
+        """Join ``part`` to the pending text; emit what is complete or full."""
+        out: list[str] = []
+        room = LINE_LIMIT - len(self.pending)
+        while len(part) > room:
+            out.append(self.pending + part[:room])
+            self.pending, part, room = "", part[room:], LINE_LIMIT
+        if complete:
+            out.append(self.pending + part)
+            self.pending = ""
+        else:
+            self.pending += part
+        return out
+
+
 def _pump(process: "subprocess.Popen[bytes]", deadline: float, emit: OnLine) -> bool:
     """Read both pipes to EOF, emitting whole lines; False if the deadline passed."""
     # Popen was called with stdout=PIPE and stderr=PIPE, so both are set.
@@ -213,7 +274,7 @@ def _pump(process: "subprocess.Popen[bytes]", deadline: float, emit: OnLine) -> 
         stream: codecs.getincrementaldecoder("utf-8")(errors="replace")
         for stream in Stream
     }
-    pending = dict.fromkeys(Stream, "")
+    splitters = {stream: _Splitter() for stream in Stream}
     with selectors.DefaultSelector() as selector:
         for fd in pipes:
             selector.register(fd, selectors.EVENT_READ)
@@ -225,15 +286,13 @@ def _pump(process: "subprocess.Popen[bytes]", deadline: float, emit: OnLine) -> 
                 stream = pipes[key.fd]
                 chunk = os.read(key.fd, _READ_SIZE)
                 text = decoders[stream].decode(chunk, final=not chunk)
-                *lines, rest = (pending[stream] + text).split("\n")
-                for line in lines:
+                splitter = splitters[stream]
+                for line in splitter.feed(text):
                     emit(stream, line)
                 if not chunk:
                     selector.unregister(key.fd)
-                    if rest:
-                        emit(stream, rest)
-                    rest = ""
-                pending[stream] = rest
+                    for line in splitter.finish():
+                        emit(stream, line)
     return True
 
 
@@ -247,16 +306,19 @@ def _signal_group(pgid: int, sig: int) -> bool:
 
 
 def _stop_group(process: "subprocess.Popen[bytes]") -> None:
-    """SIGTERM the process group, wait out the grace, SIGKILL whatever is left."""
+    """SIGTERM the process group, wait out the grace, SIGKILL it if still alive."""
     pgid = process.pid
     if _signal_group(pgid, signal.SIGTERM):
         grace_ends = time.monotonic() + KILL_GRACE_SECONDS
-        while time.monotonic() < grace_ends:
+        alive = True
+        while alive and time.monotonic() < grace_ends:
             process.poll()
-            if not _signal_group(pgid, 0):
-                break
-            time.sleep(_POLL_SECONDS)
-        _signal_group(pgid, signal.SIGKILL)
+            alive = _signal_group(pgid, 0)
+            if alive:
+                time.sleep(_POLL_SECONDS)
+        # an emptied group's id may already belong to someone else: no SIGKILL
+        if alive:
+            _signal_group(pgid, signal.SIGKILL)
     process.wait()
 
 
