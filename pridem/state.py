@@ -51,7 +51,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal, TextIO
 
-from pydantic import Field, TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter
 
 from pridem.contract import Strict
 from pridem.events import (
@@ -69,10 +69,10 @@ from pridem.events import (
 )
 from pridem.report.codes import ExitCode
 from pridem.report.schema import (
-    RUN_ID,
     Actor,
     Composition,
     Moment,
+    RunId,
     Text,
     Verdict,
     build_verdict,
@@ -85,8 +85,10 @@ HISTORY = "history"
 JOURNAL = "journal"
 _TEMP_SUFFIX = ".tmp"
 _QUARANTINE_SUFFIX = ".damaged"
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
+STATE_DAMAGED = "state damaged; quarantined"
 
-RunId = Annotated[str, Field(pattern=f"^{RUN_ID.pattern}$")]
 JournalEvent = StepStarted | StepFinished | LogLine
 
 
@@ -108,6 +110,14 @@ class HistoryExists(FileExistsError):
 
 class JournalDamaged(ValueError):
     """The header line of a journal is not a valid journal header."""
+
+
+class StateDamaged(ValueError):
+    """``state.json`` is there but cannot be read; read outside the lock.
+
+    Under the lock a damaged ``state.json`` is quarantined instead. The message
+    never quotes the file: it names the kind of damage only.
+    """
 
 
 class BoxState(Strict):
@@ -159,6 +169,7 @@ class _Log(Strict):
     line: str
 
 
+_RUN_ID: TypeAdapter[str] = TypeAdapter(RunId)
 _LINE: TypeAdapter[_Started | _Finished | _Log] = TypeAdapter(
     Annotated[_Started | _Finished | _Log, Field(discriminator="event")]
 )
@@ -183,6 +194,7 @@ class Recovery:
 
     verdicts: tuple[Verdict, ...]
     quarantined: tuple[str, ...]
+    state_quarantined: bool = False
 
 
 def _stamp(moment: datetime) -> str:
@@ -208,17 +220,21 @@ def _write_new(final: Path, text: str, *, replace: bool) -> None:
     to ``final`` and an existing ``final`` is ``FileExistsError``, untouched.
     """
     temp = _temp(final)
-    with temp.open("w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    if replace:
-        os.replace(temp, final)
-    else:
-        try:
+    # private from creation: a umask can only narrow 0600, never widen it
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _FILE_MODE)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if replace:
+            os.replace(temp, final)
+        else:
             os.link(temp, final)
-        finally:
-            temp.unlink()
+    finally:
+        # a failed write leaves no temp behind (O_EXCL would refuse the next one);
+        # after replace there is none, after link the final name holds the data
+        temp.unlink(missing_ok=True)
     _fsync_dir(final.parent)
 
 
@@ -302,27 +318,29 @@ class JournalSink:
 
 
 def read_journal(path: Path) -> Journal:
-    """The journal at ``path``.
+    """The journal at ``path``, read as bytes and decoded line by line.
 
-    A torn last line is dropped; the first damaged line after the header ends
+    A torn last line is dropped (a writer can die inside a UTF-8 character);
+    the first damaged line after the header -- invalid UTF-8 included -- ends
     the events and is named in ``damaged_at``; a damaged header raises.
     """
-    lines = path.read_text(encoding="utf-8").split("\n")
-    torn = lines[-1] != ""
+    lines = path.read_bytes().split(b"\n")
+    torn = lines[-1] != b""
     body = lines if torn else lines[:-1]
     try:
-        first = json.loads(body[0])
+        first = json.loads(body[0].decode("utf-8"))
         if not isinstance(first, dict) or first.pop("event", None) != "header":
             raise ValueError("the first line is not a journal header")
         header = JournalHeader.model_validate(first)
-    except (IndexError, ValueError) as error:
-        raise JournalDamaged(f"{path}:1: {error}") from error
+    except (IndexError, ValueError) as error:  # UnicodeDecodeError is a ValueError
+        # the line is not quoted: a header carries the run's args
+        raise JournalDamaged(f"{path}:1: {type(error).__name__}") from None
     events: list[JournalEvent] = []
     damaged_at: int | None = None
-    for number, text in enumerate(body[1:], start=2):
+    for number, raw in enumerate(body[1:], start=2):
         try:
-            events.append(_event(_LINE.validate_json(text)))
-        except ValidationError:
+            events.append(_event(_LINE.validate_json(raw.decode("utf-8"))))
+        except ValueError:  # ValidationError and UnicodeDecodeError alike
             if not (torn and number == len(body)):
                 damaged_at = number
             break
@@ -347,6 +365,8 @@ class Box:
         self.history = root / HISTORY
         self.journals = root / JOURNAL
         self._locked = False
+        self.state_quarantined = False
+        """``state.json`` was quarantined while this ``Box`` held the lock."""
 
     def _require_lock(self) -> None:
         if not self._locked:
@@ -356,8 +376,8 @@ class Box:
     def lock(self, holder: str) -> Iterator[None]:
         """Hold the box for one command; ``BoxBusy`` if another holds it."""
         for directory in (self.root, self.history, self.journals):
-            directory.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.root / LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+            directory.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        fd = os.open(self.root / LOCK, os.O_RDWR | os.O_CREAT, _FILE_MODE)
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -368,6 +388,7 @@ class Box:
             os.pwrite(fd, holder.encode("utf-8"), 0)
             os.fsync(fd)
             self._locked = True
+            self.state_quarantined = False
             try:
                 self._remove_temps()
                 yield
@@ -386,11 +407,27 @@ class Box:
     # --- state.json -------------------------------------------------------------
 
     def read_state(self) -> BoxState | None:
-        """The box state, or ``None`` on a box no command has written one yet."""
+        """The box state, or ``None`` when there is no ``state.json``.
+
+        A damaged ``state.json`` (not UTF-8, not JSON, not the schema, empty) is
+        quarantined under the lock -- renamed ``state.json.damaged`` over an
+        earlier one, ``state_quarantined`` set -- and the box lives as without
+        it (TZ section 7.3). Outside the lock it is ``StateDamaged`` and stays
+        where it is: ``None`` means only that there is no file.
+        """
         path = self.root / STATE
         if not path.exists():
             return None
-        return BoxState.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            return BoxState.model_validate_json(path.read_bytes().decode("utf-8"))
+        except ValueError as error:  # ValidationError and UnicodeDecodeError alike
+            kind = type(error).__name__
+        if not self._locked:
+            raise StateDamaged(f"{path} is damaged ({kind})") from None
+        os.replace(path, path.with_name(STATE + _QUARANTINE_SUFFIX))
+        _fsync_dir(self.root)
+        self.state_quarantined = True
+        return None
 
     def write_state(self, state: BoxState) -> None:
         """Replace ``state.json`` atomically."""
@@ -400,7 +437,7 @@ class Box:
     # --- history/ ---------------------------------------------------------------
 
     def read_verdict(self, run_id: str) -> Verdict:
-        path = self.history / f"{run_id}.json"
+        path = self.history / f"{_RUN_ID.validate_python(run_id)}.json"
         return Verdict.model_validate_json(path.read_text(encoding="utf-8"))
 
     def history_ids(self) -> list[str]:
@@ -437,7 +474,7 @@ class Box:
 
     def read_journal(self, run_id: str) -> Journal | None:
         """The journal of ``run_id``, or ``None`` when it was evicted."""
-        path = self.journals / f"{run_id}.jsonl"
+        path = self.journals / f"{_RUN_ID.validate_python(run_id)}.jsonl"
         return read_journal(path) if path.exists() else None
 
     def evict_journals(self, budget: int, keep: str) -> dict[str, Json]:
@@ -476,8 +513,13 @@ class Box:
 
         A journal whose header is damaged is renamed ``<run_id>.jsonl.damaged``
         and listed in the result; recovery goes on with the next journal.
+        ``state.json`` is read once, before the journals: a damaged one is
+        quarantined then, and every verdict written here carries
+        ``{state, state damaged; quarantined}`` beside ``{run, ...}`` -- its
+        ``composition_after`` is the bare ``{pridem}`` for that reason.
         """
         self._require_lock()
+        state = self.read_state()
         verdicts: list[Verdict] = []
         quarantined: list[str] = []
         for path in sorted(self.journals.glob("*.jsonl"), key=_run_of):
@@ -490,13 +532,17 @@ class Box:
                 _fsync_dir(self.journals)
                 quarantined.append(path.stem)
                 continue
-            verdict = self._orphan_verdict(journal, secrets, machine_version)
+            verdict = self._orphan_verdict(journal, state, secrets, machine_version)
             self.write_verdict(verdict)
             verdicts.append(verdict)
-        return Recovery(tuple(verdicts), tuple(quarantined))
+        return Recovery(tuple(verdicts), tuple(quarantined), self.state_quarantined)
 
     def _orphan_verdict(
-        self, journal: Journal, secrets: Secrets, machine_version: str
+        self,
+        journal: Journal,
+        state: BoxState | None,
+        secrets: Secrets,
+        machine_version: str,
     ) -> Verdict:
         header = journal.header
         phases: dict[Phase, list[StepRecord]] = {
@@ -521,9 +567,15 @@ class Box:
             steps=tuple(phases["main"]),
             restore=tuple(phases["restore"]),
             finally_=tuple(phases["finally"]),
-            incomplete=(Incomplete("run", f"no verdict found; {ended}"),),
+            incomplete=(
+                Incomplete("run", f"no verdict found; {ended}"),
+                *(
+                    (Incomplete("state", STATE_DAMAGED),)
+                    if self.state_quarantined
+                    else ()
+                ),
+            ),
         )
-        state = self.read_state()
         after = state.composition if state else {"pridem": machine_version}
         return build_verdict(
             outcome,

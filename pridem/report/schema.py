@@ -63,6 +63,9 @@ RESULT: Mapping[ExitCode, Result] = {
 }
 NEEDS_RESTORE = "past the point of no return: restore from backup is needed"
 RUN_ID = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z-[0-9a-f]{4}")
+# pydantic looks for a pattern anywhere in the string: the anchors are what keep
+# a run id from naming a path outside its directory (``../<run id>``).
+RunId = Annotated[str, Field(pattern=f"^{RUN_ID.pattern}$")]
 
 Text = Annotated[str, Field(min_length=1)]
 Count = Annotated[int, Field(ge=0)]
@@ -216,7 +219,7 @@ class Verdict(Strict):
     model_config = ConfigDict(serialize_by_alias=True, validate_by_alias=True)
 
     schema_: SchemaVersion = Field(alias="schema")
-    run_id: Annotated[str, Field(pattern=RUN_ID.pattern)]
+    run_id: RunId
     verb: Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]*( [a-z][a-z0-9-]*)*$")]
     args: dict[str, Json]
     actor: Actor

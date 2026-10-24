@@ -1,7 +1,11 @@
 """state.json, history/, journal/, the box lock and recovery (DM-7)."""
 
 import json
+import os
+import stat
 import threading
+import traceback
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -9,7 +13,7 @@ from plan_support import Journal as Phases
 from plan_support import ScriptedStep, plan
 from pydantic import SecretStr, ValidationError
 from report_support import MARKER, SECRETS, build
-from state_support import AFTER, BEFORE, header, run_id, state, verdict
+from state_support import AFTER, BEFORE, STARTED, header, run_id, state, verdict
 
 from pridem.events import LogLine, Secrets, StepFinished, StepRecord, StepStarted
 from pridem.plan import StackSteps
@@ -23,6 +27,7 @@ from pridem.state import (
     JournalDamaged,
     NotLocked,
     Recovery,
+    StateDamaged,
     read_journal,
 )
 
@@ -113,6 +118,12 @@ def test_temp_files_of_a_dead_writer_go_under_the_lock(tmp_path: Path) -> None:
 
 
 def test_state_is_read_strictly_from_json(tmp_path: Path) -> None:
+    """A ``state.json`` off the schema is damaged.
+
+    Until DM-36 ``read_state`` raised pydantic's ``ValidationError``, which
+    quotes the file; outside the lock it is now ``StateDamaged``, naming only
+    the kind of damage (under the lock: quarantine).
+    """
     box = Box(tmp_path)
     with box.lock("a"):
         box.write_state(state())
@@ -120,11 +131,11 @@ def test_state_is_read_strictly_from_json(tmp_path: Path) -> None:
     assert raw["composition"] == AFTER
     raw["passport_version"] = 7.0
     (tmp_path / "state.json").write_text(json.dumps(raw), encoding="utf-8")
-    with pytest.raises(ValidationError):
+    with pytest.raises(StateDamaged, match=r"\(ValidationError\)$"):
         box.read_state()
     raw["passport_version"], raw["composition"] = 7, {"aivis": "9a1c4e2"}
     (tmp_path / "state.json").write_text(json.dumps(raw), encoding="utf-8")
-    with pytest.raises(ValidationError, match="pridem"):
+    with pytest.raises(StateDamaged):
         box.read_state()
 
 
@@ -405,3 +416,95 @@ def test_eviction_counts_quarantine_oldest_first(tmp_path: Path) -> None:
         f"{run_id(2)}.jsonl",
         f"{run_id(3)}.jsonl",
     ]
+
+
+# --- DM-36: what the box claims about writes, and damaged files -----------------
+
+
+def _fsyncs(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Every ``os.fsync`` from now on, as ``True`` for a directory."""
+    seen: list[bool] = []
+    real = os.fsync
+
+    def spy(fd: int) -> None:
+        seen.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    return seen
+
+
+def test_every_rename_and_link_is_followed_by_a_directory_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path)
+    with box.lock("a"):
+        seen = _fsyncs(monkeypatch)
+        writes: list[Callable[[], None]] = [
+            lambda: box.write_state(state()),
+            lambda: box.write_verdict(verdict(run_id(1))),
+            lambda: box.open_journal(header(run_id(2)), SECRETS).close(),
+        ]
+        for write in writes:
+            seen.clear()
+            write()
+            assert True in seen, write
+
+
+def test_journal_is_fsynced_on_finished_steps_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path)
+    with box.lock("a"):
+        sink = box.open_journal(header(run_id(1)), SECRETS)
+        seen = _fsyncs(monkeypatch)
+        sink.emit(LogLine("main", "aivis", "up", Stream.STDOUT, "x"))
+        sink.emit(StepStarted("main", "aivis", "up", 10, STARTED))
+        assert seen == []
+        record = StepRecord("aivis", "up", 10, "ok", None, None, 1.0, {"x": 1})
+        sink.emit(StepFinished("main", record))
+        assert seen == [False]
+        sink.close()
+
+
+def test_orphan_never_finishes_before_it_started(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    with box.lock("dying"):
+        box.open_journal(header(run_id(1)), SECRETS).close()
+    path = box.journals / f"{run_id(1)}.jsonl"
+    earlier = STARTED.timestamp() - 3600  # the clock was stepped back
+    os.utime(path, (earlier, earlier))
+    with box.lock("next"):
+        (red,) = box.recover(SECRETS, "0.3.1").verdicts
+    assert red.finished == red.started == STARTED
+
+
+def test_damaged_journal_header_is_not_quoted(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    with box.lock("a"):
+        box.open_journal(header(run_id(1)), SECRETS).close()
+    path = box.journals / f"{run_id(1)}.jsonl"
+    path.write_text('{"event": "header", "verb": "' + MARKER + '"}\n')
+    with pytest.raises(JournalDamaged) as damaged:
+        read_journal(path)
+    shown = "".join(traceback.format_exception(damaged.value))
+    assert MARKER not in shown and str(damaged.value).endswith(":1: ValidationError")
+
+
+def test_damaged_state_outside_the_lock_is_an_error_and_stays(tmp_path: Path) -> None:
+    """``None`` means only «no state.json»; damage read without the lock raises."""
+    box = Box(tmp_path)
+    assert box.read_state() is None
+    path = tmp_path / "state.json"
+    content = '{"composition": "' + MARKER + '"'
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(StateDamaged) as damaged:
+        box.read_state()
+    shown = "".join(traceback.format_exception(damaged.value))
+    assert MARKER not in shown and "state.json is damaged" in shown
+    assert path.read_text(encoding="utf-8") == content
+    assert not (tmp_path / "state.json.damaged").exists()
+    with box.lock("a"):
+        assert box.read_state() is None and box.state_quarantined
+    assert (tmp_path / "state.json.damaged").read_text(encoding="utf-8") == content
+    assert box.read_state() is None
