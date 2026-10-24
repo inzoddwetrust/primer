@@ -10,9 +10,13 @@ reports, with file and line, every way of starting a process it knows:
   ``asyncio.create_subprocess_exec`` or ``asyncio.create_subprocess_shell``,
   called or not, through the module name, an alias or ``from ... import``;
 - ``from os import *`` and ``from asyncio import *``, which hide what they bind;
-- dynamic access with a constant string: ``__import__("subprocess")``,
-  ``importlib.import_module("subprocess")``, ``getattr(os, "system")``,
-  ``sys.modules["subprocess"]``.
+- dynamic access with a constant string: ``getattr(os, "system")``, and getting
+  a module by name -- ``__import__``, ``builtins.__import__``,
+  ``importlib.__import__``, ``importlib.import_module``, ``sys.modules[...]``,
+  ``sys.modules.get/pop/setdefault(...)``, through any alias or
+  ``from ... import`` -- when the name is a forbidden module or a module whose
+  names are forbidden (``os``, ``asyncio``): the fence cannot follow a module
+  object once it is out of a name, so getting it is the violation.
 
 ``pridem/runner.py`` is the one allowed file: its hits are counted, not
 reported, and the green test requires at least one, so a fence that sees
@@ -23,22 +27,24 @@ can be silenced with ``noqa`` (measured on ruff 0.17.1).
 Loading code by a computed name or from a string, and ``ctypes``, are forbidden
 in ``pridem/`` and ``tests/`` by ``tests/fences/test_import_direction_fence.py``.
 
-KNOWN CEILING: ``getattr`` on a module with a computed attribute name.
-1. Mechanics: the fence reads names and constant strings in the AST.
-   ``getattr(os, "sys" + "tem")`` takes an attribute whose name is built at run
-   time from a module the fence knows, and starts a process without a trace in
-   the AST.
+KNOWN CEILING: a module whose names are forbidden, reached past a tracked name.
+1. Mechanics: the fence follows a module only through the names ``import`` binds
+   and reads constant strings. Three forms reach ``os.system`` without that
+   trace: ``getattr`` with a computed attribute name (``getattr(os, "sys" +
+   "tem")``); a module object that leaves its name -- assigned (``m = os``),
+   passed as an argument, stored in an attribute or a container, returned;
+   attribute access through ``__dict__``, ``vars()``, ``__getattribute__`` or
+   ``__builtins__``.
 2. Status: acknowledged by design.
-3. Task: none -- ``getattr`` with a computed name is an ordinary construct that
-   cannot be forbidden as a whole; no file under ``pridem/`` or ``tests/``
-   calls ``getattr``.
-4. Trigger: a file under ``pridem/`` or ``tests/`` calls ``getattr`` with an
-   imported module (or its alias) as the first argument and a non-constant name
-   as the second.
-5. Agreed fix: on the trigger, the fence reports that call itself as a violation
-   outside ``runner.py``.
-6. Rejected: forbidding ``getattr`` with a computed name everywhere -- it is an
-   ordinary construct (dispatcher answer to the DM-34 gate);
+3. Task: none -- these are ordinary constructs that cannot be forbidden as a
+   whole; the tree uses one of them harmlessly (``tests/test_probe_DM_7_state.py``
+   passes ``os`` to ``monkeypatch.setattr`` for ``os.replace``).
+4. Trigger: a file under ``pridem/`` or ``tests/`` uses one of these forms on
+   ``os`` or ``asyncio`` to reach a name in ``FORBIDDEN_NAMES``.
+5. Agreed fix: on the trigger, the fence reports that form itself as a
+   violation outside ``runner.py``.
+6. Rejected: forbidding the forms everywhere -- they are ordinary constructs
+   (dispatcher answers to the DM-34 and DM-40 gates);
    ``multiprocessing`` and ``concurrent.futures.ProcessPoolExecutor`` are not
    fenced -- they start Python workers, not external commands (dispatcher
    answer to the DM-5 gate); a runtime audit hook (``sys.addaudithook`` on
@@ -68,6 +74,11 @@ FORBIDDEN_NAMES = {
     ),
 }
 FORBIDDEN_PREFIXES = {"os": ("spawn", "exec")}
+MODULE_GETTERS = frozenset(
+    {"builtins.__import__", "importlib.__import__", "importlib.import_module"}
+)
+SYS_MODULES = "sys.modules"
+SYS_MODULES_METHODS = frozenset({"get", "pop", "setdefault"})
 
 
 @dataclass(frozen=True)
@@ -94,7 +105,12 @@ def _forbidden_name(module: str, name: str) -> bool:
     return name.startswith(FORBIDDEN_PREFIXES.get(module, ()))
 
 
-def _constant_str(node: ast.expr) -> str | None:
+def _fenced_module(name: str) -> bool:
+    """A module that may not be got by name: forbidden, or with forbidden names."""
+    return _forbidden_module(name) or name in FORBIDDEN_NAMES
+
+
+def _constant_str(node: ast.expr | None) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return None
@@ -107,10 +123,19 @@ class _Visitor(ast.NodeVisitor):
         self.path = path
         self.hits: list[Hit] = []
         self.modules: dict[str, str] = {}
-        self.import_module_names: set[str] = set()
+        self.bound: dict[str, str] = {}
 
     def _hit(self, node: ast.stmt | ast.expr, what: str) -> None:
         self.hits.append(Hit(self.path, node.lineno, what))
+
+    def _qualified(self, node: ast.expr) -> str | None:
+        """Dotted name of an expression; an unbound name is a builtin."""
+        if isinstance(node, ast.Name):
+            return self.bound.get(node.id, f"builtins.{node.id}")
+        if isinstance(node, ast.Attribute):
+            head = self._qualified(node.value)
+            return None if head is None else f"{head}.{node.attr}"
+        return None
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -119,8 +144,10 @@ class _Visitor(ast.NodeVisitor):
             top = alias.name.split(".")[0]
             if alias.asname is not None:
                 self.modules[alias.asname] = alias.name
+                self.bound[alias.asname] = alias.name
             else:
                 self.modules[top] = top
+                self.bound[top] = top
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
@@ -133,8 +160,7 @@ class _Visitor(ast.NodeVisitor):
                     self._hit(node, f"from {module} import *")
                 elif _forbidden_name(module, alias.name):
                     self._hit(node, f"from {module} import {alias.name}")
-                elif module == "importlib" and alias.name == "import_module":
-                    self.import_module_names.add(alias.asname or alias.name)
+                self.bound[alias.asname or alias.name] = f"{module}.{alias.name}"
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -145,20 +171,20 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        name = _constant_str(node.args[0]) if node.args else None
         func = node.func
-        if name is not None and _forbidden_module(name):
-            dynamic_import = (
-                isinstance(func, ast.Name)
-                and (func.id == "__import__" or func.id in self.import_module_names)
-            ) or (
-                isinstance(func, ast.Attribute)
-                and func.attr == "import_module"
-                and isinstance(func.value, ast.Name)
-                and self.modules.get(func.value.id) == "importlib"
-            )
-            if dynamic_import:
+        qualified = self._qualified(func) or ""
+        first = node.args[0] if node.args else None
+        if qualified in MODULE_GETTERS:
+            if first is None:
+                first = next((k.value for k in node.keywords if k.arg == "name"), None)
+            name = _constant_str(first)
+            if name is not None and _fenced_module(name):
                 self._hit(node, f"dynamic import of {name}")
+        owner, _, method = qualified.rpartition(".")
+        if owner == SYS_MODULES and method in SYS_MODULES_METHODS:
+            key = _constant_str(first)
+            if key is not None and _fenced_module(key):
+                self._hit(node, f"sys.modules.{method}({key!r})")
         if (
             isinstance(func, ast.Name)
             and func.id == "getattr"
@@ -180,11 +206,8 @@ class _Visitor(ast.NodeVisitor):
         key = _constant_str(node.slice)
         if (
             key is not None
-            and _forbidden_module(key)
-            and isinstance(value, ast.Attribute)
-            and value.attr == "modules"
-            and isinstance(value.value, ast.Name)
-            and self.modules.get(value.value.id) == "sys"
+            and _fenced_module(key)
+            and self._qualified(value) == SYS_MODULES
         ):
             self._hit(node, f"sys.modules[{key!r}]")
         self.generic_visit(node)
@@ -285,3 +308,42 @@ def test_fence_passes_clean_twin(tmp_path: Path, source: str) -> None:
 def test_fence_reports_every_hit_in_a_file(tmp_path: Path) -> None:
     report = _plant(tmp_path, "import os\nos.system('a')\nos.system('b')\n")
     assert [hit.line for hit in report.violations] == [2, 3]
+
+
+GETTER_FORMS = [
+    ("import builtins\nbuiltins.__import__({m!r})\n", 2),
+    ("from builtins import __import__ as imp\nimp({m!r})\n", 2),
+    ("__import__({m!r})\n", 1),
+    ("import importlib\nimportlib.__import__({m!r})\n", 2),
+    ("from importlib import __import__\n__import__({m!r})\n", 2),
+    ("import importlib\nimportlib.import_module({m!r})\n", 2),
+    ("import importlib as il\nil.import_module(name={m!r})\n", 2),
+    ("from importlib import import_module\nimport_module({m!r})\n", 2),
+    ("import sys\nsys.modules[{m!r}]\n", 2),
+    ("import sys as s\ns.modules[{m!r}]\n", 2),
+    ("from sys import modules\nmodules[{m!r}]\n", 2),
+    ("import sys\nsys.modules.get({m!r})\n", 2),
+    ("import sys\nsys.modules.get({m!r}).system('x')\n", 2),
+    ("from sys import modules as mods\nmods.get({m!r})\n", 2),
+    ("import sys\nsys.modules.pop({m!r})\n", 2),
+    ("import sys\nsys.modules.setdefault({m!r}, None)\n", 2),
+]
+
+
+@pytest.mark.parametrize("module", ["subprocess", "os", "asyncio"])
+@pytest.mark.parametrize(("form", "line"), GETTER_FORMS)
+def test_probe_DM_40_builtins_import_is_red(
+    tmp_path: Path, form: str, line: int, module: str
+) -> None:
+    """Getting a fenced module by a constant name is red; ``json`` is not."""
+    planted = _plant(tmp_path / "planted", form.format(m=module))
+    assert [hit.line for hit in planted.violations] == [line], planted.violations
+    assert len(planted.allowed) == 1
+
+    pair = _plant(tmp_path / "pair", form.format(m="json"))
+    assert pair.violations == ()
+    assert pair.scanned == 2
+
+    tree = scan(REPO)
+    assert len(tree.allowed) >= 1
+    assert tree.violations == ()

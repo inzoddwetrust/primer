@@ -1,10 +1,18 @@
 """Loading contract files: strict YAML and errors that name file, path and rule.
 
+A contract file may come from someone else's repository, so its form is checked
+before it is parsed (contract 3 rule 16, contract 1 rule 13): a file larger
+than ``MAX_BYTES`` is refused unread; then one pass over the parser's events --
+which keep no tree and no recursion -- refuses every anchor and alias
+(``Y.alias``) and nesting of collections deeper than ``MAX_DEPTH``
+(``Y.depth``). Without anchors and aliases the composed graph is a tree, so no
+node is shared and no cycle exists; ``yaml.compose`` runs only on a file that
+passed.
+
 ``yaml.safe_load`` silently keeps the last of two equal keys and lets a merge
 key (``<<``) override fields; both hide a mistake in a contract file. The
-loader walks the composed YAML graph first and reports every duplicate key
-(with both lines) and every merge key, all at once; only then is the document
-constructed. Anchors and aliases without merge are allowed.
+loader walks the composed tree and reports every duplicate key (with both
+lines) and every merge key, all at once; only then is the document constructed.
 
 A contract file may hold secrets (the passport does), so no problem quotes the
 source: a YAML error is reported by line, column and the parser's own words,
@@ -20,6 +28,8 @@ import yaml
 from pydantic import ValidationError
 
 MERGE_TAG = "tag:yaml.org,2002:merge"
+MAX_BYTES = 1024 * 1024
+MAX_DEPTH = 32
 
 
 @dataclass(frozen=True)
@@ -55,15 +65,62 @@ def render_path(loc: Iterable[int | str]) -> str:
     return out
 
 
-def _walk(
-    node: yaml.Node, path: tuple[int | str, ...], seen: set[int], out: list[Problem]
-) -> None:
-    if id(node) in seen:
-        return
-    seen = seen | {id(node)}
+def _where(event: yaml.Event) -> str:
+    mark = event.start_mark
+    if mark is None:  # the stubs allow it; _yaml_error_text treats it the same way
+        return "an unknown position"
+    return f"line {mark.line + 1}, column {mark.column + 1}"
+
+
+def _form_problems(text: str) -> list[Problem]:
+    """Refuse anchors, aliases and deep nesting from the event stream.
+
+    The parser keeps a state stack, not a recursion, and builds no nodes, so
+    this pass is linear in the file. Every anchor and alias is reported; deep
+    nesting once, where it first exceeds the limit. Names of anchors are
+    source text and are not quoted.
+    """
+    out: list[Problem] = []
+    depth = 0
+    too_deep = False
+    for event in yaml.parse(text, Loader=yaml.SafeLoader):
+        if isinstance(event, yaml.AliasEvent):
+            out.append(
+                Problem(
+                    "",
+                    "Y.alias",
+                    f"alias at {_where(event)}: anchors and aliases are not allowed",
+                )
+            )
+        elif isinstance(event, yaml.NodeEvent) and event.anchor is not None:
+            out.append(
+                Problem(
+                    "",
+                    "Y.alias",
+                    f"anchor at {_where(event)}: anchors and aliases are not allowed",
+                )
+            )
+        if isinstance(event, yaml.CollectionStartEvent):
+            depth += 1
+            if depth > MAX_DEPTH and not too_deep:
+                too_deep = True
+                out.append(
+                    Problem(
+                        "",
+                        "Y.depth",
+                        f"collections nested deeper than {MAX_DEPTH} "
+                        f"at {_where(event)}",
+                    )
+                )
+        elif isinstance(event, yaml.CollectionEndEvent):
+            depth -= 1
+    return out
+
+
+def _walk(node: yaml.Node, path: tuple[int | str, ...], out: list[Problem]) -> None:
     if isinstance(node, yaml.SequenceNode):
         for index, item in enumerate(node.value):
-            _walk(item, (*path, index), seen, out)
+            _walk(item, (*path, index), out)
     elif isinstance(node, yaml.MappingNode):
         first: dict[object, int] = {}
         constructor = yaml.SafeLoader("")
@@ -92,7 +149,7 @@ def _walk(
                 )
             else:
                 first[hashable] = line
-            _walk(value_node, (*path, label), seen, out)
+            _walk(value_node, (*path, label), out)
 
 
 def _yaml_error_text(error: yaml.YAMLError) -> str:
@@ -117,11 +174,18 @@ def _read(file: Path) -> tuple[dict[str, object], list[Problem]]:
     so may a value under an explicit tag; such errors carry the value in their
     text, so only their type is reported.
     """
+    with file.open("rb") as handle:
+        raw = handle.read(MAX_BYTES + 1)
+    if len(raw) > MAX_BYTES:
+        return {}, [Problem("", "Y.size", f"file is larger than {MAX_BYTES} bytes")]
     try:
-        text = file.read_text(encoding="utf-8")
+        text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         return {}, [Problem("", "Y.syntax", f"not UTF-8: {error}")]
     try:
+        form = _form_problems(text)
+        if form:
+            return {}, form
         node = yaml.compose(text, Loader=yaml.SafeLoader)
     except yaml.YAMLError as error:
         return {}, [Problem("", "Y.syntax", _yaml_error_text(error))]
@@ -131,7 +195,7 @@ def _read(file: Path) -> tuple[dict[str, object], list[Problem]]:
         return {}, [Problem("", "Y.root", "top level must be a mapping")]
     problems: list[Problem] = []
     try:
-        _walk(node, (), set(), problems)
+        _walk(node, (), problems)
         if problems:
             return {}, problems
         data = yaml.safe_load(text)
@@ -151,7 +215,7 @@ def _read(file: Path) -> tuple[dict[str, object], list[Problem]]:
 
 
 def load_yaml_mapping(file: Path) -> dict[str, object]:
-    """Read ``file`` as one YAML mapping, rejecting duplicates and merge keys."""
+    """Read ``file`` as one YAML mapping of the contract form, or raise."""
     if not file.is_file():
         raise ContractError(file, [Problem("", "Y.missing", "file not found")])
     data, problems = _read(file)

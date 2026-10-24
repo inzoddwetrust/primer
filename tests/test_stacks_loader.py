@@ -67,22 +67,28 @@ def test_duplicate_keys_at_every_level_all_at_once(tmp_path: Path) -> None:
 
 
 def test_merge_key_is_rejected(tmp_path: Path) -> None:
-    text = "base: &b {k: 1}\nother:\n  <<: *b\n  k: 2\n"
+    """A merge key over an inline mapping; an anchor is refused before the walk.
+
+    Contract 3 rule 16 (DM-40) refuses anchors and aliases before parsing, so
+    the merge key is reached with an inline mapping, not ``<<: *anchor``.
+    """
+    text = "other:\n  <<: {k: 1}\n  k: 2\n"
     [problem] = _problems(tmp_path, text)
     assert (problem.path, problem.code) == ("other", "Y.merge")
 
 
-def test_anchor_and_alias_without_merge_are_allowed(tmp_path: Path) -> None:
-    file = tmp_path / "primer.yaml"
-    file.write_text("base: &b {k: 1}\nother: *b\n")
-    assert load_yaml_mapping(file) == {"base": {"k": 1}, "other": {"k": 1}}
+def test_anchor_and_alias_are_refused(tmp_path: Path) -> None:
+    """Replaces "anchor and alias without merge are allowed" (contract 3 rule 16)."""
+    found = _problems(tmp_path, "base: &b {k: 1}\nother: *b\n")
+    assert [(p.path, p.code) for p in found] == [("", "Y.alias"), ("", "Y.alias")]
+    assert found[0].message.startswith("anchor at line 1, column 7:")
+    assert found[1].message.startswith("alias at line 2, column 8:")
 
 
-def test_recursive_alias_does_not_hang(tmp_path: Path) -> None:
-    file = tmp_path / "primer.yaml"
-    file.write_text("a: &x [1, *x]\n")
-    data = load_yaml_mapping(file)
-    assert isinstance(data["a"], list)
+def test_recursive_alias_is_refused(tmp_path: Path) -> None:
+    """Replaces "recursive alias does not hang": a cycle needs an alias (DM-40)."""
+    found = _problems(tmp_path, "a: &x [1, *x]\n")
+    assert [p.code for p in found] == ["Y.alias", "Y.alias"]
 
 
 def test_error_text_names_file_path_and_code(tmp_path: Path) -> None:
