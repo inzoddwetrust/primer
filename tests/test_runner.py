@@ -81,11 +81,15 @@ def test_non_positive_timeout_is_refused(timeout: float) -> None:
 
 
 def test_command_not_in_path_is_not_started() -> None:
+    """The text names the command as every runner error does: ``shlex.join``."""
+    argv = ["pridem-no-such-command", "an arg"]
     with pytest.raises(CommandNotStarted) as error:
-        SubprocessRunner().run(
-            ["pridem-no-such-command"], timeout=TIMEOUT, on_line=Lines()
-        )
-    assert error.value.argv == ("pridem-no-such-command",)
+        SubprocessRunner().run(argv, timeout=TIMEOUT, on_line=Lines())
+    assert error.value.argv == ("pridem-no-such-command", "an arg")
+    assert error.value.reason
+    assert str(error.value) == (
+        f"command not started: pridem-no-such-command 'an arg': {error.value.reason}"
+    )
 
 
 def test_not_executable_file_is_not_started(tmp_path: Path) -> None:
@@ -360,13 +364,16 @@ def test_fake_cwd_and_env_are_part_of_the_match(
 def test_fake_scripted_timeout_and_not_started() -> None:
     with FakeRunner(
         FakeCall(("a",), lines=((Stream.STDOUT, "half"),), outcome="timeout"),
-        FakeCall(("b",), outcome="not_started"),
+        FakeCall(("b", "x y"), outcome="not_started"),
     ) as fake:
         with pytest.raises(CommandTimedOut) as timed_out:
             fake.run(["a"], timeout=TIMEOUT, on_line=Lines())
-        with pytest.raises(CommandNotStarted):
-            fake.run(["b"], timeout=TIMEOUT, on_line=Lines())
+        with pytest.raises(CommandNotStarted) as not_started:
+            fake.run(["b", "x y"], timeout=TIMEOUT, on_line=Lines())
     assert timed_out.value.tail == ((Stream.STDOUT, "half"),)
+    assert str(not_started.value) == (
+        "command not started: b 'x y': scripted: not started"
+    )
 
 
 def test_fake_empty_script_without_calls_closes_cleanly() -> None:

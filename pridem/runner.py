@@ -11,8 +11,9 @@ tests: calls must arrive in the scripted order, an unplanned call fails at the
 moment it is made, and an expectation left unconsumed fails when the script is
 closed.
 
-The text of ``CommandFailed`` and ``CommandTimedOut`` names the command and its
-exit code or timeout, never its output: the last lines are the ``tail``
+Every command error names the command one way, ``shlex.join(argv)``. The text
+of ``CommandFailed`` and ``CommandTimedOut`` names the command and its exit
+code or timeout, never its output: the last lines are the ``tail``
 attribute, for the journal. A step that wraps the text of the error in its own
 cannot carry the output into a reason, and a reason lives in the verdict.
 """
@@ -75,7 +76,7 @@ class CommandNotStarted(RunnerError):
     def __init__(self, argv: tuple[str, ...], reason: str) -> None:
         self.argv = argv
         self.reason = reason
-        super().__init__(f"command not started: {list(argv)}: {reason}")
+        super().__init__(f"command not started: {shlex.join(argv)}: {reason}")
 
 
 class CommandFailed(RunnerError):
