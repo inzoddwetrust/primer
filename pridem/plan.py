@@ -25,17 +25,23 @@ event is written: the rest of the main ladder or ``restore`` is skipped,
 outcome is emitted and kept in ``Plan.outcome``, and the interrupt is raised
 again.
 
-A sink never crashes a plan either: its first failure is ``{journal, journal
-write failed}`` in the outcome and the sink is not called again; an event cut
-by an interrupt is such a failure too (a half-written line ends the journal).
+A sink never crashes a plan either: its first failure is ``{what: journal,
+code: write-failed}`` in the outcome and the sink is not called again; an event
+cut by an interrupt is such a failure too (a half-written line ends the
+journal).
 
-The reason of a step a command let down is the text of the runner's error --
-the command and its exit code, timeout or why it did not start, never its
-output (contract 2). The reason of any other unexpected exception is its type
-name only; its text goes to the journal as ``stderr`` lines, where known
-secrets are cleaned. A step with its own reason raises ``StepFailed``.
+Every reason is a code with parameters (contract 2 v1.6), never a phrase. A
+step a command let down has the code of the runner's error with the command
+and its exit code, timeout or ``errno`` -- by name, from the ``OSError`` behind
+``CommandNotStarted``, else ``null`` -- never its output. Any other unexpected
+exception is ``exception {type}``; its text, and the system's text for a
+command that did not start, go to the journal as ``stderr`` lines, where known
+secrets are cleaned. A step's own codes (``StepFailed``, ``CheckResult.would``,
+``Verified.incomplete``) are prefixed with its name, ``<step>:<code>``;
+``catalog`` is the machine's catalog plus the texts the plan's steps declare.
 """
 
+import errno
 import time
 import traceback
 from collections.abc import Callable, Sequence
@@ -44,6 +50,9 @@ from datetime import UTC, datetime
 
 from pridem.events import (
     AFTER_INTERRUPT,
+    INTERRUPTED,
+    NO_FACT,
+    Code,
     DoctorItem,
     Event,
     EventSink,
@@ -61,8 +70,15 @@ from pridem.events import (
     after_failure,
     role_skip,
 )
+from pridem.report.catalog import ENGLISH, Catalog, with_steps
 from pridem.report.codes import ExitCode, worst
-from pridem.runner import Runner, RunnerError, Stream
+from pridem.runner import (
+    CommandFailed,
+    CommandNotStarted,
+    CommandTimedOut,
+    Runner,
+    Stream,
+)
 from pridem.steps.base import (
     MODES,
     CheckResult,
@@ -74,17 +90,41 @@ from pridem.steps.base import (
 )
 
 
-def _failure_reason(error: Exception) -> str:
+def _errno_name(error: CommandNotStarted) -> str | None:
+    """The ``errno`` name of the ``OSError`` behind ``error``, if there is one."""
+    cause = error.__cause__
+    if isinstance(cause, OSError) and cause.errno is not None:
+        return errno.errorcode.get(cause.errno)
+    return None
+
+
+def _failure_code(error: Exception) -> Code:
     """The reason of a step that raised ``error``.
 
-    A runner's command error is its text: one form for the whole family, the
-    command and what happened to it, never its output. Any other error is its
-    type name: its text may quote anything, a secret included, and the verdict
-    lives forever; the text goes to the journal instead.
+    A runner's command error is the command and what happened to it, never its
+    output. Any other error is its type name: its text may quote anything, a
+    secret included, and the verdict lives forever; the text goes to the
+    journal instead.
     """
-    if isinstance(error, RunnerError):
-        return str(error)
-    return type(error).__name__
+    if isinstance(error, CommandFailed):
+        return Code(
+            "command-failed", {"argv": list(error.argv), "exit_code": error.code}
+        )
+    if isinstance(error, CommandTimedOut):
+        return Code(
+            "command-timed-out", {"argv": list(error.argv), "timeout_s": error.timeout}
+        )
+    if isinstance(error, CommandNotStarted):
+        return Code(
+            "command-not-started",
+            {"argv": list(error.argv), "errno": _errno_name(error)},
+        )
+    return Code("exception", {"type": type(error).__name__})
+
+
+def _qualified(step: Step, code: Code) -> Code:
+    """A step's own code as the verdict keeps it: ``<step>:<code>``."""
+    return Code(f"{step.name}:{code.code}", code.params)
 
 
 @dataclass(frozen=True)
@@ -142,7 +182,7 @@ class _Run:
     """The step just executed was interrupted while it ran."""
 
 
-SINK_FAILED = Incomplete("journal", "journal write failed")
+SINK_FAILED = Incomplete("journal", Code("write-failed"))
 
 
 def _chosen(stacks: Sequence[StackSteps], mode: Mode) -> list[tuple[str, Step]]:
@@ -188,6 +228,11 @@ class Plan:
             _validate_steps(extra)
         self._restore = _chosen(restore, selected)
         self._finally = _chosen(finally_, selected)
+        steps = (*self._steps, *self._restore, *self._finally)
+        self.catalog: Catalog = with_steps(
+            ENGLISH, ((step.name, type(step).codes) for _, step in steps)
+        )
+        """The machine's texts and those of the plan's steps."""
 
     # --- events ---------------------------------------------------------------
 
@@ -237,19 +282,29 @@ class Plan:
         self._emit(StepFinished(phase, record))
         return record
 
-    def _skipped(self, phase: Phase, stack: str, step: Step, reason: str) -> StepRecord:
+    def _skipped(
+        self, phase: Phase, stack: str, step: Step, reason: Code
+    ) -> StepRecord:
         record = StepRecord(stack, step.name, step.order, "skipped", reason)
         return self._record(phase, record)
 
     def _unexpected(
         self, phase: Phase, stack: str, step: Step, error: Exception
-    ) -> str:
-        """The reason of ``error``; the text of a non-runner error goes to the log."""
-        if not isinstance(error, RunnerError):
-            for text in traceback.format_exception_only(error):
-                for line in text.rstrip("\n").split("\n"):
-                    self._emit(LogLine(phase, stack, step.name, Stream.STDERR, line))
-        return _failure_reason(error)
+    ) -> Code:
+        """The code of ``error``; text a verdict cannot keep goes to the log.
+
+        That is the text of an error from outside the runner, and the system's
+        reason a command did not start.
+        """
+        texts: list[str] = []
+        if isinstance(error, CommandNotStarted):
+            texts = [error.reason]
+        elif not isinstance(error, CommandFailed | CommandTimedOut):
+            texts = traceback.format_exception_only(error)
+        for text in texts:
+            for line in text.rstrip("\n").split("\n"):
+                self._emit(LogLine(phase, stack, step.name, Stream.STDERR, line))
+        return _failure_code(error)
 
     # --- the run --------------------------------------------------------------
 
@@ -308,7 +363,7 @@ class Plan:
         """
         state = self._run
         records: list[StepRecord] = []
-        stopped: str | None = None
+        stopped: Code | None = None
         for stack, step in steps:
             if stopped is not None:
                 records.append(self._skipped(phase, stack, step, stopped))
@@ -337,11 +392,11 @@ class Plan:
                         recorded = True
                     # finally: the step has not run yet; run it now
             if state.cut:
-                stopped = after_failure(stack, step.name)
+                stopped = after_failure(phase, stack, step.name)
             elif not stop_on_failure:
                 continue
             elif record.status == "failed":
-                stopped = after_failure(stack, step.name)
+                stopped = after_failure(phase, stack, step.name)
             elif state.interrupt is not before:  # between steps or after its record
                 stopped = AFTER_INTERRUPT
         return records
@@ -351,7 +406,7 @@ class Plan:
         state.cut = False
         before = state.interrupt
         fact: Fact = {}
-        reason: str | None = None
+        reason: Code | None = None
         started = self._now()
         begin = self._clock()
         try:
@@ -367,15 +422,17 @@ class Plan:
             verified = step.verify(ctx, check)
             fact = dict(verified.fact)
             if not fact:
-                reason = "verify returned no fact"
+                reason = NO_FACT
             elif verified.incomplete is not None:
-                state.incomplete.append(verified.incomplete)
+                state.incomplete.append(
+                    Incomplete(step.name, _qualified(step, verified.incomplete))
+                )
         except StepFailed as error:
-            reason, fact = error.reason, dict(error.fact)
+            reason, fact = _qualified(step, error.reason), dict(error.fact)
         except KeyboardInterrupt as interrupt:
             state.interrupt = interrupt
             state.cut = True
-            reason = "interrupted"
+            reason = INTERRUPTED
         except Exception as error:  # a step never crashes the plan; it fails
             reason = self._unexpected(phase, stack, step, error)
         status: Status = "ok" if reason is None else "failed"
@@ -439,14 +496,14 @@ class Plan:
         """One ``doctor`` check: a failed check is a record, a needed one a diff."""
         state = self._run
         check: CheckResult | None = None
-        reason: str | None = None
+        reason: Code | None = None
         started = self._now()
         begin = self._clock()
         try:
             check = step.check(self._context("main", stack, step))
         except KeyboardInterrupt as interrupt:
             state.interrupt = interrupt
-            reason = "interrupted"
+            reason = INTERRUPTED
         except Exception as error:  # a check never crashes doctor; it fails
             reason = self._unexpected("main", stack, step, error)
         if reason is not None:
@@ -460,5 +517,5 @@ class Plan:
                 self._clock() - begin,
             )
             records.append(self._record("main", record))
-        elif check is not None and check.needed:
-            diff.append(DoctorItem(stack, step.name, check.what))
+        elif check is not None and check.needed and check.would is not None:
+            diff.append(DoctorItem(stack, step.name, _qualified(step, check.would)))

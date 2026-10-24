@@ -19,6 +19,7 @@ from passport_support import (
 from plan_support import Journal, ScriptedStep, plan
 
 from pridem import runner
+from pridem.events import Code
 from pridem.plan import StackSteps
 from pridem.runner import (
     CommandFailed,
@@ -58,6 +59,10 @@ def _shown(error: RunnerError) -> str:
 def test_probe_DM_35_runner_error_text_carries_no_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
+    parameters, not phrases; the data changed form only, each assertion keeps
+    its strength.
+    """
     monkeypatch.setattr(runner, "KILL_GRACE_SECONDS", 1.0)
     failing = [PY, "-c", f"import sys; print('{OUTPUT}'.upper()); sys.exit(3)"]
     hanging = [
@@ -109,7 +114,8 @@ def test_probe_DM_35_runner_error_text_carries_no_output(
         assert str(error) == text
         assert any(line == shown_output for _, line in tail), text
 
-    # the plan's reason is the error's text, one format for both
+    # the plan's reason is the error's code with the command, one form for both
+    # (DM-42, contract 2 v1.6: a code with parameters instead of the text)
     up = ScriptedStep("up", 1, Journal(), act_argv=["make", "up"])
     wait = ScriptedStep("wait", 2, Journal(), act_argv=["make", "wait"])
     with FakeRunner(
@@ -123,9 +129,10 @@ def test_probe_DM_35_runner_error_text_carries_no_output(
     ) as fake:
         reasons.append(plan([StackSteps("a", [wait], True)], runner=fake)[0].run())
     assert [outcome.steps[0].reason for outcome in reasons] == [
-        str(fake_failed.value),
-        "command timed out after 10.0 s: make wait",
+        Code("command-failed", {"argv": ["make", "up"], "exit_code": 2}),
+        Code("command-timed-out", {"argv": ["make", "wait"], "timeout_s": 10.0}),
     ]
+    assert all(shown_output not in str(outcome.steps[0].reason) for outcome in reasons)
 
 
 def test_probe_DM_35_short_secret_is_rejected(tmp_path: Path) -> None:

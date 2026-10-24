@@ -8,14 +8,22 @@ no fact is failed, not ok -- there is no ``act`` without a ``verify`` that
 reads the fact back. A step reports a contradiction it read back by raising
 ``StepFailed`` with the fact it saw, and something left undone by returning
 ``Verified(fact, incomplete=...)``.
+
+What a step says is a code with parameters, never a phrase (contract 2 v1.6):
+``StepFailed``, ``CheckResult`` and ``Verified.incomplete`` take a code the
+step declares in ``codes`` (code -> catalog template); the plan prefixes the
+step name, ``<step>:<code>``, and the verdict is not built for a code without
+a text.
 """
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import ClassVar, Literal
 
-from pridem.events import Fact, Incomplete, Json
+from pridem.events import Code, Fact, Json
+from pridem.report.codes import LOCAL_CODE
 from pridem.runner import OnLine, Runner
 
 Mode = Literal["install", "deploy", "reinstall"]
@@ -23,17 +31,25 @@ Role = Literal["test", "prod", "preview"]
 MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
 
+def local_code(code: str, params: Mapping[str, Json] | None = None) -> Code:
+    """A code as a step says it, before the plan prefixes the step name."""
+    if not re.fullmatch(LOCAL_CODE, code):
+        raise ValueError(f"a step code is {LOCAL_CODE}: {code!r}")
+    return Code(code, dict(params or {}))
+
+
 @dataclass(frozen=True)
 class CheckResult:
-    """What ``check`` found: is ``act`` needed, what it would do, data for later."""
+    """What ``check`` found: is ``act`` needed, the code of what it would do,
+    data for later."""
 
     needed: bool
-    what: str = ""
+    would: Code | None = None
     data: Mapping[str, Json] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.needed and not self.what:
-            raise ValueError("a needed act must say what it would do")
+        if self.needed and self.would is None:
+            raise ValueError("a needed act must say, by a code, what it would do")
 
 
 @dataclass(frozen=True)
@@ -41,17 +57,20 @@ class Verified:
     """The fact ``verify`` read back, and what was left undone, if anything."""
 
     fact: Fact
-    incomplete: Incomplete | None = None
+    incomplete: Code | None = None
 
 
 class StepFailed(Exception):
     """``verify`` read back a fact that contradicts what the step promised."""
 
-    def __init__(self, reason: str, fact: Fact | None = None) -> None:
-        if not reason:
-            raise ValueError("StepFailed needs a reason: it is the step's reason")
-        super().__init__(reason)
-        self.reason = reason
+    def __init__(
+        self,
+        code: str,
+        params: Mapping[str, Json] | None = None,
+        fact: Fact | None = None,
+    ) -> None:
+        self.reason = local_code(code, params)
+        super().__init__(code)
         self.fact: Fact = dict(fact or {})
 
 
@@ -78,6 +97,8 @@ class Step(ABC):
     name: str
     order: int
     modes: frozenset[Mode]
+    codes: ClassVar[Mapping[str, str]] = {}
+    """The step's own codes -> their catalog templates (English)."""
     point_of_no_return: bool = False
     roles: frozenset[Role] | None = None
 

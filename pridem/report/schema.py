@@ -9,6 +9,14 @@ optional field is left out of the dump when it is ``None``. Rules checked here:
   ``True``/``False`` rejected in every mode, JSON included);
 - a ``skipped`` or ``failed`` step has a ``reason``; an ``ok`` step has a
   non-empty ``verify`` fact; ``verify``, when present, is not empty;
+- ``reason``, an ``incomplete`` entry and a ``doctor_diff`` entry are a code and
+  its parameters in one flat object, never a phrase (v1.6): a machine code is
+  one of a closed union with exactly its parameters -- ``ended_at`` and
+  ``errno`` are the only parameters that may be ``null`` -- and anything else
+  must have the form of a step's code, ``<step>:<code>``, with scalar or
+  list-of-string parameters, so the verdict of a removed step still loads;
+  a step's incomplete entry has ``what`` = its step and a doctor entry
+  ``name`` = its step;
 - the code agrees with the content: a failed step means 1; 0 means no failed
   step, no ``incomplete`` and no ``doctor_diff`` entry; 2 means no failed step
   and ``incomplete`` or ``doctor_diff`` not empty; 1 without a failed step is
@@ -19,7 +27,9 @@ optional field is left out of the dump when it is ``None``. Rules checked here:
 
 Rule 2 (no secrets) is kept by ``build_verdict``: every string of the raw
 verdict, keys included, is cleaned of known secrets before validation, so not
-even a validation error can quote one. Rule 3 (a role skip is ``skipped``, not
+even a validation error can quote one. Rule 6 (every code has a text) is kept by
+``build_verdict`` too: a code without a text in the catalog it is given is
+refused before the verdict exists. Rule 3 (a role skip is ``skipped``, not
 ``incomplete``) is how the plan writes records; a model cannot tell it.
 
 ``python -m pridem.report.schema --export`` writes the JSON Schema of the
@@ -32,15 +42,18 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, ClassVar, Literal, Self
 
 from pydantic import (
     AfterValidator,
     AwareDatetime,
     BeforeValidator,
     ConfigDict,
+    Discriminator,
     Field,
+    Tag,
     TypeAdapter,
+    WithJsonSchema,
     model_validator,
 )
 from pydantic_core import PydanticCustomError
@@ -53,7 +66,15 @@ from pridem.contract import (
     schema_text,
 )
 from pridem.events import Fact, Json, Phase, PlanOutcome, Secrets, StepRecord
-from pridem.report.codes import ExitCode
+from pridem.report.catalog import ENGLISH, Catalog, missing
+from pridem.report.codes import (
+    INCOMPLETE_CODES,
+    REASON_CODES,
+    RESERVED_PARAMS,
+    STEP_CODE,
+    ExitCode,
+    catalog_key,
+)
 
 Result = Literal["green", "red", "incomplete"]
 RESULT: Mapping[ExitCode, Result] = {
@@ -61,7 +82,6 @@ RESULT: Mapping[ExitCode, Result] = {
     ExitCode.FAILED: "red",
     ExitCode.INCOMPLETE: "incomplete",
 }
-NEEDS_RESTORE = "past the point of no return: restore from backup is needed"
 RUN_ID = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z-[0-9a-f]{4}")
 # pydantic looks for a pattern anywhere in the string: the anchors are what keep
 # a run id from naming a path outside its directory (``../<run id>``).
@@ -144,13 +164,158 @@ class Actor(Strict):
         return self
 
 
+PhaseName = Literal["main", "restore", "finally"]
+Argv = Annotated[list[Text], Field(min_length=1)]
+ErrnoName = Annotated[str, Field(pattern=r"^E[A-Z0-9]+$")]
+StepParam = int | float | bool | str | list[str]
+
+
+class _Nullable(Strict):
+    """A machine code whose ``NULLABLE`` parameters are written as ``null``."""
+
+    NULLABLE: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_explicit_null(cls, data: object) -> object:
+        if isinstance(data, dict):
+            nulls = sorted(
+                str(key)
+                for key, value in data.items()
+                if value is None and key not in cls.NULLABLE
+            )
+            if nulls:
+                raise PydanticCustomError(
+                    "null_forbidden",
+                    "explicit null is not allowed (omit the key instead): {keys}",
+                    {"keys": ", ".join(nulls)},
+                )
+        return data
+
+
+def _or_null(model: type[Strict] | TypeAdapter[str]) -> WithJsonSchema:
+    """The JSON Schema of ``model`` or ``null``; the generator drops plain nulls."""
+    if isinstance(model, TypeAdapter):
+        inner = model.json_schema(schema_generator=ContractSchema)
+    else:
+        inner = model.model_json_schema(schema_generator=ContractSchema)
+    return WithJsonSchema({"anyOf": [inner, {"type": "null"}]})
+
+
+class At(Strict):
+    """A step of a plan: where a journal ends."""
+
+    phase: PhaseName
+    stack: Text
+    name: Text
+
+
+class RoleSkip(Strict):
+    code: Literal["role"]
+    role: Text
+
+
+class AfterFailure(Strict):
+    code: Literal["after-failure"]
+    phase: PhaseName
+    stack: Text
+    name: Text
+
+
+class AfterInterrupt(Strict):
+    code: Literal["after-interrupt"]
+
+
+class Interrupted(Strict):
+    code: Literal["interrupted"]
+
+
+class NoFact(Strict):
+    code: Literal["no-fact"]
+
+
+class CommandFailedReason(Strict):
+    code: Literal["command-failed"]
+    argv: Argv
+    exit_code: int
+
+
+class CommandTimedOutReason(Strict):
+    code: Literal["command-timed-out"]
+    argv: Argv
+    timeout_s: Annotated[float, Field(ge=0)]
+
+
+class CommandNotStartedReason(_Nullable):
+    NULLABLE = frozenset({"errno"})
+    code: Literal["command-not-started"]
+    argv: Argv
+    errno: Annotated[ErrnoName | None, _or_null(TypeAdapter(ErrnoName))]
+
+
+class ExceptionReason(Strict):
+    code: Literal["exception"]
+    type: Text
+
+
+class StepCode(Strict):
+    """A step's own code, ``<step>:<code>``, with its parameters."""
+
+    model_config = ConfigDict(extra="allow")
+    __pydantic_extra__: dict[str, StepParam] = Field(init=False)
+
+    code: Annotated[str, Field(pattern=STEP_CODE)]
+
+    @model_validator(mode="after")
+    def _params(self) -> Self:
+        taken = sorted(RESERVED_PARAMS & set(self.__pydantic_extra__))
+        if taken:
+            raise ValueError(f"parameter names {taken} are taken")
+        return self
+
+    @property
+    def step(self) -> str:
+        return self.code.split(":", 1)[0]
+
+
+def _reason_tag(value: object) -> str:
+    code = value.get("code") if isinstance(value, dict) else getattr(value, "code", "")
+    return code if code in REASON_CODES else "step"
+
+
+Reason = Annotated[
+    Annotated[RoleSkip, Tag("role")]
+    | Annotated[AfterFailure, Tag("after-failure")]
+    | Annotated[AfterInterrupt, Tag("after-interrupt")]
+    | Annotated[Interrupted, Tag("interrupted")]
+    | Annotated[NoFact, Tag("no-fact")]
+    | Annotated[CommandFailedReason, Tag("command-failed")]
+    | Annotated[CommandTimedOutReason, Tag("command-timed-out")]
+    | Annotated[CommandNotStartedReason, Tag("command-not-started")]
+    | Annotated[ExceptionReason, Tag("exception")]
+    | Annotated[StepCode, Tag("step")],
+    Discriminator(_reason_tag),
+]
+REASON_MODELS: dict[str, type[Strict]] = {
+    "role": RoleSkip,
+    "after-failure": AfterFailure,
+    "after-interrupt": AfterInterrupt,
+    "interrupted": Interrupted,
+    "no-fact": NoFact,
+    "command-failed": CommandFailedReason,
+    "command-timed-out": CommandTimedOutReason,
+    "command-not-started": CommandNotStartedReason,
+    "exception": ExceptionReason,
+}
+
+
 class Step(Strict):
     stack: Text
     name: Text
-    phase: Literal["main", "restore", "finally"]
+    phase: PhaseName
     order: int
     status: Literal["ok", "failed", "skipped"]
-    reason: Text | None = Field(default=None, exclude_if=_is_none)
+    reason: Reason | None = Field(default=None, exclude_if=_is_none)
     started: Moment | None = Field(default=None, exclude_if=_is_none)
     duration_s: Annotated[float, Field(ge=0)] | None = Field(
         default=None, exclude_if=_is_none
@@ -177,15 +342,92 @@ class Failure(Strict):
     request_ids: list[str]
 
 
-class Incomplete(Strict):
+class NoVerdict(_Nullable):
+    NULLABLE = frozenset({"ended_at"})
+    what: Literal["run"]
+    code: Literal["no-verdict"]
+    ended_at: Annotated[At | None, _or_null(At)]
+
+
+class JournalDamaged(Strict):
+    what: Literal["run"]
+    code: Literal["journal-damaged"]
+    line: Annotated[int, Field(ge=1)]
+
+
+class JournalWriteFailed(Strict):
+    what: Literal["journal"]
+    code: Literal["write-failed"]
+
+
+class JournalQuarantined(Strict):
+    what: Literal["journal"]
+    code: Literal["quarantined"]
+    run_id: RunId
+
+
+class StateQuarantined(Strict):
+    what: Literal["state"]
+    code: Literal["quarantined"]
+
+
+class RestoreNeeded(Strict):
+    what: Literal["restore"]
+    code: Literal["needed"]
+
+
+class StepIncomplete(StepCode):
+    """Something a step left undone: ``what`` is the step, ``code`` its own."""
+
     what: Text
-    why: Text
+
+    @model_validator(mode="after")
+    def _what_is_the_step(self) -> Self:
+        if self.what != self.step:
+            raise ValueError(f"a step's incomplete entry names its step: {self.step}")
+        return self
 
 
-class DoctorDiff(Strict):
+def _incomplete_tag(value: object) -> str:
+    if isinstance(value, dict):
+        what, code = value.get("what"), value.get("code")
+    else:
+        what, code = getattr(value, "what", ""), getattr(value, "code", "")
+    key = f"{what}/{code}"
+    return key if key in INCOMPLETE_CODES else "step"
+
+
+IncompleteEntry = Annotated[
+    Annotated[NoVerdict, Tag("run/no-verdict")]
+    | Annotated[JournalDamaged, Tag("run/journal-damaged")]
+    | Annotated[JournalWriteFailed, Tag("journal/write-failed")]
+    | Annotated[JournalQuarantined, Tag("journal/quarantined")]
+    | Annotated[StateQuarantined, Tag("state/quarantined")]
+    | Annotated[RestoreNeeded, Tag("restore/needed")]
+    | Annotated[StepIncomplete, Tag("step")],
+    Discriminator(_incomplete_tag),
+]
+INCOMPLETE_MODELS: dict[str, type[Strict]] = {
+    "run/no-verdict": NoVerdict,
+    "run/journal-damaged": JournalDamaged,
+    "journal/write-failed": JournalWriteFailed,
+    "journal/quarantined": JournalQuarantined,
+    "state/quarantined": StateQuarantined,
+    "restore/needed": RestoreNeeded,
+}
+
+
+class DoctorDiff(StepCode):
+    """What ``doctor`` found a step would do: ``name`` is the step of ``code``."""
+
     stack: Text
     name: Text
-    what: Text
+
+    @model_validator(mode="after")
+    def _name_is_the_step(self) -> Self:
+        if self.name != self.step:
+            raise ValueError(f"a doctor entry's code is its step's: {self.name}")
+        return self
 
 
 class DnsCheck(Strict):
@@ -196,7 +438,7 @@ class DnsCheck(Strict):
 
 class Report(Strict):
     failures: list[Failure]
-    incomplete: list[Incomplete]
+    incomplete: list[IncompleteEntry]
     doctor_diff: list[DoctorDiff] | None = Field(default=None, exclude_if=_is_none)
     dns: list[DnsCheck] | None = Field(default=None, exclude_if=_is_none)
 
@@ -275,7 +517,7 @@ def _step(phase: Phase, record: StepRecord) -> dict[str, Json]:
         "status": record.status,
     }
     if record.reason is not None:
-        raw["reason"] = record.reason
+        raw["reason"] = record.reason.as_json()
     if record.started is not None:
         raw["started"] = _stamp(record.started)
     if record.duration_s is not None:
@@ -301,26 +543,39 @@ def build_verdict(
     failures: Sequence[Fact] = (),
     dns: Sequence[Fact] | None = None,
     junit: Mapping[str, int] | None = None,
+    catalog: Catalog = ENGLISH,
 ) -> Verdict:
     """The verdict of a plan, cleaned of ``secrets`` before it is validated.
 
     ``steps`` are the main ladder, then ``restore``, then ``finally``, in the
     order they ran, each with the phase of its tuple. A restore that is needed
     past the point of no return is an ``incomplete`` entry at code 1; an
-    interrupted run is the failed step whose reason says ``interrupted``.
+    interrupted run is the failed step whose reason is ``interrupted``. A code
+    without a text in ``catalog`` is refused (contract 2 rule 6).
     """
-    incomplete: list[Json] = [
-        {"what": item.what, "why": item.why} for item in outcome.incomplete
+    keys = [
+        catalog_key(record.reason.code)
+        for record in (*outcome.steps, *outcome.restore, *outcome.finally_)
+        if record.reason is not None
     ]
+    keys += [catalog_key(item.reason.code, item.what) for item in outcome.incomplete]
+    keys += [item.reason.code for item in outcome.doctor_diff]
+    for item in outcome.doctor_diff:
+        if {"stack", "name"} & set(item.reason.params):
+            raise ValueError(f"{item.reason.code}: stack and name are a doctor entry's")
+    absent = missing(catalog, keys)
+    if absent:
+        raise ValueError(f"no text in the catalog for codes {absent} (rule 6)")
+    incomplete: list[Json] = [item.as_json() for item in outcome.incomplete]
     if outcome.needs_restore:
-        incomplete.append({"what": "restore", "why": NEEDS_RESTORE})
+        incomplete.append({"what": "restore", "code": "needed"})
     report: dict[str, Json] = {
         "failures": [dict(item) for item in failures],
         "incomplete": incomplete,
     }
     if outcome.mode == "doctor":
         report["doctor_diff"] = [
-            {"stack": item.stack, "name": item.name, "what": item.what}
+            {"stack": item.stack, "name": item.name, **item.reason.as_json()}
             for item in outcome.doctor_diff
         ]
     if dns is not None:

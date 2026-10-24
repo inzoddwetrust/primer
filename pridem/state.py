@@ -27,8 +27,9 @@
 
 A run that ended without a verdict (journal, no verdict) is recovered under
 the lock before a new journal opens: a red verdict whose steps are the
-finished steps of the journal and whose ``incomplete`` names the last step the
-journal reached, or the line where it is damaged (contract 2 rule 4). Its
+finished steps of the journal and whose ``incomplete`` is ``run/no-verdict``
+with the last step the journal reached (``ended_at``, ``null`` before the
+first), or ``run/journal-damaged`` with the damaged line (contract 2 rule 4). Its
 ``composition_before`` is the header's; its ``composition_after`` is what
 ``state.json`` holds at recovery -- a run may die between writing
 ``state.json`` and writing its verdict, so only the header knows the
@@ -55,6 +56,7 @@ from pydantic import Field, TypeAdapter
 
 from pridem.contract import Strict
 from pridem.events import (
+    Code,
     Event,
     Incomplete,
     Json,
@@ -67,11 +69,13 @@ from pridem.events import (
     StepRecord,
     StepStarted,
 )
+from pridem.report.catalog import ENGLISH, Catalog
 from pridem.report.codes import ExitCode
 from pridem.report.schema import (
     Actor,
     Composition,
     Moment,
+    Reason,
     RunId,
     Text,
     Verdict,
@@ -87,7 +91,6 @@ _TEMP_SUFFIX = ".tmp"
 _QUARANTINE_SUFFIX = ".damaged"
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
-STATE_DAMAGED = "state damaged; quarantined"
 
 JournalEvent = StepStarted | StepFinished | LogLine
 
@@ -158,7 +161,7 @@ class _Finished(Strict):
     name: Text
     order: int
     status: Literal["ok", "failed", "skipped"]
-    reason: str | None = None
+    reason: Reason | None = None
     started: Moment | None = None
     duration_s: float | None = None
     verify: dict[str, Json] = {}
@@ -264,7 +267,7 @@ def _event_line(event: JournalEvent, secrets: Secrets) -> str:
             "status": record.status,
         }
         if record.reason is not None:
-            raw["reason"] = secrets.text(record.reason)
+            raw["reason"] = secrets.value(record.reason.as_json())
         if record.started is not None:
             raw["started"] = _stamp(record.started)
         if record.duration_s is not None:
@@ -286,12 +289,16 @@ def _event(line: _Started | _Finished | _Log) -> JournalEvent:
     if isinstance(line, _Started):
         return StepStarted(line.phase, line.stack, line.name, line.order, line.started)
     if isinstance(line, _Finished):
+        reason = None
+        if line.reason is not None:
+            params = line.reason.model_dump()
+            reason = Code(str(params.pop("code")), params)
         record = StepRecord(
             line.stack,
             line.name,
             line.order,
             line.status,
-            line.reason,
+            reason,
             line.started,
             line.duration_s,
             line.verify,
@@ -523,7 +530,9 @@ class Box:
             *self.journals.glob(f"*.jsonl{_QUARANTINE_SUFFIX}"),
         ]
 
-    def recover(self, secrets: Secrets, machine_version: str) -> Recovery:
+    def recover(
+        self, secrets: Secrets, machine_version: str, catalog: Catalog = ENGLISH
+    ) -> Recovery:
         """Write a red verdict for every journal that has none (contract 2 rule 4).
 
         A journal whose header is damaged is renamed ``<run_id>.jsonl.damaged``
@@ -547,7 +556,9 @@ class Box:
                 _fsync_dir(self.journals)
                 quarantined.append(path.stem)
                 continue
-            verdict = self._orphan_verdict(journal, state, secrets, machine_version)
+            verdict = self._orphan_verdict(
+                journal, state, secrets, machine_version, catalog
+            )
             self.write_verdict(verdict)
             verdicts.append(verdict)
         return Recovery(tuple(verdicts), tuple(quarantined), self.state_quarantined)
@@ -558,6 +569,7 @@ class Box:
         state: BoxState | None,
         secrets: Secrets,
         machine_version: str,
+        catalog: Catalog,
     ) -> Verdict:
         header = journal.header
         phases: dict[Phase, list[StepRecord]] = {
@@ -565,17 +577,22 @@ class Box:
             "restore": [],
             "finally": [],
         }
-        last = "the start"
+        last: Json = None  # no step started: the journal ends at the start
         for event in journal.events:
             if isinstance(event, StepStarted):
-                last = f"{event.phase} {event.stack}/{event.name}"
+                last = {"phase": event.phase, "stack": event.stack, "name": event.name}
             elif isinstance(event, StepFinished):
                 phases[event.phase].append(event.record)
-                last = f"{event.phase} {event.record.stack}/{event.record.name}"
+                record = event.record
+                last = {
+                    "phase": event.phase,
+                    "stack": record.stack,
+                    "name": record.name,
+                }
         if journal.damaged_at is not None:
-            ended = f"journal damaged at line {journal.damaged_at}"
+            run = Code("journal-damaged", {"line": journal.damaged_at})
         else:
-            ended = f"journal ends at step {last}"
+            run = Code("no-verdict", {"ended_at": last})
         outcome = PlanOutcome(
             mode=header.mode,
             code=ExitCode.FAILED,
@@ -583,9 +600,9 @@ class Box:
             restore=tuple(phases["restore"]),
             finally_=tuple(phases["finally"]),
             incomplete=(
-                Incomplete("run", f"no verdict found; {ended}"),
+                Incomplete("run", run),
                 *(
-                    (Incomplete("state", STATE_DAMAGED),)
+                    (Incomplete("state", Code("quarantined")),)
                     if self.state_quarantined
                     else ()
                 ),
@@ -605,4 +622,5 @@ class Box:
             composition_before=header.composition_before,
             composition_after=after,
             secrets=secrets,
+            catalog=catalog,
         )

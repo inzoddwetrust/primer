@@ -5,6 +5,7 @@ import io
 from plan_support import Journal, ScriptedStep, plan, red
 
 from pridem.events import (
+    Code,
     ConsoleSink,
     DoctorItem,
     Incomplete,
@@ -24,7 +25,9 @@ def test_console_prints_the_ladder() -> None:
     """One line per finished step and nothing after the last one.
 
     Until DM-7 the sink also printed ``deploy → red`` at the end; the closing
-    line is now the summary line of the verdict (contract 2 section 4).
+    line is now the summary line of the verdict (contract 2 section 4). Since
+    DM-42 a reason is a code and the console puts it in the plan's catalog's
+    words (v1.6).
     """
     journal = Journal()
     out = io.StringIO()
@@ -46,14 +49,14 @@ def test_console_prints_the_ladder() -> None:
             )
         ]
     )
-    console = ConsoleSink(out, NO_SECRETS)
+    console = ConsoleSink(out, NO_SECRETS, run.catalog)
     run.run()
     for event in sink.events:
         console.emit(event)
     assert out.getvalue().splitlines() == [
         "✓ aivis · build · 1.0 s · image_id=sha256:ab, ports=[80]",
-        "✗ aivis · up · 1.0 s · seen=x — up read back the wrong state",
-        "– aivis · health — after failed aivis/up",
+        "✗ aivis · up · 1.0 s · seen=x — read back x",
+        "– aivis · health — after the failure of main aivis · up",
     ]
 
 
@@ -65,13 +68,13 @@ def test_console_leaves_the_outcome_to_the_verdict() -> None:
     summary line and the breakage report of the verdict now. The pair: a
     finished step of the same run does print.
     """
-    record = StepRecord("aivis", "migrate", 5, "failed", "boom")
+    record = StepRecord("aivis", "migrate", 5, "failed", Code("interrupted"))
     outcome = PlanOutcome(
         mode="deploy",
         code=ExitCode.FAILED,
         steps=(record,),
-        incomplete=(Incomplete("ssl", "deferred"),),
-        doctor_diff=(DoctorItem("comms", "env", "render env"),),
+        incomplete=(Incomplete("ssl", Code("ssl:left")),),
+        doctor_diff=(DoctorItem("comms", "env", Code("env:do")),),
         needs_restore=True,
         interrupted=True,
     )
@@ -80,7 +83,7 @@ def test_console_leaves_the_outcome_to_the_verdict() -> None:
     sink.emit(PlanFinished(outcome))
     assert out.getvalue() == ""
     sink.emit(StepFinished("main", record))
-    assert out.getvalue() == "✗ aivis · migrate — boom\n"
+    assert out.getvalue() == "✗ aivis · migrate — interrupted\n"
 
 
 def test_console_ignores_command_output_lines() -> None:

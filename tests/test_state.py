@@ -16,7 +16,7 @@ from pydantic import SecretStr, ValidationError
 from report_support import MARKER, SECRETS, build
 from state_support import AFTER, BEFORE, STARTED, header, run_id, state, verdict
 
-from pridem.events import LogLine, Secrets, StepFinished, StepRecord, StepStarted
+from pridem.events import Code, LogLine, Secrets, StepFinished, StepRecord, StepStarted
 from pridem.plan import StackSteps
 from pridem.report.render import render_report
 from pridem.runner import FakeCall, FakeRunner, Stream
@@ -184,9 +184,8 @@ def test_journal_is_header_then_events_with_phase_and_no_secret(
         sink = box.open_journal(header(run, args={"token": MARKER}), SECRETS)
         sink.emit(StepStarted("main", "aivis", "up", 10, header(run).started))
         sink.emit(LogLine("main", "aivis", "up", Stream.STDERR, f"tok {MARKER}"))
-        record = StepRecord(
-            "aivis", "up", 10, "failed", f"command failed: x {MARKER}", None, None, {}
-        )
+        failed = Code("command-failed", {"argv": ["x", MARKER], "exit_code": 1})
+        record = StepRecord("aivis", "up", 10, "failed", failed, None, None, {})
         sink.emit(StepFinished("restore", record))
         sink.close()
     text = (tmp_path / "journal" / f"{run}.jsonl").read_text(encoding="utf-8")
@@ -284,8 +283,8 @@ def test_run_dead_before_its_first_step_is_red_from_the_header(
     with box.lock("next"):
         (recovered,) = box.recover(SECRETS, "0.3.1").verdicts
     assert recovered.result == "red" and recovered.steps == []
-    assert [(i.what, i.why) for i in recovered.report.incomplete] == [
-        ("run", "no verdict found; journal ends at step the start")
+    assert [i.model_dump() for i in recovered.report.incomplete] == [
+        {"what": "run", "code": "no-verdict", "ended_at": None}
     ]
     assert recovered.composition_before == BEFORE
     assert recovered.composition_after == {"pridem": "0.3.1"}
@@ -377,13 +376,15 @@ def test_damage_after_the_header_is_its_own_red_verdict(tmp_path: Path) -> None:
         done = box.recover(SECRETS, "0.3.1")
     assert done.quarantined == ()
     first, second = done.verdicts
-    assert [(i.what, i.why) for i in first.report.incomplete] == [
-        ("run", "no verdict found; journal damaged at line 3")
+    assert [i.model_dump() for i in first.report.incomplete] == [
+        {"what": "run", "code": "journal-damaged", "line": 3}
     ]
     assert [(s.phase, s.name) for s in first.steps] == [("main", "build")]
-    assert second.report.incomplete[0].why == (
-        "no verdict found; journal ends at step main aivis/build"
-    )
+    assert second.report.incomplete[0].model_dump() == {
+        "what": "run",
+        "code": "no-verdict",
+        "ended_at": {"phase": "main", "stack": "aivis", "name": "build"},
+    }
     with box.lock("after"):  # the box is not blocked
         assert box.recover(SECRETS, "0.3.1") == Recovery((), ())
     assert box.history_ids() == [run_id(1), run_id(2)]

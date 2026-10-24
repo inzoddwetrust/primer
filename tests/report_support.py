@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pydantic import SecretStr
 
 from pridem.events import Fact, Json, PlanOutcome, Secrets
+from pridem.report.catalog import ENGLISH, Catalog, with_steps
 from pridem.report.schema import Verdict, build_verdict
 
 RUN_ID = "2026-10-15T10:42:07Z-a3f9"
@@ -71,7 +72,7 @@ _EXAMPLE: dict[str, Json] = {
             "phase": "main",
             "order": 11,
             "status": "skipped",
-            "reason": "role prod",
+            "reason": {"code": "role", "role": "prod"},
         },
     ],
     "report": {"failures": [], "incomplete": []},
@@ -102,6 +103,22 @@ def load(data: Mapping[str, Json]) -> Verdict:
     return Verdict.model_validate_json(json.dumps(data))
 
 
+def scripted_catalog(outcome: PlanOutcome) -> dict[str, str]:
+    """The machine's texts and ``ScriptedStep``'s, for every step the outcome
+    names in a step code -- what ``Plan.catalog`` gives a plan of them."""
+    from plan_support import ScriptedStep
+
+    codes = [
+        record.reason.code
+        for record in (*outcome.steps, *outcome.restore, *outcome.finally_)
+        if record.reason is not None
+    ]
+    codes += [item.reason.code for item in outcome.incomplete]
+    codes += [item.reason.code for item in outcome.doctor_diff]
+    names = {code.split(":", 1)[0] for code in codes if ":" in code}
+    return with_steps(ENGLISH, ((name, ScriptedStep.codes) for name in sorted(names)))
+
+
 def build(
     outcome: PlanOutcome,
     *,
@@ -109,6 +126,7 @@ def build(
     args: Fact | None = None,
     failures: tuple[Fact, ...] = (),
     secrets: Secrets = SECRETS,
+    catalog: Catalog | None = None,
 ) -> Verdict:
     return build_verdict(
         outcome,
@@ -123,4 +141,5 @@ def build(
         composition_after={"aivis": "9a1c4e2", "pridem": "0.3.1"},
         secrets=secrets,
         failures=failures,
+        catalog=scripted_catalog(outcome) if catalog is None else catalog,
     )

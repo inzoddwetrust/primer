@@ -13,7 +13,7 @@ from pydantic import SecretStr
 from report_support import build
 from state_support import header
 
-from pridem.events import ConsoleSink, Event, EventSink, Secrets, StepFinished
+from pridem.events import Code, ConsoleSink, Event, EventSink, Secrets, StepFinished
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.report.render import render_json, render_llm, render_report
@@ -70,6 +70,10 @@ class _InterruptOnce(ListSink):
 
 @pytest.mark.parametrize("place", ["in_step", "between_steps", "in_emit"])
 def test_probe_DM_37_finally_runs_every_step_after_interrupt(place: str) -> None:
+    """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
+    parameters, not phrases; the data changed form only, each assertion keeps
+    its strength.
+    """
     journal = Journal()
     sink: ListSink = _InterruptOnce() if place == "in_emit" else ListSink()
     build_step = ScriptedStep("build", 1, journal)
@@ -107,10 +111,10 @@ def test_probe_DM_37_finally_runs_every_step_after_interrupt(place: str) -> None
     assert "aivis/timers:verify" in journal and "aivis/old:verify" in journal
     assert "aivis/health:check" not in journal
     assert outcome.steps[-1].status == "skipped"
-    lost = [(i.what, i.why) for i in outcome.incomplete]
+    lost = [i.as_json() for i in outcome.incomplete]  # DM-42: codes (v1.6)
     if place == "in_emit":
         # the cut event is lost like a failed write; the step's record is kept
-        assert lost == [("journal", "journal write failed")]
+        assert lost == [{"what": "journal", "code": "write-failed"}]
         assert (outcome.steps[0].name, outcome.steps[0].status) == ("build", "ok")
     else:
         assert lost == []
@@ -138,6 +142,10 @@ class _BrokenSink(ListSink):
     "kind", ["StepStarted", "StepFinished", "LogLine", "PlanFinished"]
 )
 def test_probe_DM_37_sink_failure_never_crashes_the_plan(kind: str) -> None:
+    """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
+    parameters, not phrases; the data changed form only, each assertion keeps
+    its strength.
+    """
     journal = Journal()
     sink = _BrokenSink(kind)
     talker = ScriptedStep("up", 2, journal)
@@ -150,8 +158,8 @@ def test_probe_DM_37_sink_failure_never_crashes_the_plan(kind: str) -> None:
     )
     outcome = run.run()
     assert sink.failed and sink.calls_after_failure == 0
-    assert [(i.what, i.why) for i in outcome.incomplete] == [
-        ("journal", "journal write failed")
+    assert [i.as_json() for i in outcome.incomplete] == [  # DM-42: codes (v1.6)
+        {"what": "journal", "code": "write-failed"}
     ]
     assert [r.name for r in outcome.steps] == ["noisy", "up"]
     assert [r.name for r in outcome.restore] == ["old"]
@@ -161,6 +169,10 @@ def test_probe_DM_37_sink_failure_never_crashes_the_plan(kind: str) -> None:
 
 
 def test_probe_DM_37_unexpected_exception_reason_is_type_only(tmp_path: Path) -> None:
+    """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
+    parameters, not phrases; the data changed form only, each assertion keeps
+    its strength.
+    """
     marker = "unexpected-secret-value-41a7"
     secrets = Secrets([SecretStr(marker)])
     journal = Journal()
@@ -177,7 +189,11 @@ def test_probe_DM_37_unexpected_exception_reason_is_type_only(tmp_path: Path) ->
         outcome = run.run()
         sink.close()
     record = outcome.steps[0]
-    assert (record.status, record.reason) == ("failed", "RuntimeError")
+    # DM-42 (contract 2 v1.6): the type name is the parameter of ``exception``
+    assert (record.status, record.reason) == (
+        "failed",
+        Code("exception", {"type": "RuntimeError"}),
+    )
     verdict = build(outcome, secrets=Secrets(()))  # nothing left to clean
     texts = [
         verdict.model_dump_json(),
@@ -191,7 +207,7 @@ def test_probe_DM_37_unexpected_exception_reason_is_type_only(tmp_path: Path) ->
     assert "RuntimeError: token=[redacted] rejected" in written
     assert marker not in written
     own_reason = _plan([red("up", 1, Journal())], ListSink()).run()
-    assert own_reason.steps[0].reason == "up read back the wrong state"
+    assert own_reason.steps[0].reason == Code("up:wrong-state", {"seen": "x"})
 
 
 class _Tee:

@@ -3,7 +3,7 @@
 import pytest
 from plan_support import Journal, ScriptedStep, plan, red
 
-from pridem.events import StepRecord
+from pridem.events import Code, StepRecord
 from pridem.plan import StackSteps
 from pridem.report.codes import ExitCode
 
@@ -37,6 +37,10 @@ def test_probe_DM_6_doctor_calls_no_act() -> None:
 
 
 def test_probe_DM_6_red_verify_skips_rest_exit_1() -> None:
+    """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
+    parameters, not phrases; the data changed form only, each assertion keeps
+    its strength.
+    """
     journal = Journal()
     stacks = [
         StackSteps(
@@ -58,7 +62,9 @@ def test_probe_DM_6_red_verify_skips_rest_exit_1() -> None:
         ("health", "skipped"),
     ]
     assert outcome.steps[1].verify == {"seen": "x"}
-    assert all(r.reason == "after failed aivis/build" for r in outcome.steps[2:])
+    # DM-42 (contract 2 v1.6): the reason is a code with parameters
+    after = Code("after-failure", {"phase": "main", "stack": "aivis", "name": "build"})
+    assert all(r.reason == after for r in outcome.steps[2:])
     assert "aivis/up:check" not in journal
     assert outcome.code is ExitCode.FAILED
 
@@ -198,6 +204,10 @@ def test_probe_DM_6_finally_runs_on_red() -> None:
 
 
 def test_probe_DM_6_step_without_verify_fact_is_invalid() -> None:
+    """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
+    parameters, not phrases; the data changed form only, each assertion keeps
+    its strength.
+    """
     journal = Journal()
     stacks = [
         StackSteps(
@@ -211,8 +221,12 @@ def test_probe_DM_6_step_without_verify_fact_is_invalid() -> None:
     ]
     outcome = plan(stacks)[0].run()
     assert [(r.name, r.status, r.reason) for r in outcome.steps] == [
-        ("build", "failed", "verify returned no fact"),
-        ("up", "skipped", "after failed aivis/build"),
+        ("build", "failed", Code("no-fact")),  # DM-42: codes, not phrases (v1.6)
+        (
+            "up",
+            "skipped",
+            Code("after-failure", {"phase": "main", "stack": "aivis", "name": "build"}),
+        ),
     ]
     assert outcome.code is ExitCode.FAILED
     with pytest.raises(ValueError, match="non-empty verify fact"):

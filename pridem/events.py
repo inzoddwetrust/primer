@@ -12,8 +12,12 @@ the step itself put into its fact.
 
 Known secrets (``asked`` and ``tls`` of the passport, ``minted``) are cleaned by
 exact match with ``Secrets`` -- the one function the verdict and the console use
-(contract 2 rule 2). The skip reasons a plan writes are built here, so the
-renderers that tell a role skip from a skip after a failure read the same text.
+(contract 2 rule 2).
+
+A reason, an incomplete entry and a doctor item carry a ``Code``: a code and
+its parameters, never a phrase (contract 2 v1.6). The words come from a catalog
+(``report/catalog.py``) when something is rendered; the skip codes a plan
+writes are built here.
 """
 
 import json
@@ -25,7 +29,8 @@ from typing import Literal, Protocol, TextIO
 from pydantic import SecretStr
 
 from pridem.contract import SECRET_MIN_LENGTH
-from pridem.report.codes import ExitCode
+from pridem.report.catalog import ENGLISH, Catalog, text
+from pridem.report.codes import RESERVED_PARAMS, ExitCode
 from pridem.runner import Stream
 
 type Json = None | bool | int | float | str | list[Json] | dict[str, Json]
@@ -36,19 +41,43 @@ Phase = Literal["main", "restore", "finally"]
 PlanMode = Literal["install", "deploy", "doctor", "reinstall"]
 
 REDACTED = "[redacted]"
-ROLE_SKIP = "role "
-AFTER_FAILURE = "after failed "
-AFTER_INTERRUPT = "after interrupt"
 
 
-def role_skip(role: str) -> str:
-    """The reason of a step skipped because the box's role does not run it."""
-    return f"{ROLE_SKIP}{role}"
+@dataclass(frozen=True)
+class Code:
+    """A code and its parameters: a fact, not a phrase (contract 2 v1.6).
+
+    ``code`` and ``what`` are taken and are never parameter names.
+    """
+
+    code: str
+    params: Mapping[str, Json] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.code:
+            raise ValueError("a code is not empty")
+        taken = sorted(RESERVED_PARAMS & set(self.params))
+        if taken:
+            raise ValueError(f"parameter names {taken} are taken")
+
+    def as_json(self) -> dict[str, Json]:
+        """The flat object of the verdict: ``{"code": ..., **params}``."""
+        return {"code": self.code, **self.params}
 
 
-def after_failure(stack: str, name: str) -> str:
-    """The reason of a step skipped because an earlier step failed."""
-    return f"{AFTER_FAILURE}{stack}/{name}"
+def role_skip(role: str) -> Code:
+    """A step skipped because the box's role does not run it."""
+    return Code("role", {"role": role})
+
+
+def after_failure(phase: Phase, stack: str, name: str) -> Code:
+    """A step skipped because the step ``phase stack name`` failed."""
+    return Code("after-failure", {"phase": phase, "stack": stack, "name": name})
+
+
+AFTER_INTERRUPT = Code("after-interrupt")
+INTERRUPTED = Code("interrupted")
+NO_FACT = Code("no-fact")
 
 
 def _forms(secret: str) -> set[str]:
@@ -108,14 +137,18 @@ class Secrets:
 
 @dataclass(frozen=True)
 class Incomplete:
-    """Something a step should have done and did not, with the reason."""
+    """Something that should have been done and was not, and its code."""
 
     what: str
-    why: str
+    reason: Code
 
     def __post_init__(self) -> None:
-        if not self.what or not self.why:
-            raise ValueError("incomplete needs both what and why")
+        if not self.what:
+            raise ValueError("incomplete needs what")
+
+    def as_json(self) -> dict[str, Json]:
+        """The flat object of the verdict: ``{"what": ..., "code": ..., **params}``."""
+        return {"what": self.what, **self.reason.as_json()}
 
 
 @dataclass(frozen=True)
@@ -126,13 +159,13 @@ class StepRecord:
     name: str
     order: int
     status: Status
-    reason: str | None = None
+    reason: Code | None = None
     started: datetime | None = None
     duration_s: float | None = None
     verify: Fact = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.status in ("skipped", "failed") and not self.reason:
+        if self.status in ("skipped", "failed") and self.reason is None:
             raise ValueError(f"a {self.status} step needs a reason")
         if self.status == "ok" and not self.verify:
             raise ValueError("an ok step needs a non-empty verify fact")
@@ -144,7 +177,7 @@ class DoctorItem:
 
     stack: str
     name: str
-    what: str
+    reason: Code
 
 
 @dataclass(frozen=True)
@@ -223,12 +256,16 @@ class ConsoleSink:
     Output lines of commands are not printed here; they belong to the journal.
     The closing line is the summary line of the verdict (contract 2 section 4),
     printed by whoever holds the verdict, not by this sink. A step's ``reason``
-    and ``verify`` are cleaned of known secrets.
+    is put in words by ``catalog``; it and ``verify`` are cleaned of known
+    secrets.
     """
 
-    def __init__(self, stream: TextIO, secrets: Secrets) -> None:
+    def __init__(
+        self, stream: TextIO, secrets: Secrets, catalog: Catalog = ENGLISH
+    ) -> None:
         self._stream = stream
         self._secrets = secrets
+        self._catalog = catalog
 
     def emit(self, event: Event) -> None:
         if isinstance(event, StepFinished):
@@ -244,6 +281,7 @@ class ConsoleSink:
             line += f" · {record.duration_s:.1f} s"
         if record.verify:
             line += f" · {_fact_line(self._secrets.fact(record.verify))}"
-        if record.reason:
-            line += f" — {self._secrets.text(record.reason)}"
+        if record.reason is not None:
+            words = text(self._catalog, record.reason.code, record.reason.params)
+            line += f" — {self._secrets.text(words)}"
         self._write(line)

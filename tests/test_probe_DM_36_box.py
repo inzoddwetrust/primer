@@ -17,6 +17,8 @@ from pridem.events import LogLine, StepFinished, StepRecord, StepStarted
 from pridem.runner import Stream
 from pridem.state import Box, JournalHeader, Recovery
 
+BUILD_STEP = {"phase": "main", "stack": "aivis", "name": "build"}
+
 STARTED = header(run_id(1)).started
 DAMAGED_STATE = [
     b"not json at all " + MARKER.encode(),
@@ -38,6 +40,10 @@ def _journal(box: Box, run: str) -> Path:
 
 
 def test_probe_DM_36_torn_utf8_never_blocks_the_box(tmp_path: Path) -> None:
+    """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
+    parameters, not phrases; the data changed form only, each assertion keeps
+    its strength.
+    """
     box = Box(tmp_path)
     with box.lock("dying"):
         torn, middle, head = (_journal(box, run_id(n)) for n in (1, 2, 3))
@@ -51,10 +57,11 @@ def test_probe_DM_36_torn_utf8_never_blocks_the_box(tmp_path: Path) -> None:
         done = box.recover(SECRETS, "0.3.1")
     assert done.quarantined == (run_id(3),)
     assert [v.run_id for v in done.verdicts] == [run_id(1), run_id(2)]
-    whys = [v.report.incomplete[0].why for v in done.verdicts]
-    assert whys == [
-        "no verdict found; journal ends at step main aivis/build",
-        "no verdict found; journal damaged at line 3",
+    # DM-42 (contract 2 v1.6): codes with parameters instead of phrases
+    entries = [v.report.incomplete[0].model_dump() for v in done.verdicts]
+    assert entries == [
+        {"what": "run", "code": "no-verdict", "ended_at": BUILD_STEP},
+        {"what": "run", "code": "journal-damaged", "line": 3},
     ]
     with box.lock("after"):  # the box is not blocked
         assert box.recover(SECRETS, "0.3.1") == Recovery((), ())
@@ -66,6 +73,10 @@ def test_probe_DM_36_torn_utf8_never_blocks_the_box(tmp_path: Path) -> None:
 def test_probe_DM_36_damaged_state_is_quarantined(
     tmp_path: Path, content: bytes
 ) -> None:
+    """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
+    parameters, not phrases; the data changed form only, each assertion keeps
+    its strength.
+    """
     box = Box(tmp_path)
     with box.lock("dying"):
         _journal(box, run_id(1))
@@ -76,9 +87,10 @@ def test_probe_DM_36_damaged_state_is_quarantined(
     assert not (tmp_path / "state.json").exists()
     assert (tmp_path / "state.json.damaged").read_bytes() == content
     (red,) = done.verdicts
-    assert [(i.what, i.why) for i in red.report.incomplete] == [
-        ("run", "no verdict found; journal ends at step main aivis/build"),
-        ("state", "state damaged; quarantined"),
+    # DM-42 (contract 2 v1.6): codes with parameters instead of phrases
+    assert [i.model_dump() for i in red.report.incomplete] == [
+        {"what": "run", "code": "no-verdict", "ended_at": BUILD_STEP},
+        {"what": "state", "code": "quarantined"},
     ]
     assert red.composition_after == {"pridem": "0.3.1"}
     assert MARKER not in red.model_dump_json()

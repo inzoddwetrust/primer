@@ -15,6 +15,7 @@ from report_support import MARKER, build, example, items, load, section
 
 from pridem.contract import SCHEMA_DIR
 from pridem.events import (
+    Code,
     ConsoleSink,
     DoctorItem,
     Incomplete,
@@ -24,11 +25,12 @@ from pridem.events import (
     StepRecord,
 )
 from pridem.plan import StackSteps
+from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.codes import ExitCode
 from pridem.report.render import render_json, render_llm, render_report, summary_line
 from pridem.report.schema import VERDICT_SCHEMA, Verdict, rendered_schema
 from pridem.runner import FakeCall, FakeRunner, Stream
-from pridem.steps.base import CheckResult, StepContext
+from pridem.steps.base import CheckResult, StepContext, local_code
 
 VISIBLE = "visible-0b5d"
 
@@ -44,13 +46,17 @@ def _step(data: dict[str, Json], index: int) -> dict[str, Json]:
     return step
 
 
+CATALOG = with_steps(ENGLISH, ((name, ScriptedStep.codes) for name in ("ssl", "env")))
+"""DM-42: the words of the scripted steps' codes."""
+
+
 def _renders(verdict: Verdict, secrets: Secrets) -> dict[str, str]:
     return {
         "dump": verdict.model_dump_json(),
         "summary": summary_line(verdict),
         "json": render_json(verdict),
-        "report": render_report(verdict, None, secrets),
-        "llm": render_llm(verdict, None, secrets),
+        "report": render_report(verdict, None, secrets, CATALOG),
+        "llm": render_llm(verdict, None, secrets, CATALOG),
     }
 
 
@@ -68,6 +74,12 @@ def test_probe_DM_4_verdict_requires_composition() -> None:
 
 
 def test_probe_DM_4_verdict_code2_requires_incomplete() -> None:
+    """Code 2 needs ``incomplete`` or ``doctor_diff``; neither -- refused.
+
+    DM-42 (contract 2 v1.6): reasons, incomplete and doctor entries are codes
+    with parameters, not phrases; this probe's data changed form only, each
+    assertion keeps its strength.
+    """
     run, _ = plan(
         [StackSteps("comms", [ScriptedStep("env", 3, Journal())], root=True)],
         "doctor",
@@ -76,18 +88,24 @@ def test_probe_DM_4_verdict_code2_requires_incomplete() -> None:
     assert outcome.code is ExitCode.INCOMPLETE and outcome.incomplete == ()
     verdict = build(outcome, verb="doctor", args={})
     assert verdict.exit_code is ExitCode.INCOMPLETE and verdict.report.incomplete == []
-    assert [(d.stack, d.name, d.what) for d in verdict.report.doctor_diff or []] == [
-        ("comms", "env", "do env")
+    assert [d.model_dump() for d in verdict.report.doctor_diff or []] == [
+        {"stack": "comms", "name": "env", "code": "env:do", "step": "env"}
     ]
 
     neither = example()
     neither["exit_code"], neither["result"] = 2, "incomplete"
     _refused(neither, "exit code 2 needs report.incomplete or report.doctor_diff")
-    section(neither, "report")["incomplete"] = [{"what": "ssl", "why": "deferred"}]
+    section(neither, "report")["incomplete"] = [{"what": "ssl", "code": "ssl:left"}]
     assert load(neither).result == "incomplete"
 
 
 def test_probe_DM_4_verdict_skipped_requires_reason() -> None:
+    """A ``skipped`` or ``failed`` step needs a reason.
+
+    DM-42 (contract 2 v1.6): reasons, incomplete and doctor entries are codes
+    with parameters, not phrases; this probe's data changed form only, each
+    assertion keeps its strength.
+    """
     data = example()
     del _step(data, 2)["reason"]
     _refused(data, "a skipped step needs a reason")
@@ -96,9 +114,13 @@ def test_probe_DM_4_verdict_skipped_requires_reason() -> None:
     del _step(data, 1)["verify"]
     data["exit_code"], data["result"] = 1, "red"
     _refused(data, "a failed step needs a reason")
-    _step(data, 1)["reason"] = "health 502"
-    assert load(data).steps[1].reason == "health 502"
-    assert load(example()).steps[2].reason == "role prod"
+    _step(data, 1)["reason"] = {"code": "health:status", "status": 502}
+    failed = load(data).steps[1].reason
+    assert failed is not None
+    assert failed.model_dump() == {"code": "health:status", "status": 502}
+    skipped = load(example()).steps[2].reason
+    assert skipped is not None
+    assert skipped.model_dump() == {"code": "role", "role": "prod"}
 
 
 def test_probe_DM_4_verdict_step_requires_verify_fact() -> None:
@@ -118,6 +140,10 @@ def test_probe_DM_4_verdict_step_requires_verify_fact() -> None:
 
 
 def test_probe_DM_4_render_llm_excludes_green_and_secrets() -> None:
+    """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
+    parameters, not phrases; the data changed form only, each assertion keeps
+    its strength.
+    """
     planted = f"tok={MARKER}"
     red = PlanOutcome(
         mode="deploy",
@@ -131,13 +157,13 @@ def test_probe_DM_4_render_llm_excludes_green_and_secrets() -> None:
                 "up",
                 12,
                 "failed",
-                f"command failed: make {planted}: exit code 2",
+                Code("command-failed", {"argv": ["make", planted], "exit_code": 2}),
                 None,
                 None,
                 {"seen": {"nested": [planted]}, planted: 1},
             ),
         ),
-        incomplete=(Incomplete("ssl", f"deferred, {planted}"),),
+        incomplete=(Incomplete("ssl", Code("ssl:left", {"thing": planted})),),
     )
     failure: dict[str, Json] = {
         "test": "t",
@@ -152,7 +178,7 @@ def test_probe_DM_4_render_llm_excludes_green_and_secrets() -> None:
         "doctor",
         ExitCode.INCOMPLETE,
         (),
-        doctor_diff=(DoctorItem("a", "env", planted),),
+        doctor_diff=(DoctorItem("a", "env", Code("env:do", {"step": planted})),),
     )
     doctor = build(drift, verb="doctor", args={})
     secrets = Secrets([SecretStr(MARKER)])
@@ -162,10 +188,10 @@ def test_probe_DM_4_render_llm_excludes_green_and_secrets() -> None:
             # the doctor summary line carries no planted field to show cleaned
             assert "[redacted]" in text or (verdict, name) == (doctor, "summary"), name
 
-    llm = render_llm(deploy, None, secrets)
+    llm = render_llm(deploy, None, secrets, CATALOG)
     assert "| aivis | up | 12 | failed |" in llm
     assert "| comms | up |" not in llm and VISIBLE not in llm
-    assert VISIBLE in render_report(deploy, None, secrets)
+    assert VISIBLE in render_report(deploy, None, secrets, CATALOG)
     assert VISIBLE in deploy.model_dump_json()
 
 
@@ -186,12 +212,16 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
 
     ``OUTPUT`` is not a known secret: only the reason's form keeps it out.
     ``MARKER`` is known: it sits in the command line and in a ``verify`` fact.
+
+    DM-42 (contract 2 v1.6): reasons, incomplete and doctor entries are codes
+    with parameters, not phrases; this probe's data changed form only, each
+    assertion keeps its strength.
     """
     output = "leaked-output-4f2a"
 
     class Up(ScriptedStep):
         def check(self, ctx: StepContext) -> CheckResult:
-            return CheckResult(True, "start")
+            return CheckResult(True, local_code("do", {"step": "up"}))
 
     runner = FakeRunner(
         FakeCall(
@@ -209,8 +239,11 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
         run, sink = plan([StackSteps("aivis", [seen, up], root=True)], runner=runner)
         outcome = run.run()
     reason = outcome.steps[1].reason
-    assert reason is not None and output not in reason
-    assert reason.startswith("command failed: make deploy ") and "exit code 2" in reason
+    assert reason is not None and output not in str(reason.as_json())
+    assert reason == Code(
+        "command-failed",
+        {"argv": ["make", "deploy", f"TOKEN={MARKER}"], "exit_code": 2},
+    )
     assert [line.line for line in sink.lines()] == [
         f"{output} line 1",
         f"{output} line 2",
@@ -220,7 +253,7 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
     verdict = build(outcome, secrets=secrets)
     for name, text in _renders(verdict, secrets).items():
         assert output not in text and MARKER not in text, name
-    assert "make deploy TOKEN=[redacted]" in verdict.model_dump_json()
+    assert '["make","deploy","TOKEN=[redacted]"]' in verdict.model_dump_json()
 
     out = io.StringIO()
     console = ConsoleSink(out, secrets)
@@ -228,4 +261,4 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
         console.emit(event)
     printed = out.getvalue()
     assert MARKER not in printed and output not in printed
-    assert VISIBLE in printed and "TOKEN=[redacted]: exit code 2" in printed
+    assert VISIBLE in printed and "TOKEN=[redacted] — exit code 2" in printed

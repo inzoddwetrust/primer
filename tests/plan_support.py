@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from itertools import count
 
-from pridem.events import Event, Fact, Incomplete, LogLine, PlanMode, StepFinished
+from pridem.events import Code, Event, Fact, LogLine, PlanMode, StepFinished
 from pridem.plan import Plan, StackSteps
 from pridem.runner import FakeRunner, Runner
 from pridem.steps.base import (
@@ -15,6 +15,7 @@ from pridem.steps.base import (
     StepContext,
     StepFailed,
     Verified,
+    local_code,
 )
 
 NOW = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
@@ -39,7 +40,18 @@ class ListSink:
 
 
 class ScriptedStep(Step):
-    """A step whose phases do what the test says and log themselves."""
+    """A step whose phases do what the test says and log themselves.
+
+    Its own codes (contract 2 v1.6): ``do`` -- what ``check`` says ``act`` would
+    do; ``wrong-state`` -- what ``red`` steps read back; ``left`` -- an
+    incomplete entry.
+    """
+
+    codes = {
+        "do": "would do {step}",
+        "wrong-state": "read back {seen}",
+        "left": "left {thing} undone",
+    }
 
     def __init__(
         self,
@@ -56,7 +68,7 @@ class ScriptedStep(Step):
         act_raises: BaseException | None = None,
         fact: Fact | None = None,
         verify_raises: BaseException | None = None,
-        incomplete: Incomplete | None = None,
+        incomplete: Code | None = None,
     ) -> None:
         self.name = name
         self.order = order
@@ -79,7 +91,8 @@ class ScriptedStep(Step):
         self._log(ctx, "check")
         if self._check_raises is not None:
             raise self._check_raises
-        return CheckResult(self._needed, f"do {self.name}" if self._needed else "")
+        would = local_code("do", {"step": self.name}) if self._needed else None
+        return CheckResult(self._needed, would)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         self._log(ctx, "act")
@@ -104,7 +117,7 @@ def red(
         order,
         journal,
         point_of_no_return=point_of_no_return,
-        verify_raises=StepFailed(f"{name} read back the wrong state", {"seen": "x"}),
+        verify_raises=StepFailed("wrong-state", {"seen": "x"}, {"seen": "x"}),
     )
 
 

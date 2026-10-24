@@ -16,22 +16,21 @@ of the journal lines of the run): nothing is stored, the source is one.
 
 The verdict is clean of secrets when it is built; journal lines are cleaned
 here with the same ``Secrets``, so no renderer depends on how the journal was
-written.
+written. A reason, an incomplete entry and a doctor entry are codes with
+parameters; their words come from ``catalog`` (``ENGLISH`` by default), and
+``--llm`` tells the skips after a failure by their codes.
 """
 
 import json
 import re
 from collections.abc import Sequence
 
-from pridem.events import (
-    AFTER_FAILURE,
-    AFTER_INTERRUPT,
-    ROLE_SKIP,
-    Json,
-    LogLine,
-    Secrets,
-)
-from pridem.report.schema import Failure, Step, Verdict
+from pydantic import BaseModel
+
+from pridem.events import Json, LogLine, Secrets
+from pridem.report.catalog import ENGLISH, Catalog, text
+from pridem.report.codes import SKIPPED_AFTER
+from pridem.report.schema import DoctorDiff, Failure, Step, Verdict
 from pridem.runner import TAIL_LINES
 
 LINE_LIMIT = 200
@@ -106,6 +105,16 @@ def _block(lines: Sequence[str], llm: bool) -> list[str]:
     return [*out, f"{fence}text", *shown, fence]
 
 
+def words(catalog: Catalog, item: BaseModel) -> str:
+    """The words for a reason, an incomplete entry or a doctor entry."""
+    params = item.model_dump()
+    if isinstance(item, DoctorDiff):  # where it is, not what it says
+        del params["stack"], params["name"]
+    code = str(params.pop("code"))
+    what = params.pop("what", None)  # never a parameter: the name is taken
+    return text(catalog, code, params, None if what is None else str(what))
+
+
 def _output(step: Step, journal: Sequence[LogLine], secrets: Secrets) -> list[str]:
     return [
         secrets.text(f"[{item.stream}] {item.line}")
@@ -115,7 +124,11 @@ def _output(step: Step, journal: Sequence[LogLine], secrets: Secrets) -> list[st
 
 
 def _failed_steps(
-    verdict: Verdict, journal: Sequence[LogLine] | None, secrets: Secrets, llm: bool
+    verdict: Verdict,
+    journal: Sequence[LogLine] | None,
+    secrets: Secrets,
+    llm: bool,
+    catalog: Catalog,
 ) -> list[str]:
     failed = [step for step in verdict.steps if step.status == "failed"]
     if not failed:
@@ -125,7 +138,7 @@ def _failed_steps(
         out += [
             f"### {step.stack} · {step.name} · order {step.order}",
             "",
-            f"{step.reason}",
+            words(catalog, step.reason) if step.reason is not None else "",
             "",
         ]
         if journal is None:
@@ -153,30 +166,29 @@ def _cell(text: str) -> str:
     return " ".join(text.split()).replace("|", "\\|")
 
 
-def _row(step: Step) -> str:
+def _row(step: Step, catalog: Catalog) -> str:
     spent = "" if step.duration_s is None else f"{step.duration_s:.1f} s"
     if step.reason is not None:
-        said = step.reason
+        said = words(catalog, step.reason)
     else:
         said = ", ".join(f"{k}={_value(v)}" for k, v in (step.verify or {}).items())
     cells = [step.stack, step.name, str(step.order), step.status, spent, said]
     return "| " + " | ".join(_cell(cell) for cell in cells) + " |"
 
 
+def _code(step: Step) -> str:
+    return "" if step.reason is None else step.reason.code
+
+
 def _green(step: Step) -> bool:
-    return step.status == "ok" or (
-        step.status == "skipped" and (step.reason or "").startswith(ROLE_SKIP)
-    )
+    return step.status == "ok" or (step.status == "skipped" and _code(step) == "role")
 
 
 def _after_failure(step: Step) -> bool:
-    reason = step.reason or ""
-    return step.status == "skipped" and (
-        reason.startswith(AFTER_FAILURE) or reason == AFTER_INTERRUPT
-    )
+    return step.status == "skipped" and _code(step) in SKIPPED_AFTER
 
 
-def _ladder(verdict: Verdict, llm: bool) -> list[str]:
+def _ladder(verdict: Verdict, llm: bool, catalog: Catalog) -> list[str]:
     steps = verdict.steps
     after = 0
     if llm:
@@ -189,7 +201,7 @@ def _ladder(verdict: Verdict, llm: bool) -> list[str]:
         out += [
             "| stack | step | order | status | duration | fact or reason |",
             "|---|---|---|---|---|---|",
-            *(_row(step) for step in steps),
+            *(_row(step, catalog) for step in steps),
             "",
         ]
     if after:
@@ -214,39 +226,52 @@ def _closing(verdict: Verdict) -> list[str]:
 
 
 def _report(
-    verdict: Verdict, journal: Sequence[LogLine] | None, secrets: Secrets, llm: bool
+    verdict: Verdict,
+    journal: Sequence[LogLine] | None,
+    secrets: Secrets,
+    llm: bool,
+    catalog: Catalog,
 ) -> str:
     out = [f"# {summary_line(verdict)}", ""]
-    out += _failed_steps(verdict, journal, secrets, llm)
+    out += _failed_steps(verdict, journal, secrets, llm, catalog)
     if verdict.report.failures:
         out += ["## Failed tests", ""]
         for failure in verdict.report.failures:
             out += _failure(failure, llm)
     if verdict.report.incomplete:
         out += ["## Incomplete", ""]
-        out += [f"- {item.what} — {item.why}" for item in verdict.report.incomplete]
+        out += [
+            f"- {item.what} — {words(catalog, item)}"
+            for item in verdict.report.incomplete
+        ]
         out.append("")
     if verdict.report.doctor_diff:
         out += ["## Doctor diff", ""]
         out += [
-            f"- {item.stack} · {item.name} — {item.what}"
+            f"- {item.stack} · {item.name} — {words(catalog, item)}"
             for item in verdict.report.doctor_diff
         ]
         out.append("")
-    out += _ladder(verdict, llm)
+    out += _ladder(verdict, llm, catalog)
     out += _closing(verdict)
     return "\n".join(out) + "\n"
 
 
 def render_report(
-    verdict: Verdict, journal: Sequence[LogLine] | None, secrets: Secrets
+    verdict: Verdict,
+    journal: Sequence[LogLine] | None,
+    secrets: Secrets,
+    catalog: Catalog = ENGLISH,
 ) -> str:
     """The breakage report; ``journal`` is ``None`` when the run has none left."""
-    return _report(verdict, journal, secrets, llm=False)
+    return _report(verdict, journal, secrets, llm=False, catalog=catalog)
 
 
 def render_llm(
-    verdict: Verdict, journal: Sequence[LogLine] | None, secrets: Secrets
+    verdict: Verdict,
+    journal: Sequence[LogLine] | None,
+    secrets: Secrets,
+    catalog: Catalog = ENGLISH,
 ) -> str:
     """The breakage report for a chat: no green part, foreign lines cut."""
-    return _report(verdict, journal, secrets, llm=True)
+    return _report(verdict, journal, secrets, llm=True, catalog=catalog)

@@ -36,6 +36,157 @@
       "title": "Actor",
       "type": "object"
     },
+    "AfterFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "after-failure",
+          "title": "Code",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "main",
+            "restore",
+            "finally"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "phase",
+        "stack",
+        "name"
+      ],
+      "title": "AfterFailure",
+      "type": "object"
+    },
+    "AfterInterrupt": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "after-interrupt",
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "AfterInterrupt",
+      "type": "object"
+    },
+    "CommandFailedReason": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Argv",
+          "type": "array"
+        },
+        "code": {
+          "const": "command-failed",
+          "title": "Code",
+          "type": "string"
+        },
+        "exit_code": {
+          "title": "Exit Code",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code",
+        "argv",
+        "exit_code"
+      ],
+      "title": "CommandFailedReason",
+      "type": "object"
+    },
+    "CommandNotStartedReason": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Argv",
+          "type": "array"
+        },
+        "code": {
+          "const": "command-not-started",
+          "title": "Code",
+          "type": "string"
+        },
+        "errno": {
+          "anyOf": [
+            {
+              "pattern": "^E[A-Z0-9]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Errno"
+        }
+      },
+      "required": [
+        "code",
+        "argv",
+        "errno"
+      ],
+      "title": "CommandNotStartedReason",
+      "type": "object"
+    },
+    "CommandTimedOutReason": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Argv",
+          "type": "array"
+        },
+        "code": {
+          "const": "command-timed-out",
+          "title": "Code",
+          "type": "string"
+        },
+        "timeout_s": {
+          "minimum": 0,
+          "title": "Timeout S",
+          "type": "number"
+        }
+      },
+      "required": [
+        "code",
+        "argv",
+        "timeout_s"
+      ],
+      "title": "CommandTimedOutReason",
+      "type": "object"
+    },
     "DnsCheck": {
       "additionalProperties": false,
       "properties": {
@@ -67,8 +218,35 @@
       "type": "object"
     },
     "DoctorDiff": {
-      "additionalProperties": false,
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ]
+      },
+      "description": "What ``doctor`` found a step would do: ``name`` is the step of ``code``.",
       "properties": {
+        "code": {
+          "pattern": "^[a-z][a-z0-9_]*:[a-z][a-z0-9-]*$",
+          "title": "Code",
+          "type": "string"
+        },
         "name": {
           "minLength": 1,
           "title": "Name",
@@ -78,19 +256,35 @@
           "minLength": 1,
           "title": "Stack",
           "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stack",
+        "name"
+      ],
+      "title": "DoctorDiff",
+      "type": "object"
+    },
+    "ExceptionReason": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "exception",
+          "title": "Code",
+          "type": "string"
         },
-        "what": {
+        "type": {
           "minLength": 1,
-          "title": "What",
+          "title": "Type",
           "type": "string"
         }
       },
       "required": [
-        "stack",
-        "name",
-        "what"
+        "code",
+        "type"
       ],
-      "title": "DoctorDiff",
+      "title": "ExceptionReason",
       "type": "object"
     },
     "ExitCode": {
@@ -151,25 +345,94 @@
       "title": "Failure",
       "type": "object"
     },
-    "Incomplete": {
+    "Interrupted": {
       "additionalProperties": false,
       "properties": {
-        "what": {
-          "minLength": 1,
-          "title": "What",
+        "code": {
+          "const": "interrupted",
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "Interrupted",
+      "type": "object"
+    },
+    "JournalDamaged": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "journal-damaged",
+          "title": "Code",
           "type": "string"
         },
-        "why": {
-          "minLength": 1,
-          "title": "Why",
+        "line": {
+          "minimum": 1,
+          "title": "Line",
+          "type": "integer"
+        },
+        "what": {
+          "const": "run",
+          "title": "What",
           "type": "string"
         }
       },
       "required": [
         "what",
-        "why"
+        "code",
+        "line"
       ],
-      "title": "Incomplete",
+      "title": "JournalDamaged",
+      "type": "object"
+    },
+    "JournalQuarantined": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "quarantined",
+          "title": "Code",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z-[0-9a-f]{4}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "what": {
+          "const": "journal",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code",
+        "run_id"
+      ],
+      "title": "JournalQuarantined",
+      "type": "object"
+    },
+    "JournalWriteFailed": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "write-failed",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "const": "journal",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code"
+      ],
+      "title": "JournalWriteFailed",
       "type": "object"
     },
     "Json": {
@@ -227,6 +490,82 @@
       "title": "Junit",
       "type": "object"
     },
+    "NoFact": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "no-fact",
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "NoFact",
+      "type": "object"
+    },
+    "NoVerdict": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "no-verdict",
+          "title": "Code",
+          "type": "string"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "description": "A step of a plan: where a journal ends.",
+              "properties": {
+                "name": {
+                  "minLength": 1,
+                  "title": "Name",
+                  "type": "string"
+                },
+                "phase": {
+                  "enum": [
+                    "main",
+                    "restore",
+                    "finally"
+                  ],
+                  "title": "Phase",
+                  "type": "string"
+                },
+                "stack": {
+                  "minLength": 1,
+                  "title": "Stack",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "phase",
+                "stack",
+                "name"
+              ],
+              "title": "At",
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "what": {
+          "const": "run",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code",
+        "ended_at"
+      ],
+      "title": "NoVerdict",
+      "type": "object"
+    },
     "Report": {
       "additionalProperties": false,
       "properties": {
@@ -253,7 +592,29 @@
         },
         "incomplete": {
           "items": {
-            "$ref": "#/$defs/Incomplete"
+            "oneOf": [
+              {
+                "$ref": "#/$defs/NoVerdict"
+              },
+              {
+                "$ref": "#/$defs/JournalDamaged"
+              },
+              {
+                "$ref": "#/$defs/JournalWriteFailed"
+              },
+              {
+                "$ref": "#/$defs/JournalQuarantined"
+              },
+              {
+                "$ref": "#/$defs/StateQuarantined"
+              },
+              {
+                "$ref": "#/$defs/RestoreNeeded"
+              },
+              {
+                "$ref": "#/$defs/StepIncomplete"
+              }
+            ]
           },
           "title": "Incomplete",
           "type": "array"
@@ -264,6 +625,69 @@
         "incomplete"
       ],
       "title": "Report",
+      "type": "object"
+    },
+    "RestoreNeeded": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "needed",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "const": "restore",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code"
+      ],
+      "title": "RestoreNeeded",
+      "type": "object"
+    },
+    "RoleSkip": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "role",
+          "title": "Code",
+          "type": "string"
+        },
+        "role": {
+          "minLength": 1,
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "role"
+      ],
+      "title": "RoleSkip",
+      "type": "object"
+    },
+    "StateQuarantined": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "quarantined",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "const": "state",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code"
+      ],
+      "title": "StateQuarantined",
       "type": "object"
     },
     "Step": {
@@ -293,9 +717,39 @@
           "type": "string"
         },
         "reason": {
-          "minLength": 1,
-          "title": "Reason",
-          "type": "string"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RoleSkip"
+            },
+            {
+              "$ref": "#/$defs/AfterFailure"
+            },
+            {
+              "$ref": "#/$defs/AfterInterrupt"
+            },
+            {
+              "$ref": "#/$defs/Interrupted"
+            },
+            {
+              "$ref": "#/$defs/NoFact"
+            },
+            {
+              "$ref": "#/$defs/CommandFailedReason"
+            },
+            {
+              "$ref": "#/$defs/CommandTimedOutReason"
+            },
+            {
+              "$ref": "#/$defs/CommandNotStartedReason"
+            },
+            {
+              "$ref": "#/$defs/ExceptionReason"
+            },
+            {
+              "$ref": "#/$defs/StepCode"
+            }
+          ],
+          "title": "Reason"
         },
         "stack": {
           "minLength": 1,
@@ -332,6 +786,86 @@
         "status"
       ],
       "title": "Step",
+      "type": "object"
+    },
+    "StepCode": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ]
+      },
+      "description": "A step's own code, ``<step>:<code>``, with its parameters.",
+      "properties": {
+        "code": {
+          "pattern": "^[a-z][a-z0-9_]*:[a-z][a-z0-9-]*$",
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "StepCode",
+      "type": "object"
+    },
+    "StepIncomplete": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ]
+      },
+      "description": "Something a step left undone: ``what`` is the step, ``code`` its own.",
+      "properties": {
+        "code": {
+          "pattern": "^[a-z][a-z0-9_]*:[a-z][a-z0-9-]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "minLength": 1,
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "what"
+      ],
+      "title": "StepIncomplete",
       "type": "object"
     }
   },

@@ -20,11 +20,13 @@ from report_support import (
 )
 
 from pridem.contract import SCHEMA_DIR
-from pridem.events import Incomplete, Json, PlanOutcome, Secrets, StepRecord
+from pridem.events import Code, Incomplete, Json, PlanOutcome, Secrets, StepRecord
 from pridem.plan import StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, Stream
 from pridem.steps.base import CheckResult, StepContext
+
+X = Code("exception", {"type": "OSError"})
 
 REPO = Path(__file__).resolve().parents[1]
 AT = datetime(2026, 10, 15, 10, 45, tzinfo=UTC)
@@ -119,7 +121,7 @@ def test_failed_step_makes_code_1() -> None:
             "phase": "finally",
             "order": 20,
             "status": "failed",
-            "reason": "x",
+            "reason": {"code": "exception", "type": "OSError"},
         }
     )
     assert "a failed step makes the exit code 1" in _errors(data)
@@ -129,7 +131,7 @@ def test_failed_step_makes_code_1() -> None:
 
 def test_code_0_with_incomplete_is_refused() -> None:
     data = example()
-    section(data, "report")["incomplete"] = [{"what": "ssl", "why": "deferred"}]
+    section(data, "report")["incomplete"] = [{"what": "ssl", "code": "ssl:deferred"}]
     assert "exit code 0 with report.incomplete" in _errors(data)
 
 
@@ -137,7 +139,7 @@ def test_code_1_without_failed_step_is_rule_4() -> None:
     data = example()
     data["exit_code"], data["result"] = 1, "red"
     section(data, "report")["incomplete"] = [
-        {"what": "run", "why": "no verdict found; journal ends at step 7"}
+        {"what": "run", "code": "no-verdict", "ended_at": None}
     ]
     assert load(data).result == "red"
 
@@ -224,7 +226,7 @@ def test_restore_and_finally_follow_main_steps_in_run_order() -> None:
     outcome = PlanOutcome(
         mode="deploy",
         code=ExitCode.FAILED,
-        steps=(_ok("aivis", "build", 1), StepRecord("aivis", "up", 2, "failed", "x")),
+        steps=(_ok("aivis", "build", 1), StepRecord("aivis", "up", 2, "failed", X)),
         restore=(_ok("aivis", "up_old", 2),),
         finally_=(_ok("aivis", "gc", 2),),
     )
@@ -237,26 +239,29 @@ def test_needs_restore_is_incomplete_at_code_1() -> None:
     outcome = PlanOutcome(
         mode="deploy",
         code=ExitCode.FAILED,
-        steps=(StepRecord("aivis", "migrate", 5, "failed", "x"),),
-        incomplete=(Incomplete("ssl", "deferred"),),
+        steps=(StepRecord("aivis", "migrate", 5, "failed", X),),
+        incomplete=(Incomplete("ssl", Code("ssl:left", {"thing": "x"})),),
         needs_restore=True,
     )
     verdict = build(outcome)
-    assert [(i.what, i.why) for i in verdict.report.incomplete] == [
-        ("ssl", "deferred"),
-        ("restore", "past the point of no return: restore from backup is needed"),
+    assert [i.model_dump() for i in verdict.report.incomplete] == [
+        {"what": "ssl", "code": "ssl:left", "thing": "x"},
+        {"what": "restore", "code": "needed"},
     ]
     assert verdict.exit_code is ExitCode.FAILED
 
 
 def test_records_map_to_steps_without_loss() -> None:
     record = StepRecord("aivis", "up", 10, "ok", None, AT, 18.5, {"a": [1, None]})
-    skipped = StepRecord("aivis", "tests", 11, "skipped", "role prod")
+    skipped = StepRecord(
+        "aivis", "tests", 11, "skipped", Code("role", {"role": "prod"})
+    )
     outcome = PlanOutcome(mode="deploy", code=ExitCode.OK, steps=(record, skipped))
     up, tests = build(outcome).steps
     assert (up.stack, up.name, up.order, up.status) == ("aivis", "up", 10, "ok")
     assert (up.started, up.duration_s, up.verify) == (AT, 18.5, {"a": [1, None]})
-    assert tests.reason == "role prod" and tests.verify is None
+    assert tests.reason is not None and tests.verify is None
+    assert tests.reason.model_dump() == {"code": "role", "role": "prod"}
     assert tests.started is None and tests.duration_s is None
 
 
@@ -286,7 +291,9 @@ def test_timed_out_command_reason_has_no_output() -> None:
     with runner:
         step = ScriptedStep("up", 1, Journal(), act_argv=["make", "up"])
         outcome = plan([StackSteps("aivis", [step], True)], runner=runner)[0].run()
-    assert outcome.steps[0].reason == "command timed out after 10.0 s: make up"
+    assert outcome.steps[0].reason == Code(
+        "command-timed-out", {"argv": ["make", "up"], "timeout_s": 10.0}
+    )
 
 
 def test_doctor_check_command_failure_reason_has_no_output() -> None:
@@ -304,7 +311,9 @@ def test_doctor_check_command_failure_reason_has_no_output() -> None:
             "doctor",
             runner=runner,
         )[0].run()
-    assert outcome.steps[0].reason == "command failed: dpkg -s nginx: exit code 1"
+    assert outcome.steps[0].reason == Code(
+        "command-failed", {"argv": ["dpkg", "-s", "nginx"], "exit_code": 1}
+    )
 
 
 # --- secrets --------------------------------------------------------------------
@@ -363,5 +372,9 @@ def test_every_schema_file_is_titled_contract_v1() -> None:
 def test_red_scripted_step_reason_survives_the_builder() -> None:
     run, _ = plan([StackSteps("aivis", [red("up", 1, Journal())], True)])
     verdict = build(run.run())
-    assert verdict.steps[0].reason == "up read back the wrong state"
+    assert verdict.steps[0].reason is not None
+    assert verdict.steps[0].reason.model_dump() == {
+        "code": "up:wrong-state",
+        "seen": "x",
+    }
     assert verdict.steps[0].verify == {"seen": "x"}

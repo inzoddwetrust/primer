@@ -62,7 +62,11 @@ def test_probe_DM_7_history_is_append_only(tmp_path: Path) -> None:
 
 
 def test_probe_DM_7_orphan_journal_becomes_red_verdict(tmp_path: Path) -> None:
-    """The run died inside ``up`` after state.json had already been written."""
+    """The run died inside ``up`` after state.json had already been written.
+
+    DM-42 (contract 2 v1.6): the incomplete entry is ``run/no-verdict`` with
+    ``ended_at`` instead of a phrase; the data changed form only.
+    """
     box = Box(tmp_path)
     run = run_id(1)
     with box.lock("dying"):
@@ -84,8 +88,12 @@ def test_probe_DM_7_orphan_journal_becomes_red_verdict(tmp_path: Path) -> None:
     assert [v.run_id for v in recovered] == [run]
     (red,) = recovered
     assert (red.exit_code, red.result) == (1, "red")
-    assert [(i.what, i.why) for i in red.report.incomplete] == [
-        ("run", "no verdict found; journal ends at step main aivis/up")
+    assert [i.model_dump() for i in red.report.incomplete] == [
+        {
+            "what": "run",
+            "code": "no-verdict",
+            "ended_at": {"phase": "main", "stack": "aivis", "name": "up"},
+        }
     ]
     assert [(s.phase, s.name, s.status) for s in red.steps] == [("main", "build", "ok")]
     assert red.composition_before == BEFORE and red.composition_after == AFTER
