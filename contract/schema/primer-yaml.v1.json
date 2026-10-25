@@ -120,15 +120,6 @@
     "Frontend": {
       "additionalProperties": false,
       "properties": {
-        "build_args": {
-          "default": [],
-          "items": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "title": "Build Args",
-          "type": "array"
-        },
         "port": {
           "maximum": 65535,
           "minimum": 1,
@@ -260,6 +251,21 @@
       "title": "Package",
       "type": "object"
     },
+    "Param": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "param",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "Param",
+      "type": "object"
+    },
     "Passport": {
       "additionalProperties": false,
       "properties": {
@@ -318,6 +324,7 @@
                 "asked": "#/$defs/Asked",
                 "derived": "#/$defs/Derived",
                 "minted": "#/$defs/Minted",
+                "param": "#/$defs/Param",
                 "passport": "#/$defs/Passport",
                 "seam": "#/$defs/Seam"
               },
@@ -332,6 +339,9 @@
               },
               {
                 "$ref": "#/$defs/Derived"
+              },
+              {
+                "$ref": "#/$defs/Param"
               },
               {
                 "$ref": "#/$defs/Passport"
@@ -587,6 +597,30 @@
       "title": "Seam",
       "type": "object"
     },
+    "Seed": {
+      "additionalProperties": false,
+      "properties": {
+        "run": {
+          "minLength": 1,
+          "title": "Run",
+          "type": "string"
+        },
+        "when": {
+          "enum": [
+            "install",
+            "command"
+          ],
+          "title": "When",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run",
+        "when"
+      ],
+      "title": "Seed",
+      "type": "object"
+    },
     "Service": {
       "additionalProperties": false,
       "properties": {
@@ -597,6 +631,7 @@
                 "asked": "#/$defs/Asked",
                 "derived": "#/$defs/Derived",
                 "minted": "#/$defs/Minted",
+                "param": "#/$defs/Param",
                 "passport": "#/$defs/Passport",
                 "seam": "#/$defs/Seam"
               },
@@ -611,6 +646,9 @@
               },
               {
                 "$ref": "#/$defs/Derived"
+              },
+              {
+                "$ref": "#/$defs/Param"
               },
               {
                 "$ref": "#/$defs/Passport"
@@ -745,8 +783,7 @@
         },
         "seeds": {
           "additionalProperties": {
-            "minLength": 1,
-            "type": "string"
+            "$ref": "#/$defs/Seed"
           },
           "default": {},
           "propertyNames": {
@@ -756,9 +793,7 @@
           "type": "object"
         },
         "test": {
-          "minLength": 1,
-          "title": "Test",
-          "type": "string"
+          "$ref": "#/$defs/StackTest"
         },
         "types": {
           "$ref": "#/$defs/Types"
@@ -768,6 +803,27 @@
         "compose"
       ],
       "title": "Stack",
+      "type": "object"
+    },
+    "StackTest": {
+      "additionalProperties": false,
+      "properties": {
+        "run": {
+          "minLength": 1,
+          "title": "Run",
+          "type": "string"
+        },
+        "target": {
+          "minLength": 1,
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run",
+        "target"
+      ],
+      "title": "StackTest",
       "type": "object"
     },
     "Types": {

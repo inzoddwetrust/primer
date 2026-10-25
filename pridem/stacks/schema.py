@@ -3,10 +3,12 @@
 A file is checked in two layers. Field layer: the pydantic models, strict and
 closed (an unknown key at any depth is an error), plus the fields the contract
 names as forbidden (rule 1 ``value``/``fixed``, rule 5 ``file``, rule 9
-``branch``), reported with their rule. Rule layer: cross-field rules of the
-contract (rule 3 single-point pins, rule 4, 10, 11, 13 and the referential
-checks), run only when the field layer is clean, each collecting every
-violation. Every problem names the path in the file.
+``branch``) and the object forms a bare string must not stand for (rule 17
+seeds ``{run, when}``, rule 20 tests ``{run, target}``), reported with their
+rule. Seed profiles are named by the stack; the machine knows none by name.
+Rule layer: cross-field rules of the contract (rule 3 single-point pins, rule
+4, 10, 11, 13 and the referential checks), run only when the field layer is
+clean, each collecting every violation. Every problem names the path in the file.
 
 ``python -m pridem.stacks.schema --export`` writes the JSON Schema of
 ``primer.yaml`` to ``contract/schema/``; ``pridem.stacks.lock`` exports its own.
@@ -65,6 +67,11 @@ RULES = {
     "R11.edition-services": (11, "the services of an edition are its dependencies"),
     "R11.edition-enum": (11, "enum: editions needs editions declared"),
     "R13.remote-seam": (13, "a remote dependency provides through the passport"),
+    "R17.seed-form": (17, "a seed profile is {run, when}, when is install or command"),
+    "R20.test-form": (
+        20,
+        "tests are {run, target}: run in the image built from target",
+    ),
     "S.seam-from": (0, "a seam names a stack this stack can be wired to"),
     "S.mount-dependency": (0, "a package mount names a declared dependency"),
 }
@@ -120,7 +127,29 @@ class App(Strict):
 class Frontend(Strict):
     service: Name
     port: Port
-    build_args: list[Name] = []
+
+
+def _object_form(code: str, form: str) -> BeforeValidator:
+    """A bare string where the contract wants an object names the rule."""
+
+    def check(value: object) -> object:
+        if isinstance(value, str):
+            raise _rule_error(code, f"a string is not {form}")
+        return value
+
+    return BeforeValidator(check)
+
+
+# A seed profile (rule 17); the machine knows no profile by name.
+class Seed(Strict):
+    run: Command
+    when: Literal["install", "command"]
+
+
+# Tests of a stack (rule 20): ``run`` in a container of build target ``target``.
+class StackTest(Strict):
+    run: Command
+    target: Name
 
 
 class Types(Strict):
@@ -134,9 +163,13 @@ class Stack(Strict):
     app: App | None = None
     frontend: Frontend | None = None
     migrate: Command | None = None
-    test: Command | None = None
+    test: (
+        Annotated[StackTest, _object_form("R20.test-form", "{run, target}")] | None
+    ) = None
     types: Types | None = None
-    seeds: dict[Name, Command] = {}
+    seeds: dict[
+        Name, Annotated[Seed, _object_form("R17.seed-form", "{run, when}")]
+    ] = {}
     repo: Name | None = None
     persistent: bool = False
 
@@ -152,6 +185,11 @@ class Asked(Strict):
 class Derived(Strict):
     source: Literal["derived"]
     run: Command
+
+
+# A non-secret instance parameter: params.<stack>.<variable> of the passport.
+class Param(Strict):
+    source: Literal["param"]
 
 
 class Passport(Strict):
@@ -179,7 +217,8 @@ def _no_values(value: object) -> object:
 
 EnvVar = Annotated[
     Annotated[
-        Minted | Asked | Derived | Passport | Seam, Field(discriminator="source")
+        Minted | Asked | Derived | Param | Passport | Seam,
+        Field(discriminator="source"),
     ],
     BeforeValidator(_no_values),
 ]

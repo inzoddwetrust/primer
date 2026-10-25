@@ -1,4 +1,4 @@
-# Contract 3 v1.4, section 2, verbatim.
+# Contract 3 v1.13, section 2, verbatim.
 schema: 1
 name: comms
 kind: service
@@ -8,7 +8,7 @@ stacks:
     compose: deploy/docker-compose.yml
     app:     { service: comms-app, port: 8000, health: /health, ready: /ready }
     migrate: alembic upgrade head
-    test:    python -m pytest tests/ --junitxml=/tmp/junit.xml
+    test:    { run: python -m pytest tests/ --junitxml=/tmp/junit.xml, target: test }
 
 env:
   SECRET_KEY:          { source: minted }

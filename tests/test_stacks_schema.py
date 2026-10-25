@@ -17,7 +17,7 @@ def test_examples_load_and_are_not_empty() -> None:
     service = load_primer_yaml(FIXTURES / "service.yaml")
     assert isinstance(product, Product)
     assert isinstance(service, Service)
-    assert len(product.env) == 8
+    assert len(product.env) == 9  # contract 3 v1.13 adds SUPPORT_LANGUAGE (param)
     assert set(product.dependencies) == {"comms", "payments", "meet"}
     assert len(product.packages["texts"].mount) == 2
     assert product.stacks["storage"].persistent is True

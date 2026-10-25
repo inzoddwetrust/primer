@@ -274,6 +274,22 @@
       "title": "Packages",
       "type": "object"
     },
+    "params": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "propertyNames": {
+          "minLength": 1
+        },
+        "type": "object"
+      },
+      "propertyNames": {
+        "minLength": 1
+      },
+      "title": "Params",
+      "type": "object"
+    },
     "policies": {
       "$ref": "#/$defs/Policies"
     },
@@ -302,6 +318,7 @@
     "domains",
     "access",
     "asked",
+    "params",
     "policies",
     "packages",
     "cloud"

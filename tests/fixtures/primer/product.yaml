@@ -1,4 +1,4 @@
-# Contract 3 v1.6, section 1, verbatim.
+# Contract 3 v1.13, section 1, verbatim.
 schema: 1
 name: aivis
 kind: product
@@ -19,11 +19,13 @@ stacks:                               # собственные стеки про
   aivis:
     compose: docker-compose.yml
     app:      { service: app, port: 8000, health: /health, ready: /ready }
-    frontend: { service: frontend, port: 80, build_args: [VITE_API_BASE_URL] }
+    frontend: { service: frontend, port: 80 }                    # инстансных значений в сборке нет (п.19)
     migrate:  python -m alembic upgrade head
-    test:     python -m pytest tests/ --junitxml=/tmp/junit.xml
+    test:     { run: python -m pytest tests/ --junitxml=/tmp/junit.xml, target: test }   # п.20
     types:    { openapi: /openapi.json, out: frontend/src/api/generated.ts, commit_as: aivis-bot }
-    seeds:    { bootstrap: python -m app.seed bootstrap, demo: python -m app.seed demo }
+    seeds:                            # профиль сам объявляет, когда он идёт (п.17)
+      bootstrap: { run: python -m app.seed bootstrap, when: install }
+      demo:      { run: python -m app.seed demo, when: command }
   storage:                            # стек с незаменимыми данными (файлы людей) [Р 22.10]
     compose: deploy/storage-compose.yml
     persistent: true                  # тома переживают destroy и reinstall (п.14)
@@ -32,7 +34,8 @@ env:                                  # схема окружения; толь�
   SECRET_KEY:            { source: minted }
   POSTGRES_PASSWORD:     { source: minted }
   EDITION:               { source: passport, key: edition, enum: editions }   # проверяется до сборки
-  VITE_API_BASE_URL:     { source: passport, key: domains.api }
+  SUPPORT_LANGUAGE:      { source: param }                         # params.aivis.SUPPORT_LANGUAGE паспорта
+  API_BASE_URL:          { source: passport, key: domains.api }   # хост; фронт получает при старте, `https://` добавляет продукт
   COMMS_API_URL:         { source: seam, from: comms }
   COMMS_SERVICE_TOKEN:   { source: seam, from: comms }
   TELEGRAM_BOT_URL:      { source: seam, from: comms }            # производное считает comms

@@ -1,4 +1,4 @@
-# Contract 1 v1.6, section 1, verbatim.
+# Contract 1 v1.9, section 1, verbatim.
 schema: 1
 version: 7                        # версия паспорта; растёт при каждой правке
 
@@ -28,10 +28,13 @@ asked:                            # ответы на asked каждого ст�
     MAILGUN_API_KEY: "<secret: 16+ chars>"
   payments:
     STRIPE_SECRET_KEY: "<secret: 16+ chars>"
-  velo:
-    MEET_URL: "https://meet.velo…"  # provides remote-сервиса приходят сюда (контракт 3 п.13)
-    MEET_JWT_SECRET: "<secret: 16+ chars>"
-  aivis: {}
+  aivis:
+    MEET_JWT_SECRET: "<secret: 16+ chars>"   # remote-зависимость meet продукта (контракт 3 п.13)
+
+params:                           # несекретные параметры инстанса по стеку: не вычищаются, правила длины нет
+  aivis:
+    MEET_URL: "https://meet.aivis…"  # provides remote-сервиса приходят сюда (контракт 3 п.13)
+    SUPPORT_LANGUAGE: ru
 
 policies:
   ssl: letsencrypt                # letsencrypt | self-signed | defer | provided

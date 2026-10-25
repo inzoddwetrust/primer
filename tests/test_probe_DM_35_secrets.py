@@ -156,4 +156,5 @@ def test_probe_DM_35_short_secret_is_rejected(tmp_path: Path) -> None:
 
     example = load_passport(write_passport(tmp_path, passport_example()))
     values = [v.get_secret_value() for a in example.asked.values() for v in a.values()]
-    assert len(values) == 5 and min(map(len, values)) >= 16
+    # contract 1 v1.8 moved MEET_URL from asked to params: four secrets remain
+    assert len(values) == 4 and min(map(len, values)) >= 16

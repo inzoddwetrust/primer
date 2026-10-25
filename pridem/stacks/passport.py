@@ -3,8 +3,9 @@
 A passport is checked in two layers, as ``primer.yaml`` is. Field layer: the
 models, strict and closed, plus the names rule 1 forbids (``minted``, the
 composition, derived values), reported with their rule wherever the passport
-would hold them, rule 9 (a package is pinned to an exact version) and rule 12
-(every value of ``asked`` and ``policies.tls`` is at least 16 characters). Rule
+would hold them, rule 9 (a package is pinned to an exact version), rule 12
+(every value of ``asked`` and ``policies.tls`` is at least 16 characters), rule
+14 (``params`` is plain strings by stack) and rule 15 (domains are lowercase). Rule
 layer, only when the field layer is clean: rule 4 (``product.ref`` by role),
 rule 5 (``policies.tls`` exactly when ``ssl: provided``), rule 10
 (``server.expires_at`` exactly on ``preview``); each collects every violation.
@@ -75,6 +76,10 @@ RULES = {
         10,
         "server.expires_at is required on role preview and forbidden on other roles",
     ),
+    "R15.domain-lowercase": (
+        15,
+        "a domain is written in lowercase: some clients compare hosts by case",
+    ),
     "R12.secret-length": (
         12,
         f"a secret of the passport (asked, policies.tls) is at least "
@@ -100,13 +105,24 @@ _COMMIT = re.compile(r"[0-9a-f]{7,40}")
 _REF_FORBIDDEN = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 
 
-def _host_name(value: str) -> str:
+def _is_host_name(value: str) -> bool:
     labels = value.split(".")
-    if (
-        len(value) > 253
-        or len(labels) < 2
-        or not all(_HOST_LABEL.fullmatch(label) for label in labels)
-    ):
+    return (
+        len(value) <= 253
+        and len(labels) >= 2
+        and all(_HOST_LABEL.fullmatch(label) for label in labels)
+    )
+
+
+def _host_name(value: str) -> str:
+    """Rule 15 first: a host that is only wrong by case says so with its rule."""
+    if not _is_host_name(value):
+        if _is_host_name(value.lower()):
+            raise PydanticCustomError(
+                "R15.domain-lowercase",
+                "{message}",
+                {"message": rule_message("R15.domain-lowercase", f"{value!r}")},
+            )
         raise ValueError(f"not a host name (no scheme, path or port): {value!r}")
     return value
 
@@ -246,6 +262,8 @@ class Passport(Strict):
     domains: dict[Name, HostName]
     access: Access
     asked: dict[Name, dict[Name, AskedValue]]
+    # rule 14: plain strings by stack, no length rule, never among the secrets
+    params: dict[Name, dict[Name, str]]
     policies: Policies
     packages: dict[Name, Package]
     cloud: Cloud
