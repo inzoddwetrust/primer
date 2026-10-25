@@ -34,10 +34,11 @@ from pridem.steps.sources import source_steps
 root, address = Path("/"), sys.argv[1]
 _, steps = source_steps(root, stack="blank", address=address, ref="main", tag=False)
 box, secrets = Box(Path("/opt/pridem")), Secrets(())
+key_step = DeployKey(address, root, wait_s=30)
 with box.lock("tier3-sources"):
     started = datetime.now(UTC).replace(microsecond=0)
     outcome = Plan(
-        [StackSteps("sources", [DeployKey(address, root), *steps], root=True)],
+        [StackSteps("sources", [key_step, *steps], root=True)],
         mode="install", role="test", runner=SubprocessRunner(),
         sink=ConsoleSink(sys.stdout, secrets),
     ).run()
@@ -60,7 +61,7 @@ def _run(argv: list[str]) -> tuple[int, list[str]]:
         lines.append(line)
 
     runner = SubprocessRunner()
-    return runner.run(argv, expect=(0, 1, 2), timeout=600, on_line=keep).code, lines
+    return runner.run(argv, expect=(0, 1, 2), timeout=900, on_line=keep).code, lines
 
 
 def _plan() -> tuple[Verdict, list[str]]:
@@ -79,8 +80,13 @@ def test_probe_DM_10_blank_is_fetched_by_ref_over_ssh() -> None:
     key = keys / repo(ADDRESS).alias
     shutil.copyfile(source, key)
     key.chmod(0o600)
+    # FIX DM-10: a key without access made the ceremony wait KEY_WAIT_S (1800 s)
+    # past the probe's timeout and the reason was lost; the probe now waits 30 s
+    # and first proves the secret is a private key ssh can read
+    code, public = _run(["ssh-keygen", "-y", "-f", str(key)])
+    assert code == 0, f"the secret is not a private key ssh reads: {public}"
     verdict, lines = _plan()
-    assert verdict.result == "green", lines
+    assert verdict.result == "green", (public, lines)
     by = {step.name: step for step in verdict.steps}
     fetched = by["fetch_root"].verify or {}
     assert fetched["config"] == "blank" and fetched["release"] == fetched["head"]
