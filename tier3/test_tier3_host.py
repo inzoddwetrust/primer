@@ -54,6 +54,7 @@ with box.lock("tier3-host"):
     )
     box.write_verdict(verdict)
 print("VERDICT " + verdict.model_dump_json())
+sys.exit(int(verdict.exit_code))  # the exit code is the verdict's, as a verb's
 """
 
 

@@ -51,17 +51,18 @@ with box.lock("tier3-sources"):
     )
     box.write_verdict(verdict)
 print("VERDICT " + verdict.model_dump_json())
+sys.exit(int(verdict.exit_code))  # the exit code is the verdict's, as a verb's
 """
 
 
-def _run(argv: list[str]) -> tuple[int, list[str]]:
+def _run(argv: list[str], expect: tuple[int, ...] = (0, 1, 2)) -> tuple[int, list[str]]:
     lines: list[str] = []
 
     def keep(stream: Stream, line: str, cut: bool) -> None:
         lines.append(line)
 
     runner = SubprocessRunner()
-    return runner.run(argv, expect=(0, 1, 2), timeout=900, on_line=keep).code, lines
+    return runner.run(argv, expect=expect, timeout=900, on_line=keep).code, lines
 
 
 def _plan() -> tuple[Verdict, list[str]]:
@@ -83,7 +84,7 @@ def test_probe_DM_10_blank_is_fetched_by_ref_over_ssh() -> None:
     # FIX DM-10: a key without access made the ceremony wait KEY_WAIT_S (1800 s)
     # past the probe's timeout and the reason was lost; the probe now waits 30 s
     # and first proves the secret is a private key ssh can read
-    code, public = _run(["ssh-keygen", "-y", "-f", str(key)])
+    code, public = _run(["ssh-keygen", "-y", "-f", str(key)], expect=(0, 255))
     assert code == 0, f"the secret is not a private key ssh reads: {public}"
     verdict, lines = _plan()
     assert verdict.result == "green", (public, lines)
