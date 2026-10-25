@@ -6,7 +6,9 @@ name: tier3
 # backend; install.sh gets its pins from this run -- the pushed commit under a
 # temporary tag v{__version__} in a local bare clone, the wheel by file:// --
 # and installs the machine the way it installs a box. Then the tier 3 probes run
-# as root against the installed binary.
+# as root against the installed binary. No step depends on the directory it
+# starts in: the job runs in the clone ($GITHUB_WORKSPACE, checked out first)
+# and every file of the repository is named from $GITHUB_WORKSPACE.
 
 on:
   push:
@@ -23,6 +25,9 @@ defaults:
 jobs:
   box:
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -45,13 +50,13 @@ jobs:
           # venv for the build; install.sh asks for python3-venv again, as on a box
           sudo apt-get -o DPkg::Lock::Timeout=600 install -y python3-venv
           python3 -m venv /tmp/build
-          /tmp/build/bin/python -m pip install --require-hashes -r requirements-build.lock
-          /tmp/build/bin/python -m pip wheel --no-deps --no-build-isolation --no-index -w /tmp/tier3/dist .
+          /tmp/build/bin/python -m pip install --require-hashes -r "$GITHUB_WORKSPACE/requirements-build.lock"
+          /tmp/build/bin/python -m pip wheel --no-deps --no-build-isolation --no-index -w /tmp/tier3/dist "$GITHUB_WORKSPACE"
       - name: install.sh with this run's sources
         run: |
-          version=$(python3 -c 'import re, pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("pridem/__init__.py").read_text()).group(1))')
+          version=$(python3 -c 'import re, pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("'"$GITHUB_WORKSPACE"'/pridem/__init__.py").read_text()).group(1))')
           tag="v$version"
-          git clone --quiet --bare . /tmp/tier3/primer.git
+          git clone --quiet --bare "$GITHUB_WORKSPACE" /tmp/tier3/primer.git
           git -C /tmp/tier3/primer.git tag -f "$tag" "$GITHUB_SHA"
           wheel="/tmp/tier3/dist/pridem-$version-py3-none-any.whl"
           sha=$(sha256sum "$wheel" | cut -d " " -f 1)
@@ -60,7 +65,7 @@ jobs:
             -e "s/@PRIDEM_WHEEL_SHA256@/$sha/" \
             -e "s|@PRIDEM_REPO@|file:///tmp/tier3/primer|" \
             -e "s|@PRIDEM_WHEEL_URL@|file://$wheel|" \
-            install.sh > /tmp/tier3/install.sh
+            "$GITHUB_WORKSPACE/install.sh" > /tmp/tier3/install.sh
           if grep -n "@PRIDEM_" /tmp/tier3/install.sh; then
             echo "a pin was not substituted"
             exit 1
@@ -69,8 +74,8 @@ jobs:
       - name: tier 3 probes
         run: |
           python3 -m venv /tmp/t3
-          /tmp/t3/bin/python -m pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
-          /tmp/t3/bin/python -m pip install --no-deps -e .
+          /tmp/t3/bin/python -m pip install --no-index --find-links "$GITHUB_WORKSPACE/wheels" --require-hashes -r "$GITHUB_WORKSPACE/requirements.lock"
+          /tmp/t3/bin/python -m pip install --no-deps -e "$GITHUB_WORKSPACE"
           /tmp/t3/bin/python -m pip freeze --exclude-editable > "$RUNNER_TEMP/runtime.txt"
-          /tmp/t3/bin/python -m pip install -c "$RUNNER_TEMP/runtime.txt" -e ".[dev]"
-          sudo /tmp/t3/bin/python -m pytest -q -p no:cacheprovider tier3
+          /tmp/t3/bin/python -m pip install -c "$RUNNER_TEMP/runtime.txt" -e "$GITHUB_WORKSPACE[dev]"
+          sudo /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --rootdir "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/tier3"

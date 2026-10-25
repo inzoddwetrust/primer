@@ -8,9 +8,11 @@ exits 1 with stderr and leaves the box untouched (contract 2 v1.9).
 
 import io
 import json
+import re
 from pathlib import Path
 
 import pytest
+import yaml
 from state_support import header, run_id, state
 
 from pridem import __version__
@@ -146,3 +148,74 @@ def test_two_status_runs_write_two_verdicts(tmp_path: Path) -> None:
     assert _run(["status"], root)[0] == 0
     first, second = _verdicts(root)
     assert first.run_id != second.run_id
+
+
+# --- FIX DM-16: tier 3 steps do not depend on the directory they start in ---
+
+REPO = Path(__file__).resolve().parents[1]
+TIER3 = REPO / ".github" / "workflows" / "tier3.yml"
+REPO_NAMES = (
+    "install.sh",
+    "requirements-build.lock",
+    "requirements.lock",
+    "wheels",
+    "pyproject.toml",
+    "pridem/",
+    "tier3",
+)
+RELATIVE = re.compile(
+    r"(?<![\w/$.-])(?:" + "|".join(re.escape(name) for name in REPO_NAMES) + r")"
+)
+
+
+def workflow_problems(text: str) -> list[str]:
+    """Steps of ``text`` that read the repository before the clone exists, or
+    name a file of it relative to the directory they start in."""
+    document = yaml.safe_load(text)
+    problems: list[str] = []
+    for name, job in document["jobs"].items():
+        defaults = (job.get("defaults") or {}).get("run") or {}
+        if defaults.get("working-directory") != "${{ github.workspace }}":
+            problems.append(f"{name}: no working-directory ${{{{ github.workspace }}}}")
+        cloned = False
+        for index, step in enumerate(job["steps"]):
+            if str(step.get("uses", "")).startswith("actions/checkout@"):
+                cloned = True
+                continue
+            run = "\n".join(  # a comment reads nothing
+                line
+                for line in str(step.get("run", "")).splitlines()
+                if not line.lstrip().startswith("#")
+            )
+            reads = "$GITHUB_WORKSPACE" in run or RELATIVE.search(run) is not None
+            if reads and not cloned:
+                problems.append(
+                    f"{name}: step {index} reads the repository before checkout"
+                )
+            if RELATIVE.search(run):
+                problems.append(
+                    f"{name}: step {index} names a repository file relatively"
+                )
+    return problems
+
+
+def test_tier3_steps_read_the_repository_only_after_checkout() -> None:
+    text = TIER3.read_text()
+    assert workflow_problems(text) == []
+    assert "$GITHUB_WORKSPACE/requirements-build.lock" in text  # the check sees reads
+    found = re.search(r"      - uses: actions/checkout@.*\n        with:\n.*\n", text)
+    assert found is not None
+    checkout = found.group(0)
+    late = text.replace(checkout, "").replace(
+        "      - name: tier 3 probes\n", checkout + "      - name: tier 3 probes\n"
+    )
+    assert late != text and any("before checkout" in p for p in workflow_problems(late))
+    relative = text.replace(
+        '-r "$GITHUB_WORKSPACE/requirements-build.lock"', "-r requirements-build.lock"
+    )
+    assert relative != text
+    assert workflow_problems(relative) == [
+        "box: step 2 names a repository file relatively"
+    ]
+    anywhere = text.replace("        working-directory: ${{ github.workspace }}\n", "")
+    assert anywhere != text and len(workflow_problems(anywhere)) == 1

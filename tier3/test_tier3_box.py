@@ -61,6 +61,7 @@ def test_probe_DM_16_status_on_a_fresh_box_is_green() -> None:
 def test_probe_DM_16_box_files_are_private_on_the_runner() -> None:
     code, _, err = _pridem("status")
     assert code == 0, err
+    assert _mode(BOX) == 0o700  # FIX DM-16: install.sh makes the home root's alone
     for directory in (BOX / "history", BOX / "journal"):
         assert _mode(directory) == 0o700, directory
         files = list(directory.iterdir())

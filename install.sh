@@ -80,6 +80,8 @@ else
     curl -fsSL -o "$work/pridem-${TAG#v}-py3-none-any.whl" "$WHEEL_URL"
     echo "$WHEEL_SHA256  $work/pridem-${TAG#v}-py3-none-any.whl" | sha256sum -c --strict
     rm -rf "$TARGET"
+    # the machine's home is root's alone, like every file of the box
+    install -d -m 0700 "$HOME_DIR"
     mkdir -p "$HOME_DIR/versions"
     python3 -m venv "$TARGET/venv"
     "$TARGET/venv/bin/pip" install --no-index --find-links "$work/pridem/wheels" \

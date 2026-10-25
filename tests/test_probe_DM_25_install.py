@@ -16,6 +16,7 @@ bytes, so a wrong download is a wrong hash and nothing else.
 import hashlib
 import json
 import re
+import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -153,8 +154,15 @@ class Box:
 
 
 def _installed(box: Box) -> bool:
-    current = box.root / "opt" / "pridem" / "current"
-    return current.is_symlink() and (box.root / "usr/local/bin/pridem").is_symlink()
+    home = box.root / "opt" / "pridem"
+    current = home / "current"
+    # FIX DM-16: the machine's home is 0700, root's alone
+    private = stat.S_IMODE(home.stat().st_mode) == 0o700 if home.exists() else False
+    return (
+        private
+        and current.is_symlink()
+        and (box.root / "usr/local/bin/pridem").is_symlink()
+    )
 
 
 def _clean(tmp_path: Path) -> Box:
