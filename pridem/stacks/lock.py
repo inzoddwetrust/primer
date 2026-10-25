@@ -34,6 +34,7 @@ from pridem.stacks.loader import (
     Problem,
     field_problems,
     load_yaml_mapping,
+    load_yaml_text,
 )
 from pridem.stacks.schema import (
     Name,
@@ -103,6 +104,14 @@ def load_primer_lock(file: Path) -> Lock:
     if problems or lock is None:
         raise ContractError(file, problems)
     return lock
+
+
+def parse_primer_lock(text: str, name: str) -> Lock:
+    """Check ``text`` taken from git (``git show <ref>:<path>``); ``name`` names it."""
+    found, problems = _check(load_yaml_text(text, name))
+    if problems or found is None:
+        raise ContractError(Path(name), problems)
+    return found
 
 
 def check_lock(product: Product, lock: Lock) -> list[Problem]:

@@ -167,15 +167,19 @@ def _yaml_error_text(error: yaml.YAMLError) -> str:
 
 
 def _read(file: Path) -> tuple[dict[str, object], list[Problem]]:
-    """Parse ``file``; every failure is a problem, nothing is raised from here.
+    """Parse ``file``; every failure is a problem, nothing is raised from here."""
+    with file.open("rb") as handle:
+        return _parse(handle.read(MAX_BYTES + 1))
+
+
+def _parse(raw: bytes) -> tuple[dict[str, object], list[Problem]]:
+    """Parse the bytes of a contract file; every failure is a problem.
 
     Construction runs after the walk: an implicit scalar may still fail to
     construct (``2026-13-45`` is a timestamp by pattern and not a date), and
     so may a value under an explicit tag; such errors carry the value in their
     text, so only their type is reported.
     """
-    with file.open("rb") as handle:
-        raw = handle.read(MAX_BYTES + 1)
     if len(raw) > MAX_BYTES:
         return {}, [Problem("", "Y.size", f"file is larger than {MAX_BYTES} bytes")]
     try:
@@ -212,6 +216,16 @@ def _read(file: Path) -> tuple[dict[str, object], list[Problem]]:
     if not isinstance(data, dict):
         return {}, [Problem("", "Y.root", "top level must be a mapping")]
     return data, []
+
+
+def load_yaml_text(text: str, name: str) -> dict[str, object]:
+    """Read ``text`` -- a contract file taken from git, ``git show <ref>:<path>``
+    -- as one YAML mapping of the contract form, or raise; ``name`` names it in
+    the error. The same size limit and form checks as a file."""
+    data, problems = _parse(text.encode("utf-8"))
+    if problems:
+        raise ContractError(Path(name), problems)
+    return data
 
 
 def load_yaml_mapping(file: Path) -> dict[str, object]:

@@ -42,6 +42,7 @@ from pridem.stacks.loader import (
     Problem,
     field_problems,
     load_yaml_mapping,
+    load_yaml_text,
     render_path,
 )
 
@@ -574,6 +575,14 @@ def load_primer_yaml(file: Path) -> Product | Service:
     if problems or stack is None:
         raise ContractError(file, problems)
     return stack
+
+
+def parse_primer_yaml(text: str, name: str) -> Product | Service:
+    """Check ``text`` taken from git (``git show <ref>:<path>``); ``name`` names it."""
+    found, problems = _check(load_yaml_text(text, name))
+    if problems or found is None:
+        raise ContractError(Path(name), problems)
+    return found
 
 
 PRIMER_YAML_SCHEMA = "primer-yaml.v1.json"

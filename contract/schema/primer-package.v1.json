@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "pattern": "^\\d+\\.\\d+$",
+      "title": "Contract",
+      "type": "string"
+    },
+    "schema": {
+      "const": 1,
+      "title": "Schema",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema",
+    "contract"
+  ],
+  "title": "primer-package.yaml v1",
+  "type": "object"
+}
