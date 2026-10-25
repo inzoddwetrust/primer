@@ -1,0 +1,83 @@
+name: release
+
+# A release of the machine is a tag v{__version__} on the first parent of main
+# (TZ section 10.2). Tier 1 runs on the tag's commit first; only a green run
+# builds the wheel from the pinned build backend and publishes two assets: the
+# wheel and install.sh with its three pins substituted.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tier1:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      # Runtime exactly as boxes get it: from wheels/ by the lock, with hashes.
+      - run: python -m pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
+      - run: python -m pip install --no-deps -e .
+      # Dev tools from the index, constrained to the installed runtime: a tool
+      # that needs another runtime version fails here instead of moving it.
+      - run: |
+          python -m pip freeze --exclude-editable > "$RUNNER_TEMP/runtime.txt"
+          python -m pip install -c "$RUNNER_TEMP/runtime.txt" -e ".[dev]"
+      - run: ruff check . && ruff format --check .
+      - run: mypy .
+      - run: pytest
+      - run: shellcheck install.sh
+
+  release:
+    needs: tier1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: tag is v{__version__} on the first parent of main
+        run: |
+          version=$(python -c 'import re, pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("pridem/__init__.py").read_text()).group(1))')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME is not v$version (pridem/__init__.py)"
+            exit 1
+          fi
+          if ! git rev-list --first-parent origin/main | grep -qx "$GITHUB_SHA"; then
+            echo "$GITHUB_SHA is not on the first parent of main"
+            exit 1
+          fi
+      - run: python -m pip install --require-hashes -r requirements-build.lock
+      - run: python -m pip wheel --no-deps --no-build-isolation --no-index -w dist .
+      - name: install.sh with its pins
+        run: |
+          wheel="dist/pridem-${GITHUB_REF_NAME#v}-py3-none-any.whl"
+          sha=$(sha256sum "$wheel" | cut -d " " -f 1)
+          sed -e "s/@PRIDEM_TAG@/$GITHUB_REF_NAME/" \
+            -e "s/@PRIDEM_COMMIT@/$GITHUB_SHA/" \
+            -e "s/@PRIDEM_WHEEL_SHA256@/$sha/" install.sh > dist/install.sh
+          if grep -n "@PRIDEM_" dist/install.sh; then
+            echo "a pin was not substituted"
+            exit 1
+          fi
+      - run: shellcheck dist/install.sh
+      - name: GitHub Release with the wheel and install.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/pridem-${GITHUB_REF_NAME#v}-py3-none-any.whl" dist/install.sh \
+            --title "pridem $GITHUB_REF_NAME" --notes "pridem $GITHUB_REF_NAME at $GITHUB_SHA"
