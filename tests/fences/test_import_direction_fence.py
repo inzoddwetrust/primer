@@ -74,6 +74,7 @@ LAYERS: Layers = (
             "pridem.stacks.stack",
             "pridem.steps",
             "pridem.steps.base",
+            "pridem.steps.host",
         ),
     ),
     ("plan", ("pridem.plan",)),

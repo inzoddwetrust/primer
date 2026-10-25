@@ -581,6 +581,14 @@ def build_verdict(
             {"stack": item.stack, "name": item.name, **item.reason.as_json()}
             for item in outcome.doctor_diff
         ]
+    if dns is None:  # the dns key of any step's fact, whatever the step is called
+        found = [
+            entry
+            for record in (*outcome.steps, *outcome.restore, *outcome.finally_)
+            for entry in (record.verify.get("dns") or [])  # type: ignore[union-attr]
+            if isinstance(record.verify.get("dns"), list)
+        ]
+        dns = [entry for entry in found if isinstance(entry, dict)] or None
     if dns is not None:
         report["dns"] = [dict(item) for item in dns]
     raw: dict[str, Json] = {
