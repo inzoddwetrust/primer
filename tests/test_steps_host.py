@@ -440,3 +440,33 @@ class _Fails(_NeverActs):
         raise StepFailed("boom")
 
     codes = {"boom": "boom", "do": "act"}
+
+
+def test_a_domain_with_an_extra_address_is_a_mismatch(tmp_path: Path) -> None:
+    """FIX DM-12: the box's IP among others is not enough -- an extra A record (an
+    old box after a move) sends traffic and the ACME check elsewhere."""
+    root = box(tmp_path)
+    calls = preflight_calls()
+    calls += [
+        call("curl", "-fsS", "--max-time", "10", url, lines=(IP,))
+        for url in ECHO_SERVICES
+    ]
+    old = "198.51.100.9"
+    calls.append(
+        call(
+            "getent",
+            "ahostsv4",
+            "app.example.org",
+            lines=(f"{IP}   STREAM app.example.org", f"{old}   STREAM app.example.org"),
+        )
+    )
+    outcome = run([Preflight(root, domains=["app.example.org"], min_free_gib=0)], calls)
+    step = outcome.steps[0]
+    assert step.reason is not None and step.reason.code == "preflight:dns-mismatch"
+    assert step.verify["dns"] == [
+        {"domain": "app.example.org", "resolves_to": sorted([IP, old]), "expected": IP}
+    ]
+    # the pair: one record, on the box -- green
+    one = preflight_calls({"app.example.org": IP})
+    outcome = run([Preflight(root, domains=["app.example.org"], min_free_gib=0)], one)
+    assert outcome.code is ExitCode.OK

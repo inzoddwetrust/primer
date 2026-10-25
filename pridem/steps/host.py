@@ -9,7 +9,8 @@ killed. Every step reads its fact back: a package is installed when
 
 - ``preflight`` -- Ubuntu 24.04, root, free disk, a living docker if docker is
   installed, and DNS: each domain resolves to the box's public IP (two echo
-  services must agree). It has no ``act``; it fails before any step acts.
+  services must agree) and nowhere else -- an extra A record, say an old box's,
+  is a mismatch. It has no ``act``; it fails before any step acts.
   The table ``{domain, resolves_to, expected}`` is the ``dns`` key of its
   fact, which the verdict builder copies to ``report.dns``.
 - ``wait_host_quiet`` -- ``cloud-init status --wait`` when cloud-init is
@@ -208,7 +209,7 @@ class Preflight(_HostStep):
                 table.append(
                     {"domain": domain, "resolves_to": _j(resolved), "expected": ip}
                 )
-                if ip not in resolved:
+                if resolved != [ip]:  # every address is the box's (contract 1 rule 6)
                     wrong.append(domain)
             fact["public_ip"] = ip
             fact["dns"] = table
