@@ -46,6 +46,7 @@ ENGLISH: Catalog = {
     "@null:errno": "no errno",
     # --- the renderers' words and layout ---
     "@summary": "{head} → {result} · {duration} · {composition} · {passport}",
+    "@summary.no-passport": "{head} → {result} · {duration} · {composition}",
     "@summary.sep": " · ",
     "@passport": "passport v{version}",
     "@composition.same": "{name} {value}",

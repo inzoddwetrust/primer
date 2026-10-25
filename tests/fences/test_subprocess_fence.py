@@ -59,7 +59,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-SCANNED_DIRS = ("pridem", "tests")
+SCANNED_DIRS = ("pridem", "tests", "tier3")  # tier3: DM-16
 ALLOWED_FILE = "pridem/runner.py"
 
 FORBIDDEN_MODULES = frozenset(

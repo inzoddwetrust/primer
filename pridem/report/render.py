@@ -77,13 +77,23 @@ def summary_line(verdict: Verdict, catalog: Catalog = ENGLISH) -> str:
     """``deploy 9a1c4e2 → green · 7m12s · aivis 8f0b21d→9a1c4e2 · … · passport v7``."""
     head = " ".join([verdict.verb, *(_value(v) for v in verdict.args.values())])
     spent = duration((verdict.finished - verdict.started).total_seconds(), catalog)
+    composition = say(catalog, "@summary.sep").join(_composition(verdict, catalog))
+    if verdict.passport_version is None:  # a box without a passport (v1.9)
+        return say(
+            catalog,
+            "@summary.no-passport",
+            head=head,
+            result=verdict.result,
+            duration=spent,
+            composition=composition,
+        )
     return say(
         catalog,
         "@summary",
         head=head,
         result=verdict.result,
         duration=spent,
-        composition=say(catalog, "@summary.sep").join(_composition(verdict, catalog)),
+        composition=composition,
         passport=say(catalog, "@passport", version=verdict.passport_version),
     )
 
@@ -245,7 +255,10 @@ def _closing(verdict: Verdict, catalog: Catalog) -> list[str]:
     for key in keys:
         cells = [key, before.get(key, missing), after.get(key, missing)]
         out.append("| " + " | ".join(_cell(cell) for cell in cells) + " |")
-    out += ["", say(catalog, "@closing.passport", version=verdict.passport_version)]
+    out.append("")
+    if verdict.passport_version is not None:
+        version = verdict.passport_version
+        out.append(say(catalog, "@closing.passport", version=version))
     if verdict.junit is not None:
         junit = verdict.junit
         out.append(

@@ -41,7 +41,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 PACKAGE = "pridem"
-BANNED_AREA = ("pridem", "tests")
+BANNED_AREA = ("pridem", "tests", "tier3")  # tier3: DM-16
 MAP_PATH = "<layer map>"
 
 Layers = tuple[tuple[str, tuple[str, ...]], ...]
@@ -77,6 +77,15 @@ LAYERS: Layers = (
         ),
     ),
     ("plan", ("pridem.plan",)),
+    (
+        "verbs",
+        (
+            "pridem.verbs",
+            "pridem.verbs.base",
+            "pridem.verbs.status",
+            "pridem.verbs.version",
+        ),
+    ),
     ("top", ("pridem.agent", "pridem.cli")),
 )
 
@@ -719,7 +728,9 @@ def test_fence_sees_the_tree(tmp_path: Path) -> None:
     pairs = {(edge.importer, edge.target) for edge in tree.edges}
     assert ("pridem.stacks.lock", "pridem.stacks.schema") in pairs
     assert ("pridem.stacks.schema", "pridem.stacks.lock") not in pairs
-    assert ("pridem.cli", "pridem") in pairs
+    # DM-16: the CLI goes through the verbs; the version comes from the root
+    assert ("pridem.cli", "pridem.verbs") in pairs
+    assert ("pridem.verbs.version", "pridem") in pairs
 
     empty = tmp_path / "empty"
     (empty / "pridem").mkdir(parents=True)

@@ -68,7 +68,10 @@ jobs:
           sha=$(sha256sum "$wheel" | cut -d " " -f 1)
           sed -e "s/@PRIDEM_TAG@/$GITHUB_REF_NAME/" \
             -e "s/@PRIDEM_COMMIT@/$GITHUB_SHA/" \
-            -e "s/@PRIDEM_WHEEL_SHA256@/$sha/" install.sh > dist/install.sh
+            -e "s/@PRIDEM_WHEEL_SHA256@/$sha/" \
+            -e "s|@PRIDEM_REPO@|https://github.com/$GITHUB_REPOSITORY|" \
+            -e "s|@PRIDEM_WHEEL_URL@|https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/pridem-${GITHUB_REF_NAME#v}-py3-none-any.whl|" \
+            install.sh > dist/install.sh
           if grep -n "@PRIDEM_" dist/install.sh; then
             echo "a pin was not substituted"
             exit 1

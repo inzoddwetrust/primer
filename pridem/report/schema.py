@@ -469,7 +469,10 @@ class Verdict(Strict):
     finished: Moment
     exit_code: Annotated[ExitCode, BeforeValidator(_exit_code)]
     result: Result
-    passport_version: Annotated[int, Field(ge=1)]
+    # absent while the box has no passport (contract 2 v1.9)
+    passport_version: Annotated[int, Field(ge=1)] | None = Field(
+        default=None, exclude_if=_is_none
+    )
     composition_before: Composition
     composition_after: Composition
     steps: list[Step]
@@ -536,7 +539,7 @@ def build_verdict(
     actor: Mapping[str, str],
     started: datetime,
     finished: datetime,
-    passport_version: int,
+    passport_version: int | None,
     composition_before: Mapping[str, str],
     composition_after: Mapping[str, str],
     secrets: Secrets,
@@ -590,7 +593,7 @@ def build_verdict(
         "finished": _stamp(finished),
         "exit_code": int(outcome.code),
         "result": RESULT[outcome.code],
-        "passport_version": passport_version,
+        **({} if passport_version is None else {"passport_version": passport_version}),
         "composition_before": dict(composition_before),
         "composition_after": dict(composition_after),
         "steps": [

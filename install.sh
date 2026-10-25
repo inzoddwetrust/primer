@@ -4,8 +4,11 @@
 # Five actions, no questions: check the host; install the packages; clone pridem
 # at the pinned commit; build the venv without an index; link `current` and
 # `pridem`. In the repository this file is a template: the release workflow
-# substitutes the three pins below and publishes the result as an asset of the
-# GitHub Release, next to the pridem wheel. With unsubstituted pins it refuses.
+# substitutes the five pins below -- tag, commit, the wheel's sha256 and the two
+# sources, the repository and the wheel's address -- and publishes the result as
+# an asset of the GitHub Release, next to the pridem wheel; tier 3 substitutes a
+# local clone and a file:// wheel built in its run. With unsubstituted pins it
+# refuses.
 #
 # PRIDEM_ROOT prefixes every path the script reads or writes (empty on a box);
 # it changes where, never what.
@@ -14,7 +17,8 @@ set -euo pipefail
 TAG="@PRIDEM_TAG@"
 COMMIT="@PRIDEM_COMMIT@"
 WHEEL_SHA256="@PRIDEM_WHEEL_SHA256@"
-REPO="https://github.com/inzoddwetrust/primer"
+REPO="@PRIDEM_REPO@"
+WHEEL_URL="@PRIDEM_WHEEL_URL@"
 SOPS_VERSION="v3.13.3"
 SOPS_SHA256="e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b"
 
@@ -30,7 +34,9 @@ fail() {
 
 # 1. The host: exactly Ubuntu 24.04 on x86_64, as root, with real pins.
 [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && $COMMIT =~ ^[0-9a-f]{40}$ &&
-    $WHEEL_SHA256 =~ ^[0-9a-f]{64}$ ]] ||
+    $WHEEL_SHA256 =~ ^[0-9a-f]{64}$ &&
+    $REPO =~ ^(https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|file:///[^[:space:]]+)$ &&
+    $WHEEL_URL =~ ^(https://github\.com/|file:///)[^[:space:]]+\.whl$ ]] ||
     fail "pins are not set: use install.sh from the GitHub Release of a tag"
 [[ -r $ROOT/etc/os-release ]] || fail "no /etc/os-release: not Ubuntu 24.04"
 os_id="" os_version=""
@@ -47,7 +53,7 @@ arch=$(uname -m)
 [[ $(id -u) == "0" ]] || fail "needs root"
 echo "1/5 host: Ubuntu 24.04 x86_64, root"
 
-if [[ -x $TARGET/venv/bin/pridem && $("$TARGET/venv/bin/pridem" --version) == "pridem ${TAG#v}" ]]; then
+if [[ -x $TARGET/venv/bin/pridem && $("$TARGET/venv/bin/pridem" version) == "pridem ${TAG#v}" ]]; then
     echo "2-4/5 pridem $TAG is installed already"
 else
     # 2. Packages: apt waits for the dpkg lock instead of breaking it; sops is
@@ -71,8 +77,7 @@ else
     # 4. The venv without an index: the runtime from wheels/ by the lock, the
     #    wheel of pridem from the Release; nothing is built here. A venv cannot
     #    be moved, so an earlier attempt that did not end installed is removed.
-    curl -fsSL -o "$work/pridem-${TAG#v}-py3-none-any.whl" \
-        "$REPO/releases/download/$TAG/pridem-${TAG#v}-py3-none-any.whl"
+    curl -fsSL -o "$work/pridem-${TAG#v}-py3-none-any.whl" "$WHEEL_URL"
     echo "$WHEEL_SHA256  $work/pridem-${TAG#v}-py3-none-any.whl" | sha256sum -c --strict
     rm -rf "$TARGET"
     mkdir -p "$HOME_DIR/versions"
@@ -81,7 +86,7 @@ else
         --require-hashes -r "$work/pridem/requirements.lock"
     "$TARGET/venv/bin/pip" install --no-index --no-deps \
         "$work/pridem-${TAG#v}-py3-none-any.whl"
-    version=$("$TARGET/venv/bin/pridem" --version)
+    version=$("$TARGET/venv/bin/pridem" version)
     [[ $version == "pridem ${TAG#v}" ]] || fail "installed pridem says '$version'"
     echo "4/5 venv: $TARGET/venv, $version"
 fi

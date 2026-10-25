@@ -62,8 +62,8 @@ from pridem.events import (
     Json,
     LogLine,
     Phase,
-    PlanMode,
     PlanOutcome,
+    RunMode,
     Secrets,
     StepFinished,
     StepRecord,
@@ -137,11 +137,14 @@ class BoxState(Strict):
 class JournalHeader(Strict):
     run_id: RunId
     verb: Text
-    mode: PlanMode
+    mode: RunMode
     args: dict[str, Json]
     actor: Actor
     started: Moment
-    passport_version: Annotated[int, Field(ge=1)]
+    # absent while the box has no passport (contract 2 v1.9)
+    passport_version: Annotated[int, Field(ge=1)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     composition_before: Composition
 
 

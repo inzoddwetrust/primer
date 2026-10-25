@@ -40,6 +40,8 @@ type Fact = Mapping[str, Json]
 Status = Literal["ok", "failed", "skipped"]
 Phase = Literal["main", "restore", "finally"]
 PlanMode = Literal["install", "deploy", "doctor", "reinstall"]
+RunMode = PlanMode | Literal["status"]
+"""What a run is: a plan's mode, or a verb that runs no plan (``status``)."""
 
 REDACTED = "[redacted]"
 
@@ -213,7 +215,7 @@ class DoctorItem:
 class PlanOutcome:
     """The result of a plan, from which the verdict is built."""
 
-    mode: PlanMode
+    mode: RunMode
     code: ExitCode
     steps: tuple[StepRecord, ...]
     restore: tuple[StepRecord, ...] = ()

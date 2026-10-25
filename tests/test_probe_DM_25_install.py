@@ -30,6 +30,8 @@ REPO = Path(__file__).resolve().parents[1]
 INSTALL = REPO / "install.sh"
 RELEASE = REPO / ".github" / "workflows" / "release.yml"
 TAG, VERSION = "v0.1.0", "0.1.0"
+GITHUB = "https://github.com/inzoddwetrust/primer"
+WHEEL_URL = f"{GITHUB}/releases/download/{TAG}/pridem-{VERSION}-py3-none-any.whl"
 COMMIT = "a" * 40
 SOPS_BYTES, WHEEL_BYTES = b"sops-binary", b"pridem-wheel"
 INSTALLS = ("python3", "pip")
@@ -76,10 +78,19 @@ def render(
     commit: str = COMMIT,
     wheel: bytes = WHEEL_BYTES,
     sops: bytes = SOPS_BYTES,
+    repo: str = GITHUB,
+    wheel_url: str | None = None,
 ) -> str:
-    """``install.sh`` with its pins, as the release workflow writes it."""
+    """``install.sh`` with its pins, as the release workflow writes it.
+
+    DM-16 added the two source pins (repository, wheel address).
+    """
+    url = (
+        wheel_url or f"{repo}/releases/download/{tag}/pridem-{tag[1:]}-py3-none-any.whl"
+    )
     text = INSTALL.read_text()
     text = text.replace("@PRIDEM_TAG@", tag).replace("@PRIDEM_COMMIT@", commit)
+    text = text.replace("@PRIDEM_REPO@", repo).replace("@PRIDEM_WHEEL_URL@", url)
     text = text.replace("@PRIDEM_WHEEL_SHA256@", hashlib.sha256(wheel).hexdigest())
     pinned = re.search(r'SOPS_SHA256="([0-9a-f]{64})"', text)
     assert pinned is not None
@@ -237,17 +248,26 @@ def test_not_root_aborts(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("tag", "commit"),
+    ("tag", "commit", "repo", "wheel_url"),
     [
-        ("@PRIDEM_TAG@", COMMIT),
-        (TAG, "@PRIDEM_COMMIT@"),
-        ("main", COMMIT),
-        (TAG, "a" * 39),
+        ("@PRIDEM_TAG@", COMMIT, GITHUB, None),
+        (TAG, "@PRIDEM_COMMIT@", GITHUB, None),
+        ("main", COMMIT, GITHUB, None),
+        (TAG, "a" * 39, GITHUB, None),
+        (TAG, COMMIT, "@PRIDEM_REPO@", WHEEL_URL),
+        (TAG, COMMIT, "https://example.com/a/b", WHEEL_URL),
+        (TAG, COMMIT, GITHUB, "@PRIDEM_WHEEL_URL@"),
+        (TAG, COMMIT, GITHUB, "https://example.com/pridem.whl"),
+        (TAG, COMMIT, GITHUB, "file:///tmp/pridem.tar.gz"),
     ],
 )
-def test_template_without_pins_refuses(tmp_path: Path, tag: str, commit: str) -> None:
+def test_template_without_pins_refuses(
+    tmp_path: Path, tag: str, commit: str, repo: str, wheel_url: str | None
+) -> None:
+    """DM-16 added the source pins: a repository and a wheel address of the
+    accepted forms (``https://github.com/...`` or ``file:///...``)."""
     box = Box(tmp_path)
-    assert box.run(render(tag=tag, commit=commit)) == 1
+    assert box.run(render(tag=tag, commit=commit, repo=repo, wheel_url=wheel_url)) == 1
     assert box.names() == []
     assert any("pins are not set" in line for line in box.lines)
     unrendered = Box(tmp_path / "raw")
@@ -346,8 +366,11 @@ def test_release_checks_the_tag_builds_pinned_and_publishes_two_assets() -> None
     assert "git rev-list --first-parent origin/main" in runs
     assert "pip install --require-hashes -r requirements-build.lock" in runs
     assert "pip wheel --no-deps --no-build-isolation --no-index" in runs
-    for pin in ("@PRIDEM_TAG@", "@PRIDEM_COMMIT@", "@PRIDEM_WHEEL_SHA256@"):
-        assert f"s/{pin}/" in runs and pin in INSTALL.read_text()
+    pins = ["@PRIDEM_TAG@", "@PRIDEM_COMMIT@", "@PRIDEM_WHEEL_SHA256@"]
+    pins += ["@PRIDEM_REPO@", "@PRIDEM_WHEEL_URL@"]  # DM-16: the sources
+    for pin in pins:
+        assert f"s/{pin}/" in runs or f"s|{pin}|" in runs, pin
+        assert pin in INSTALL.read_text()
     assert "shellcheck dist/install.sh" in runs
     create = [line for line in runs.splitlines() if "gh release create" in line]
     assert create and "py3-none-any.whl" in runs and "dist/install.sh" in runs

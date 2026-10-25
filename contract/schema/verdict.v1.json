@@ -968,7 +968,6 @@
     "finished",
     "exit_code",
     "result",
-    "passport_version",
     "composition_before",
     "composition_after",
     "steps",
