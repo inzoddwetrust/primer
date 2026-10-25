@@ -130,25 +130,43 @@ def test_probe_DM_12_host_steps_on_a_clean_runner() -> None:
     assert again.result == "green"
 
 
+def _absent(package: str) -> None:
+    """``package`` is not installed, so ``provision_host`` must run ``apt``.
+
+    FIX DM-12: the runner image already had the packages the probes asked for
+    (``jq``, ``tree``), ``check`` found nothing missing and ``apt`` never met the
+    planted lock -- the waiting probe passed without waiting.
+    """
+    if _installed(package):
+        _run(["apt-get", "-o", "DPkg::Lock::Timeout=600", "purge", "-y", package])
+    assert not _installed(package), package
+
+
+def _installed(package: str) -> bool:
+    code, status = _run(["dpkg-query", "-W", "-f=${Status}", package], timeout=30)
+    return code == 0 and status == ["install ok installed"]
+
+
 def test_probe_DM_12_planted_dpkg_lock_waits_then_passes() -> None:
+    _absent("sl")
     timer = _held(10)
     try:
-        verdict, lines = _plan("jq", 120)
+        verdict, lines = _plan("sl", 120)
     finally:
         timer.join()
     assert verdict.result == "green", lines
-    status = _run(["dpkg-query", "-W", "-f=${Status}", "jq"])[1]
-    assert status == ["install ok installed"]
+    assert _installed("sl")
 
 
 def test_probe_DM_12_planted_dpkg_lock_over_timeout_is_red_without_checkmark() -> None:
+    _absent("cowsay")
     timer = _held(60)
     try:
-        verdict, lines = _plan("tree", 5)
+        verdict, lines = _plan("cowsay", 5)
     finally:
         timer.join()
     assert verdict.result == "red", lines
     provision = [step for step in verdict.steps if step.name == "provision_host"]
     assert provision[0].status == "failed"
     assert not any(line.startswith("✓ host · provision_host") for line in lines)
-    assert _run(["dpkg-query", "-W", "-f=${Status}", "tree"], timeout=30)[0] != 0
+    assert not _installed("cowsay")
