@@ -78,6 +78,7 @@ LAYERS: Layers = (
             "pridem.steps.host",
             "pridem.steps.git",
             "pridem.steps.keys",
+            "pridem.steps.passport",
             "pridem.steps.sources",
         ),
     ),

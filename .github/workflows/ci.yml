@@ -68,6 +68,22 @@ jobs:
       - run: |
           python -m pip freeze --exclude-editable > "$RUNNER_TEMP/runtime.txt"
           python -m pip install -c "$RUNNER_TEMP/runtime.txt" -e ".[dev]"
+      # age and sops for the tier 1 tests that decrypt a passport (DM-13): age
+      # from apt, sops at the pin of install.sh, checked by its sha256.
+      - name: age and sops at the pin of install.sh
+        run: |
+          sops_version=$(sed -n 's/^SOPS_VERSION="\(.*\)"$/\1/p' install.sh)
+          sops_sha256=$(sed -n 's/^SOPS_SHA256="\(.*\)"$/\1/p' install.sh)
+          if [ -z "$sops_version" ] || [ -z "$sops_sha256" ]; then
+            echo "install.sh pins no sops"
+            exit 1
+          fi
+          sudo apt-get -o DPkg::Lock::Timeout=600 update
+          sudo apt-get -o DPkg::Lock::Timeout=600 install -y age
+          curl -fsSL -o "$RUNNER_TEMP/sops" "https://github.com/getsops/sops/releases/download/$sops_version/sops-$sops_version.linux.amd64"
+          echo "$sops_sha256  $RUNNER_TEMP/sops" | sha256sum -c --strict
+          sudo install -m 0755 "$RUNNER_TEMP/sops" /usr/local/bin/sops
+          command -v age-keygen sops
       - name: pytest
         env:
           # Empty on push and on dispatch without `planted`; "1" only on a planted dispatch.

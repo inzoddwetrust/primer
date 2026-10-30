@@ -48,6 +48,9 @@ pip freeze --exclude-editable > /tmp/runtime.txt && pip install -c /tmp/runtime.
 ruff check . && ruff format --check . && mypy . && pytest -q
 ```
 
+The passport tests decrypt with the real tools: `age` (apt) and `sops` at the
+version and sha256 pinned in `install.sh` must be on `PATH` before `pytest`.
+
 Runtime dependencies are declared as ranges in `pyproject.toml`, pinned with
 hashes in `requirements.lock` and shipped as wheels in `wheels/`, because boxes
 have no access to PyPI. The recipe above installs the runtime exactly as a box
@@ -59,7 +62,8 @@ installed runtime has the lock's versions.
 
 CI runs on every push to `main` (`.github/workflows/ci.yml`, `ubuntu-24.04`,
 Python 3.12) as four jobs: `ruff` (lint and format check), `mypy` and `pytest`,
-each after the same recipe, and `shellcheck` over the tracked `*.sh` files.
+each after the same recipe, and `shellcheck` over the tracked `*.sh` files; the
+`pytest` job installs `age` and `sops` by the pin of `install.sh` first.
 Actions are pinned by commit SHA. The workflow can also be started manually with
 the `planted` input, which plants a failure in the `pytest` job; that run must
 be red.

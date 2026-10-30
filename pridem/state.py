@@ -6,9 +6,10 @@
   command is refused with ``BoxBusy`` naming the holder, it never waits. The
   kernel drops the lock with its process, so a dead run never holds the box.
   Every write below requires the lock; it is checked, not hoped for.
-- ``state.json`` -- composition, passport version, ``current`` of each stack,
-  last ``run_id`` per verb; replaced atomically (temp + fsync + rename + fsync
-  of the directory).
+- ``state.json`` -- composition, passport version, the ops repository commit
+  the passport came from (absent for a passport given as a file), ``current``
+  of each stack, last ``run_id`` per verb; replaced atomically (temp + fsync +
+  rename + fsync of the directory).
 - ``history/<run_id>.json`` -- every verdict, append-only: written as temp +
   fsync + ``link`` to the final name, so a name already taken is
   ``HistoryExists`` and the first verdict stays as it was. Nothing here edits
@@ -127,9 +128,16 @@ class StateDamaged(ValueError):
     """
 
 
+OpsCommit = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+
+
 class BoxState(Strict):
     composition: Composition
     passport_version: Annotated[int, Field(ge=1)]
+    # absent for a passport given as a file: it has no ops repository (DM-13)
+    ops_commit: OpsCommit | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     current: dict[str, Text]
     last_run: dict[str, RunId]
 
