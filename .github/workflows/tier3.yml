@@ -76,27 +76,13 @@ jobs:
           PRIMER_BLANK_DEPLOY_KEY: ${{ secrets.PRIMER_BLANK_DEPLOY_KEY }}
         run: |
           (umask 077 && printf '%s\n' "$PRIMER_BLANK_DEPLOY_KEY" > "$RUNNER_TEMP/deploy_key")
-      - name: the age key of the tier 3 box, from the CI secrets (DM-13)
-        env:
-          PRIMER_TIER3_AGE_KEY: ${{ secrets.PRIMER_TIER3_AGE_KEY }}
-        run: |
-          if [ -z "$PRIMER_TIER3_AGE_KEY" ]; then
-            echo "the CI secret PRIMER_TIER3_AGE_KEY is empty"
-            exit 1
-          fi
-          (umask 077 && printf '%s\n' "$PRIMER_TIER3_AGE_KEY" > "$RUNNER_TEMP/age.key")
-          if ! age-keygen -y "$RUNNER_TEMP/age.key"; then
-            echo "the CI secret PRIMER_TIER3_AGE_KEY is not an age key"
-            exit 1
-          fi
       - name: tier 3 probes
         env:
           PRIMER_DEPLOY_KEY_FILE: ${{ runner.temp }}/deploy_key
-          PRIMER_AGE_KEY_FILE: ${{ runner.temp }}/age.key
         run: |
           python3 -m venv /tmp/t3
           /tmp/t3/bin/python -m pip install --no-index --find-links "$GITHUB_WORKSPACE/wheels" --require-hashes -r "$GITHUB_WORKSPACE/requirements.lock"
           /tmp/t3/bin/python -m pip install --no-deps -e "$GITHUB_WORKSPACE"
           /tmp/t3/bin/python -m pip freeze --exclude-editable > "$RUNNER_TEMP/runtime.txt"
           /tmp/t3/bin/python -m pip install -c "$RUNNER_TEMP/runtime.txt" -e "$GITHUB_WORKSPACE[dev]"
-          sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE,PRIMER_AGE_KEY_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --rootdir "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/tier3"
+          sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --rootdir "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/tier3"

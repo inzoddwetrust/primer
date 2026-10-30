@@ -1,35 +1,35 @@
-"""Tier 3 probe (DM-13): the box decrypts its passport from a test ops repository.
+"""Tier 3 probe (DM-13): the box mints its age key and decrypts its passport.
 
-The ops repository is a fixture: ``tier3/fixtures/ops`` committed into a bare
-repository reached by ``file://`` (no deploy key; ssh is DM-10's probe). Its
-``passports/tier3-box.yaml`` is encrypted for the test age key, whose private
-part is the CI secret ``PRIMER_TIER3_AGE_KEY``: the workflow writes it to a
-0600 file and passes only the path through ``sudo
---preserve-env=PRIMER_AGE_KEY_FILE``, and the probe puts it where the machine
-keeps its age key, so ``age_key`` finds it and does not act.
-``passports/tier3-other.yaml`` is encrypted for a key that was thrown away:
-fetching it is red, ``not-recipient``, with the box's public key. The plan runs
-in the machine's venv against the installed package; on red and on timeout the
-probe prints every line it collected.
+Nothing comes from outside the run. The box's age pair is minted by the
+machine's own ceremony (``age_key`` alone, first plan); the probe reads the
+public part from that step's fact and encrypts an invented test passport for
+it with ``sops`` in the run; the ops repository is a bare repository the probe
+commits that file to, reached by ``file://`` (no deploy key; ssh is DM-10's
+probe). The second plan is the whole ladder: ``age_key`` finds the key and
+does not act, ``fetch_passport`` decrypts with it. A passport encrypted in the
+run for a key minted and thrown away at once is red, ``not-recipient``, with
+the box's public key. The plans run in the machine's venv against the
+installed package; on red and on timeout the probe prints every line it
+collected.
 """
 
 import os
-import shutil
 from pathlib import Path
+
+import yaml
 
 from pridem.report.schema import StepCode, Verdict
 from pridem.runner import CommandTimedOut, Stream, SubprocessRunner
 from pridem.steps.passport import AGE_KEY, PASSPORT_COPY
 
 PYTHON = "/opt/pridem/current/venv/bin/python"
-FIXTURE = Path(__file__).parent / "fixtures" / "ops"
+KEY_ONLY = "-"
 SECRETS = ("tier3-invented-telegram-token", "tier3-invented-other-token-1")
 SCRIPT = """
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_hex
-from pydantic import SecretStr
 from pridem import __version__
 from pridem.events import ConsoleSink, Secrets
 from pridem.plan import Plan, StackSteps
@@ -37,12 +37,15 @@ from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.schema import build_verdict
 from pridem.runner import SubprocessRunner
 from pridem.state import Box
-from pridem.steps.passport import OpsSource, passport_steps
+from pridem.steps.passport import AgeKey, Fetched, OpsSource, passport_steps
 
 root, address, server = Path("/"), sys.argv[1], sys.argv[2]
-fetched, steps = passport_steps(
-    root, server=server, ops=OpsSource(address), wait_s=5, poll_s=2
-)
+if address == "-":  # the ceremony alone: mint the box's key, print its public part
+    fetched, steps = Fetched(), [AgeKey(root)]
+else:
+    fetched, steps = passport_steps(
+        root, server=server, ops=OpsSource(address), wait_s=5, poll_s=2
+    )
 box, secrets = Box(Path("/opt/pridem")), Secrets(())
 with box.lock("tier3-passport"):
     started = datetime.now(UTC).replace(microsecond=0)
@@ -65,6 +68,16 @@ print("OPS_COMMIT " + str(fetched.ops_commit))
 print("VERDICT " + verdict.model_dump_json())
 sys.exit(int(verdict.exit_code))  # the exit code is the verdict's, as a verb's
 """
+GIT_ENV = {
+    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    "HOME": "/nonexistent",
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@example.org",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@example.org",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+}
 
 
 def _out(argv: list[str], env: dict[str, str] | None = None) -> str:
@@ -79,23 +92,67 @@ def _out(argv: list[str], env: dict[str, str] | None = None) -> str:
 
 
 def _git(*args: str) -> str:
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": "/nonexistent",
-        "GIT_AUTHOR_NAME": "t",
-        "GIT_AUTHOR_EMAIL": "t@example.org",
-        "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@example.org",
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_NOSYSTEM": "1",
+    return _out(["git", *args], GIT_ENV)
+
+
+def _passport(server: str, secret: str) -> dict[str, object]:
+    """An invented passport for ``server``; its one secret is ``secret``."""
+    return {
+        "schema": 1,
+        "version": 3,
+        "server": {"name": server, "role": "test", "os": "ubuntu-24.04"},
+        "product": {"repo": "file:///tmp/tier3/no-product.git", "ref": "main"},
+        "domains": {"frontend": "tier3.example.org"},
+        "access": {"mode": "deploy-keys"},
+        "asked": {"comms": {"TELEGRAM_BOT_TOKEN": secret}},
+        "params": {"comms": {"SUPPORT_LANGUAGE": "ru"}},
+        "policies": {
+            "ssl": "self-signed",
+            "gc": {
+                "keep_releases": 2,
+                "builder_cache_budget": "3G",
+                "journal_budget": "200M",
+            },
+            "backup": {"enabled": False},
+            "timers": {"gc": "daily"},
+        },
+        "packages": {},
+        "cloud": {},
     }
-    return _out(["git", *args], env)
 
 
-def _ops_repository(tmp: Path) -> tuple[str, str]:
-    """The fixture committed on ``main`` of a bare repository; (address, head)."""
+def _encrypt(tmp: Path, data: dict[str, object], public: str) -> str:
+    """``data`` encrypted by sops for ``public``; the plaintext does not stay."""
+    plain = tmp / "plain.yaml"
+    plain.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    env = {**GIT_ENV, "HOME": str(tmp)}
+    try:
+        return _out(["sops", "--encrypt", "--age", public, str(plain)], env) + "\n"
+    finally:
+        plain.unlink()
+
+
+def _thrown_away_public(tmp: Path) -> str:
+    """The public part of a key minted here and deleted at once."""
+    key = tmp / "thrown.key"
+    try:
+        SubprocessRunner().run(
+            ["age-keygen", "-o", str(key)],
+            timeout=60,
+            on_line=lambda stream, line, cut: None,
+        )
+        return _out(["age-keygen", "-y", str(key)])
+    finally:
+        key.unlink(missing_ok=True)
+
+
+def _ops_repository(tmp: Path, passports: dict[str, str]) -> tuple[str, str]:
+    """``passports/<name>.yaml`` committed on ``main`` of a bare repository;
+    (address, head)."""
     work = tmp / "ops-work"
-    shutil.copytree(FIXTURE, work)
+    (work / "passports").mkdir(parents=True)
+    for name, text in passports.items():
+        (work / "passports" / f"{name}.yaml").write_text(text, encoding="utf-8")
     _git("-C", str(work), "init", "-q", "-b", "main")
     _git("-C", str(work), "add", "-A")
     _git("-C", str(work), "commit", "-q", "-m", "passports")
@@ -126,21 +183,29 @@ def _plan(address: str, server: str) -> tuple[Verdict, str, list[str]]:
     return verdict, commit.removeprefix("OPS_COMMIT "), lines
 
 
-def _place_key() -> str:
-    source = Path(os.environ["PRIMER_AGE_KEY_FILE"])
-    assert source.stat().st_size > 1, "the CI secret PRIMER_TIER3_AGE_KEY is empty"
+def _box_public() -> tuple[str, bool]:
+    """The box's public key by the machine's ceremony; whether it was minted."""
     key = Path("/") / AGE_KEY
-    key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    shutil.copyfile(source, key)
-    key.chmod(0o600)
-    return _out(["age-keygen", "-y", str(key)])
+    absent = not key.exists()
+    verdict, _, lines = _plan(KEY_ONLY, "-")
+    printed = "\n".join(lines)
+    assert verdict.result == "green", printed
+    [step] = verdict.steps
+    public = (step.verify or {})["public_key"]
+    assert isinstance(public, str) and public.startswith("age1"), printed
+    assert oct(key.stat().st_mode & 0o777) == oct(0o600), printed
+    assert _out(["age-keygen", "-y", str(key)]) == public, printed
+    console = [line for line in lines if not line.startswith("VERDICT ")]
+    assert any(public in line for line in console), printed  # what the owner adds
+    return public, absent
 
 
 def test_tier3_box_decrypts_its_passport_from_the_ops_repository(
     tmp_path: Path,
 ) -> None:
-    public = _place_key()
-    address, head = _ops_repository(tmp_path)
+    public, _ = _box_public()
+    text = _encrypt(tmp_path, _passport("tier3-box", SECRETS[0]), public)
+    address, head = _ops_repository(tmp_path, {"tier3-box": text})
 
     verdict, commit, lines = _plan(address, "tier3-box")
 
@@ -159,8 +224,11 @@ def test_tier3_box_decrypts_its_passport_from_the_ops_repository(
 
 
 def test_tier3_passport_not_for_this_box_is_red_with_its_key(tmp_path: Path) -> None:
-    public = _place_key()
-    address, _ = _ops_repository(tmp_path)
+    public, _ = _box_public()
+    other = _thrown_away_public(tmp_path)
+    assert other != public
+    text = _encrypt(tmp_path, _passport("tier3-other", SECRETS[1]), other)
+    address, _ = _ops_repository(tmp_path, {"tier3-other": text})
 
     verdict, _, lines = _plan(address, "tier3-other")
 

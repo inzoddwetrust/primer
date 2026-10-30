@@ -3,9 +3,9 @@
 ``age_key`` mints the box's age pair under ``/opt/pridem/keys/age.key`` (0600)
 and prints the public part: the owner adds it as a recipient of the box's
 passport in the ops repository. A key already in place, 0600 and readable as
-a key, needs no ``act`` -- tier 3 puts it there from the CI secrets. A key with
-another mode is refused, never ``chmod``-ed: something changed it, and the
-step does not guess what.
+a key, needs no ``act``: every later run finds it. A key with another mode is
+refused, never ``chmod``-ed: something changed it, and the step does not
+guess what.
 
 ``fetch_passport`` brings the passport to ``/opt/pridem/passport.yaml``
 (0600), a cache: the truth is the ops repository. From the ops repository the
