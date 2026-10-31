@@ -38,7 +38,10 @@ when they match, a decryption into a scratch file compared with the copy;
 
 The step does not write ``state.json`` (a first ``install`` has no composition
 to write): it leaves ``Fetched`` and its fact, and ``with_passport`` gives the
-writer of the state its passport version and ops commit.
+writer of the state its passport version and ops commit. Its ``verify`` adds
+the passport's secrets to the run's ``Secrets`` -- the one growing set the
+sinks and the verdict hold -- so every later line of the run is cleaned of
+them.
 """
 
 import os
@@ -51,9 +54,9 @@ from pathlib import Path
 from typing import ClassVar
 
 import yaml
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
-from pridem.events import Fact, Json
+from pridem.events import Fact, Json, Secrets
 from pridem.runner import OnLine, Stream
 from pridem.stacks.loader import ContractError, load_yaml_mapping, render_path
 from pridem.stacks.passport import PASSPORT, Passport, load_passport
@@ -103,22 +106,10 @@ Data = dict[str, object]
 class Fetched:
     """What ``fetch_passport`` read back: the passport and the ops commit.
 
-    KNOWN CEILING (DM-13).
-    1. Mechanics: the run's ``Secrets`` are built before the plan starts, when
-       the passport is not on the box yet, so its ``asked`` and ``tls`` values
-       are not cleaned from the console, the journal or the verdict of the run
-       that fetched it. ``fetch_passport`` itself never emits one; a later step
-       of the same run that prints one would leave it uncleaned.
-    2. Status: acknowledged by design.
-    3. Task: DM-14 (env render), the first step after this one that handles
-       the passport's values.
-    4. Trigger: a step after ``fetch_passport`` in one run prints a value read
-       from the passport.
-    5. Agreed fix: the verb builds ``Secrets`` from ``Fetched`` before the
-       sinks of a second plan, or the sinks share one growing set of secrets.
-    6. Rejected: adding to ``Secrets`` inside the step -- the step does not own
-       the sinks, and a set it grows behind them breaks the journal's cut of
-       long lines, which is computed from the secrets it knows.
+    The passport's secrets (``asked``, ``tls``) are in the run's ``Secrets``
+    from ``verify`` of ``fetch_passport`` on: every later line, fact and the
+    verdict are cleaned of them. ``render_env`` replaces ``passport`` when an
+    answer of ``install`` is written to the local copy.
     """
 
     passport: Passport | None = None
@@ -138,6 +129,15 @@ def with_passport(state: BoxState, fetched: Fetched) -> BoxState:
     if fetched.ops_commit is not None:
         fields["ops_commit"] = fetched.ops_commit
     return BoxState.model_validate(fields)
+
+
+def passport_secrets(passport: Passport) -> list[SecretStr]:
+    """The known secrets of a passport: every ``asked`` value and ``tls``."""
+    found = [value for stack in passport.asked.values() for value in stack.values()]
+    tls = passport.policies.tls
+    if tls is not None:
+        found += [tls.cert, tls.key]
+    return found
 
 
 def _keep(ctx: StepContext, out: list[str]) -> OnLine:
@@ -266,7 +266,7 @@ def _resolve(node: Mapping[str, Json], defs: Mapping[str, Json]) -> dict[str, Js
         return dict(node)
 
 
-def _schema_at(path: tuple[str, ...]) -> dict[str, Json]:
+def schema_at(path: tuple[str, ...]) -> dict[str, Json]:
     """The passport's schema node at ``path``."""
     root = PASSPORT.json_schema(mode="validation")
     defs = _object(root.get("$defs", {}))
@@ -289,7 +289,7 @@ def _leaves(path: tuple[str, ...]) -> list[tuple[str, ...]] | None:
     """
     if path in NEVER_ASKED:
         return None
-    node = _schema_at(path)
+    node = schema_at(path)
     if node.get("type") != "object":
         return [path]
     properties = node.get("properties")
@@ -368,6 +368,38 @@ def _copy_data(copy: Path) -> Data | None:
         return None  # a damaged cache is replaced, not trusted
 
 
+def _write_checked(temp: Path, data: Data) -> Passport:
+    """``data`` written to ``temp`` (0600) and loaded clean, or ``invalid``."""
+    _empty_0600(temp)
+    with temp.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        return load_passport(temp)
+    except ContractError as error:
+        raise StepFailed("invalid", {"problems": _problems(error)}) from None
+
+
+def copy_data(root: Path) -> Data:
+    """The local copy of the passport as data, values in the clear."""
+    return _load(root / PASSPORT_COPY)
+
+
+def rewrite_copy(root: Path, data: Data) -> Passport:
+    """The local copy replaced by ``data`` once it loads clean (answers of
+    ``install``, contract 1 rule 3); the version is the caller's to keep."""
+    copy = root / PASSPORT_COPY
+    temp = copy.with_name(copy.name + ".tmp")
+    try:
+        passport = _write_checked(temp, data)
+        os.replace(temp, copy)
+        _fsync_dir(copy.parent)
+    finally:
+        temp.unlink(missing_ok=True)
+    return passport
+
+
 @dataclass(frozen=True)
 class OpsSource:
     """Where the passport lives: the ops repository and its branch."""
@@ -407,6 +439,7 @@ class FetchPassport(Step):
         fetched: Fetched,
         root: Path = Path("/"),
         *,
+        secrets: Secrets,
         server: str | None,
         ops: OpsSource | None = None,
         file: Path | None = None,
@@ -422,6 +455,7 @@ class FetchPassport(Step):
             raise ValueError("the ops repository is read by the server's name")
         self.fetched = fetched
         self.root = root
+        self.secrets = secrets
         self.server = server
         self.ops = ops
         self.file = file
@@ -567,7 +601,7 @@ class FetchPassport(Step):
             names = [render_path(leaf) for leaf in leaves]
             raise StepFailed("missing", {"fields": list[Json](names)})
         for leaf in leaves:
-            schema = _schema_at(leaf)
+            schema = schema_at(leaf)
             answer = self.ask(render_path(leaf), schema)
             if not answer:
                 raise StepFailed("no-answer", {"field": render_path(leaf)})
@@ -576,15 +610,7 @@ class FetchPassport(Step):
 
     def _accept(self, temp: Path, data: Data) -> Passport:
         """``data`` written to ``temp`` (0600), loaded clean, for this server."""
-        _empty_0600(temp)
-        with temp.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            passport = load_passport(temp)
-        except ContractError as error:
-            raise StepFailed("invalid", {"problems": _problems(error)}) from None
+        passport = _write_checked(temp, data)
         if self.server is not None and passport.server.name != self.server:
             raise StepFailed(
                 "name-mismatch",
@@ -718,6 +744,8 @@ class FetchPassport(Step):
                     "no-ref", {"repo": self._ops.address, "ref": self._ops.ref}
                 )
             fact = {**fact, "ops_commit": commit}
+        # before the fact leaves the step: from here on the run cleans them
+        self.secrets.add(passport_secrets(passport))
         self.fetched.passport = passport
         self.fetched.ops_commit = commit
         return Verified(fact)
@@ -730,6 +758,7 @@ class _NotRecipient(Exception):
 def passport_steps(
     root: Path,
     *,
+    secrets: Secrets,
     server: str | None,
     ops: OpsSource | None = None,
     file: Path | None = None,
@@ -743,6 +772,7 @@ def passport_steps(
     fetch = FetchPassport(
         fetched,
         root,
+        secrets=secrets,
         server=server,
         ops=ops,
         file=file,

@@ -102,13 +102,27 @@ class Secrets:
     are one set, replaced longest first, so a secret that contains another --
     or contains its own lines -- is replaced whole, with no pieces left. An
     empty value is an error: it matches everywhere.
+
+    The set of a run grows and never shrinks: a secret that appears during the
+    run (the passport's after ``fetch_passport``, an answer of ``install``, a
+    ``derived`` value) is ``add``-ed to the one object every sink and the
+    verdict hold, before the first line that could carry it. The journal's cut
+    of a long line is computed from this set on every piece (``safe_cut``), so
+    a larger ``longest`` holds from the next piece on; the pieces written
+    before could not carry a value the run did not know yet.
     """
 
     def __init__(self, values: Iterable[SecretStr]) -> None:
+        self._values: tuple[str, ...] = ()
+        self._pattern: re.Pattern[str] | None = None
+        self.add(values)
+
+    def add(self, values: Iterable[SecretStr]) -> None:
+        """Know ``values`` too, from now on, wherever this object cleans."""
         plain = {value.get_secret_value() for value in values}
         if "" in plain:
             raise ValueError("an empty secret would match every position of a text")
-        forms = set().union(*(_forms(secret) for secret in plain))
+        forms = set(self._values).union(*(_forms(secret) for secret in plain))
         self._values = tuple(sorted(forms, key=len, reverse=True))
         self._pattern = (
             re.compile("|".join(re.escape(form) for form in self._values))

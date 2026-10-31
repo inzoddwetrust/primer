@@ -196,11 +196,13 @@ def ops_steps(
     ask: Ask | None = None,
     wait_s: float = 0,
     sleep: Callable[[float], None] = lambda s: None,
+    secrets: Secrets | None = None,
 ) -> tuple[Fetched, list[Step]]:
     fetched = Fetched()
     fetch = FetchPassport(
         fetched,
         root,
+        secrets=Secrets(()) if secrets is None else secrets,
         server=server,
         ops=OpsSource(ops.address),
         ask=ask,
@@ -216,7 +218,10 @@ def file_steps(
     root: Path, file: Path, *, ask: Ask | None = None, server: str | None = SERVER
 ) -> tuple[Fetched, list[Step]]:
     fetched = Fetched()
-    return fetched, [FetchPassport(fetched, root, server=server, file=file, ask=ask)]
+    fetch = FetchPassport(
+        fetched, root, secrets=Secrets(()), server=server, file=file, ask=ask
+    )
+    return fetched, [fetch]
 
 
 def write_file(tmp: Path, data: Data, name: str = "given.yaml") -> Path:
@@ -644,9 +649,13 @@ def test_box_state_reads_without_the_ops_commit() -> None:
 
 
 def test_passport_steps_from_a_file_are_the_fetch_only(tmp_path: Path) -> None:
-    _, steps = passport_steps(tmp_path, server=None, file=tmp_path / "p.yaml")
+    _, steps = passport_steps(
+        tmp_path, secrets=Secrets(()), server=None, file=tmp_path / "p.yaml"
+    )
     assert [step.name for step in steps] == ["fetch_passport"]
-    _, steps = passport_steps(tmp_path, server=SERVER, ops=OpsSource("file:///x"))
+    _, steps = passport_steps(
+        tmp_path, secrets=Secrets(()), server=SERVER, ops=OpsSource("file:///x")
+    )
     assert [step.name for step in steps] == ["age_key", "ops_key", "fetch_passport"]
     modes: set[Mode] = {"install", "deploy", "reinstall"}
     assert all(step.modes == modes for step in steps)
@@ -665,7 +674,12 @@ def test_sops_128_with_a_key_that_does_not_read_is_not_waited_for(
     key.chmod(0o600)
     fetched = Fetched()
     fetch = FetchPassport(
-        fetched, root, server=SERVER, ops=OpsSource(ops.address), wait_s=100
+        fetched,
+        root,
+        secrets=Secrets(()),
+        server=SERVER,
+        ops=OpsSource(ops.address),
+        wait_s=100,
     )
     outcome, _ = run([fetch], Recording())
     assert failed(outcome) == ("fetch_passport:key-unreadable", {"path": str(key)})
@@ -710,3 +724,20 @@ def test_the_decrypted_file_is_0600_from_the_start(tmp_path: Path) -> None:
         os.umask(old)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert runner.modes == [oct(0o600)]
+
+
+def test_fetch_passport_puts_the_passports_secrets_in_the_runs_set(
+    tmp_path: Path,
+) -> None:
+    """DM-14: the run's one growing set knows the passport's secrets from
+    ``verify`` of ``fetch_passport`` on; every later line is cleaned of them."""
+    root = tmp_path / "box"
+    public = box_key(root)
+    ops = Ops(tmp_path)
+    ops.put(SERVER, encrypt(tmp_path, passport(), public))
+    secrets = Secrets(())
+    assert all(secrets.text(secret) == secret for secret in SECRETS)
+    _, steps = ops_steps(root, ops, secrets=secrets)
+    outcome, _ = run(steps, Recording())
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert all(secrets.text(secret) == "[redacted]" for secret in SECRETS)

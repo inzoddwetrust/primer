@@ -1,5 +1,20 @@
 {
   "$defs": {
+    "Address": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "address",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "Address",
+      "type": "object"
+    },
     "App": {
       "additionalProperties": false,
       "properties": {
@@ -321,6 +336,7 @@
           "additionalProperties": {
             "discriminator": {
               "mapping": {
+                "address": "#/$defs/Address",
                 "asked": "#/$defs/Asked",
                 "derived": "#/$defs/Derived",
                 "minted": "#/$defs/Minted",
@@ -348,6 +364,9 @@
               },
               {
                 "$ref": "#/$defs/Seam"
+              },
+              {
+                "$ref": "#/$defs/Address"
               }
             ]
           },
@@ -628,6 +647,7 @@
           "additionalProperties": {
             "discriminator": {
               "mapping": {
+                "address": "#/$defs/Address",
                 "asked": "#/$defs/Asked",
                 "derived": "#/$defs/Derived",
                 "minted": "#/$defs/Minted",
@@ -655,6 +675,9 @@
               },
               {
                 "$ref": "#/$defs/Seam"
+              },
+              {
+                "$ref": "#/$defs/Address"
               }
             ]
           },

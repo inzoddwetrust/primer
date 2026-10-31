@@ -204,6 +204,12 @@ class Seam(Strict):
     from_: Name = Field(alias="from")
 
 
+# The stack's own application on the network ``pridem``:
+# ``http://<stack>-<app.service>:<app.port>`` (TZ 7.3); not a secret.
+class Address(Strict):
+    source: Literal["address"]
+
+
 def _no_values(value: object) -> object:
     """Rule 1 and rule 5 name fields that must not exist; say so with the rule."""
     if isinstance(value, dict):
@@ -218,7 +224,7 @@ def _no_values(value: object) -> object:
 
 EnvVar = Annotated[
     Annotated[
-        Minted | Asked | Derived | Param | Passport | Seam,
+        Minted | Asked | Derived | Param | Passport | Seam | Address,
         Field(discriminator="source"),
     ],
     BeforeValidator(_no_values),

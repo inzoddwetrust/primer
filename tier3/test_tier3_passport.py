@@ -40,13 +40,14 @@ from pridem.state import Box
 from pridem.steps.passport import AgeKey, Fetched, OpsSource, passport_steps
 
 root, address, server = Path("/"), sys.argv[1], sys.argv[2]
+box, secrets = Box(Path("/opt/pridem")), Secrets(())
 if address == "-":  # the ceremony alone: mint the box's key, print its public part
     fetched, steps = Fetched(), [AgeKey(root)]
 else:
     fetched, steps = passport_steps(
-        root, server=server, ops=OpsSource(address), wait_s=5, poll_s=2
+        root, secrets=secrets, server=server, ops=OpsSource(address), wait_s=5,
+        poll_s=2,
     )
-box, secrets = Box(Path("/opt/pridem")), Secrets(())
 with box.lock("tier3-passport"):
     started = datetime.now(UTC).replace(microsecond=0)
     outcome = Plan(
