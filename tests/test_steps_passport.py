@@ -9,11 +9,13 @@ then runs it. A file passport runs on an empty strict ``FakeRunner``: no
 command at all.
 """
 
+import io
 import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
@@ -21,14 +23,21 @@ from passport_support import passport_example
 from plan_support import ListSink
 from state_support import state
 
-from pridem.events import Json, PlanOutcome, Secrets
+from pridem.events import ConsoleSink, Event, Json, PlanOutcome, Secrets
 from pridem.plan import Plan, StackSteps
 from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.codes import ExitCode
 from pridem.report.schema import Verdict, build_verdict
 from pridem.runner import FakeRunner, OnLine, Result, Runner, Stream, SubprocessRunner
-from pridem.state import Box, BoxState
-from pridem.steps.base import Mode, Step
+from pridem.state import Box, BoxState, JournalSink
+from pridem.steps.base import (
+    CheckResult,
+    Mode,
+    Step,
+    StepContext,
+    Verified,
+    local_code,
+)
 from pridem.steps.git import KEYS
 from pridem.steps.passport import (
     AGE_KEY,
@@ -251,7 +260,10 @@ def printed(sink: ListSink) -> str:
 
 
 def verdict_of(
-    outcome: PlanOutcome, steps: Sequence[Step], fetched: Fetched
+    outcome: PlanOutcome,
+    steps: Sequence[Step],
+    fetched: Fetched,
+    secrets: Secrets | None = None,
 ) -> Verdict:
     return build_verdict(
         outcome,
@@ -264,7 +276,7 @@ def verdict_of(
         passport_version=None if fetched.passport is None else fetched.passport.version,
         composition_before={"pridem": "0.0.0"},
         composition_after={"pridem": "0.0.0"},
-        secrets=Secrets(()),
+        secrets=Secrets(()) if secrets is None else secrets,
         catalog=with_steps(ENGLISH, [(step.name, step.codes) for step in steps]),
     )
 
@@ -741,3 +753,87 @@ def test_fetch_passport_puts_the_passports_secrets_in_the_runs_set(
     outcome, _ = run(steps, Recording())
     assert outcome.code is ExitCode.OK, outcome.steps
     assert all(secrets.text(secret) == "[redacted]" for secret in SECRETS)
+
+
+TLS_CERT_BODY = "MIIBinventedTier1CertificateBody0001"
+TLS_KEY_BODY = "MIIEinventedTier1PrivateKeyBody00002"
+TLS_CERT = f"-----BEGIN CERTIFICATE-----\n{TLS_CERT_BODY}\n-----END CERTIFICATE-----\n"
+TLS_KEY = f"-----BEGIN PRIVATE KEY-----\n{TLS_KEY_BODY}\n-----END PRIVATE KEY-----\n"
+
+
+class _Echo(Step):
+    """A later step of the run that prints the passport's TLS and puts it in
+    its fact: what every sink must clean."""
+
+    name = "echo"
+    order = 4
+    modes: frozenset[Mode] = frozenset({"install"})
+    codes: ClassVar[dict[str, str]] = {"echo": "print the passport's TLS"}
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        return CheckResult(True, local_code("echo"))
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        for text in (TLS_CERT, TLS_KEY):
+            ctx.on_line(Stream.STDOUT, text, False)
+            for line in text.splitlines():
+                ctx.on_line(Stream.STDERR, line, False)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        return Verified({"cert": TLS_CERT, "key_body": TLS_KEY_BODY})
+
+
+def test_fetch_passport_puts_the_passports_tls_in_the_runs_set(tmp_path: Path) -> None:
+    """DM-14 fix: ``policies.tls`` of a passport with ``ssl: provided`` enters
+    the run's set at ``fetch_passport``; a later step that prints it leaves it
+    neither in the console, nor in the journal, nor in the verdict."""
+    data = passport()
+    policies = data["policies"]
+    assert isinstance(policies, dict)
+    policies["ssl"] = "provided"
+    policies["tls"] = {"cert": TLS_CERT, "key": TLS_KEY}
+    secrets = Secrets(())
+    fetched = Fetched()
+    fetch = FetchPassport(
+        fetched,
+        tmp_path / "box",
+        secrets=secrets,
+        server=SERVER,
+        file=write_file(tmp_path, data),
+    )
+    steps: list[Step] = [fetch, _Echo()]
+    console = io.StringIO()
+    journal = tmp_path / "journal.jsonl"
+    journal.touch()
+    to_console, to_journal = (
+        ConsoleSink(console, secrets),
+        JournalSink(journal, secrets),
+    )
+    raw = ListSink()
+
+    class All:
+        def emit(self, event: Event) -> None:
+            raw.emit(event)
+            to_console.emit(event)
+            to_journal.emit(event)
+
+    ticks = count()
+    outcome = Plan(
+        [StackSteps("passport", steps, root=True)],
+        mode="install",
+        role="test",
+        runner=FakeRunner(),
+        sink=All(),
+        clock=lambda: float(next(ticks)),
+        now=lambda: datetime(2026, 10, 31, tzinfo=UTC),
+    ).run()
+    to_journal.close()
+
+    assert outcome.code is ExitCode.OK, outcome.steps
+    verdict = verdict_of(outcome, steps, fetched, secrets).model_dump_json()
+    pieces = (TLS_CERT, TLS_KEY, TLS_CERT_BODY, TLS_KEY_BODY)
+    for seen in (console.getvalue(), journal.read_text(), verdict):
+        assert not [piece for piece in pieces if piece in seen]
+    # the pair: the values were there to clean, and they are in the run's set
+    assert TLS_KEY_BODY in printed(raw) and TLS_CERT_BODY in printed(raw)
+    assert all(secrets.text(piece) == "[redacted]" for piece in pieces)
