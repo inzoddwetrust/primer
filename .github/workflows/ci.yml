@@ -89,6 +89,9 @@ jobs:
           # Empty on push and on dispatch without `planted`; "1" only on a planted dispatch.
           PRIDEM_PLANTED: ${{ inputs.planted && '1' || '' }}
         run: pytest
+      # Every check that turns a box red catches its planted defects (par0 9).
+      - name: conformance --selftest
+        run: python -m pridem.conformance.stack --selftest
 
   shellcheck:
     runs-on: ubuntu-24.04

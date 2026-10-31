@@ -66,6 +66,7 @@ LAYERS: Layers = (
         "domain",
         (
             "pridem.conformance",
+            "pridem.conformance.stack",
             "pridem.stacks",
             "pridem.stacks.env",
             "pridem.stacks.loader",
