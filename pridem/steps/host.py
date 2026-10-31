@@ -122,6 +122,39 @@ class _HostStep(_Step):
         return path.read_text(encoding="utf-8") if path.exists() else None
 
 
+def public_ip(ctx: StepContext) -> str:
+    """The box's public IPv4, agreed by every echo service, or red."""
+    answers: list[str] = []
+    for url in ECHO_SERVICES:
+        _, lines = _out(ctx, ["curl", "-fsS", "--max-time", "10", url])
+        answers.append(lines[0].strip() if lines else "")
+    try:
+        addresses = {str(ipaddress.IPv4Address(answer)) for answer in answers}
+    except ValueError:
+        addresses = set()
+    if len(addresses) != 1:
+        raise StepFailed("public-ip-unknown", {"answers": _j(answers)})
+    return addresses.pop()
+
+
+def dns_table(
+    ctx: StepContext, domains: Sequence[str]
+) -> tuple[str, list[Json], list[str]]:
+    """The box's public IP, ``domain -> resolves_to -> expected`` for each
+    domain, and the domains that do not resolve to the box (contract 1 rule
+    6). ``preflight`` and ``ssl`` (DM-17) read DNS by this one function."""
+    ip = public_ip(ctx)
+    table: list[Json] = []
+    wrong: list[str] = []
+    for domain in domains:
+        _, lines = _out(ctx, ["getent", "ahostsv4", domain], expect=(0, 2))
+        resolved = sorted({line.split()[0] for line in lines if line.strip()})
+        table.append({"domain": domain, "resolves_to": _j(resolved), "expected": ip})
+        if resolved != [ip]:  # every address is the box's
+            wrong.append(domain)
+    return ip, table, wrong
+
+
 class Preflight(_HostStep):
     name = "preflight"
     order = 1
@@ -158,19 +191,6 @@ class Preflight(_HostStep):
             pairs[key] = value.strip('"')
         return f"{pairs.get('ID', '')} {pairs.get('VERSION_ID', '')}".strip()
 
-    def _public_ip(self, ctx: StepContext) -> str:
-        answers: list[str] = []
-        for url in ECHO_SERVICES:
-            _, lines = _out(ctx, ["curl", "-fsS", "--max-time", "10", url])
-            answers.append(lines[0].strip() if lines else "")
-        try:
-            addresses = {str(ipaddress.IPv4Address(answer)) for answer in answers}
-        except ValueError:
-            addresses = set()
-        if len(addresses) != 1:
-            raise StepFailed("public-ip-unknown", {"answers": _j(answers)})
-        return addresses.pop()
-
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         found = self._os()
         if found != "ubuntu 24.04":
@@ -200,17 +220,7 @@ class Preflight(_HostStep):
                 raise StepFailed("docker-dead")
             fact["docker"] = version[0] if version else ""
         if self.domains:
-            ip = self._public_ip(ctx)
-            table: list[Json] = []
-            wrong: list[str] = []
-            for domain in self.domains:
-                _, lines = _out(ctx, ["getent", "ahostsv4", domain], expect=(0, 2))
-                resolved = sorted({line.split()[0] for line in lines if line.strip()})
-                table.append(
-                    {"domain": domain, "resolves_to": _j(resolved), "expected": ip}
-                )
-                if resolved != [ip]:  # every address is the box's (contract 1 rule 6)
-                    wrong.append(domain)
+            ip, table, wrong = dns_table(ctx, self.domains)
             fact["public_ip"] = ip
             fact["dns"] = table
             if wrong:

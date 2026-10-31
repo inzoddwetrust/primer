@@ -15,8 +15,9 @@ product's file and carries what the machine adds:
 - the label ``pridem.stack`` alone on the project's volumes and on its
   network ``default``: they outlive releases, and a release label would put a
   database volume under the clean-up of old releases;
-- the external network ``pridem`` and, on the ``app`` service, the alias
-  ``<name>-<app.service>`` (the ``address`` source, contract 3) next to the
+- the external network ``pridem`` and, on the ``app`` service and on every
+  service a route of ``host.routes`` goes to, the alias ``<entry>-<service>``
+  (TZ 7.3; nginx and the ``address`` source reach it there) next to the
   networks the service already had -- a service's ``networks`` in an override
   replaces the implicit ``default``, so the override names it.
 
@@ -32,6 +33,7 @@ from pathlib import Path
 
 from pridem.events import Json
 from pridem.runner import Stream
+from pridem.stacks.routes import alias, routed_services
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import StepContext
 
@@ -169,6 +171,9 @@ def override_text(compose: ComposeStack, document: Mapping[str, Json]) -> str:
     """The machine's override for the product's compose ``document``."""
     services: dict[str, Json] = {}
     app = compose.app_service
+    aliased = {app} if app is not None else set()
+    if isinstance(compose.stack, Product):
+        aliased |= set(routed_services(compose.stack, compose.entry))
     for name, body in sorted(_mapping(document.get("services")).items()):
         part: dict[str, Json] = {"labels": dict[str, Json](compose.release_labels())}
         if "build" in _mapping(body):
@@ -177,11 +182,11 @@ def override_text(compose: ComposeStack, document: Mapping[str, Json]) -> str:
                 "pridem.service": name,
             }
             part["build"] = {"labels": labels}
-        if name == app:
+        if name in aliased:
             networks: dict[str, Json] = dict(_mapping(_mapping(body).get("networks")))
             if not networks:
                 networks["default"] = None
-            networks[NETWORK] = {"aliases": [f"{compose.name}-{name}"]}
+            networks[NETWORK] = {"aliases": [alias(compose.entry, name)]}
             part["networks"] = networks
         services[name] = part
     volumes: dict[str, Json] = {
