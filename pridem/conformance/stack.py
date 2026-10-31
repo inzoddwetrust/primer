@@ -518,6 +518,8 @@ def _planted() -> list[tuple[str, Callable[[], list[Problem]]]]:
             "log-fields",
             with_(replace(good, logs=[_GOOD_LOG.replace('"request_id"', '"rid"')])),
         ),
+        # an eighth field alone: the seven are exact, an extra one is red too
+        ("log-fields", with_(replace(good, logs=[_GOOD_LOG[:-1] + ', "trace": "t"}']))),
         ("max-body", with_(good, "2M")),
         ("max-body", with_(good, "1000k")),
         (

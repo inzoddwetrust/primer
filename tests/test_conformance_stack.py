@@ -378,3 +378,14 @@ def test_ci_runs_every_conformance_selftest() -> None:
     assert selftest_problems(planted) == [
         "python -m pridem.conformance.stack --selftest"
     ]
+
+
+def test_an_eighth_log_field_is_red_by_its_name() -> None:
+    """The seven fields of TZ 11 item 5 are exact: an extra one alone is red."""
+    line = GOOD.logs[0][:-1] + ', "trace": "t"}'
+    assert json.loads(line)["trace"] == "t"
+    [problem] = check_stack(stack(), "blank", replace(GOOD, logs=[GOOD.logs[0], line]))
+    assert (problem.code, dict(problem.params)) == (
+        "log-fields",
+        {"line": 2, "missing": [], "extra": ["trace"]},
+    )
