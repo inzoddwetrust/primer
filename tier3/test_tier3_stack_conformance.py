@@ -6,7 +6,10 @@ blank up the way the machine will: the ``.env`` rendered by the machine
 with ``PRIMER_RELEASE`` and ``PRIMER_COMMIT`` (contract 3 rule 19), the
 stack's ``migrate`` in a throwaway container, ``up -d app``, and the app
 attached to the network ``pridem`` with the alias ``blank-app`` (TZ 7.3). The
-frontend is not built: conformance does not look at it.
+network is the machine's own: its step ``ensure_network`` runs here as DM-18
+will run it -- created if absent, as it is on a box where
+``test_tier3_host.py`` has not run, kept if present, as after it. The frontend
+is not built: conformance does not look at it.
 
 Then ``observe`` and ``check_stack`` run in the machine's venv against the
 installed package: no problem. The same observation is checked a second time
@@ -36,6 +39,19 @@ from pridem.runner import CommandTimedOut, Stream, SubprocessRunner
 from pridem.stacks.schema import load_primer_yaml
 
 HEALTHY_WAIT_S = 180
+NETWORK_SCRIPT = """
+import sys
+from pridem.events import ConsoleSink, Secrets
+from pridem.plan import Plan, StackSteps
+from pridem.runner import SubprocessRunner
+from pridem.steps.host import EnsureNetwork
+
+outcome = Plan(
+    [StackSteps("host", [EnsureNetwork()], root=True)], mode="install", role="test",
+    runner=SubprocessRunner(), sink=ConsoleSink(sys.stdout, Secrets(())),
+).run()
+sys.exit(int(outcome.code))
+"""
 SCRIPT = """
 import json, sys
 from pathlib import Path
@@ -100,7 +116,7 @@ def test_tier3_blank_after_up_passes_conformance(tmp_path: Path) -> None:
         "-f",
         str(checkout / "docker-compose.yml"),
     ]
-    _run(["docker", "network", "create", "pridem"], 60)
+    _run([PYTHON, "-c", NETWORK_SCRIPT], 120)  # the machine's ensure_network
     _run(
         [
             *compose,
