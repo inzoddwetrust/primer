@@ -2,9 +2,12 @@
 container -- the point of no return (TZ 7.3; contract 3 section 1).
 
 The stack is the blank's (TZ 2): its migrations are alembic's. ``check`` reads
-the heads of the new image with ``python -m alembic heads`` in a throwaway
-container that starts nothing else (``run --rm --no-deps``): more than one
-head is red before anything is written. One head is compared with the
+the heads of the image ``build`` made for this commit (found by its labels)
+with ``docker run --rm <image> python -m alembic heads`` -- no compose, no
+dependency, no network: the scripts of the image, nothing else. A stack that
+declares ``migrate`` has a head: none read is red (``no-heads``), never "no
+migration"; more than one is red too -- both before anything is written. One
+head is compared with the
 revision the running application reports (``/health.alembic_head``, TZ 11,
 read by ``observe`` of DM-15): the same -- no ``act``, the point of no return
 is not crossed; another, no answer, no running ``app`` (a first install) --
@@ -33,7 +36,14 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.compose import COMMAND_TIMEOUT_S, ComposeStack, current, heads, out
+from pridem.steps.compose import (
+    COMMAND_TIMEOUT_S,
+    ComposeStack,
+    current,
+    heads,
+    image_of,
+    out,
+)
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 MIGRATE_TIMEOUT_S = 1800
@@ -70,6 +80,8 @@ class Migrate(Step):
     codes: ClassVar[dict[str, str]] = {
         "migrate": "migrate {stack} to {head}",
         "alembic-heads": "the migrations of {stack} have {count} heads: {heads}",
+        "no-heads": "no alembic head read from the image of {stack} in {lines} lines",
+        "no-image": "no image of {service} at {commit}: build runs before migrate",
         "not-at-head": "the database of {stack} is at {current}, not at {head}",
     }
 
@@ -90,17 +102,37 @@ class Migrate(Step):
         self.command = shlex.split(stage.migrate)
         self.app = stage.app.service
 
-    def _alembic(self, ctx: StepContext, *args: str, deps: bool) -> list[str]:
-        throwaway = ["run", "--rm"] if deps else ["run", "--rm", "--no-deps"]
+    def _heads(self, ctx: StepContext) -> tuple[list[str], int]:
+        """Heads of the built image, by ``docker run`` on it; and the line count."""
+        images = image_of(ctx, self.compose, self.app)
+        if len(images) != 1:
+            raise StepFailed(
+                "no-image", {"service": self.app, "commit": self.compose.commit}
+            )
+        labels = [
+            word
+            for key, value in self.compose.release_labels().items()
+            for word in ("--label", f"{key}={value}")
+        ]
         _, lines = out(
             ctx,
-            self.compose.argv(*throwaway, self.app, *ALEMBIC, *args),
+            ["docker", "run", "--rm", *labels, images[0], *ALEMBIC, "heads"],
             timeout=COMMAND_TIMEOUT_S,
         )
-        return lines
+        return heads(lines), len(lines)
+
+    def _current(self, ctx: StepContext) -> list[str]:
+        _, lines = out(
+            ctx,
+            self.compose.argv("run", "--rm", self.app, *ALEMBIC, "current"),
+            timeout=COMMAND_TIMEOUT_S,
+        )
+        return current(lines)
 
     def check(self, ctx: StepContext) -> CheckResult:
-        found = heads(self._alembic(ctx, "heads", deps=False))
+        found, read = self._heads(ctx)
+        if not found:
+            raise StepFailed("no-heads", {"stack": self.compose.entry, "lines": read})
         if len(found) > 1:
             raise StepFailed(
                 "alembic-heads",
@@ -110,8 +142,6 @@ class Migrate(Step):
                     "heads": list[Json](found),
                 },
             )
-        if not found:
-            return CheckResult(False, None, {"heads": 0})
         head = found[0]
         data: dict[str, Json] = {"head": head}
         if running_head(ctx, self.compose) == head:
@@ -129,8 +159,8 @@ class Migrate(Step):
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         head = check.data.get("head")
         if not isinstance(head, str):
-            return Verified({"alembic_heads": 0})
-        now = current(self._alembic(ctx, "current", deps=True))
+            raise RuntimeError("migrate verifies after a check that read a head")
+        now = self._current(ctx)
         if now != [head]:
             raise StepFailed(
                 "not-at-head",

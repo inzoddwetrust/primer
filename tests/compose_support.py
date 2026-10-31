@@ -186,6 +186,21 @@ def alembic_call(cs: ComposeStack, what: str, *lines: str, deps: bool) -> FakeCa
     )
 
 
+def heads_call(cs: ComposeStack, image: str, *lines: str) -> FakeCall:
+    labels = (
+        "--label",
+        f"pridem.stack={cs.entry}",
+        "--label",
+        f"pridem.release={cs.ref}",
+        "--label",
+        f"pridem.commit={cs.commit}",
+    )
+    return FakeCall(
+        ("docker", "run", "--rm", *labels, image, "python", "-m", "alembic", "heads"),
+        lines=stdout(*lines),
+    )
+
+
 def migrate_call(cs: ComposeStack, code: int = 0) -> FakeCall:
     return FakeCall(
         tuple(

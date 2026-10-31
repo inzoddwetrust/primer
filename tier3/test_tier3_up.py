@@ -30,6 +30,7 @@ from pridem.report.schema import Verdict
 from pridem.runner import CommandTimedOut, Stream, SubprocessRunner
 
 REF = "main"
+JOURNAL_TAIL = 120
 PLAN = """
 import sys
 from datetime import UTC, datetime
@@ -43,7 +44,7 @@ from pridem.report.schema import build_verdict
 from pridem.runner import SubprocessRunner
 from pridem.stacks.schema import load_primer_yaml
 from pridem.stacks.seams import SeamMemory
-from pridem.state import Box
+from pridem.state import Box, JournalHeader
 from pridem.steps.build import Build
 from pridem.steps.env import RenderEnv, SeamsCheck
 from pridem.steps.host import EnsureNetwork
@@ -65,17 +66,36 @@ ladder = [
     Up(blank, "blank", **parts, memory=memory, render=render),
 ]
 host = [EnsureNetwork()]
+class Both:
+    def __init__(self, *sinks):
+        self.sinks = sinks
+    def emit(self, event):
+        for sink in self.sinks:
+            sink.emit(event)
+
 with box.lock("tier3-up"):
     started = datetime.now(UTC).replace(microsecond=0)
-    outcome = Plan(
-        [StackSteps("host", host), StackSteps("passport", first),
-         StackSteps("blank", ladder, root=True)],
-        mode="install", role="test", runner=SubprocessRunner(),
-        sink=ConsoleSink(sys.stdout, secrets),
-    ).run()
+    run_id = f"{started:%Y-%m-%dT%H:%M:%SZ}-{token_hex(2)}"
+    journal = box.open_journal(
+        JournalHeader(
+            run_id=run_id, verb="install", mode="install", args={},
+            actor={"type": "machine", "via": "local"}, started=started,
+            composition_before={"pridem": __version__},
+        ),
+        secrets,
+    )
+    try:
+        outcome = Plan(
+            [StackSteps("host", host), StackSteps("passport", first),
+             StackSteps("blank", ladder, root=True)],
+            mode="install", role="test", runner=SubprocessRunner(),
+            sink=Both(ConsoleSink(sys.stdout, secrets), journal),
+        ).run()
+    finally:
+        journal.close()
     every = [*host, *first, *ladder]
     verdict = build_verdict(
-        outcome, run_id=f"{started:%Y-%m-%dT%H:%M:%SZ}-{token_hex(2)}",
+        outcome, run_id=run_id,
         verb="install", args={}, actor={"type": "machine", "via": "local"},
         started=started, finished=datetime.now(UTC).replace(microsecond=0),
         passport_version=fetched.passport.version if fetched.passport else None,
@@ -133,7 +153,19 @@ def _plan(checkout: Path, passport: Path) -> tuple[Verdict, str]:
     printed = "\n".join(lines)
     verdicts = [line for line in lines if line.startswith("VERDICT ")]
     assert len(verdicts) == 1, printed
-    return Verdict.model_validate_json(verdicts[0].removeprefix("VERDICT ")), printed
+    verdict = Verdict.model_validate_json(verdicts[0].removeprefix("VERDICT "))
+    if verdict.result != "green":
+        printed += _journal_tail(verdict)
+    return verdict, printed
+
+
+def _journal_tail(verdict: Verdict) -> str:
+    """The end of the run's journal: the console shows no command output."""
+    journal = Path("/opt/pridem") / verdict.log_ref
+    if not journal.is_file():
+        return f"\n(no journal at {journal})"
+    tail = journal.read_text(encoding="utf-8").splitlines()[-JOURNAL_TAIL:]
+    return "\n--- journal tail ---\n" + "\n".join(tail)
 
 
 def _labels(kind: str, name: str) -> dict[str, str]:
@@ -169,7 +201,7 @@ def test_tier3_blank_is_built_migrated_up_and_conforms(tmp_path: Path) -> None:
         printed
     )
     assert facts["up"]["image"] == facts["build"]["app_image"], printed
-    assert "alembic_head" in facts["migrate"], printed
+    assert facts["migrate"].get("alembic_head") == "0001", printed  # the blank's head
     container = _app()
 
     again, printed = _plan(checkout, passport)  # the same commit: nothing recreated
