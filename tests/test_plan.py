@@ -3,6 +3,8 @@
 from pathlib import Path
 
 import pytest
+from env_support import COMMS_REPO, box, passport_data, product, render, service
+from env_support import run as run_env
 from plan_support import NOW, Journal, ListSink, ScriptedStep, plan, red
 
 from pridem.events import (
@@ -16,7 +18,13 @@ from pridem.events import (
 )
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
-from pridem.runner import FakeCall, FakeRunner, Stream
+from pridem.runner import (
+    CommandFailed,
+    CommandNotStarted,
+    FakeCall,
+    FakeRunner,
+    Stream,
+)
 from pridem.state import JournalSink
 from pridem.steps.base import (
     CheckResult,
@@ -635,3 +643,94 @@ def test_interrupt_between_finally_steps_lets_the_clean_up_finish() -> None:
         ("logs", "ok"),
     ]
     assert "aivis/timers:verify" in journal and "aivis/logs:verify" in journal
+
+
+# --- DM-48: a refusal in check keeps its code in doctor -------------------------
+
+
+def test_probe_DM_48_doctor_keeps_the_code_of_a_check_refusal() -> None:
+    journal = Journal()
+    refused = ScriptedStep(
+        "up",
+        1,
+        journal,
+        check_raises=StepFailed("wrong-state", {"seen": "x"}),
+    )
+    drift = ScriptedStep("env", 2, journal)
+    run, sink = plan(_root(refused, drift), "doctor")
+    outcome = run.run()
+    assert outcome.code is ExitCode.FAILED
+    assert [(r.name, r.status, r.reason, r.verify) for r in outcome.steps] == [
+        ("up", "failed", WRONG_STATE, {})
+    ]
+    assert sink.lines() == []  # the code and its parameters are the whole story
+    assert [d.name for d in outcome.doctor_diff] == ["env"]
+    assert not any(entry.endswith((":act", ":verify")) for entry in journal)
+    # the pair: an error from outside the step is still an exception, its text
+    # in the journal
+    other = ScriptedStep("up", 1, journal, check_raises=ValueError("no state"))
+    run, sink = plan(_root(other), "doctor")
+    outcome = run.run()
+    assert [r.reason for r in outcome.steps] == [
+        Code("exception", {"type": "ValueError"})
+    ]
+    assert [line.line for line in sink.lines()] == ["ValueError: no state"]
+
+
+def test_doctor_keeps_the_fact_of_a_check_refusal() -> None:
+    journal = Journal()
+    refused = ScriptedStep(
+        "up",
+        1,
+        journal,
+        check_raises=StepFailed("wrong-state", {"seen": "x"}, {"mode": "0o644"}),
+    )
+    outcome = plan(_root(refused), "doctor")[0].run()
+    assert [(r.reason, r.verify) for r in outcome.steps] == [
+        (WRONG_STATE, {"mode": "0o644"})
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (
+            CommandFailed(("docker", "ps"), 3, (0,), ()),
+            Code("command-failed", {"argv": ["docker", "ps"], "exit_code": 3}),
+        ),
+        (
+            CommandNotStarted(("nope",), "No such file or directory"),
+            Code("command-not-started", {"argv": ["nope"], "errno": None}),
+        ),
+    ],
+)
+def test_doctor_records_a_command_error_of_a_check_by_its_code(
+    error: Exception, reason: Code
+) -> None:
+    journal = Journal()
+    step = ScriptedStep("up", 1, journal, check_raises=error)
+    outcome = plan(_root(step), "doctor")[0].run()
+    assert [(r.status, r.reason) for r in outcome.steps] == [("failed", reason)]
+
+
+def test_doctor_reproduction_of_DM_14_render_env_missing_asked(
+    tmp_path: Path,
+) -> None:
+    """DM-14's reproduction: ``doctor`` of ``render_env`` for a stack whose
+    ``asked`` the passport lacks, with nobody to ask -- the step's own code."""
+    made = product(tmp_path, {}, dependencies={"comms": COMMS_REPO})
+    comms = service(tmp_path, {"TELEGRAM_BOT_TOKEN": {"source": "asked"}})
+    root, fetched = box(tmp_path, passport_data())
+    outcome, sink = run_env(
+        [render(comms, root, fetched, product=made)], FakeRunner(), mode="doctor"
+    )
+    assert outcome.code is ExitCode.FAILED
+    assert [(r.name, r.status, r.reason) for r in outcome.steps] == [
+        (
+            "render_env",
+            "failed",
+            Code("render_env:missing", {"fields": ["asked.comms.TELEGRAM_BOT_TOKEN"]}),
+        )
+    ]
+    assert outcome.doctor_diff == ()
+    assert sink.lines() == []

@@ -15,7 +15,7 @@ that point nothing automatic is done and the outcome says a restore is needed.
 step never stops the others, only an interrupt during a ``finally`` step does
 -- one between its steps is kept, and the clean-up goes on to its end.
 ``doctor`` runs only ``check`` of the ``deploy`` steps and reports what would be
-done.
+done; a step that refuses in ``check`` is recorded by its own code, as in a run.
 
 A step never crashes a plan: any exception from a phase is that step's failure.
 A ``KeyboardInterrupt`` is an interrupt of the run wherever it lands -- in a
@@ -492,14 +492,23 @@ class Plan:
         records: list[StepRecord],
         diff: list[DoctorItem],
     ) -> None:
-        """One ``doctor`` check: a failed check is a record, a needed one a diff."""
+        """One ``doctor`` check: a failed check is a record, a needed one a diff.
+
+        A step that refuses in ``check`` (``StepFailed``) is recorded with its
+        own code, parameters and fact, as ``_execute`` records it: one refusal
+        reads the same in ``doctor`` and in ``install``; it is no ``exception``
+        and leaves no text in the journal.
+        """
         state = self._run
         check: CheckResult | None = None
         reason: Code | None = None
+        fact: Fact = {}
         started = self._now()
         begin = self._clock()
         try:
             check = step.check(self._context("main", stack, step))
+        except StepFailed as error:
+            reason, fact = _qualified(step, error.reason), dict(error.fact)
         except KeyboardInterrupt as interrupt:
             state.interrupt = interrupt
             reason = INTERRUPTED
@@ -514,6 +523,7 @@ class Plan:
                 reason,
                 started,
                 self._clock() - begin,
+                fact,
             )
             records.append(self._record("main", record))
         elif check is not None and check.needed and check.would is not None:
