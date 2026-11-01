@@ -26,31 +26,15 @@ NGINX_IMAGE = (
 )
 """The nginx the blank's frontend is built from: pulled on every tier 3 run."""
 
-CERTBOT_IMAGE = "certbot/certbot"
-"""KNOWN CEILING (DM-17).
-
-1. Mechanics: images run by digest only (TZ 7.3); certbot's digest has not been
-   seen by anyone on this line -- the sandbox has no docker and no registry --
-   so the constant names no digest, and ``ssl`` in ``letsencrypt`` mode is red
-   ``ssl:certbot-unpinned`` before ``act``: no certbot runs unpinned.
-   ``self-signed``, ``defer`` and ``provided`` never run certbot.
-2. Status: acknowledged by design.
-3. Task: a delivery after DM-17, before DM-23, pins it.
-4. Trigger: tier 3 prints ``RepoDigests`` and ``--version`` of
-   ``CERTBOT_TAG`` (``tier3/test_tier3_whole_install.py``).
-5. Agreed fix: ``CERTBOT_IMAGE = "certbot/certbot:<tag>@sha256:<digest>"`` with
-   the value taken from that print.
-6. Rejected: a tag without a digest -- a tag moves, the image under it is not
-   the one the line has seen.
-"""
-
-CERTBOT_TAG = "certbot/certbot:latest"
-"""What tier 3 reads the digest and version of (KNOWN CEILING above, point 4):
-the pin names the version it found, never this tag."""
-
-
-def pinned(image: str) -> bool:
-    return "@sha256:" in image
+CERTBOT_IMAGE = (
+    "certbot/certbot:v5.9.0@sha256:"
+    "bc93cb710b413e6b456d622f9b0133b3e109c0a78c2ed9976af43d209b0a1805"
+)
+"""certbot, pinned by the digest tier 3 read (DM-49): ``RepoDigests`` of
+``certbot/certbot:latest`` pulled on the run of ``main@c5931be``, whose
+``--version`` said ``certbot 5.9.0`` -- the tag named here. docker pulls by the
+digest; the tag is for people. Tier 3 checks on every run that this tag names
+this digest (``tier3/test_tier3_whole_install.py``)."""
 
 
 def home(root: Path) -> Path:

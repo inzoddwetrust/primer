@@ -44,12 +44,10 @@ from pridem.steps.base import (
 )
 from pridem.steps.compose import out
 from pridem.steps.edge import (
-    CERTBOT_IMAGE,
     argv,
     certs_dir,
     letsencrypt_dir,
     mode_of,
-    pinned,
     write_file,
 )
 from pridem.steps.host import dns_table
@@ -179,8 +177,6 @@ def _copy_issued(root: Path, secrets: Secrets) -> None:
 
 def issue(ctx: StepContext, root: Path, names: list[str], secrets: Secrets) -> None:
     """certbot HTTP-01 through the shared webroot; the pair copied; reload."""
-    if not pinned(CERTBOT_IMAGE):
-        raise StepFailed("certbot-unpinned", {"image": CERTBOT_IMAGE})
     out(
         ctx,
         argv(
@@ -209,8 +205,6 @@ def issue(ctx: StepContext, root: Path, names: list[str], secrets: Secrets) -> N
 
 def renew(ctx: StepContext, root: Path, secrets: Secrets) -> dict[str, Json]:
     """``ssl renew``: certbot renews what is due, the pair is copied, reload."""
-    if not pinned(CERTBOT_IMAGE):
-        raise StepFailed("certbot-unpinned", {"image": CERTBOT_IMAGE})
     out(
         ctx,
         argv(
@@ -330,7 +324,6 @@ class Ssl(Step):
         **NO_PASSPORT,
         "issue": "issue a Let's Encrypt certificate for {domains}",
         "deferred": "the certificate is self-signed until ssl issue",
-        "certbot-unpinned": "certbot {image} has no digest; nothing runs unpinned",
         "dns-not-ready": "domains do not resolve to this box: {domains}",
         "not-issued": "the certificate is still self-signed after certbot",
         "expired": "the certificate expired at {cert_expires}",
@@ -363,8 +356,6 @@ class Ssl(Step):
         names = self._names()
         if _passport(self.fetched).policies.ssl != "letsencrypt" or not names:
             return CheckResult(False)
-        if not pinned(CERTBOT_IMAGE):
-            raise StepFailed("certbot-unpinned", {"image": CERTBOT_IMAGE})
         _, _, wrong = dns_table(ctx, names)
         if wrong:
             raise StepFailed("dns-not-ready", {"domains": list[Json](wrong)})

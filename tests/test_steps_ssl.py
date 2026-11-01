@@ -1,9 +1,10 @@
 """``tls_files`` and ``ssl`` (DM-17): the four modes of ``policies.ssl``.
 ``openssl`` runs for real; docker and the network follow a strict script."""
 
+import json
+import re
 from pathlib import Path
 
-import pytest
 from edge_support import (
     DOMAINS,
     NOW,
@@ -17,17 +18,21 @@ from edge_support import (
     stdout,
 )
 
-import pridem.steps.ssl as ssl
 from pridem.events import Code, Secrets
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall
 from pridem.steps.base import Step
-from pridem.steps.edge import argv, letsencrypt_dir, mode_of
+from pridem.steps.edge import (
+    CERTBOT_IMAGE,
+    argv,
+    compose_text,
+    letsencrypt_dir,
+    mode_of,
+)
 from pridem.steps.passport import Fetched
 from pridem.steps.ssl import Ssl, TlsFiles, cert_path, key_path
 
 NAMES = list(DOMAINS.values())
-PINNED = "certbot/certbot:v0.0.0@sha256:" + "c" * 64
 
 
 def ladder(root: Path, fetched: Fetched, secrets: Secrets | None = None) -> list[Step]:
@@ -58,7 +63,7 @@ def test_probe_DM_17_defer_gives_exit_2_with_incomplete_ssl(tmp_path: Path) -> N
 
 
 def test_probe_DM_17_provided_cert_installed_without_certbot_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     cert, key = self_signed_pair(tmp_path, ["*.preview.example.org", *NAMES])
     root, fetched = passport(tmp_path, role="preview", ssl="provided", tls=(cert, key))
@@ -83,7 +88,6 @@ def test_probe_DM_17_provided_cert_installed_without_certbot_call(
     (live / "fullchain.pem").write_text(issued_cert)
     (live / "privkey.pem").write_text(issued_key)
     calls = [*_dns_green(), *_issue(root)]
-    monkeypatch.setattr(ssl, "CERTBOT_IMAGE", PINNED)
     runner = Mixed(*calls)
     with runner:
         outcome, _ = run(ladder(root, fetched), runner)
@@ -137,21 +141,7 @@ def _issue(root: Path) -> list[FakeCall]:
     ]
 
 
-def test_letsencrypt_without_a_pinned_certbot_is_red_before_act(tmp_path: Path) -> None:
-    root, fetched = passport(tmp_path, ssl="letsencrypt")
-    runner = Mixed()
-    with runner:  # no curl, no getent, no certbot
-        outcome, _ = run(ladder(root, fetched), runner)
-    assert outcome.steps[1].reason == Code(
-        "ssl:certbot-unpinned", {"image": "certbot/certbot"}
-    )
-    assert not [a for a in runner.argvs if a[0] != "openssl"]
-
-
-def test_letsencrypt_with_dns_elsewhere_is_red_before_certbot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(ssl, "CERTBOT_IMAGE", PINNED)
+def test_letsencrypt_with_dns_elsewhere_is_red_before_certbot(tmp_path: Path) -> None:
     root, fetched = passport(tmp_path, ssl="letsencrypt")
     calls = _dns_green()
     calls[-1] = FakeCall(
@@ -208,3 +198,31 @@ def test_status_reports_expiry_and_key_mode(tmp_path: Path) -> None:
     assert fact["mode"] == "self-signed"
     assert str(fact["cert_expires"]).endswith("Z")
     assert fact["domains"] == sorted(NAMES)
+
+
+# --- DM-49: certbot pinned by digest -------------------------------------------
+
+READ_BY_TIER_3 = "bc93cb710b413e6b456d622f9b0133b3e109c0a78c2ed9976af43d209b0a1805"
+"""The digest tier 3 printed on ``main@c5931be`` (DM-50): the only source."""
+
+
+def test_probe_DM_49_certbot_image_is_pinned_by_digest(tmp_path: Path) -> None:
+    assert re.fullmatch(
+        r"certbot/certbot:v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}", CERTBOT_IMAGE
+    )
+    assert CERTBOT_IMAGE.endswith(f"@sha256:{READ_BY_TIER_3}")
+    # the edge's compose runs certbot from that image, nothing else
+    document = json.loads(compose_text(tmp_path))
+    assert document["services"]["certbot"]["image"] == CERTBOT_IMAGE
+    # the pair: letsencrypt with DNS on the box calls certbot -- no stand-in image
+    root, fetched = passport(tmp_path / "le", ssl="letsencrypt")
+    issued_cert, issued_key = issued_pair(tmp_path, NAMES)
+    live = letsencrypt_dir(root) / "live" / "pridem"
+    live.mkdir(parents=True)
+    (live / "fullchain.pem").write_text(issued_cert)
+    (live / "privkey.pem").write_text(issued_key)
+    runner = Mixed(*_dns_green(), *_issue(root))
+    with runner:
+        outcome, _ = run(ladder(root, fetched), runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert any("certonly" in argv for argv in runner.argvs)

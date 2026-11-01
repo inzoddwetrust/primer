@@ -20,21 +20,20 @@ once as ``doctor``. The blank is built and brought up once in the whole tier
   ``state.json``, the live database's head.
 
 Two short checks need no install: what a single-quoted value is to compose,
-and the digest certbot is to be pinned by (printed, not asserted). The file
+and that the tag certbot is pinned by still names the pinned digest. The file
 runs after ``test_tier3_host.py`` (pytest takes a directory's files by
 name): docker is on the runner only after the host steps.
 """
 
 import json
 import os
-import warnings
 from pathlib import Path
 
 import yaml
 
 from pridem.report.schema import Verdict
 from pridem.runner import CommandTimedOut, Stream, SubprocessRunner
-from pridem.steps.edge import CERTBOT_TAG
+from pridem.steps.edge import CERTBOT_IMAGE
 
 PYTHON = "/opt/pridem/current/venv/bin/python"
 BLANK = "https://github.com/inzoddwetrust/primer-blank.git"
@@ -590,14 +589,15 @@ def test_tier3_compose_takes_a_single_quoted_value_as_it_is(tmp_path: Path) -> N
     assert config["postgres"]["POSTGRES_PASSWORD"].replace("$$", "$") == literal
 
 
-def test_tier3_prints_the_digest_certbot_is_to_be_pinned_by() -> None:
-    """W6: printed, not asserted -- KNOWN CEILING on ``CERTBOT_IMAGE``."""
-    _run(["docker", "pull", "-q", CERTBOT_TAG], timeout=300)
-    digests = _stdout(
-        ["docker", "image", "inspect", "-f", "{{json .RepoDigests}}", CERTBOT_TAG]
+def test_tier3_certbot_tag_has_the_pinned_digest() -> None:
+    """W6 (DM-49): the tag ``CERTBOT_IMAGE`` names still points at its digest.
+    Not so -- red with the tag's digests as measured, for the next pin."""
+    tag, _, digest = CERTBOT_IMAGE.partition("@")
+    repository = tag.rpartition(":")[0]
+    _run(["docker", "pull", "-q", tag], timeout=300)
+    digests = json.loads(
+        "\n".join(
+            _stdout(["docker", "image", "inspect", "-f", "{{json .RepoDigests}}", tag])
+        )
     )
-    version = _run(["docker", "run", "--rm", CERTBOT_TAG, "--version"], timeout=120)
-    # a warning, so the run's summary shows it whatever pytest captures
-    warnings.warn(
-        f"CERTBOT {CERTBOT_TAG} digests={digests} version={version}", stacklevel=1
-    )
+    assert f"{repository}@{digest}" in digests, (tag, digests)
