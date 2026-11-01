@@ -179,8 +179,13 @@ ExactVersion = Annotated[
 ]
 
 
+SERVER_NAME = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+"""A server's name: a DNS label in lower case. The passport's ``server.name``
+and the name the machine reads ``passports/<name>.yaml`` by."""
+
+
 class Server(Strict):
-    name: Annotated[str, Field(pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")]
+    name: Annotated[str, Field(pattern=SERVER_NAME)]
     role: Literal["test", "prod", "preview"]
     os: Literal["ubuntu-24.04"]
     expires_at: AwareDatetime | None = None

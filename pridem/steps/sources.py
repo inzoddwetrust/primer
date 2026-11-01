@@ -22,6 +22,7 @@ contract checked against the product's range before a worktree is made. They
 share what they read through one ``Resolved``.
 """
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,10 +84,25 @@ class Target:
         return self.ref if self.tag else self.commit
 
 
+COMMIT = re.compile(r"[0-9a-f]{40}")
+"""A commit as the machine takes it from a remote: 40 lower-case hex digits."""
+
+NOT_A_COMMIT: dict[str, str] = {
+    "not-a-commit": "{repo} answered {ref} with {commit}, not a 40-hex commit",
+}
+"""The code of every step that asks a remote for a commit: what the remote
+answered is checked before it reaches a git command or a release path."""
+
+
 def remote_target(
     ctx: StepContext, root: Path, found: Repo, ref: str, tag: bool
 ) -> Target | None:
-    """The commit of ``ref`` on the remote (``git ls-remote``); ``None`` if missing."""
+    """The commit of ``ref`` on the remote (``git ls-remote``); ``None`` if missing.
+
+    The answer is refused (``not-a-commit``) unless it is 40 hex digits: it
+    becomes an argument of ``git show``, ``reset`` and ``worktree add`` and the
+    name of a release directory.
+    """
     full = f"refs/tags/{ref}" if tag else f"refs/heads/{ref}"
     _, lines = run_git(ctx, root, ["ls-remote", found.url(), full, f"{full}^{{}}"])
     commits: dict[str, str] = {}
@@ -95,7 +111,14 @@ def remote_target(
         if name:
             commits[name] = commit
     peeled = commits.get(f"{full}^{{}}") or commits.get(full)
-    return Target(ref, tag, peeled) if peeled else None
+    if not peeled:
+        return None
+    if COMMIT.fullmatch(peeled) is None:
+        raise StepFailed(
+            "not-a-commit",
+            {"repo": found.address, "ref": full, "commit": peeled[:80]},
+        )
+    return Target(ref, tag, peeled)
 
 
 class Checkout:
@@ -205,6 +228,7 @@ class FetchRoot(_SourceStep):
     name = "fetch_root"
     order = 2
     codes: ClassVar[dict[str, str]] = {
+        **NOT_A_COMMIT,
         "fetch": "fetch {stack} at {ref}",
         "missing-ref": "{ref} is not on {repo}",
         "no-primer-yaml": "{ref} has no primer.yaml",
@@ -294,6 +318,7 @@ class CheckLock(_SourceStep):
     name = "check_lock"
     order = 3
     codes: ClassVar[dict[str, str]] = {
+        **NOT_A_COMMIT,
         "lock-missing": "primer.lock is missing and the product has dependencies",
         "lock-range": "primer.lock breaks primer.yaml: {codes}",
         "lock-commit": "{service}: tag {tag} is {found}, the lock says {commit}",
@@ -348,6 +373,7 @@ class FetchServices(_SourceStep):
     name = "fetch_services"
     order = 4
     codes: ClassVar[dict[str, str]] = {
+        **NOT_A_COMMIT,
         "fetch": "fetch {services}",
         "release-off-target": "{release} is not on the target commit after the reset",
     }
@@ -397,6 +423,7 @@ class FetchPackages(_SourceStep):
     name = "fetch_packages"
     order = 5
     codes: ClassVar[dict[str, str]] = {
+        **NOT_A_COMMIT,
         "fetch": "fetch {packages}",
         "undeclared": "the product declares no package slot {slots}",
         "missing-tag": "{slot}: tag {tag} is not on {repo}",

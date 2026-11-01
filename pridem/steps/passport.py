@@ -30,6 +30,10 @@ Answers already in the local copy of the same version are reused, so a box
 is asked once per version (contract 1 rule 3). Answers go to the local copy
 only; the ops repository is the owner's. The version never changes here.
 
+The server's name is a DNS label in lower case (``SERVER_NAME``, the rule of
+``server.name``); another name is refused when the step is built, before git or
+sops runs, since it is a path in the ops repository.
+
 Nothing is written until the passport loads clean and names this server:
 the copy is replaced by rename of the checked temporary file. ``check`` reads
 only: ``git ls-remote`` against the head of the bare repository on disk and,
@@ -45,6 +49,7 @@ them.
 """
 
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -59,7 +64,7 @@ from pydantic import SecretStr, ValidationError
 from pridem.events import Fact, Json, Secrets
 from pridem.runner import OnLine, Stream
 from pridem.stacks.loader import ContractError, load_yaml_mapping, render_path
-from pridem.stacks.passport import PASSPORT, Passport, load_passport
+from pridem.stacks.passport import PASSPORT, SERVER_NAME, Passport, load_passport
 from pridem.state import BoxState
 from pridem.steps.base import (
     CheckResult,
@@ -72,7 +77,7 @@ from pridem.steps.base import (
 )
 from pridem.steps.git import KEYS, git_env, repo, run_git
 from pridem.steps.keys import DeployKey
-from pridem.steps.sources import Checkout, remote_target
+from pridem.steps.sources import NOT_A_COMMIT, Checkout, remote_target
 
 AGE_KEY = KEYS / "age.key"
 """The box's age identity (contract 2 section 3, ``keys/``)."""
@@ -422,6 +427,7 @@ class FetchPassport(Step):
     order = 3
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NOT_A_COMMIT,
         "fetch": "fetch passports/{server}.yaml from {repo}",
         "copy": "copy the passport from {file}",
         "no-ref": "the ops repository {repo} has no branch {ref}",
@@ -460,6 +466,8 @@ class FetchPassport(Step):
             raise ValueError("a passport comes from the ops repository or a file")
         if ops is not None and server is None:
             raise ValueError("the ops repository is read by the server's name")
+        if server is not None and re.fullmatch(SERVER_NAME, server) is None:
+            raise ValueError(f"not a server name: {server!r}")
         self.fetched = fetched
         self.root = root
         self.secrets = secrets

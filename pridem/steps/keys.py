@@ -4,9 +4,15 @@ For a repository reached over ssh the machine mints an ed25519 pair under
 ``/opt/pridem/keys/`` (the private part 0600), prints the public part, and
 waits until the repository answers ``git ls-remote`` with it -- the owner adds
 the public part as a read-only deploy key meanwhile. ssh goes through the
-machine's ``ssh_config``: ``Host <alias>`` per repository with its key only
-(``IdentitiesOnly yes``) and the machine's ``known_hosts``
-(``StrictHostKeyChecking accept-new``); root's ``~/.ssh`` is never touched.
+machine's ``ssh_config``: ``Host <alias>`` per repository with its user, its
+port when the address names one, its key only (``IdentitiesOnly yes``) and no
+prompt ever (``BatchMode yes``). GitHub on its ssh port is checked against the
+machine's own copy of GitHub's host keys, ``known_hosts.github``, and nothing
+else (``StrictHostKeyChecking yes``, ``GlobalKnownHostsFile none``): no trust on
+first use. Every other host goes to the machine's ``known_hosts``
+(``StrictHostKeyChecking accept-new``). A repository's block is drawn again from
+its address each time, the blocks of other repositories are kept; root's
+``~/.ssh`` is never touched.
 A key already in place with access needs no ``act`` -- tier 3 puts it there
 from the CI secrets. The private part is never in a fact, a log or a reason.
 """
@@ -35,44 +41,120 @@ KEY_WAIT_S = 1800
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
 
+GITHUB_HOST_KEYS: tuple[str, ...] = (
+    (
+        "ssh-ed25519 "
+        "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9"
+        "GKJl"
+    ),
+    (
+        "ecdsa-sha2-nistp256 "
+        "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEez"
+        "OmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2"
+        "YB/++Tpockg="
+    ),
+    (
+        "ssh-rsa "
+        "AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTv"
+        "DP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7a"
+        "GCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6"
+        "JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCf"
+        "lmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVr"
+        "uj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM"
+        "4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0"
+        "ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJz"
+        "K5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk="
+    ),
+)
+"""GitHub's ssh host keys, ``<type> <base64>``: the ``known_hosts`` lines of
+GitHub's publication "GitHub's SSH key fingerprints",
+https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints,
+read on 2026-11-01. Their SHA256 fingerprints are the ones the same page lists
+(tier 1 checks it); tier 3 checks them against ``ssh-keyscan github.com`` and
+``api.github.com/meta`` on every run, so a rotation turns tier 3 red."""
+
+PINNED = "known_hosts.github"
+"""The machine's copy of GitHub's host keys, beside its ``known_hosts``."""
+
+
+def pinned_known_hosts() -> str:
+    """``known_hosts.github``: one line per GitHub host key."""
+    return "".join(f"github.com {key}\n" for key in GITHUB_HOST_KEYS)
+
+
+def _block(keys: Path, found: Repo) -> str:
+    lines = [
+        f"Host {found.alias}",
+        f"  HostName {found.host}",
+        f"  User {found.user}",
+    ]
+    if found.port is not None:
+        lines.append(f"  Port {found.port}")
+    lines += [
+        f"  IdentityFile {keys / found.alias}",
+        "  IdentitiesOnly yes",
+        "  BatchMode yes",
+    ]
+    if found.pinned:
+        lines += [
+            "  StrictHostKeyChecking yes",
+            f"  UserKnownHostsFile {keys / PINNED}",
+            "  GlobalKnownHostsFile none",
+        ]
+    else:
+        lines += [
+            "  StrictHostKeyChecking accept-new",
+            f"  UserKnownHostsFile {keys / 'known_hosts'}",
+        ]
+    return "\n".join(lines) + "\n"
+
+
 def ssh_config(root: Path, repos: Sequence[Repo]) -> str:
     """``ssh_config`` of the machine for ``repos`` (ssh ones)."""
     keys = root / KEYS
-    blocks = [
-        f"Host {found.alias}\n"
-        f"  HostName {found.host}\n"
-        "  User git\n"
-        f"  IdentityFile {keys / found.alias}\n"
-        "  IdentitiesOnly yes\n"
-        "  StrictHostKeyChecking accept-new\n"
-        f"  UserKnownHostsFile {keys / 'known_hosts'}\n"
-        for found in repos
-        if not found.local
-    ]
-    return "\n".join(blocks)
+    return "\n".join(_block(keys, found) for found in repos if not found.local)
+
+
+def _blocks(text: str) -> dict[str, str]:
+    """``Host`` alias -> its block, in the order of the file."""
+    found: dict[str, str] = {}
+    current: str | None = None
+    for line in text.splitlines(keepends=True):
+        if line.startswith("Host "):
+            current = line.split()[1]
+            found[current] = ""
+        if current is not None and line.strip():
+            found[current] += line
+    return found
+
+
+def _replace(path: Path, text: str) -> None:
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(text, encoding="utf-8")
+    temp.chmod(0o600)
+    temp.replace(path)
 
 
 def write_ssh_config(root: Path, repos: Sequence[Repo]) -> None:
-    """Add ``repos`` to the machine's ``ssh_config`` (0600), keeping the others."""
+    """Draw the blocks of ``repos`` into the machine's ``ssh_config`` (0600),
+    keeping the other blocks; write ``known_hosts.github`` when one of them is
+    GitHub. A file already as drawn is not written."""
     keys = root / KEYS
     keys.mkdir(mode=0o700, parents=True, exist_ok=True)
-    known = sorted(
-        {p.name for p in keys.glob("pridem-*") if not p.name.endswith(".pub")}
-    )
-    wanted = {found.alias: found for found in repos if not found.local}
     config = keys / "ssh_config"
     present = config.read_text(encoding="utf-8") if config.exists() else ""
-    hosts = {
-        line.split()[1] for line in present.splitlines() if line.startswith("Host ")
-    }
-    extra = [found for alias, found in wanted.items() if alias not in hosts]
-    if not extra and set(known) >= set(wanted):
-        return
-    text = present + ("\n" if present else "") + ssh_config(root, extra)
-    temp = config.with_name("ssh_config.tmp")
-    temp.write_text(text, encoding="utf-8")
-    temp.chmod(0o600)
-    temp.replace(config)
+    blocks = _blocks(present)
+    for found in repos:
+        if not found.local:
+            blocks[found.alias] = _block(keys, found)
+    text = "\n".join(blocks.values())
+    if text != present:
+        _replace(config, text)
+    pinned = keys / PINNED
+    if any(found.pinned for found in repos if not found.local):
+        wanted = pinned_known_hosts()
+        if not pinned.exists() or pinned.read_text(encoding="utf-8") != wanted:
+            _replace(pinned, wanted)
 
 
 def has_access(ctx: StepContext, root: Path, found: Repo) -> bool:
@@ -166,5 +248,10 @@ class DeployKey(Step):
             )
         mode = oct(self._key.stat().st_mode & 0o777)
         return Verified(
-            {"repo": self.repo.address, "alias": self.repo.alias, "key_mode": mode}
+            {
+                "repo": self.repo.address,
+                "alias": self.repo.alias,
+                "key_mode": mode,
+                "host_keys": PINNED if self.repo.pinned else "accept-new",
+            }
         )

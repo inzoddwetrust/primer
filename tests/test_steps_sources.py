@@ -18,11 +18,19 @@ from plan_support import ListSink
 from pridem.events import PlanOutcome
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
-from pridem.runner import Stream, SubprocessRunner
+from pridem.runner import FakeCall, FakeRunner, Stream, SubprocessRunner
 from pridem.stacks.passport import Package
 from pridem.steps.base import StepContext
-from pridem.steps.git import git_env, run_git
-from pridem.steps.sources import source_steps
+from pridem.steps.git import git_env, repo, run_git
+from pridem.steps.sources import (
+    NOT_A_COMMIT,
+    CheckLock,
+    FetchPackages,
+    FetchRoot,
+    FetchServices,
+    remote_target,
+    source_steps,
+)
 
 ENV = {
     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -464,3 +472,84 @@ def test_primer_package_schema_file_is_the_model_export() -> None:
         parse_primer_package(
             "schema: 1\ncontract: 1.3.0\nextra: x\n", "primer-package.yaml"
         )
+
+
+# --- DM-52: a commit from ls-remote is 40 hex or nothing runs after it ----------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "a" * 39,
+        "a" * 41,
+        "a" * 64,  # a sha256 repository
+        "A" * 40,
+        "--upload-pack=touch /tmp/x",
+        "../../../etc",
+        "g" * 40,
+        "a" * 40 + "\n",
+    ],
+)
+def test_a_remote_answer_that_is_not_a_commit_stops_everything(
+    tmp_path: Path, answer: str
+) -> None:
+    address = "file:///srv/blank.git"
+    ref = "refs/heads/main"
+    runner = FakeRunner(
+        FakeCall(
+            ("git", "ls-remote", address, ref, f"{ref}^{{}}"),
+            lines=((Stream.STDOUT, f"{answer}\t{ref}"),),
+            env=git_env(tmp_path),
+        )
+    )
+    _, steps = source_steps(
+        tmp_path, stack="blank", address=address, ref="main", tag=False
+    )
+    with runner:  # strict: nothing after the ls-remote
+        outcome = Plan(
+            [StackSteps("sources", steps, root=True)],
+            mode="install",
+            role="test",
+            runner=runner,
+            sink=ListSink(),
+        ).run()
+    assert outcome.code is ExitCode.FAILED
+    record = outcome.steps[0]
+    assert record.reason is not None
+    assert record.reason.code == "fetch_root:not-a-commit"
+    assert {r.status for r in outcome.steps[1:]} == {"skipped"}
+    assert record.reason.params == {
+        "repo": address,
+        "ref": ref,
+        "commit": answer[:80],
+    }
+    assert not (tmp_path / "opt").exists()  # no bare, no release directory
+
+
+def test_a_40_hex_answer_is_the_target(tmp_path: Path) -> None:
+    address, ref, commit = "file:///srv/blank.git", "refs/tags/v1.0.0", "ab" * 20
+    lines = (
+        (Stream.STDOUT, f"{'cd' * 20}\t{ref}"),
+        (Stream.STDOUT, f"{commit}\t{ref}^{{}}"),
+    )
+    with FakeRunner(
+        FakeCall(
+            ("git", "ls-remote", address, ref, f"{ref}^{{}}"),
+            lines=lines,
+            env=git_env(tmp_path),
+        )
+    ) as runner:
+        ctx = StepContext(
+            runner=runner,
+            mode="install",
+            role="test",
+            stack="s",
+            on_line=lambda stream, line, cut: None,
+        )
+        target = remote_target(ctx, tmp_path, repo(address), "v1.0.0", True)
+    assert target is not None and (target.commit, target.release) == (commit, "v1.0.0")
+
+
+def test_every_step_that_asks_a_remote_declares_the_code() -> None:
+    for step in (FetchRoot, CheckLock, FetchServices, FetchPackages):
+        assert step.codes["not-a-commit"] == NOT_A_COMMIT["not-a-commit"], step

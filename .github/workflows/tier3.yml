@@ -76,13 +76,19 @@ jobs:
           PRIMER_BLANK_DEPLOY_KEY: ${{ secrets.PRIMER_BLANK_DEPLOY_KEY }}
         run: |
           (umask 077 && printf '%s\n' "$PRIMER_BLANK_DEPLOY_KEY" > "$RUNNER_TEMP/deploy_key")
+      - name: the GitHub API header, from the workflow's own token (DM-52)
+        env:
+          GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          (umask 077 && printf 'Authorization: Bearer %s\n' "$GITHUB_API_TOKEN" > "$RUNNER_TEMP/github_api_header")
       - name: tier 3 probes
         env:
           PRIMER_DEPLOY_KEY_FILE: ${{ runner.temp }}/deploy_key
+          PRIMER_GITHUB_API_HEADER_FILE: ${{ runner.temp }}/github_api_header
         run: |
           python3 -m venv /tmp/t3
           /tmp/t3/bin/python -m pip install --no-index --find-links "$GITHUB_WORKSPACE/wheels" --require-hashes -r "$GITHUB_WORKSPACE/requirements.lock"
           /tmp/t3/bin/python -m pip install --no-deps -e "$GITHUB_WORKSPACE"
           /tmp/t3/bin/python -m pip freeze --exclude-editable > "$RUNNER_TEMP/runtime.txt"
           /tmp/t3/bin/python -m pip install -c "$RUNNER_TEMP/runtime.txt" -e "$GITHUB_WORKSPACE[dev]"
-          sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --durations=0 --rootdir "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/tier3"
+          sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE,PRIMER_GITHUB_API_HEADER_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --durations=0 --rootdir "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/tier3"

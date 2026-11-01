@@ -1082,3 +1082,49 @@ def test_doctor_cleans_the_passports_secrets_read_in_check(tmp_path: Path) -> No
         assert not [piece for piece in pieces if piece in seen]
     # the pair: the raw lines carried them -- there was something to clean
     assert all(piece in printed(raw) for piece in (*SECRETS, TLS_KEY_BODY))
+
+
+# --- DM-52: the server's name is checked before git or sops ---------------------
+
+
+@pytest.mark.parametrize(
+    "server", ["../x", "a/b", "Box-one", "", "-a", "a-", "a" * 64, "box one", "box.one"]
+)
+def test_a_server_name_that_is_not_a_label_is_refused_before_any_command(
+    tmp_path: Path, server: str
+) -> None:
+    with pytest.raises(ValueError, match="not a server name"):
+        FetchPassport(
+            Fetched(),
+            tmp_path,
+            secrets=Secrets(()),
+            server=server,
+            ops=OpsSource("git@github.com:o/ops.git"),
+        )
+    with pytest.raises(ValueError, match="not a server name"):
+        passport_steps(
+            tmp_path, secrets=Secrets(()), server=server, file=tmp_path / "f"
+        )
+
+
+@pytest.mark.parametrize("server", ["box-one", "a", "a" * 63, "0", "aivis-test"])
+def test_a_label_is_a_server_name(tmp_path: Path, server: str) -> None:
+    fetch = FetchPassport(
+        Fetched(),
+        tmp_path,
+        secrets=Secrets(()),
+        server=server,
+        ops=OpsSource("git@github.com:o/ops.git"),
+    )
+    assert fetch.server == server
+    # the pair: no name at all is a passport from a file, as before
+    assert (
+        FetchPassport(
+            Fetched(), tmp_path, secrets=Secrets(()), server=None, file=tmp_path / "f"
+        ).server
+        is None
+    )
+
+
+def test_fetch_passport_declares_the_code_of_a_remote_commit() -> None:
+    assert "not-a-commit" in FetchPassport.codes
