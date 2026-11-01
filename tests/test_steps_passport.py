@@ -268,11 +268,12 @@ def verdict_of(
     steps: Sequence[Step],
     fetched: Fetched,
     secrets: Secrets | None = None,
+    verb: str = "install",
 ) -> Verdict:
     return build_verdict(
         outcome,
         run_id="2026-10-27T00:00:00Z-ab12",
-        verb="install",
+        verb=verb,
         args={},
         actor={"type": "machine", "via": "local"},
         started=datetime(2026, 10, 27, tzinfo=UTC),
@@ -992,3 +993,92 @@ def test_doctor_without_a_decryption_is_red_by_code_not_by_exception(
     outcome = _plan(stacks, "doctor")  # nothing fetched, no copy yet
     codes = [r.reason.code for r in outcome.steps if r.reason is not None]
     assert codes == ["render_env:no-passport", "nginx:no-passport"]
+
+
+# --- DM-50 fix 3: in doctor the passport's secrets are in the set from check ---
+
+
+class _PrintsInCheck(Step):
+    """A later step whose ``check`` prints the passport's ``asked`` and ``tls``
+    and names one in what it would do -- in doctor nothing else adds them."""
+
+    name = "echo_check"
+    order = 4
+    modes: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
+    codes: ClassVar[dict[str, str]] = {"would": "would use {value}"}
+
+    def __init__(self, fetched: Fetched) -> None:
+        self.fetched = fetched
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        passport = self.fetched.passport
+        assert passport is not None, "fetch_passport's check filled Fetched"
+        asked = [
+            v.get_secret_value() for s in passport.asked.values() for v in s.values()
+        ]
+        tls = passport.policies.tls
+        assert tls is not None
+        for value in [*asked, tls.cert.get_secret_value(), tls.key.get_secret_value()]:
+            ctx.on_line(Stream.STDOUT, value, False)
+        return CheckResult(True, local_code("would", {"value": asked[0]}))
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        raise AssertionError("doctor runs no act")
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        raise AssertionError("doctor runs no verify")
+
+
+def test_doctor_cleans_the_passports_secrets_read_in_check(tmp_path: Path) -> None:
+    data = passport()
+    policies = data["policies"]
+    assert isinstance(policies, dict)
+    policies["ssl"] = "provided"
+    policies["tls"] = {"cert": TLS_CERT, "key": TLS_KEY}
+    secrets = Secrets(())
+    fetched = Fetched()
+    fetch = FetchPassport(
+        fetched,
+        tmp_path / "box",
+        secrets=secrets,
+        server=SERVER,
+        file=write_file(tmp_path, data),
+    )
+    steps: list[Step] = [fetch, _PrintsInCheck(fetched)]
+    console = io.StringIO()
+    journal = tmp_path / "journal.jsonl"
+    journal.touch()
+    to_console, to_journal = (
+        ConsoleSink(console, secrets),
+        JournalSink(journal, secrets),
+    )
+    raw = ListSink()
+
+    class All:
+        def emit(self, event: Event) -> None:
+            raw.emit(event)
+            to_console.emit(event)
+            to_journal.emit(event)
+
+    ticks = count()
+    outcome = Plan(
+        [StackSteps("passport", steps, root=True)],
+        mode="doctor",
+        role="test",
+        runner=FakeRunner(),
+        sink=All(),
+        clock=lambda: float(next(ticks)),
+        now=lambda: datetime(2026, 11, 1, tzinfo=UTC),
+    ).run()
+    to_journal.close()
+
+    assert [d.reason.code for d in outcome.doctor_diff] == [
+        "fetch_passport:copy",
+        "echo_check:would",
+    ]
+    verdict = verdict_of(outcome, steps, fetched, secrets, "doctor").model_dump_json()
+    pieces = (*SECRETS, TLS_CERT_BODY, TLS_KEY_BODY)
+    for seen in (console.getvalue(), journal.read_text(), verdict):
+        assert not [piece for piece in pieces if piece in seen]
+    # the pair: the raw lines carried them -- there was something to clean
+    assert all(piece in printed(raw) for piece in (*SECRETS, TLS_KEY_BODY))
