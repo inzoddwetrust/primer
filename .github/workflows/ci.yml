@@ -3,6 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+  # a pull request runs the same checks; ci uses no secrets at all
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       planted:

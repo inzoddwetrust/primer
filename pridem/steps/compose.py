@@ -22,15 +22,31 @@ product's file and carries what the machine adds:
   replaces the implicit ``default``, so the override names it.
 
 ``down``, ``rm`` and ``--remove-orphans`` are never part of a command.
+
+``forbidden`` is the trust boundary of a stack's compose, read from the same
+``config`` output (anchors, ``extends`` and relative paths already resolved;
+top-level ``x-`` keys are not services and are not read): what would give a
+container the host is refused before anything is built (contract 3 rules 9,
+12; TZ 7.3). A service may not be ``privileged``, add capabilities, take
+devices, share a namespace of the host (``pid``, ``ipc``, ``network_mode``,
+``userns_mode``, ``cgroup``) or another container's (``network_mode`` or
+``volumes_from`` ``container:``), drop its confinement (``security_opt``
+``unconfined``, ``label:disable``), mount ``docker.sock``, bind or build from
+a path that resolves out of the release (a symlink of the release counts
+where it leads), or publish a port of the host its stack does not declare in
+``host.ports`` (a product declares none). A named volume that binds a path out
+of the release, a ``configs`` or ``secrets`` file out of it, and a package
+mounted into a service the compose does not have are refused the same way.
 """
 
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from pridem.events import Json
+from pridem.events import Json, as_list
 from pridem.files import atomic_write
 from pridem.runner import Stream
 from pridem.stacks.routes import alias, routed_services
@@ -160,6 +176,112 @@ def config(ctx: StepContext, compose: ComposeStack) -> dict[str, Json]:
 
 def _mapping(value: Json | None) -> dict[str, Json]:
     return value if isinstance(value, dict) else {}
+
+
+_HOST_NAMESPACES = ("pid", "ipc", "network_mode", "userns_mode", "cgroup")
+_UNCONFINED = re.compile(r"^(?:[a-z_]+[:=]unconfined|label[:=]disable)$")
+
+
+def _within(path: str, release: Path) -> bool:
+    """``path`` resolves into ``release`` (a symlink counts where it leads)."""
+    real = Path(os.path.realpath(path))
+    return real.is_relative_to(Path(os.path.realpath(release)))
+
+
+def _socket(path: str) -> bool:
+    return "docker.sock" in (Path(path).name, Path(os.path.realpath(path)).name)
+
+
+def _item(value: Json) -> str:
+    """One element of a compose list as it reads: a string, or its source."""
+    if isinstance(value, dict):
+        return str(value.get("source", json.dumps(value, sort_keys=True)))
+    return str(value)
+
+
+def _service_problems(
+    body: Mapping[str, Json], release: Path, declared: set[tuple[str, int]]
+) -> list[str]:
+    found: list[str] = []
+    if body.get("privileged") is True:
+        found.append("privileged")
+    found += [f"cap_add={_item(cap)}" for cap in as_list(body.get("cap_add"))]
+    found += [f"devices={_item(dev)}" for dev in as_list(body.get("devices"))]
+    for key in _HOST_NAMESPACES:
+        if body.get(key) == "host":
+            found.append(f"{key}=host")
+    mode = body.get("network_mode")
+    if isinstance(mode, str) and mode.startswith("container:"):
+        found.append(f"network_mode={mode}")
+    for option in as_list(body.get("security_opt")):
+        if _UNCONFINED.match(_item(option)):
+            found.append(f"security_opt={_item(option)}")
+    for source in as_list(body.get("volumes_from")):
+        if _item(source).startswith("container:"):
+            found.append(f"volumes_from={_item(source)}")
+    for volume in as_list(body.get("volumes")):
+        mount = _mapping(volume)
+        if mount.get("type") != "bind":
+            continue
+        source = str(mount.get("source", ""))
+        if _socket(source):
+            found.append("volumes=docker.sock")
+        elif not _within(source, release):
+            found.append(f"volumes={source}")
+    build = _mapping(body.get("build"))
+    context = build.get("context")
+    if isinstance(context, str):
+        dockerfile = build.get("dockerfile")
+        if not _within(context, release):
+            found.append(f"build.context={context}")
+        elif isinstance(dockerfile, str):
+            path = os.path.join(context, dockerfile)  # an absolute one stays
+            if not _within(path, release):
+                found.append(f"build.dockerfile={dockerfile}")
+    for port in as_list(body.get("ports")):
+        entry = _mapping(port)
+        proto = str(entry.get("protocol", "tcp"))
+        published = entry.get("published")
+        if published is None:  # a port of the host all the same: a random one
+            found.append(f"ports={entry.get('target')}/{proto} on a random port")
+        elif (
+            not str(published).isdigit() or (proto, int(str(published))) not in declared
+        ):
+            found.append(f"ports={published}/{proto}")
+    return found
+
+
+def forbidden(
+    compose: ComposeStack,
+    document: Mapping[str, Json],
+    mounts: Sequence[tuple[str, str]] = (),
+) -> list[str]:
+    """What the compose ``document`` asks of the host beyond the stack's trust,
+    one ``<where>: <key>`` per finding, sorted; ``mounts`` -- the packages'
+    ``(slot, service)`` the machine would bind."""
+    release = compose.release
+    stack = compose.stack
+    declared: set[tuple[str, int]] = set()
+    if isinstance(stack, Service) and stack.host is not None:
+        declared = {(port.proto, int(port.port)) for port in stack.host.ports}
+    services = _mapping(document.get("services"))
+    found: list[str] = []
+    for name, body in services.items():
+        problems = _service_problems(_mapping(body), release, declared)
+        found += [f"{name}: {problem}" for problem in problems]
+    for name, body in _mapping(document.get("volumes")).items():
+        device = _mapping(_mapping(body).get("driver_opts")).get("device")
+        if device is not None and not _within(str(device), release):
+            found.append(f"volumes.{name}: driver_opts.device={device}")
+    for kind in ("configs", "secrets"):
+        for name, body in _mapping(document.get(kind)).items():
+            file = _mapping(body).get("file")
+            if isinstance(file, str) and not _within(file, release):
+                found.append(f"{kind}.{name}: file={file}")
+    for slot, service in mounts:
+        if service not in services:
+            found.append(f"{service}: packages.{slot}.mount (no such service)")
+    return sorted(found)
 
 
 def built_services(document: Mapping[str, Json]) -> list[str]:

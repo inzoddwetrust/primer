@@ -255,12 +255,24 @@ def test_probe_DM_17_preview_role_sets_noindex_on_every_route(tmp_path: Path) ->
     for block in blocks:
         assert 'add_header X-Robots-Tag "noindex, nofollow" always;' in block
         assert f'if ($cookie_pridem_preview != "{secret}") {{ return 404; }}' in block
-    assert text.count("location = /__pridem/preview {") == 2
+    # DM-55: the link's query holds the secret, so its entry is never in the
+    # access log -- one entry per route on 443, and one on port 80 for a link
+    # opened over http (until then two entries, and port 80 logged the link)
+    assert text.count("location = /__pridem/preview {") == 3
+    entry = "  location = /__pridem/preview {\n    access_log off;"
+    assert text.count(entry) == 2
+    port_80 = text.split("server {")[1]
+    assert "listen 80 default_server;" in port_80
+    assert (
+        "  location = /__pridem/preview { access_log off; "
+        "return 301 https://$host$request_uri; }"
+    ) in port_80
     # the pair: test and prod have neither
     _, plain = passport(tmp_path / "t")
     assert plain.passport is not None
     other = render(nginx.product, plain.passport, None)
     assert "X-Robots-Tag" not in other and "pridem_preview" not in other
+    assert "__pridem" not in other
 
 
 # --- the rest -------------------------------------------------------------------

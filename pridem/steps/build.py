@@ -5,9 +5,11 @@ rules 18-19).
 arguments: ``PRIMER_RELEASE`` (tag or branch) and ``PRIMER_COMMIT`` (sha) --
 one image for every instance of a commit; a ``build.args`` in the product's
 compose would carry an instance's value and is refused before anything is
-built. Images carry ``pridem.stack``, ``pridem.release``, ``pridem.commit`` and
-``pridem.service`` from the machine's override (``steps/compose.py``), which
-this step writes.
+built. So is a compose that asks the host for more than the stack's trust
+(``compose-forbidden``, every finding of ``steps.compose.forbidden``): the
+check reads it, so ``doctor`` names it too. Images carry ``pridem.stack``,
+``pridem.release``, ``pridem.commit`` and ``pridem.service`` from the
+machine's override (``steps/compose.py``), which this step writes.
 
 A red build stops the plan: nothing has touched a running container -- the
 build only makes images. ``check`` needs no ``act`` when every built service
@@ -35,12 +37,13 @@ from pridem.steps.compose import (
     ComposeStack,
     built_services,
     config,
+    forbidden,
     image_of,
     out,
     override_text,
     write_override,
 )
-from pridem.steps.packages import package_mounts, volumes
+from pridem.steps.packages import PackageMount, package_mounts, volumes
 from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
@@ -66,6 +69,7 @@ class Build(Step):
         **NO_PASSPORT,
         "build": "build {services} of {stack} at {commit}",
         "instance-args": "the compose of {stack} gives build arguments to {services}",
+        "compose-forbidden": "the compose of {stack} asks the host for {found}",
         "no-image": "no image of {service} at {commit} after the build",
         "two-images": "{count} images of {service} at {commit}",
     }
@@ -84,16 +88,15 @@ class Build(Step):
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
         self.fetched = fetched
 
-    def _mounts(self) -> dict[str, list[str]]:
+    def _mounts(self) -> list[PackageMount]:
         """The packages' binds: in the override from the build on (DM-19)."""
         stack = self.compose.stack
         if self.fetched is None or not isinstance(stack, Product):
-            return {}
+            return []
         passport = self.fetched.passport
         if passport is None:
             raise StepFailed("no-passport")
-        found = package_mounts(stack, stack.name, passport, self.compose.root)
-        return volumes(found)
+        return package_mounts(stack, stack.name, passport, self.compose.root)
 
     def _rendered(self, ctx: StepContext) -> tuple[list[str], str]:
         document = config(ctx, self.compose)
@@ -111,7 +114,15 @@ class Build(Step):
                     "instance-args",
                     {"stack": self.compose.entry, "services": list[Json](given)},
                 )
-        text = override_text(self.compose, document, self._mounts())
+        mounts = self._mounts()
+        bound = [(mount.slot, mount.service) for mount in mounts]
+        found = forbidden(self.compose, document, bound)
+        if found:
+            raise StepFailed(
+                "compose-forbidden",
+                {"stack": self.compose.entry, "found": list[Json](found)},
+            )
+        text = override_text(self.compose, document, volumes(mounts))
         return built_services(document), text
 
     def check(self, ctx: StepContext) -> CheckResult:

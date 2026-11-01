@@ -226,3 +226,36 @@ def test_a_green_final_check_verified_every_green_step(tmp_path: Path) -> None:
     assert outcome.code is ExitCode.OK, outcome.steps
     assert outcome.steps[3].verify == {"verified": 3}
     assert [journal.count(f"blank/{name}:verify") for name in names] == [2, 2, 2]
+
+
+def test_the_switch_of_current_is_made_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DM-55: after ``current`` is replaced, its directory is fsynced, so the
+    switch survives a power loss -- the rename alone may not."""
+    box = Box(tmp_path / "pridem")
+    step, release = finalize(tmp_path, box)
+    link = current_link(tmp_path, "blank")
+    order: list[str] = []
+    real_replace, real_fsync = os.replace, os.fsync
+
+    def watch_replace(src: str, dst: str) -> None:
+        order.append(f"replace {Path(dst).name}")
+        real_replace(src, dst)
+
+    def watch_fsync(fd: int) -> None:
+        if os.fstat(fd).st_ino == link.parent.stat().st_ino:
+            order.append("fsync the directory of current")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "replace", watch_replace)
+    monkeypatch.setattr(os, "fsync", watch_fsync)
+    with box.lock("probe"):
+        outcome = plan(
+            tail(ScriptedStep("up", 12, Journal(), fact={"a": 1}), FinalCheck(), step),
+            "install",
+        )[0].run()
+    assert outcome.code is ExitCode.OK, outcome.steps
+    switch = order.index("replace current")
+    assert order[switch + 1] == "fsync the directory of current"
+    assert Path(os.readlink(link)) == release

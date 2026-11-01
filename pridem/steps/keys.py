@@ -13,8 +13,11 @@ first use. Every other host goes to the machine's ``known_hosts``
 (``StrictHostKeyChecking accept-new``). A repository's block is drawn again from
 its address each time, the blocks of other repositories are kept; root's
 ``~/.ssh`` is never touched.
-A key already in place with access needs no ``act`` -- tier 3 puts it there
-from the CI secrets. The private part is never in a fact, a log or a reason.
+A key already in place with access and files already as drawn need no
+``act`` -- tier 3 puts the key there from the CI secrets. ``check`` only
+compares: the files are written by ``act`` and read back by ``verify``, so
+``doctor`` changes nothing on disk. The private part is never in a fact, a log
+or a reason.
 """
 
 import time
@@ -129,26 +132,38 @@ def _blocks(text: str) -> dict[str, str]:
     return found
 
 
-def write_ssh_config(root: Path, repos: Sequence[Repo]) -> None:
-    """Draw the blocks of ``repos`` into the machine's ``ssh_config`` (0600),
-    keeping the other blocks; write ``known_hosts.github`` when one of them is
-    GitHub. A file already as drawn is not written."""
+def _present(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def drawn_ssh_config(root: Path, repos: Sequence[Repo]) -> dict[Path, str]:
+    """The machine's ``ssh_config`` with the blocks of ``repos`` drawn and the
+    other blocks kept, and ``known_hosts.github`` when one of them is GitHub;
+    nothing is written."""
     keys = root / KEYS
-    keys.mkdir(mode=0o700, parents=True, exist_ok=True)
     config = keys / "ssh_config"
-    present = config.read_text(encoding="utf-8") if config.exists() else ""
-    blocks = _blocks(present)
+    blocks = _blocks(_present(config))
     for found in repos:
         if not found.local:
             blocks[found.alias] = _block(keys, found)
-    text = "\n".join(blocks.values())
-    if text != present:
-        atomic_write(config, text, 0o600)
-    pinned = keys / PINNED
+    files = {config: "\n".join(blocks.values())}
     if any(found.pinned for found in repos if not found.local):
-        wanted = pinned_known_hosts()
-        if not pinned.exists() or pinned.read_text(encoding="utf-8") != wanted:
-            atomic_write(pinned, wanted, 0o600)
+        files[keys / PINNED] = pinned_known_hosts()
+    return files
+
+
+def ssh_config_differs(root: Path, repos: Sequence[Repo]) -> list[Path]:
+    """The files of ``drawn_ssh_config`` that are not as drawn."""
+    drawn = drawn_ssh_config(root, repos)
+    return [path for path, text in drawn.items() if _present(path) != text]
+
+
+def write_ssh_config(root: Path, repos: Sequence[Repo]) -> None:
+    """Write the files of ``drawn_ssh_config`` (0600) that are not as drawn."""
+    (root / KEYS).mkdir(mode=0o700, parents=True, exist_ok=True)
+    drawn = drawn_ssh_config(root, repos)
+    for path in ssh_config_differs(root, repos):
+        atomic_write(path, drawn[path], 0o600)
 
 
 def has_access(ctx: StepContext, root: Path, found: Repo) -> bool:
@@ -165,6 +180,8 @@ class DeployKey(Step):
     codes: ClassVar[dict[str, str]] = {
         "mint": "mint a deploy key for {repo} and wait for access",
         "alias-clash": "repositories share one key: {aliases}",
+        "ssh-config": "draw {repo} into {files}",
+        "ssh-config-differs": "{path} is not as drawn after the write",
         "no-access": "no read access to {repo} with key {public_key} after {wait_s} s",
     }
 
@@ -199,12 +216,22 @@ class DeployKey(Step):
             raise StepFailed("alias-clash", {"aliases": list[Json](clash)})
         if self.repo.local:
             return CheckResult(False)
-        write_ssh_config(self.root, [self.repo])
-        if self._key.exists() and has_access(ctx, self.root, self.repo):
+        mint = CheckResult(True, local_code("mint", {"repo": self.repo.address}))
+        if not self._key.exists():
+            return mint
+        differs = ssh_config_differs(self.root, [self.repo])
+        if differs:  # ls-remote would read the old files: act draws them first
+            files = list[Json](str(path) for path in differs)
+            params: dict[str, Json] = {"repo": self.repo.address, "files": files}
+            return CheckResult(True, local_code("ssh-config", params))
+        if has_access(ctx, self.root, self.repo):
             return CheckResult(False)
-        return CheckResult(True, local_code("mint", {"repo": self.repo.address}))
+        return mint
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
+        write_ssh_config(self.root, [self.repo])
+        if self._key.exists() and has_access(ctx, self.root, self.repo):
+            return  # only the files were not as drawn
         if not self._key.exists():
             self._key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             comment = f"pridem {self.repo.alias}"
@@ -235,6 +262,8 @@ class DeployKey(Step):
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         if self.repo.local:
             return Verified({"repo": self.repo.address, "key": "none: file://"})
+        for path in ssh_config_differs(self.root, [self.repo]):
+            raise StepFailed("ssh-config-differs", {"path": str(path)})
         if not has_access(ctx, self.root, self.repo):
             raise StepFailed(
                 "no-access",

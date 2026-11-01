@@ -126,10 +126,21 @@ def stdout(*lines: str) -> tuple[tuple[Stream, str], ...]:
 # --- the script of commands -----------------------------------------------------
 
 
+def in_release(document: Mapping[str, Json], release: Path) -> dict[str, Json]:
+    """``document`` with the paths ``/r/...`` in ``release``, as ``config``
+    prints them: absolute, resolved from the compose file's directory."""
+    text = json.dumps(document).replace('"/r/', json.dumps(f"{release}/")[:-1])
+    loaded = json.loads(text)
+    assert isinstance(loaded, dict)
+    return loaded
+
+
 def config_call(cs: ComposeStack, document: Mapping[str, Json] = CONFIG) -> FakeCall:
+    """``config`` of ``document``, its ``/r/`` paths in the release (DM-55:
+    a build context out of the release is refused)."""
     return FakeCall(
         tuple(cs.product_argv("config", "--format", "json")),
-        lines=stdout(json.dumps(document)),
+        lines=stdout(json.dumps(in_release(document, cs.release))),
     )
 
 

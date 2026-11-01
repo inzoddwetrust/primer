@@ -19,11 +19,13 @@ from pridem.events import PlanOutcome
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result
+from pridem.steps import keys as keys_module
 from pridem.steps.git import KEYS, collisions, git_env, repo
 from pridem.steps.keys import (
     GITHUB_HOST_KEYS,
     PINNED,
     DeployKey,
+    drawn_ssh_config,
     pinned_known_hosts,
     ssh_config,
     write_ssh_config,
@@ -152,6 +154,64 @@ def test_key_mode_is_the_mode_of_the_key_on_disk(tmp_path: Path, mode: int) -> N
     )
     assert outcome.code is ExitCode.OK, outcome.steps
     assert outcome.steps[0].verify["key_mode"] == oct(mode)
+
+
+def _key_in_place(root: Path) -> Path:
+    key = root / KEYS / repo(ADDRESS).alias
+    key.parent.mkdir(parents=True, exist_ok=True)
+    key.write_text(PRIVATE)
+    key.with_name(key.name + ".pub").write_text(PUBLIC + "\n")
+    key.chmod(0o600)
+    return key
+
+
+def _doctor(root: Path, calls: list[FakeCall]) -> PlanOutcome:
+    with _KeygenRunner(*calls) as runner:
+        return Plan(
+            [StackSteps("sources", [DeployKey(ADDRESS, root)], root=True)],
+            mode="doctor",
+            role="test",
+            runner=runner,
+            sink=ListSink(),
+        ).run()
+
+
+def test_check_writes_nothing_act_draws_the_files(tmp_path: Path) -> None:
+    """DM-55: ``check`` only compares the machine's ssh files with the drawn
+    ones -- ``doctor`` writes nothing -- and ``act`` writes them; a key in place
+    with access is not shown again. The pair: files as drawn, no act at all and
+    the files untouched."""
+    _key_in_place(tmp_path)
+    config, pinned = tmp_path / KEYS / "ssh_config", tmp_path / KEYS / PINNED
+    outcome = _doctor(tmp_path, [])  # files not drawn: no ls-remote either
+    [item] = outcome.doctor_diff
+    assert item.reason.code == "deploy_key:ssh-config"
+    assert item.reason.params["files"] == [str(config), str(pinned)]
+    assert not config.exists() and not pinned.exists()
+    outcome, sink = run(
+        tmp_path, DeployKey(ADDRESS, tmp_path), [lsremote(tmp_path, 0)] * 2
+    )
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert config.read_text() == drawn_ssh_config(tmp_path, [repo(ADDRESS)])[config]
+    assert pinned.read_text() == pinned_known_hosts()
+    assert "deploy key for" not in "\n".join(str(event) for event in sink.events)
+    before = [(p.stat().st_ino, p.stat().st_mtime_ns) for p in (config, pinned)]
+    outcome = _doctor(tmp_path, [lsremote(tmp_path, 0)])
+    assert outcome.doctor_diff == () and outcome.code is ExitCode.OK
+    assert [(p.stat().st_ino, p.stat().st_mtime_ns) for p in (config, pinned)] == before
+
+
+def test_verify_reads_the_ssh_files_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DM-55: ``verify`` reads the files ``act`` wrote: a write that did not
+    land is ``ssh-config-differs``, not a green step."""
+    _key_in_place(tmp_path)
+    monkeypatch.setattr(keys_module, "atomic_write", lambda *args, **kw: None)
+    outcome, _ = run(tmp_path, DeployKey(ADDRESS, tmp_path), [lsremote(tmp_path, 0)])
+    reason = outcome.steps[0].reason
+    assert reason is not None and reason.code == "deploy_key:ssh-config-differs"
+    assert reason.params == {"path": str(tmp_path / KEYS / "ssh_config")}
 
 
 def test_no_access_by_the_deadline_is_red_with_the_public_part_only(

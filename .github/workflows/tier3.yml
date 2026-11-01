@@ -10,8 +10,14 @@ name: tier3
 # starts in: the job runs in the clone ($GITHUB_WORKSPACE, checked out first)
 # and every file of the repository is named from $GITHUB_WORKSPACE.
 
+# A pull request runs tier 3 too, without secrets: the step that writes the
+# deploy key is skipped and the one probe that needs it (DM-10) is deselected
+# by name, printed in the log.
+
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -72,6 +78,7 @@ jobs:
           fi
           sudo bash /tmp/tier3/install.sh
       - name: the deploy key of primer-blank, from the CI secrets (DM-10)
+        if: github.event_name != 'pull_request'
         env:
           PRIMER_BLANK_DEPLOY_KEY: ${{ secrets.PRIMER_BLANK_DEPLOY_KEY }}
         run: |
@@ -91,4 +98,9 @@ jobs:
           /tmp/t3/bin/python -m pip install --no-deps -e "$GITHUB_WORKSPACE"
           /tmp/t3/bin/python -m pip freeze --exclude-editable > "$RUNNER_TEMP/runtime.txt"
           /tmp/t3/bin/python -m pip install -c "$RUNNER_TEMP/runtime.txt" -e "$GITHUB_WORKSPACE[dev]"
-          sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE,PRIMER_GITHUB_API_HEADER_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --durations=0 --rootdir "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/tier3"
+          deselect=()
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            echo "pull_request: no secrets, so no deploy key -- DM-10 is not run"
+            deselect=(-k "not test_probe_DM_10_blank_is_fetched_by_ref_over_ssh")
+          fi
+          sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE,PRIMER_GITHUB_API_HEADER_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --durations=0 --rootdir "$GITHUB_WORKSPACE" "${deselect[@]}" "$GITHUB_WORKSPACE/tier3"

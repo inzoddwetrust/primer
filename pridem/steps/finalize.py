@@ -6,12 +6,13 @@ green step of the run once more (``plan.py``); one red fails it, and
 
 ``finalize`` switches ``current`` of every stack to its release --
 ``/opt/<stack>/current`` is a symlink replaced atomically (a temporary symlink
-and ``rename``) -- and writes ``state.json``, the only writer of it in a plan:
-the composition, the passport's version and ops commit, ``current``. A red
-gate anywhere before stops the plan before this step: ``current`` still names
-the release that ran. The final check runs before the switch: a release that
-did not pass it is never recorded as current (the containers it runs on are
-up; ``doctor`` shows ``current`` behind them).
+and ``rename``, then fsync of the directory) -- and writes ``state.json``, the
+only writer of it in a plan: the composition, the passport's version and ops
+commit, ``current``. A red gate anywhere before stops the plan before this
+step: ``current`` still names the release that ran. The final check runs
+before the switch: a release that did not pass it is never recorded as
+current (the containers it runs on are up; ``doctor`` shows ``current`` behind
+them).
 """
 
 import os
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
+from pridem.files import fsync_dir
 from pridem.state import Box, BoxState
 from pridem.steps.base import (
     CheckResult,
@@ -134,6 +136,7 @@ class Finalize(Step):
             temp.unlink(missing_ok=True)
             os.symlink(release, temp)
             os.replace(temp, link)  # never a moment without current
+            fsync_dir(link.parent)  # the switch survives a power loss
         self.box.write_state(self._state())
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:

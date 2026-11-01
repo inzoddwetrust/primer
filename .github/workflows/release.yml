@@ -1,9 +1,12 @@
 name: release
 
 # A release of the machine is a tag v{__version__} on the first parent of main
-# (TZ section 10.2). Tier 1 runs on the tag's commit first; only a green run
-# builds the wheel from the pinned build backend and publishes two assets: the
-# wheel and install.sh with its three pins substituted.
+# (TZ section 10.2). Tier 1 runs on the tag's commit first; the release job
+# first asks the tier 3 workflow's runs on that commit (pushes to main only):
+# the latest one must have finished green -- no waiting, the tag is set after
+# it. Only then the wheel is built from the pinned build backend and two
+# assets are published: the wheel and install.sh with its three pins
+# substituted.
 
 on:
   push:
@@ -58,7 +61,27 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
     steps:
+      - name: tier 3 is green on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/tier3.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=100" > "$RUNNER_TEMP/tier3-runs.json"
+          python3 - "$RUNNER_TEMP/tier3-runs.json" <<'EOF'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              runs = json.load(handle)["workflow_runs"]
+          if not runs:
+              sys.exit("tier 3 has not run on this commit: no release")
+          last = max(runs, key=lambda run: run["run_number"])
+          state = last["conclusion"] if last["status"] == "completed" else last["status"]
+          if state != "success":
+              sys.exit(f"tier 3 on this commit is {state}: {last['html_url']}")
+          print(f"tier 3 on this commit is green: {last['html_url']}")
+          EOF
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0

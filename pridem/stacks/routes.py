@@ -17,7 +17,10 @@ HTTPS with 301 and the ACME challenge on port 80; HSTS, ``X-Content-Type-
 Options``, gzip on every route; a default server that answers no unknown
 host. A ``preview`` box (contract 1 rule 10) also sets ``noindex`` on every
 route and lets in only a browser that came by the link with the secret: the
-link sets a cookie, a request without it is 404.
+link sets a cookie, a request without it is 404. The link's request carries
+the secret in its query, so it is never in the access log: its location has
+``access_log off`` on 443 and, for a link opened over http, on port 80, where
+it is redirected to https.
 
 ``normalized`` is the config as nginx would read it -- comments, empty lines
 and runs of blanks are not drift; a domain, a header, an order is.
@@ -142,6 +145,7 @@ def _server(
         cookie = f"{PREVIEW_COOKIE}={secret}; Path=/; Secure; HttpOnly; SameSite=Lax"
         lines += [
             f"  location = {PREVIEW_PATH} {{",
+            "    access_log off;  # the query holds the preview secret",
             f'    if ($arg_k != "{secret}") {{ return 404; }}',
             f'    add_header Set-Cookie "{cookie}" always;',
             *inner,
@@ -184,6 +188,13 @@ def render(product: Product, passport: Passport, secret: str | None) -> str:
         "  listen 80 default_server;",
         "  server_name _;",
         f"  location /.well-known/acme-challenge/ {{ root {ACME_ROOT}; }}",
+    ]
+    if preview:  # the link opened over http: its query holds the secret
+        lines += [
+            f"  location = {PREVIEW_PATH} {{ access_log off; "
+            "return 301 https://$host$request_uri; }",
+        ]
+    lines += [
         "  location / { return 301 https://$host$request_uri; }",
         "}",
     ]

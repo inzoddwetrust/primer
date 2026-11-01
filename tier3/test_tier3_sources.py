@@ -46,6 +46,7 @@ from pridem.steps.keys import DeployKey
 from pridem.steps.sources import source_steps
 
 root, address = Path("/"), sys.argv[1]
+mode = sys.argv[2] if len(sys.argv) > 2 else "install"
 _, steps = source_steps(root, stack="blank", address=address, ref="main", tag=False)
 box, secrets = Box(Path("/opt/pridem")), Secrets(())
 key_step = DeployKey(address, root, wait_s=30)
@@ -53,12 +54,12 @@ with box.lock("tier3-sources"):
     started = datetime.now(UTC).replace(microsecond=0)
     outcome = Plan(
         [StackSteps("sources", [key_step, *steps], root=True)],
-        mode="install", role="test", runner=SubprocessRunner(),
+        mode=mode, role="test", runner=SubprocessRunner(),
         sink=ConsoleSink(sys.stdout, secrets),
     ).run()
     verdict = build_verdict(
         outcome, run_id=f"{started:%Y-%m-%dT%H:%M:%SZ}-{token_hex(2)}",
-        verb="install", args={}, actor={"type": "machine", "via": "local"},
+        verb=mode, args={}, actor={"type": "machine", "via": "local"},
         started=started, finished=datetime.now(UTC).replace(microsecond=0),
         passport_version=None, composition_before={"pridem": __version__},
         composition_after={"pridem": __version__}, secrets=secrets,
@@ -114,8 +115,8 @@ def _ls_remote(url: str) -> tuple[int, list[str]]:
     return result.code, lines
 
 
-def _plan() -> tuple[Verdict, list[str]]:
-    code, lines = _run([PYTHON, "-c", SCRIPT, ADDRESS])
+def _plan(mode: str = "install") -> tuple[Verdict, list[str]]:
+    code, lines = _run([PYTHON, "-c", SCRIPT, ADDRESS, mode])
     [line] = [line for line in lines if line.startswith("VERDICT ")]
     verdict = Verdict.model_validate_json(line.removeprefix("VERDICT "))
     assert int(verdict.exit_code) == code, lines
@@ -148,6 +149,14 @@ def test_probe_DM_10_blank_is_fetched_by_ref_over_ssh() -> None:
     again, _ = _plan()
     assert again.result == "green"
     assert (again.steps[1].verify or {})["drift_discarded"] == []
+    # DM-55: doctor after it finds nothing to do and writes nothing: the
+    # machine's ssh_config is the same file, untouched
+    ssh_file = Path("/") / KEYS / "ssh_config"
+    drawn = (ssh_file.stat().st_ino, ssh_file.stat().st_mtime_ns)
+    doctor, doctor_lines = _plan("doctor")
+    assert doctor.result == "green", doctor_lines
+    assert doctor.report.doctor_diff == [], doctor_lines
+    assert (ssh_file.stat().st_ino, ssh_file.stat().st_mtime_ns) == drawn
 
     # GitHub's host keys (DM-52): the copy is what github.com serves ...
     scanned = _stdout(["ssh-keyscan", "-t", "ed25519,ecdsa,rsa", "github.com"])

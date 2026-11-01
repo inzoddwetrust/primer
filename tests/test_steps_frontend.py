@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 import yaml
-from compose_support import CONFIG, ENTRY, REF, SHA, stdout
+from compose_support import CONFIG, ENTRY, REF, SHA, in_release, stdout
+from compose_support import config_call as compose_config
 from edge_support import DOMAINS, Mixed, exec_call, passport, product
 from env_support import box, passport_data
 from plan_support import ListSink
@@ -18,7 +19,8 @@ from pridem.runner import FakeCall, FakeRunner
 from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import Product, load_primer_yaml
 from pridem.steps.base import Step
-from pridem.steps.compose import ComposeStack, override_text
+from pridem.steps.build import Build
+from pridem.steps.compose import ComposeStack, forbidden, override_text
 from pridem.steps.frontend import Frontend
 from pridem.steps.packages import Packages, package_mounts, volumes
 from pridem.steps.passport import Fetched
@@ -241,6 +243,40 @@ def test_an_image_named_in_compose_is_used_only_without_build(
         )
     else:  # the named image reached validate (which says no here)
         assert reason.code == "command-failed"
+
+
+def test_build_refuses_a_package_for_a_service_the_compose_lacks(
+    tmp_path: Path,
+) -> None:
+    """DM-55: a package mounted into a service the compose does not have would
+    drop out of the override unseen; ``build`` refuses it in ``check``, before
+    anything is built. The pair: with the service, the package is no finding."""
+    stack = made(tmp_path, skin_product("css"))
+    root, fetched, _ = skin_box(tmp_path)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    services = CONFIG["services"]
+    assert isinstance(services, dict)
+    lacking = {
+        **CONFIG,
+        "services": {k: v for k, v in services.items() if k != "frontend"},
+    }
+    step = Build(
+        stack,
+        ENTRY,
+        release=cs.release,
+        ref=REF,
+        commit=SHA,
+        root=root,
+        fetched=fetched,
+    )
+    with FakeRunner(compose_config(cs, lacking)) as runner:  # nothing is built
+        outcome = run([step], runner)
+    assert outcome.steps[0].reason == Code(
+        "build:compose-forbidden",
+        {"stack": ENTRY, "found": ["frontend: packages.skin.mount (no such service)"]},
+    )
+    whole = in_release(CONFIG, cs.release)
+    assert forbidden(cs, whole, [("skin", "frontend")]) == []
 
 
 def test_a_dependency_mount_is_not_done_here(tmp_path: Path) -> None:
