@@ -37,7 +37,7 @@ CERTBOT_IMAGE = "certbot/certbot"
 2. Status: acknowledged by design.
 3. Task: a delivery after DM-17, before DM-23, pins it.
 4. Trigger: tier 3 prints ``RepoDigests`` and ``--version`` of
-   ``CERTBOT_TAG`` (``tier3/test_tier3_web.py``).
+   ``CERTBOT_TAG`` (``tier3/test_tier3_whole_install.py``).
 5. Agreed fix: ``CERTBOT_IMAGE = "certbot/certbot:<tag>@sha256:<digest>"`` with
    the value taken from that print.
 6. Rejected: a tag without a digest -- a tag moves, the image under it is not

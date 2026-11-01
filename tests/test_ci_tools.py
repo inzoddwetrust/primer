@@ -98,3 +98,24 @@ def test_planted_defects_are_caught() -> None:
     for label, text in planted.items():
         assert text != ci, label
         assert tool_problems(text) != [], label
+
+
+def durations_problems(workflow: str) -> list[str]:
+    """Steps of the tier 3 workflow that run pytest without ``--durations=0``."""
+    document = yaml.safe_load(workflow)
+    out: list[str] = []
+    for job in document["jobs"].values():
+        for step in job["steps"]:
+            for line in _lines(step):
+                if _PYTEST.search(line) and "--durations=0" not in line:
+                    out.append(line.strip())
+    return out
+
+
+def test_tier3_prints_the_time_of_every_test() -> None:
+    """DM-50: the log of tier 3 names the time of each test."""
+    workflow = (WORKFLOWS / "tier3.yml").read_text(encoding="utf-8")
+    assert _pytest_jobs(workflow) == 1  # the pair: tier 3 does run pytest
+    assert durations_problems(workflow) == []
+    planted = workflow.replace(" --durations=0", "")
+    assert planted != workflow and durations_problems(planted) != []
