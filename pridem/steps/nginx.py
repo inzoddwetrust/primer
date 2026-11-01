@@ -50,7 +50,7 @@ from pridem.steps.edge import (
     write_file,
 )
 from pridem.steps.git import KEYS
-from pridem.steps.passport import Fetched
+from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 PREVIEW_SECRET = KEYS / "preview-link"
@@ -64,6 +64,7 @@ class Nginx(Step):
     order = 2
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "render": "render nginx for {routes} routes: {diff}",
         "config-invalid": "nginx -t is red in {where}; nothing reloaded",
         "route-target-unknown": "route {route} goes to {to}, which no stack declares",
@@ -93,7 +94,7 @@ class Nginx(Step):
     def _preview(self) -> bool:
         passport = self.fetched.passport
         if passport is None:
-            raise RuntimeError("no passport: fetch_passport runs before nginx")
+            raise StepFailed("no-passport")
         return passport.server.role == "preview"
 
     def _secret(self, *, mint_if_absent: bool) -> str | None:
@@ -116,7 +117,7 @@ class Nginx(Step):
     def _rendered(self, secret: str | None) -> str:
         passport = self.fetched.passport
         if passport is None:
-            raise RuntimeError("no passport: fetch_passport runs before nginx")
+            raise StepFailed("no-passport")
         return render(self.product, passport, secret)
 
     def _live(self) -> str | None:

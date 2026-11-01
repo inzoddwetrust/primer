@@ -53,7 +53,7 @@ from pridem.steps.edge import (
     write_file,
 )
 from pridem.steps.host import dns_table
-from pridem.steps.passport import Fetched
+from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 RENEW_BEFORE = timedelta(days=30)
@@ -72,7 +72,7 @@ def key_path(root: Path) -> Path:
 
 def _passport(fetched: Fetched) -> Passport:
     if fetched.passport is None:
-        raise RuntimeError("no passport: fetch_passport runs before the edge steps")
+        raise StepFailed("no-passport")
     return fetched.passport
 
 
@@ -236,6 +236,7 @@ class TlsFiles(Step):
     order = 1
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "place": "place the {mode} certificate for {domains}",
         "key-mode": "the TLS key {path} is {mode}, not 0o600; it is left as it is",
         "provided-differs": "the certificate on disk is not the passport's",
@@ -326,6 +327,7 @@ class Ssl(Step):
     order = 3
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "issue": "issue a Let's Encrypt certificate for {domains}",
         "deferred": "the certificate is self-signed until ssl issue",
         "certbot-unpinned": "certbot {image} has no digest; nothing runs unpinned",

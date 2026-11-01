@@ -29,6 +29,8 @@ from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.codes import ExitCode
 from pridem.report.schema import Verdict, build_verdict
 from pridem.runner import FakeRunner, OnLine, Result, Runner, Stream, SubprocessRunner
+from pridem.stacks.schema import PRIMER_YAML, Product
+from pridem.stacks.seams import SeamMemory
 from pridem.state import Box, BoxState, JournalSink
 from pridem.steps.base import (
     CheckResult,
@@ -38,7 +40,9 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
+from pridem.steps.env import RenderEnv
 from pridem.steps.git import KEYS
+from pridem.steps.nginx import Nginx
 from pridem.steps.passport import (
     AGE_KEY,
     PASSPORT_COPY,
@@ -837,3 +841,154 @@ def test_fetch_passport_puts_the_passports_tls_in_the_runs_set(tmp_path: Path) -
     # the pair: the values were there to clean, and they are in the run's set
     assert TLS_KEY_BODY in printed(raw) and TLS_CERT_BODY in printed(raw)
     assert all(secrets.text(piece) == "[redacted]" for piece in pieces)
+
+
+# --- DM-50 fix: doctor sees the passport install would apply -------------------
+
+
+def _web_product() -> Product:
+    made = PRIMER_YAML.validate_python(
+        {
+            "schema": 1,
+            "name": "blank",
+            "kind": "product",
+            "stacks": {
+                "blank": {
+                    "compose": "docker-compose.yml",
+                    "app": {
+                        "service": "app",
+                        "port": 8000,
+                        "health": "/h",
+                        "ready": "/r",
+                    },
+                    "frontend": {"service": "frontend", "port": 80},
+                }
+            },
+            "env": {"API_BASE_URL": {"source": "passport", "key": "domains.api"}},
+            "host": {
+                "domains": ["frontend", "api"],
+                "routes": {
+                    "frontend": {"to": "frontend:80"},
+                    "api": {"to": "app:8000"},
+                },
+            },
+            "report": {"health": "/h", "ready": "/r", "logs": "json", "junit": True},
+        }
+    )
+    assert isinstance(made, Product)
+    return made
+
+
+def _web_passport(version: int, api: str) -> Data:
+    data = passport(version=version)
+    data["domains"] = {"frontend": "blank.example.org", "api": api}
+    return data
+
+
+def _ladder(
+    root: Path, ops: Ops, secrets: Secrets, depth: int = 3
+) -> tuple[Fetched, list[StackSteps]]:
+    """The first ``depth`` stacks of passport -> render_env -> nginx."""
+    fetched, first = ops_steps(root, ops, secrets=secrets)
+    made = _web_product()
+    render = RenderEnv(
+        made,
+        product=made,
+        fetched=fetched,
+        secrets=secrets,
+        memory=SeamMemory(),
+        root=root,
+    )
+    nginx = Nginx(made, fetched=fetched, secrets=secrets, root=root)
+    rendering: list[Step] = [render]
+    serving: list[Step] = [nginx]
+    parts = [("passport", first), ("blank", rendering), ("edge", serving)][:depth]
+    stacks = [
+        StackSteps(name, steps, root=index == len(parts) - 1)
+        for index, (name, steps) in enumerate(parts)
+    ]
+    return fetched, stacks
+
+
+def _plan(stacks: list[StackSteps], mode: str) -> PlanOutcome:
+    ticks = count()
+    return Plan(
+        stacks,
+        mode=mode,  # type: ignore[arg-type]
+        role="test",
+        runner=Recording(),
+        sink=ListSink(),
+        clock=lambda: float(next(ticks)),
+        now=lambda: datetime(2026, 11, 1, tzinfo=UTC),
+    ).run()
+
+
+def test_doctor_after_fetch_passport_records_no_exception(tmp_path: Path) -> None:
+    """DM-50 fix: in doctor no verify fills ``Fetched``; ``check`` of
+    ``fetch_passport`` does, so the steps after it check, not crash."""
+    root = tmp_path / "box"
+    public = box_key(root)
+    ops = Ops(tmp_path)
+    ops.put(
+        SERVER, encrypt(tmp_path, _web_passport(7, "api.blank.example.org"), public)
+    )
+    _, stacks = _ladder(root, ops, Secrets(()), depth=1)
+    assert _plan(stacks, "install").code is ExitCode.OK  # the copy is on the box
+
+    fetched, stacks = _ladder(root, ops, Secrets(()))
+    outcome = _plan(stacks, "doctor")
+
+    assert [r for r in outcome.steps if r.reason is not None] == []
+    assert sorted(d.reason.code for d in outcome.doctor_diff) == [
+        "nginx:render",
+        "render_env:render",
+    ]
+    assert fetched.passport is not None and fetched.passport.version == 7
+
+
+def test_doctor_sees_the_newer_ops_passport_not_the_copy(tmp_path: Path) -> None:
+    """The pair: a newer passport in the ops repository, already in the box's
+    bare (not yet applied): doctor renders what install would -- the new one."""
+    root = tmp_path / "box"
+    public = box_key(root)
+    ops = Ops(tmp_path)
+    ops.put(
+        SERVER, encrypt(tmp_path, _web_passport(7, "api.blank.example.org"), public)
+    )
+    _, stacks = _ladder(root, ops, Secrets(()), depth=2)
+    assert _plan(stacks, "install").code is ExitCode.OK  # copy and .env of v7
+    ops.put(SERVER, encrypt(tmp_path, _web_passport(8, "api.new.example.org"), public))
+    git(
+        root / "opt" / "pridem" / "ops" / "git",
+        "fetch",
+        "-q",
+        ops.address,
+        "+refs/heads/*:refs/heads/*",
+    )
+
+    fetched, stacks = _ladder(root, ops, Secrets(()), depth=2)
+    outcome = _plan(stacks, "doctor")
+
+    assert [r for r in outcome.steps if r.reason is not None] == []
+    assert fetched.passport is not None and fetched.passport.version == 8
+    assert fetched.passport.domains["api"] == "api.new.example.org"
+    # the .env of v7 is not what v8 renders: render_env would act
+    assert [d.reason.code for d in outcome.doctor_diff] == [
+        "fetch_passport:fetch",
+        "render_env:render",
+    ]
+
+
+def test_doctor_without_a_decryption_is_red_by_code_not_by_exception(
+    tmp_path: Path,
+) -> None:
+    """``check`` that reaches no decryption leaves ``Fetched`` empty: the steps
+    after it are red with their own code."""
+    root = tmp_path / "box"
+    box_key(root)
+    ops = Ops(tmp_path)
+    ops.put(SERVER, "x: 1\n")
+    _, stacks = _ladder(root, ops, Secrets(()))
+    outcome = _plan(stacks, "doctor")  # nothing fetched, no copy yet
+    codes = [r.reason.code for r in outcome.steps if r.reason is not None]
+    assert codes == ["render_env:no-passport", "nginx:no-passport"]

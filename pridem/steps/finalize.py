@@ -30,7 +30,7 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.passport import Fetched
+from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
@@ -67,6 +67,7 @@ class Finalize(Step):
     order = 2
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "switch": "switch current of {stacks}",
         "not-switched": "current of {stack} names {found}, not {release}",
         "state": "state.json does not name {stack} at {release}",
@@ -93,7 +94,7 @@ class Finalize(Step):
     def _state(self) -> BoxState:
         passport = self.fetched.passport
         if passport is None:
-            raise RuntimeError("no passport: fetch_passport runs before finalize")
+            raise StepFailed("no-passport")
         old = self.box.read_state()
         fields: dict[str, object] = {
             "composition": self.composition,

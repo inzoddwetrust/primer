@@ -116,6 +116,13 @@ class Fetched:
     ops_commit: str | None = None
 
 
+NO_PASSPORT: dict[str, str] = {
+    "no-passport": "the passport is not read: fetch_passport did not reach it",
+}
+"""The code of a step that needs the passport ``fetch_passport`` did not read
+(in ``doctor`` its ``check`` stops before a decryption it cannot do)."""
+
+
 def with_passport(state: BoxState, fetched: Fetched) -> BoxState:
     """``state`` with the passport version and ops commit of ``fetched``."""
     if fetched.passport is None:
@@ -642,25 +649,41 @@ class FetchPassport(Step):
             params: dict[str, Json] = {"server": self.server, "repo": self._ops.address}
             would = local_code("fetch", params)
         needed = CheckResult(True, would, data)
-        if previous is None:
-            return needed
         commit: str | None = None
         if self.ops is not None:
+            if previous is None:
+                return needed  # nothing fetched yet: no decryption to read
             commit = self._remote_head(ctx)
             if not self._key.exists() or self._bare_head(ctx) != commit:
                 return needed
         scratch = self._copy.with_name(self._copy.name + ".check")
+        self._copy.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             composed, short = self._compose(
                 self._source(ctx, scratch, commit), asking=False
             )
+            if not short:
+                # what install would apply: the steps after this one see it in
+                # doctor, where no verify fills Fetched (DM-50)
+                self._take(_write_checked(scratch, composed), commit)
         except _NotRecipient:
             return needed
         finally:
             scratch.unlink(missing_ok=True)
-        if short or composed != previous:
+        if previous is None or short or composed != previous:
             return needed
         return CheckResult(False, None, data)
+
+    def _take(self, passport: Passport, commit: str | None) -> None:
+        """``passport`` is the run's: its secrets in the set, it in ``Fetched``."""
+        if self.server is not None and passport.server.name != self.server:
+            raise StepFailed(
+                "name-mismatch",
+                {"expected": self.server, "found": passport.server.name},
+            )
+        self.secrets.add(passport_secrets(passport))
+        self.fetched.passport = passport
+        self.fetched.ops_commit = commit
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         self._copy.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

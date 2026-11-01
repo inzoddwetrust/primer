@@ -39,7 +39,7 @@ from pridem.steps.base import (
 )
 from pridem.steps.compose import ComposeStack, config, image_of, out
 from pridem.steps.git import repo
-from pridem.steps.passport import Fetched
+from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 VALIDATE_TIMEOUT_S = 600
@@ -105,6 +105,7 @@ class Packages(Step):
     order = 9
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "validate": "validate the packages {slots}",
         "path-outside": "{slot}: mount from {from} leaves the package",
         "dependency-mount": "{slot}: a copy into {dependency} is not done here (A')",
@@ -132,7 +133,7 @@ class Packages(Step):
     def _mounts(self, ctx: StepContext) -> tuple[list[PackageMount], dict[str, Json]]:
         passport = self.fetched.passport
         if passport is None:
-            raise RuntimeError("no passport: fetch_passport runs before packages")
+            raise StepFailed("no-passport")
         mounts = package_mounts(self.product, self.compose.entry, passport, self.root)
         if not mounts:
             return [], {}

@@ -71,6 +71,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.passport import (
+    NO_PASSPORT,
     Ask,
     Fetched,
     copy_data,
@@ -86,7 +87,7 @@ DERIVE_ENV = "derive.env"
 
 def _passport(fetched: Fetched) -> Passport:
     if fetched.passport is None:
-        raise RuntimeError("no passport: fetch_passport runs before the env steps")
+        raise StepFailed("no-passport")
     return fetched.passport
 
 
@@ -97,6 +98,7 @@ class SeamsCheck(Step):
     order = 1
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "half-seam": "half seams: {seams}",
         "seam-outside-edition": "seams from services outside the edition: {seams}",
     }
@@ -144,6 +146,7 @@ class RenderEnv(Step):
     order = 2
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "render": "render the env of {stack}",
         "missing": "the passport lacks {fields} and nobody can be asked",
         "no-answer": "no answer for {field}",

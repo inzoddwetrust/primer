@@ -25,7 +25,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.compose import out
-from pridem.steps.passport import Fetched
+from pridem.steps.passport import NO_PASSPORT, Fetched
 from pridem.steps.ssl import reload_nginx
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
@@ -39,6 +39,7 @@ class Frontend(Step):
     order = 1
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "reload": "reload nginx for the front of {domain}",
         "not-200": "https://{domain}/ answers {status}",
         "config-invalid": "nginx -t is red in {where}; nothing reloaded",
@@ -54,7 +55,7 @@ class Frontend(Step):
     def _domain(self) -> str | None:
         passport = self.fetched.passport
         if passport is None:
-            raise RuntimeError("no passport: fetch_passport runs before frontend")
+            raise StepFailed("no-passport")
         for route, target in targets(self.product).items():
             stage = self.product.stacks[target.entry]
             front = stage.frontend

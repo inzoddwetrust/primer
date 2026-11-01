@@ -41,7 +41,7 @@ from pridem.steps.compose import (
     write_override,
 )
 from pridem.steps.packages import package_mounts, volumes
-from pridem.steps.passport import Fetched
+from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
@@ -63,6 +63,7 @@ class Build(Step):
     order = 8
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "build": "build {services} of {stack} at {commit}",
         "instance-args": "the compose of {stack} gives build arguments to {services}",
         "no-image": "no image of {service} at {commit} after the build",
@@ -90,7 +91,7 @@ class Build(Step):
             return {}
         passport = self.fetched.passport
         if passport is None:
-            raise RuntimeError("no passport: fetch_passport runs before build")
+            raise StepFailed("no-passport")
         found = package_mounts(stack, self.compose.entry, passport, self.compose.root)
         return volumes(found)
 
