@@ -182,6 +182,8 @@ def script(
                 "test",
                 "--iidfile",
                 str(home / "image.id"),
+                "-t",
+                f"blank-app-test:{SHA[:12]}",
                 "--build-arg",
                 f"PRIMER_RELEASE={REF}",
                 "--build-arg",
@@ -278,6 +280,8 @@ def test_probe_DM_19_tests_run_from_the_test_target_not_the_runtime_image(
         run([step(tmp_path)], runner)
     [build] = [a for a in runner.argvs if a[:2] == ("docker", "build")]
     assert build[build.index("--target") + 1] == "test"
+    # the image has the machine's name, beside compose's (DM-50 fix 2)
+    assert build[build.index("-t") + 1] == f"blank-app-test:{SHA[:12]}"
     [test] = [a for a in runner.argvs if a[:2] == ("docker", "run")]
     assert IID in test  # the image of the test target, built here
     assert not [a for a in runner.argvs if "compose" in a and "build" in a]

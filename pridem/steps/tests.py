@@ -15,8 +15,10 @@ compose does not recreate a running one. ``<live>_test`` is created when it
 is not there.
 
 The tests run from the build target ``test.target`` of the ``app`` service's
-Dockerfile, built here with the release's two build arguments and the
-machine's labels: the working image carries no tests (rule 20). The
+Dockerfile, built here with the release's two build arguments, the machine's
+labels and the machine's name ``<project>-<app>-test:<commit12>`` beside the
+names compose gives the working images: the working image carries no tests
+(rule 20). The
 container gets the test database's ``DATABASE_URL`` through an env file
 (0600) -- the password is a secret, never in argv -- and writes its junit to
 a directory of the host mounted where ``--junitxml=`` of ``test.run`` points.
@@ -193,6 +195,12 @@ class Tests(Step):
         self.image: str | None = None
 
     @property
+    def image_name(self) -> str:
+        """The machine's name of the test image, beside the names compose gives:
+        ``<project>-<app>-test:<commit12>``."""
+        return f"{self.compose.project}-{self.app}-test:{self.compose.commit[:12]}"
+
+    @property
     def _home(self) -> Path:
         return (
             self.compose.root
@@ -284,6 +292,8 @@ class Tests(Step):
                 self.target,
                 "--iidfile",
                 str(iidfile),
+                "-t",
+                self.image_name,
                 *build_args(self.compose),
                 *[w for k, v in labels.items() for w in ("--label", f"{k}={v}")],
                 "-f",
