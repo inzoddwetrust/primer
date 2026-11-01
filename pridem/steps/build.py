@@ -40,6 +40,8 @@ from pridem.steps.compose import (
     override_text,
     write_override,
 )
+from pridem.steps.packages import package_mounts, volumes
+from pridem.steps.passport import Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
@@ -76,8 +78,21 @@ class Build(Step):
         ref: str,
         commit: str,
         root: Path = Path("/"),
+        fetched: Fetched | None = None,
     ) -> None:
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.fetched = fetched
+
+    def _mounts(self) -> dict[str, list[str]]:
+        """The packages' binds: in the override from the build on (DM-19)."""
+        stack = self.compose.stack
+        if self.fetched is None or not isinstance(stack, Product):
+            return {}
+        passport = self.fetched.passport
+        if passport is None:
+            raise RuntimeError("no passport: fetch_passport runs before build")
+        found = package_mounts(stack, self.compose.entry, passport, self.compose.root)
+        return volumes(found)
 
     def _rendered(self, ctx: StepContext) -> tuple[list[str], str]:
         document = config(ctx, self.compose)
@@ -95,7 +110,8 @@ class Build(Step):
                     "instance-args",
                     {"stack": self.compose.entry, "services": list[Json](given)},
                 )
-        return built_services(document), override_text(self.compose, document)
+        text = override_text(self.compose, document, self._mounts())
+        return built_services(document), text
 
     def check(self, ctx: StepContext) -> CheckResult:
         built, text = self._rendered(ctx)

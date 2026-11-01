@@ -6,6 +6,11 @@ shared remote service has a service as its root). Inside a stack, steps run by
 ``order``; ``restore`` and ``finally`` steps are chosen the same way, by
 ``order`` and by ``modes``.
 
+A step marked ``final_check`` is the final check of TZ 7.3: in its place the plan
+calls ``verify`` of every green step of ``main`` once more, with the check it
+was run with; one red fails it by the step's name and code, and the steps after
+it (``finalize``) do not run.
+
 In ``install``, ``deploy`` and ``reinstall`` every step runs ``check``, then
 ``act`` if needed, then ``verify``. The first failed step stops the ladder: the
 rest are ``skipped`` with the reason. If the plan has not yet started the
@@ -179,6 +184,8 @@ class _Run:
     sink_failed: bool = False
     cut: bool = False
     """The step just executed was interrupted while it ran."""
+    green: list[tuple[str, Step, CheckResult]] = field(default_factory=list)
+    """Steps of ``main`` verified green, with their check: the final check."""
 
 
 SINK_FAILED = Incomplete("journal", Code("write-failed"))
@@ -412,20 +419,25 @@ class Plan:
             self._emit(StepStarted(phase, stack, step.name, step.order, started))
             if state.interrupt is not before:
                 raise state.interrupt or KeyboardInterrupt()
-            ctx = self._context(phase, stack, step)
-            check = step.check(ctx)
-            if check.needed:
-                if step.point_of_no_return:
-                    state.crossed = True
-                step.act(ctx, check)
-            verified = step.verify(ctx, check)
-            fact = dict(verified.fact)
-            if not fact:
-                reason = NO_FACT
-            elif verified.incomplete is not None:
-                state.incomplete.append(
-                    Incomplete(step.name, _qualified(step, verified.incomplete))
-                )
+            if step.final_check:
+                fact = self._final_check()
+            else:
+                ctx = self._context(phase, stack, step)
+                check = step.check(ctx)
+                if check.needed:
+                    if step.point_of_no_return:
+                        state.crossed = True
+                    step.act(ctx, check)
+                verified = step.verify(ctx, check)
+                fact = dict(verified.fact)
+                if not fact:
+                    reason = NO_FACT
+                elif verified.incomplete is not None:
+                    state.incomplete.append(
+                        Incomplete(step.name, _qualified(step, verified.incomplete))
+                    )
+                if reason is None and phase == "main":
+                    state.green.append((stack, step, check))
         except StepFailed as error:
             reason, fact = _qualified(step, error.reason), dict(error.fact)
         except KeyboardInterrupt as interrupt:
@@ -442,6 +454,27 @@ class Plan:
                 stack, step.name, step.order, status, reason, started, duration, fact
             ),
         )
+
+    def _final_check(self) -> Fact:
+        """``verify`` of every green step of ``main`` once more, with the check
+        it was run with; the first red one fails the final check by name."""
+        state = self._run
+        for stack, step, check in state.green:
+            try:
+                step.verify(self._context("main", stack, step), check)
+            except StepFailed as error:
+                code = _qualified(step, error.reason).code
+                raise StepFailed(
+                    "red", {"stack": stack, "step": step.name, "reason": code}
+                ) from None
+            except KeyboardInterrupt:
+                raise
+            except Exception as error:  # a re-verify never crashes the plan
+                raise StepFailed(
+                    "red",
+                    {"stack": stack, "step": step.name, "reason": type(error).__name__},
+                ) from None
+        return {"verified": len(state.green)}
 
     def _doctor(self) -> PlanOutcome:
         state = self._run

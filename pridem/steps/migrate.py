@@ -74,7 +74,7 @@ class Migrate(Step):
     """The stack's migrations, once, on the image of the new commit."""
 
     name = "migrate"
-    order = 9
+    order = 11
     modes = ALL_MODES
     point_of_no_return = True
     codes: ClassVar[dict[str, str]] = {

@@ -91,7 +91,9 @@ class Step(ABC):
     ``order`` is the phase number of the step within its stack (contract 2);
     ``modes`` -- the plans it belongs to, never empty; ``point_of_no_return`` --
     the start of its ``act`` makes the plan irreversible; ``roles`` -- the
-    roles it runs on, ``None`` for all.
+    roles it runs on, ``None`` for all; ``final_check`` -- the plan's final
+    check (TZ 7.3): the plan itself calls ``verify`` of every green step of the
+    run again in its place, and the step's own methods are never called.
     """
 
     name: str
@@ -101,6 +103,7 @@ class Step(ABC):
     """The step's own codes -> their catalog templates (English)."""
     point_of_no_return: bool = False
     roles: frozenset[Role] | None = None
+    final_check: bool = False
 
     @abstractmethod
     def check(self, ctx: StepContext) -> CheckResult:

@@ -167,8 +167,13 @@ def built_services(document: Mapping[str, Json]) -> list[str]:
     return sorted(name for name, body in services.items() if "build" in _mapping(body))
 
 
-def override_text(compose: ComposeStack, document: Mapping[str, Json]) -> str:
-    """The machine's override for the product's compose ``document``."""
+def override_text(
+    compose: ComposeStack,
+    document: Mapping[str, Json],
+    mounts: Mapping[str, Sequence[str]] | None = None,
+) -> str:
+    """The machine's override for the product's compose ``document``;
+    ``mounts`` -- read-only binds of the instance's packages by service."""
     services: dict[str, Json] = {}
     app = compose.app_service
     aliased = {app} if app is not None else set()
@@ -188,6 +193,9 @@ def override_text(compose: ComposeStack, document: Mapping[str, Json]) -> str:
                 networks["default"] = None
             networks[NETWORK] = {"aliases": [alias(compose.entry, name)]}
             part["networks"] = networks
+        binds = (mounts or {}).get(name)
+        if binds:
+            part["volumes"] = list[Json](binds)
         services[name] = part
     volumes: dict[str, Json] = {
         name: {"labels": dict[str, Json](compose.stack_labels())}

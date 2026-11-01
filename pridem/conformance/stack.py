@@ -321,7 +321,8 @@ def _out(ctx: StepContext, argv: list[str]) -> list[str]:
     return lines
 
 
-def _get(address: str, port: int, path: str) -> tuple[int, bytes] | None:
+def http_get(address: str, port: int, path: str) -> tuple[int, bytes] | None:
+    """``GET`` of the app at ``address``; ``None`` -- nothing answered."""
     connection = http.client.HTTPConnection(address, port, timeout=HTTP_TIMEOUT_S)
     try:
         connection.request("GET", path)
@@ -331,6 +332,32 @@ def _get(address: str, port: int, path: str) -> tuple[int, bytes] | None:
         return None
     finally:
         connection.close()
+
+
+def app_address(
+    ctx: StepContext, own: Sequence[str], service: str
+) -> tuple[bool, str | None]:
+    """Whether ``service`` runs, and its address on the network ``pridem``."""
+    ids = [line for line in _out(ctx, [*own, "ps", "-q", service]) if line.strip()]
+    if not ids:
+        return False, None
+    networks = json.loads(
+        "\n".join(
+            _out(
+                ctx,
+                [
+                    "docker",
+                    "inspect",
+                    "-f",
+                    "{{json .NetworkSettings.Networks}}",
+                    ids[0],
+                ],
+            )
+        )
+    )
+    attached = networks.get(NETWORK) if isinstance(networks, dict) else None
+    address = attached.get("IPAddress") if isinstance(attached, dict) else None
+    return True, address if isinstance(address, str) and address else None
 
 
 def observe(
@@ -361,33 +388,15 @@ def observe(
     if app is None:
         return Observed(False, None, None, None, [], configs)
     own = [*compose, "-f", str(release / stage.compose)]
-    ids = [line for line in _out(ctx, [*own, "ps", "-q", app.service]) if line.strip()]
-    if not ids:
+    running, address = app_address(ctx, own, app.service)
+    if not running:
         return Observed(False, None, None, None, [], configs)
-    networks = json.loads(
-        "\n".join(
-            _out(
-                ctx,
-                [
-                    "docker",
-                    "inspect",
-                    "-f",
-                    "{{json .NetworkSettings.Networks}}",
-                    ids[0],
-                ],
-            )
-        )
-    )
-    attached = networks.get(NETWORK) if isinstance(networks, dict) else None
-    address = attached.get("IPAddress") if isinstance(attached, dict) else None
     health = ready = None
-    if isinstance(address, str) and address:
-        got = _get(address, app.port, app.health)
+    if address is not None:
+        got = http_get(address, app.port, app.health)
         health = None if got is None else got[1]
-        answered = _get(address, app.port, app.ready)
+        answered = http_get(address, app.port, app.ready)
         ready = None if answered is None else answered[0]
-    else:
-        address = None
     logs = _out(
         ctx,
         [
