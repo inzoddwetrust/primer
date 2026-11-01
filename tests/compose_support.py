@@ -196,7 +196,20 @@ def heads_call(cs: ComposeStack, image: str, *lines: str) -> FakeCall:
         f"pridem.commit={cs.commit}",
     )
     return FakeCall(
-        ("docker", "run", "--rm", *labels, image, "python", "-m", "alembic", "heads"),
+        # no network: the heads are the image's scripts (DM-53)
+        (
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            *labels,
+            image,
+            "python",
+            "-m",
+            "alembic",
+            "heads",
+        ),  # fmt: skip
         lines=stdout(*lines),
     )
 

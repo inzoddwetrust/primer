@@ -14,8 +14,10 @@ the minted ones in ``check``, an answer of ``install`` once it is written, a
 value, nothing of it reaches the console or the journal; on a non-zero exit
 only stderr is passed on.
 
-``derive`` runs ``docker run --rm --env-file <file> <image> <run>`` in a
-throwaway container of the stack's image, not ``docker compose run``: compose
+``derive`` runs only in ``act``: ``check`` takes a ``derived`` value from the
+``.env`` on disk and compares the rest. It runs ``docker run --rm --env-file
+<file> <image> <run>`` in a throwaway container of the stack's image, not
+``docker compose run``: compose
 interpolates the whole file, and ``${VAR:?}`` of a variable not rendered yet
 -- the derived one itself -- stops it. The image is an input: the build step
 gives it (DM-18).
@@ -303,8 +305,22 @@ class RenderEnv(Step):
             return needed
         if any(key not in minted for key in self._minted_keys()):
             return needed
-        text = env_text(self._values(ctx, resolved))
-        if not self._env.exists() or self._env.read_text(encoding="utf-8") != text:
+        if not self._env.exists():
+            return needed
+        # ``check`` reads and runs nothing: ``derived`` values are taken from
+        # the file as they are -- ``derive`` is a function of the stack's other
+        # values, so the file is current when every other value matches -- and
+        # recomputed only by ``act``
+        present = self._env.read_text(encoding="utf-8")
+        try:
+            on_disk = parse_env(present)
+        except StepFailed:  # a file of another form is rendered again
+            return needed
+        if any(key not in on_disk for key in resolved.derived):
+            return needed
+        held = {key: on_disk[key] for key in resolved.derived}
+        self.secrets.add(SecretStr(value) for value in held.values())
+        if env_text({**resolved.values, **held}) != present:
             return needed
         return CheckResult(False)
 

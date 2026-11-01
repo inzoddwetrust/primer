@@ -515,3 +515,44 @@ def test_write_private_is_0600_whatever_the_umask(tmp_path: Path) -> None:
         os.umask(old)
     assert oct((tmp_path / "env" / ".env").stat().st_mode & 0o777) == oct(0o600)
     assert oct((tmp_path / "env").stat().st_mode & 0o777) == oct(0o700)
+
+
+# --- DM-53: check reads, it never runs derive ----------------------------------
+
+
+def test_check_takes_derived_values_from_the_file_and_runs_no_container(
+    tmp_path: Path,
+) -> None:
+    made, comms, root, fetched = comms_box(tmp_path, derived=True)
+    env_file = root / "opt" / "comms" / "env" / "derive.env"
+    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+        outcome, _ = run(
+            [render(comms, root, fetched, product=made, image=IMAGE)], runner
+        )
+    assert outcome.code is ExitCode.OK, outcome.steps
+    # the same env again: no docker at all, in a run and in doctor
+    secrets = Secrets(())
+    step = render(comms, root, fetched, product=made, image=IMAGE, secrets=secrets)
+    with Reading() as runner:
+        outcome, _ = run([step], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[0].reason is None and runner.argvs == []
+    assert secrets.text(DERIVED) == "[redacted]"  # read from the file, cleaned
+    with Reading() as runner:
+        outcome, _ = run(
+            [render(comms, root, fetched, product=made, image=IMAGE)],
+            runner,
+            mode="doctor",
+        )
+    assert outcome.doctor_diff == () and runner.argvs == []
+    # the pair: another value of the stack changed -- act derives again
+    env = env_of(root, "comms")
+    lines = env.read_text().splitlines(keepends=True)
+    write_private(env, "".join(lines[1:]))  # a key gone: the file is not current
+    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+        outcome, _ = run(
+            [render(comms, root, fetched, product=made, image=IMAGE)], runner
+        )
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert [a[:2] for a in runner.argvs] == [("docker", "run")]
+    assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED

@@ -3,8 +3,8 @@ container -- the point of no return (TZ 7.3; contract 3 section 1).
 
 The stack is the blank's (TZ 2): its migrations are alembic's. ``check`` reads
 the heads of the image ``build`` made for this commit (found by its labels)
-with ``docker run --rm <image> python -m alembic heads`` -- no compose, no
-dependency, no network: the scripts of the image, nothing else. A stack that
+with ``docker run --rm --network none <image> python -m alembic heads`` -- no
+compose, no dependency, no network: the scripts of the image, nothing else. A stack that
 declares ``migrate`` has a head: none read is red (``no-heads``), never "no
 migration"; more than one is red too -- both before anything is written. One
 head is compared with the
@@ -116,7 +116,17 @@ class Migrate(Step):
         ]
         _, lines = out(
             ctx,
-            ["docker", "run", "--rm", *labels, images[0], *ALEMBIC, "heads"],
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                *labels,
+                images[0],
+                *ALEMBIC,
+                "heads",
+            ],
             timeout=COMMAND_TIMEOUT_S,
         )
         return heads(lines), len(lines)

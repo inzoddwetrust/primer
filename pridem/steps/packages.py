@@ -38,8 +38,8 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.compose import ComposeStack, config, image_of, out
-from pridem.steps.git import repo
 from pridem.steps.passport import NO_PASSPORT, Fetched
+from pridem.steps.sources import package_dir, package_release
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 VALIDATE_TIMEOUT_S = 600
@@ -62,17 +62,19 @@ class PackageMount:
 
 
 def package_mounts(
-    product: Product, entry: str, passport: Passport, root: Path
+    product: Product, stack: str, passport: Passport, root: Path
 ) -> list[PackageMount]:
-    """The binds of the instance's packages; refused by name before ``act``."""
+    """The binds of the instance's packages; refused by name before ``act``.
+
+    A package is where ``fetch_packages`` put it: ``package_dir`` of the stack,
+    whatever the compose entry is called."""
     out_: list[PackageMount] = []
     for slot, declared in sorted(product.packages.items()):
         given = passport.packages.get(slot)
         if given is None:
             continue
-        found = repo(given.repo)
-        release = f"{found.name}@{given.version}"
-        base = root / "opt" / entry / "releases" / release
+        release = package_release(given)
+        base = package_dir(root, stack, given)
         if given.subpath is not None:
             base = base / given.subpath
         for element in declared.mount:
@@ -134,7 +136,9 @@ class Packages(Step):
         passport = self.fetched.passport
         if passport is None:
             raise StepFailed("no-passport")
-        mounts = package_mounts(self.product, self.compose.entry, passport, self.root)
+        mounts = package_mounts(
+            self.product, self.compose.stack.name, passport, self.root
+        )
         if not mounts:
             return [], {}
         document = config(ctx, self.compose)

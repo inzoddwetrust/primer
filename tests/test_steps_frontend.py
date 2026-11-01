@@ -22,6 +22,7 @@ from pridem.steps.compose import ComposeStack, override_text
 from pridem.steps.frontend import Frontend
 from pridem.steps.packages import Packages, package_mounts, volumes
 from pridem.steps.passport import Fetched
+from pridem.steps.sources import package_dir
 
 FRONT_IMAGE = "sha256:" + "f" * 64
 
@@ -270,3 +271,44 @@ def test_front_answers_200_or_the_step_is_red(tmp_path: Path) -> None:
     assert outcome.steps[0].reason == Code(
         "frontend:not-200", {"domain": DOMAINS["frontend"], "status": "502"}
     )
+
+
+# --- DM-53: a package is where fetch_packages put it, whatever the entry --------
+
+
+def test_a_package_is_mounted_from_the_stack_dir_not_the_entry(tmp_path: Path) -> None:
+    data = skin_product("css")
+    stacks = data["stacks"]
+    assert isinstance(stacks, dict)
+    data["stacks"] = {"web": stacks["blank"]}  # the compose entry is not the stack
+    stack = made(tmp_path, data)
+    root, fetched, package = skin_box(tmp_path / "box")  # /opt/blank/releases/...
+    assert fetched.passport is not None
+    given = fetched.passport.packages["skin"]
+    assert package == package_dir(root, "blank", given)  # fetch_packages' place
+    cs = ComposeStack(stack, "web", root / "release", REF, SHA, root)
+    step = Packages(
+        stack,
+        "web",
+        release=root / "release",
+        ref=REF,
+        commit=SHA,
+        fetched=fetched,
+        root=root,
+    )
+    config = FakeCall(
+        tuple(cs.product_argv("config", "--format", "json")),
+        lines=stdout(json.dumps(CONFIG)),
+    )
+    with FakeRunner(config) as runner:
+        outcome = Plan(
+            [StackSteps("web", [step], root=True)],
+            mode="doctor",
+            role="test",
+            runner=runner,
+            sink=ListSink(),
+        ).run()
+    [item] = outcome.doctor_diff  # found and would validate: not missing-release
+    assert item.reason.code == "packages:validate"
+    mounts = package_mounts(stack, stack.name, fetched.passport, root)
+    assert [m.source for m in mounts] == [package / "css"]

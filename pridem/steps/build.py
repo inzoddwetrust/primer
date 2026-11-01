@@ -92,7 +92,7 @@ class Build(Step):
         passport = self.fetched.passport
         if passport is None:
             raise StepFailed("no-passport")
-        found = package_mounts(stack, self.compose.entry, passport, self.compose.root)
+        found = package_mounts(stack, stack.name, passport, self.compose.root)
         return volumes(found)
 
     def _rendered(self, ctx: StepContext) -> tuple[list[str], str]:

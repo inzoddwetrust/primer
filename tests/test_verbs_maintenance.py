@@ -117,15 +117,17 @@ def test_a_busy_box_refuses_gc_and_renew_before_anything_runs(tmp_path: Path) ->
     assert [v.verb for v in verdicts(root)] == ["gc"]
 
 
-def test_gc_without_a_passport_is_red_with_its_code(tmp_path: Path) -> None:
+def test_gc_without_a_passport_removes_nothing_with_its_code(tmp_path: Path) -> None:
+    """Exit 2, ``gc:not-started``: nothing was removed (DM-53; red until then)."""
     root, _ = passport_box(tmp_path, passport_data())
     (root / PASSPORT_COPY).unlink()
-    with FakeRunner() as runner:
+    with FakeRunner() as runner:  # nothing runs at all
         code, _, _ = cli(["gc"], root, runner)
-    assert code == 1
+    assert code == 2
     [verdict] = verdicts(root)
-    [step] = verdict.steps
-    assert step.reason is not None and step.reason.code == "gc:no-passport"
+    [entry] = verdict.report.incomplete
+    assert entry.model_dump()["what"] == "gc"
+    assert entry.model_dump()["code"] == "gc:not-started"
     assert "passport_version" not in verdict.model_dump_json()
 
 

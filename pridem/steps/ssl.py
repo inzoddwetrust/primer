@@ -359,12 +359,14 @@ class Ssl(Step):
         names = self._names()
         if _passport(self.fetched).policies.ssl != "letsencrypt" or not names:
             return CheckResult(False)
-        _, _, wrong = dns_table(ctx, names)
-        if wrong:
-            raise StepFailed("dns-not-ready", {"domains": list[Json](wrong)})
+        # a fresh certificate needs nothing from outside: the echo services
+        # and DNS are asked only when there is something to issue
         facts = cert_facts(ctx, self.root)
         if not facts["self_signed"] and _fresh(facts, names, self._now()):
             return CheckResult(False)
+        _, _, wrong = dns_table(ctx, names)
+        if wrong:
+            raise StepFailed("dns-not-ready", {"domains": list[Json](wrong)})
         return CheckResult(True, local_code("issue", {"domains": list[Json](names)}))
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:

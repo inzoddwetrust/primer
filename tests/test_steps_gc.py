@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from env_support import box as passport_box
 from env_support import passport_data
-from plan_support import Journal, ListSink, red
+from plan_support import Journal, ListSink, ScriptedStep, red
 
 from pridem.events import Code, Json, PlanOutcome, Secrets, StepRecord
 from pridem.plan import Plan, StackSteps
@@ -184,8 +184,11 @@ class World:
         keep: int = 2,
         cache_budget: str = "3G",
         journal_budget: str = "200M",
+        packages: Mapping[str, object] | None = None,
     ) -> None:
         data = passport_data()
+        if packages is not None:
+            data["packages"] = dict(packages)
         policies = data["policies"]
         assert isinstance(policies, dict)
         policies["gc"] = {
@@ -740,7 +743,9 @@ def test_an_empty_box_measures_and_is_green(tmp_path: Path) -> None:
     assert after["build_cache"] == {"count": 0, "bytes": 0}
 
 
-def test_without_any_passport_gc_refuses(tmp_path: Path) -> None:
+def test_without_any_passport_gc_removes_nothing_and_says_so(tmp_path: Path) -> None:
+    """Without a passport ``gc`` cannot know its budgets: nothing is removed,
+    ``incomplete gc:not-started`` (exit 2). Until DM-53 this was red."""
     world, _, _ = kept_world(tmp_path)
     (world.root / PASSPORT_COPY).unlink()
     step = Gc(box=world.box, run_id="r", fetched=Fetched(), root=world.root)
@@ -755,7 +760,13 @@ def test_without_any_passport_gc_refuses(tmp_path: Path) -> None:
             clock=lambda: float(next(ticks)),
             now=lambda: NOW,
         ).run()
-    assert outcome.steps[0].reason == Code("gc:no-passport")
+    assert outcome.code is ExitCode.INCOMPLETE
+    [entry] = outcome.incomplete
+    assert (entry.what, entry.reason) == (
+        "gc",
+        Code("gc:not-started", {"cause": "no-passport", "command": ""}),
+    )
+    assert outcome.steps[0].status == "ok"
 
 
 def test_without_a_fetched_passport_gc_reads_the_box_copy(tmp_path: Path) -> None:
@@ -840,3 +851,84 @@ def test_the_journal_header_takes_the_gc_mode(tmp_path: Path) -> None:
     with box.lock("gc"):
         box.open_journal(header, Secrets(())).close()
         assert box.read_journal(header.run_id) is not None
+
+
+# --- DM-53: nothing started is incomplete; packages of the current release ------
+
+
+def test_a_gc_that_cannot_measure_removes_nothing_and_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    world, previous, current = kept_world(tmp_path)
+    with GitReal(FakeCall(DF, code=1)) as runner:  # docker does not answer
+        outcome, _ = run_gc(world, runner)
+    assert outcome.code is ExitCode.INCOMPLETE
+    [entry] = outcome.incomplete
+    assert (entry.what, entry.reason) == (
+        "gc",
+        Code(
+            "gc:not-started", {"cause": "command-failed", "command": "docker system df"}
+        ),
+    )
+    assert outcome.steps[0].status == "ok"
+    assert not [a for a in runner.argvs if a[0] == "docker"][1:]  # df only
+    assert previous.is_dir() and current.is_dir()
+
+
+def test_a_gc_in_finally_that_removed_nothing_leaves_a_green_plan_at_2(
+    tmp_path: Path,
+) -> None:
+    world, _, _ = kept_world(tmp_path)
+    journal = Journal()
+    ticks = count()
+    clean = gc_steps(world.root, box=world.box, run_id="r", fetched=world.fetched)
+    with world.box.lock("deploy"), GitReal(FakeCall(DF, code=1)) as runner:
+        outcome = Plan(
+            [StackSteps(STACK, [ScriptedStep("build", 1, journal)], root=True)],
+            mode="deploy",
+            role="test",
+            runner=runner,
+            sink=ListSink(),
+            finally_=[StackSteps(GC_STACK, clean)],
+            clock=lambda: float(next(ticks)),
+            now=lambda: NOW,
+        ).run()  # fmt: skip
+    assert outcome.code is ExitCode.INCOMPLETE  # 2, not 1
+    assert [r.status for r in (*outcome.steps, *outcome.finally_)] == ["ok", "ok"]
+
+
+def test_a_gc_that_began_removing_and_failed_is_red(tmp_path: Path) -> None:
+    world, _, _ = kept_world(tmp_path)
+    old = image(3, world.commits[0])
+    with GitReal(
+        df(),
+        *listed([], kind="container"),
+        *listed([old], kind="image"),
+        FakeCall(("docker", "image", "rm", str(old["Id"])), code=1),
+    ) as runner:
+        outcome, _ = run_gc(world, runner)
+    assert outcome.code is ExitCode.FAILED
+    reason = outcome.steps[0].reason
+    assert reason is not None and reason.code == "command-failed"
+
+
+def test_packages_of_the_current_release_stay_without_containers(
+    tmp_path: Path,
+) -> None:
+    skin = {"repo": "git@github.com:partner/look.git", "version": "1.2.0"}
+    world = World(tmp_path, keep=2, packages={"skin": skin})
+    previous, current = world.release(1, age=100), world.release(2)
+    by_passport = package(world, "look@1.2.0")  # the passport's: named nowhere else
+    by_current = package(world, "look@1.1.0")  # the current release's composition
+    loose = package(world, "look@0.9.0")
+    world.green(1, composition={STACK: world.commits[1], "pridem": "0.1.0"})
+    world.green(
+        2,
+        composition={STACK: world.commits[2], "skin": "look@1.1.0", "pridem": "0.1.0"},
+    )
+    world.current(current)
+    with GitReal(*nothing()) as runner:  # no container at all
+        outcome, _ = run_gc(world, runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert by_passport.is_dir() and by_current.is_dir() and not loose.exists()
+    assert previous.is_dir() and current.is_dir()

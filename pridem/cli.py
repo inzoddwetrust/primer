@@ -8,6 +8,7 @@ unknown verb, option or argument, a busy box -- exits 1 with a message on
 stderr and no verdict; 2 is never a parse error here, it means "not all done".
 """
 
+import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -80,5 +81,16 @@ def run(
 
 
 def main() -> None:
-    """The ``pridem`` console script."""
+    """The ``pridem`` console script.
+
+    SIGTERM -- systemd stopping a timer's service, ``kill`` -- is taken as
+    SIGINT is: a ``KeyboardInterrupt`` wherever it lands, so a plan runs its
+    ``restore`` and ``finally`` steps and the verb writes its verdict.
+    """
+    stop_on_sigterm()
     raise SystemExit(run(sys.argv[1:]))
+
+
+def stop_on_sigterm() -> None:
+    """SIGTERM raises ``KeyboardInterrupt``, as SIGINT does."""
+    signal.signal(signal.SIGTERM, signal.default_int_handler)

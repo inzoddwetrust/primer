@@ -20,7 +20,8 @@ killed. Every step reads its fact back: a package is installed when
   leaves the record; ``restore_timers`` in ``finally`` starts exactly them and
   deletes the record (contract 2 section 3).
 - ``provision_host`` -- the host packages, docker among them, from noble.
-- ``daemon_json`` -- docker's log driver ``local`` (TZ section 7.3).
+- ``daemon_json`` -- docker's log driver ``local`` (TZ section 7.3); docker is
+  restarted only by ``install``, see ``DaemonJson``.
 - ``ensure_network`` -- the shared network ``pridem``.
 - ``locale`` -- a UTF-8 locale: the console writes ``→ — ✓ ✗``.
 
@@ -404,39 +405,91 @@ class ProvisionHost(_HostStep):
 
 
 class DaemonJson(_HostStep):
+    """docker logs with ``local``: in ``daemon.json`` and in the running daemon.
+
+    The file is written when it says otherwise (temp, fsync, rename; its other
+    keys kept). Whether docker must restart is the running daemon's driver
+    (``docker info``), not the file: a daemon already on ``local`` needs none.
+    Only ``install`` restarts docker -- on a box that runs its stacks
+    (``deploy``, ``reinstall``) a restart would stop every container, so a
+    daemon still on another driver is ``incomplete restart-needed`` (exit 2),
+    the file waiting for docker's next restart. A ``daemon.json`` that is not
+    JSON is refused by its code and never overwritten: its other keys are not
+    known.
+    """
+
     name = "daemon_json"
     order = 4
     codes: ClassVar[dict[str, str]] = {
         "log-driver": "set docker's log driver to local",
+        "restart": "set docker's log driver to local and restart docker",
         "log-driver-wrong": "docker logs with {found}, not local",
+        "restart-needed": (
+            "docker logs with {found} until its next restart; daemon.json says local"
+        ),
+        "daemon-json-broken": "{path} is not a JSON object: {problem}",
     }
     PATH = Path("etc/docker/daemon.json")
 
     def _config(self) -> dict[str, Json]:
         text = self._read(self.PATH)
-        loaded = json.loads(text) if text else {}
-        return loaded if isinstance(loaded, dict) else {}
+        if text is None or not text.strip():
+            return {}
+        try:
+            loaded = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise StepFailed(
+                "daemon-json-broken",
+                {"path": str(self.root / self.PATH), "problem": f"line {error.lineno}"},
+            ) from None
+        if not isinstance(loaded, dict):
+            raise StepFailed(
+                "daemon-json-broken",
+                {"path": str(self.root / self.PATH), "problem": "not an object"},
+            )
+        return loaded
+
+    def _running(self, ctx: StepContext) -> str:
+        _, lines = _out(ctx, ["docker", "info", "--format", "{{.LoggingDriver}}"])
+        return lines[0].strip() if lines else ""
 
     def check(self, ctx: StepContext) -> CheckResult:
-        if self._config().get("log-driver") == "local":
+        written = self._config().get("log-driver") == "local"
+        running = self._running(ctx)
+        if written and running == "local":
             return CheckResult(False)
-        return CheckResult(True, local_code("log-driver"))
+        restart = running != "local" and ctx.mode == "install"
+        code = local_code("restart" if restart else "log-driver")
+        return CheckResult(True, code, {"restart": restart})
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        config = {**self._config(), "log-driver": "local"}  # other keys are kept
-        path = self.root / self.PATH
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_name(path.name + ".tmp")
-        temp.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-        os.replace(temp, path)
-        _out(ctx, ["systemctl", "restart", "docker"])
+        config = self._config()
+        if config.get("log-driver") != "local":
+            config = {**config, "log-driver": "local"}  # other keys are kept
+            path = self.root / self.PATH
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_name(path.name + ".tmp")
+            with temp.open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(config, indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        if check.data.get("restart") is True:  # only install decides so
+            _out(ctx, ["systemctl", "restart", "docker"])
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        _, lines = _out(ctx, ["docker", "info", "--format", "{{.LoggingDriver}}"])
-        found = lines[0] if lines else ""
-        if found != "local":
+        written = self._config().get("log-driver")
+        if written != "local":
+            raise StepFailed("log-driver-wrong", {"found": str(written or "none")})
+        found = self._running(ctx)
+        fact: dict[str, Json] = {"log_driver": found or "none", "daemon_json": "local"}
+        if found == "local":
+            return Verified(fact)
+        if ctx.mode == "install":
             raise StepFailed("log-driver-wrong", {"found": found or "none"})
-        return Verified({"log_driver": found})
+        return Verified(
+            fact, incomplete=local_code("restart-needed", {"found": found or "none"})
+        )
 
 
 class EnsureNetwork(_HostStep):

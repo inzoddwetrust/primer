@@ -19,6 +19,9 @@ install left:
   stranger ``Host`` gets no page;
 - the tests in ``blank_test`` from the test target, ``current``,
   ``state.json``, the live database's head;
+- docker (DM-53): the second run does not restart it; ``daemon_json`` alone in
+  ``deploy``, on a ``daemon.json`` planted without the log driver, writes it
+  again, restarts nothing and the app keeps its container;
 - ``gc`` (DM-20): green in ``finally`` of both runs; a planted image labelled
   with a foreign commit goes when the ``gc`` timer's service runs, the
   unlabelled images, the release's own and the volumes stay; the renewal
@@ -186,6 +189,25 @@ with box.lock("tier3-install"):
 print("VERDICT " + verdict.model_dump_json())
 sys.exit(int(verdict.exit_code))
 """
+DAEMON_JSON_DEPLOY = """
+import json
+from pathlib import Path
+from pridem.plan import Plan, StackSteps
+from pridem.runner import SubprocessRunner
+from pridem.steps.host import DaemonJson
+
+class Sink:
+    def emit(self, event):
+        pass
+
+outcome = Plan(
+    [StackSteps("host", [DaemonJson(Path("/"))], root=True)],
+    mode="deploy", role="test", runner=SubprocessRunner(), sink=Sink(),
+).run()
+print("OUTCOME " + json.dumps({"code": int(outcome.code)}))
+"""
+"""``daemon_json`` alone in ``deploy`` on the installed box (DM-53)."""
+
 PLANTED = """
 import json, sys
 from pathlib import Path
@@ -226,6 +248,14 @@ def _run(
     except CommandTimedOut:
         raise AssertionError("\n".join(lines)) from None
     return lines
+
+
+def _docker_started() -> str:
+    """When the running docker daemon started: changes on every restart."""
+    [line] = _stdout(
+        ["systemctl", "show", "docker", "--property", "ActiveEnterTimestampMonotonic"]
+    )
+    return line
 
 
 def _stdout(argv: list[str], timeout: float = 300) -> list[str]:
@@ -441,9 +471,12 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
     assert state["current"] == {"blank": BLANK_COMMIT}, state
     assert state["composition"]["blank"] == BLANK_COMMIT, state
     container = _app()
+    started = _docker_started()
 
     # the second run (R9, U4): the same password, nothing recreated, not printed
     again, printed_again = _install(checkout, passport, mirror)
+    # ... and docker not restarted: daemon.json already as drawn (DM-53)
+    assert _docker_started() == started, printed_again
 
     assert again.result == "green", printed_again
     assert _env()["POSTGRES_PASSWORD"] == password
@@ -596,6 +629,19 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
         ]
     )
     assert "1" in [x.strip() for x in test_db], test_db
+
+    # daemon_json in deploy (DM-53): a daemon.json without the log driver on a
+    # box that runs is written again, docker is not restarted, the app lives on
+    daemon_json = Path("/etc/docker/daemon.json")
+    planted = json.loads(daemon_json.read_text(encoding="utf-8"))
+    planted.pop("log-driver")
+    daemon_json.write_text(json.dumps(planted), encoding="utf-8")
+    seen = _run([PYTHON, "-c", DAEMON_JSON_DEPLOY], timeout=300)
+    [outcome] = [x for x in seen if x.startswith("OUTCOME ")]
+    assert json.loads(outcome.removeprefix("OUTCOME ")) == {"code": 0}, seen
+    assert json.loads(daemon_json.read_text(encoding="utf-8"))["log-driver"] == "local"
+    assert _docker_started() == started, seen
+    assert _app() == container, seen
 
     # gc (DM-20): in finally of both runs, by its timer, by labels only
     for run in (verdict, again):

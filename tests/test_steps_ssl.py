@@ -298,3 +298,25 @@ def test_ssl_renew_without_a_passport_refuses(tmp_path: Path) -> None:
             mode="renew",
         )
     assert outcome.steps[0].reason == Code("ssl_renew:no-passport")
+
+
+# --- DM-53: a fresh certificate asks nothing outside the box -------------------
+
+
+def test_a_fresh_certificate_asks_no_echo_service_and_no_dns(tmp_path: Path) -> None:
+    root, fetched = passport(tmp_path, ssl="letsencrypt")
+    _placed(root, *issued_pair(tmp_path, NAMES))
+    step = Ssl(product(), fetched=fetched, secrets=Secrets(()), root=root, now=NOW)
+    with Mixed() as runner:  # openssl only: no curl, no getent, no docker
+        outcome, _ = run([step], runner, mode="deploy")
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert {argv[0] for argv in runner.argvs} == {"openssl"}
+    # the pair: a self-signed one under letsencrypt asks the echo services first
+    root, fetched = passport(tmp_path / "self", ssl="letsencrypt")
+    _placed(root, *self_signed_pair(tmp_path, NAMES))
+    step = Ssl(product(), fetched=fetched, secrets=Secrets(()), root=root, now=NOW)
+    runner = Mixed()  # nothing scripted: the first outside call is refused
+    outcome, _ = run([step], runner, mode="deploy")
+    assert outcome.code is ExitCode.FAILED
+    outside = [argv for argv in runner.argvs if argv[0] != "openssl"]
+    assert outside and outside[0][0] == "curl"

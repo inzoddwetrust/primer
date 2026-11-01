@@ -20,7 +20,9 @@ and the size of ``journal/`` -- and decides what ``act`` removes:
   previous, then the newest by mtime. A worktree goes
   by ``git worktree remove`` in the bare repository it belongs to (the stack's
   or a package's), then ``worktree prune``. A package directory stays while a
-  container mounts it or the previous release's composition names it.
+  container mounts it, the passport names it (``package_dir``, the path
+  ``fetch_packages`` and ``packages`` use) or the composition of the current or
+  the previous release names it.
   ``<name>.tmp`` belongs to ``sources``;
 - journals: ``Box.evict_journals`` down to ``policies.gc.journal_budget``; the
   journal of the current run is never evicted;
@@ -42,10 +44,16 @@ more protected releases than ``keep_releases`` -- is ``incomplete {what: gc,
 code: gc:over-budget}`` with the numbers, exit code 2. Sizes are docker's text
 (decimal units) turned into bytes; budgets are the passport's (binary units).
 
-The passport is the one ``fetch_passport`` read, else the box's copy; neither is
-``gc:no-passport``. ``gc`` writes under the box lock (``evict_journals`` checks
-it). It is no point of no return: it removes only what neither the current nor
-the previous release nor a container needs, so a restore never misses it.
+The passport is the one ``fetch_passport`` read, else the box's copy. A
+``check`` that cannot measure -- no passport, a copy that does not load, docker
+or git refusing a command, output it cannot read -- has removed nothing:
+``verify`` makes it ``incomplete {what: gc, code: gc:not-started}`` with the
+cause, exit 2, so a ``gc`` that touched nothing never turns a green plan red. A
+failure once a removal has begun stays red.
+
+``gc`` writes under the box lock (``evict_journals`` checks it). It is no point
+of no return: it removes only what neither the current nor the previous release
+nor a container needs, so a restore never misses it.
 """
 
 import json
@@ -58,6 +66,8 @@ from typing import ClassVar
 
 from pridem.events import Fact, Json
 from pridem.report.schema import Verdict
+from pridem.runner import CommandFailed, CommandNotStarted, CommandTimedOut
+from pridem.stacks.loader import ContractError
 from pridem.stacks.passport import Gc as GcPolicy
 from pridem.stacks.passport import Passport, load_passport, size_bytes
 from pridem.state import Box, VerdictDamaged
@@ -73,6 +83,7 @@ from pridem.steps.base import (
 from pridem.steps.compose import out
 from pridem.steps.git import run_git
 from pridem.steps.passport import NO_PASSPORT, PASSPORT_COPY, Fetched
+from pridem.steps.sources import package_dir
 
 GC_STACK = "box"
 """The stack name a plan builder gives the ``gc`` step in ``finally``."""
@@ -243,6 +254,11 @@ def _heads(verdict: Verdict) -> dict[tuple[str, str], str]:
     return found
 
 
+def _not_started(cause: str, command: str) -> CheckResult:
+    """A check that failed before any removal: nothing is touched."""
+    return CheckResult(False, data={"not_started": cause, "command": command})
+
+
 class Gc(Step):
     """Remove what the box no longer needs, by labels, and measure it."""
 
@@ -256,6 +272,7 @@ class Gc(Step):
             "cache: {build_cache}; evict journals: {journals}"
         ),
         "not-removed": "gc removed {objects} and they are still there",
+        "not-started": "gc removed nothing: {cause} {command}",
         "volumes-changed": (
             "volumes went from {before} to {after}; gc never touches a volume"
         ),
@@ -282,14 +299,17 @@ class Gc(Step):
 
     # --- the policy -------------------------------------------------------------
 
-    def _policy(self) -> GcPolicy:
+    def _passport(self) -> Passport:
         passport: Passport | None = self.fetched.passport
         if passport is None:
             copy = self.root / PASSPORT_COPY
             if not copy.is_file():
                 raise StepFailed("no-passport")
             passport = load_passport(copy)
-        return passport.policies.gc
+        return passport
+
+    def _policy(self) -> GcPolicy:
+        return self._passport().policies.gc
 
     # --- what the box holds -------------------------------------------------------
 
@@ -318,9 +338,10 @@ class Gc(Step):
                     commits.add(self._head(ctx, target))
         previous: dict[str, str] = {}
         names: set[str] = set()
+        made: set[str] = set()  # stacks whose current release's verdict is read
         damaged = 0
         for run_id in reversed(self.box.history_ids()):
-            if not set(current) - set(previous):
+            if not set(current) - set(previous) and set(current) <= made:
                 break
             try:
                 verdict = self.box.read_verdict(run_id)
@@ -331,6 +352,10 @@ class Gc(Step):
             if finalized is None:
                 continue
             heads = _heads(verdict)
+            for stack in sorted(set(current) - made):
+                if finalized.get(stack) == current[stack].name:
+                    made.add(stack)  # the packages of the current release
+                    names.update(verdict.composition_after.values())
             for stack in sorted(set(current) - set(previous)):
                 release = finalized.get(stack)
                 if release is None or release == current[stack].name:
@@ -370,7 +395,34 @@ class Gc(Step):
     # --- the step -----------------------------------------------------------------
 
     def check(self, ctx: StepContext) -> CheckResult:
-        policy = self._policy()
+        """What to remove; a measurement that fails before anything is removed
+        is ``not-started`` in ``verify`` (exit 2), never red."""
+        try:
+            return self._check(ctx)
+        except StepFailed as failed:
+            if failed.reason.code != "no-passport":
+                raise
+            return _not_started("no-passport", "")
+        except (CommandFailed, CommandNotStarted, CommandTimedOut) as error:
+            cause = {
+                CommandFailed: "command-failed",
+                CommandNotStarted: "command-not-started",
+                CommandTimedOut: "command-timed-out",
+            }[type(error)]
+            return _not_started(cause, " ".join(error.argv[:3]))
+        except ContractError:
+            return _not_started("passport-invalid", str(self.root / PASSPORT_COPY))
+        except ValueError as error:
+            return _not_started("unreadable", type(error).__name__)
+
+    def _check(self, ctx: StepContext) -> CheckResult:
+        passport = self._passport()
+        policy = passport.policies.gc
+        packages = {
+            package_dir(self.root, stack, package)
+            for stack in self._stacks()
+            for package in passport.packages.values()
+        }
         df = system_df(ctx)
         stacks = self._stacks()
         known = self._known(ctx, stacks)
@@ -402,7 +454,8 @@ class Gc(Step):
         removed: list[Json] = []
         kept: dict[str, Json] = {}
         for stack in stacks:
-            gone, stay = self._choose(ctx, stack, policy, known, mounts)
+            held = [*mounts, *packages]  # mounted, or a package of the passport
+            gone, stay = self._choose(ctx, stack, policy, known, held)
             removed += [
                 {"stack": stack, "path": str(r.path), "bare": str(r.bare)} for r in gone
             ]
@@ -523,8 +576,17 @@ class Gc(Step):
             self.box.evict_journals(size_bytes(policy.journal_budget), self.run_id)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        policy = self._policy()
         data = check.data
+        cause = data.get("not_started")
+        if isinstance(cause, str):
+            command = str(data.get("command") or "")
+            return Verified(
+                {"gc": "not-started", "cause": cause, "command": command},
+                incomplete=local_code(
+                    "not-started", {"cause": cause, "command": command}
+                ),
+            )
+        policy = self._policy()
         before = data.get("before")
         if not isinstance(before, dict):
             raise ValueError("gc verify needs the measurement of its check")

@@ -4,14 +4,16 @@ in the scenario, in order, and nothing else. Host files live under a temporary
 """
 
 import json
+import os
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
 
+import pytest
 from plan_support import ListSink
 from report_support import SECRETS
 
-from pridem.events import PlanOutcome
+from pridem.events import Code, PlanOutcome
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.report.schema import build_verdict
@@ -136,7 +138,8 @@ def ready_calls() -> list[FakeCall]:
         "pridem",
         lines=("pridem",),
     )
-    return [*preflight_calls(), *quiet, *provision, info, inspect, inspect]
+    # daemon_json reads the running daemon's driver in check and in verify
+    return [*preflight_calls(), *quiet, *provision, info, info, inspect, inspect]
 
 
 def ready(tmp_path: Path) -> Path:
@@ -354,9 +357,11 @@ def test_daemon_json_keeps_other_keys(tmp_path: Path) -> None:
     (root / "etc" / "docker" / "daemon.json").write_text(
         json.dumps({"data-root": "/srv/docker"})
     )
-    calls = [
+    info = ("docker", "info", "--format", "{{.LoggingDriver}}")
+    calls = [  # check reads the running daemon (DM-53), install restarts it
+        call(*info, lines=("json-file",)),
         call("systemctl", "restart", "docker"),
-        call("docker", "info", "--format", "{{.LoggingDriver}}", lines=("local",)),
+        call(*info, lines=("local",)),
     ]
     assert run([DaemonJson(root)], calls).code is ExitCode.OK
     config = json.loads((root / "etc" / "docker" / "daemon.json").read_text())
@@ -470,3 +475,104 @@ def test_a_domain_with_an_extra_address_is_a_mismatch(tmp_path: Path) -> None:
     one = preflight_calls({"app.example.org": IP})
     outcome = run([Preflight(root, domains=["app.example.org"], min_free_gib=0)], one)
     assert outcome.code is ExitCode.OK
+
+
+# --- DM-53: docker restarts only in install ------------------------------------
+
+INFO = ("docker", "info", "--format", "{{.LoggingDriver}}")
+
+
+def daemon_box(tmp_path: Path, config: object | str | None) -> Path:
+    root = box(tmp_path)
+    if config is not None:
+        (root / "etc" / "docker").mkdir()
+        text = config if isinstance(config, str) else json.dumps(config)
+        (root / "etc" / "docker" / "daemon.json").write_text(text)
+    return root
+
+
+def run_mode(steps: list[Step], calls: list[FakeCall], mode: str) -> PlanOutcome:
+    with FakeRunner(*calls) as runner:
+        return Plan(
+            [StackSteps("host", steps, root=True)],
+            mode=mode,  # type: ignore[arg-type]
+            role="test",
+            runner=runner,
+            sink=ListSink(),
+        ).run()
+
+
+def test_probe_DM_53_deploy_never_restarts_docker(tmp_path: Path) -> None:
+    for mode in ("deploy", "reinstall"):
+        root = daemon_box(tmp_path / mode, {"data-root": "/srv/docker"})
+        calls = [call(*INFO, lines=("json-file",)), call(*INFO, lines=("json-file",))]
+        outcome = run_mode([DaemonJson(root)], calls, mode)  # strict: no restart
+        assert outcome.code is ExitCode.INCOMPLETE, (mode, outcome.steps)
+        [entry] = outcome.incomplete
+        assert (entry.what, entry.reason) == (
+            "daemon_json",
+            Code("daemon_json:restart-needed", {"found": "json-file"}),
+        )
+        written = json.loads((root / "etc" / "docker" / "daemon.json").read_text())
+        assert written == {"data-root": "/srv/docker", "log-driver": "local"}
+    # the pair: install restarts docker and is green
+    root = daemon_box(tmp_path / "install", {"data-root": "/srv/docker"})
+    calls = [
+        call(*INFO, lines=("json-file",)),
+        call("systemctl", "restart", "docker"),
+        call(*INFO, lines=("local",)),
+    ]
+    outcome = run_mode([DaemonJson(root)], calls, "install")
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[0].verify == {"log_driver": "local", "daemon_json": "local"}
+
+
+def test_a_daemon_already_on_local_needs_no_restart_in_any_mode(
+    tmp_path: Path,
+) -> None:
+    for mode in ("install", "deploy"):
+        root = daemon_box(tmp_path / mode, None)  # no daemon.json at all
+        calls = [call(*INFO, lines=("local",)), call(*INFO, lines=("local",))]
+        outcome = run_mode([DaemonJson(root)], calls, mode)
+        assert outcome.code is ExitCode.OK, (mode, outcome.steps)
+        written = json.loads((root / "etc" / "docker" / "daemon.json").read_text())
+        assert written == {"log-driver": "local"}
+
+
+def test_doctor_names_the_restart_only_install_would_do(tmp_path: Path) -> None:
+    root = daemon_box(tmp_path, {})
+    outcome = run_mode(
+        [DaemonJson(root)], [call(*INFO, lines=("json-file",))], "doctor"
+    )
+    [item] = outcome.doctor_diff
+    assert item.reason.code == "daemon_json:log-driver"  # doctor checks as deploy
+    assert json.loads((root / "etc" / "docker" / "daemon.json").read_text()) == {}
+
+
+def test_a_daemon_json_that_is_not_json_is_refused_and_left(tmp_path: Path) -> None:
+    for text, problem in (('{"log-driver": ', "line 1"), ("[1, 2]", "not an object")):
+        root = daemon_box(tmp_path / problem.replace(" ", "-"), text)
+        outcome = run_mode([DaemonJson(root)], [], "install")  # nothing runs
+        path = root / "etc" / "docker" / "daemon.json"
+        assert outcome.steps[0].reason == Code(
+            "daemon_json:daemon-json-broken", {"path": str(path), "problem": problem}
+        )
+        assert path.read_text() == text
+
+
+def test_daemon_json_is_flushed_to_disk_before_it_replaces_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[int] = []
+    real = os.fsync
+
+    def fsync(fd: int) -> None:
+        synced.append(fd)
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    root = daemon_box(tmp_path, {})
+    calls = [call(*INFO, lines=("local",)), call(*INFO, lines=("local",))]
+    assert run_mode([DaemonJson(root)], calls, "deploy").code is ExitCode.OK
+    assert len(synced) == 1
+    assert not (root / "etc" / "docker" / "daemon.json.tmp").exists()

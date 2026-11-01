@@ -121,6 +121,18 @@ def remote_target(
     return Target(ref, tag, peeled)
 
 
+def package_release(package: Package) -> str:
+    """The release directory name of a package: ``<repo name>@<version>``."""
+    return f"{repo(package.repo).name}@{package.version}"
+
+
+def package_dir(root: Path, stack: str, package: Package) -> Path:
+    """Where a package of ``stack`` is on the box: ``/opt/<stack>/releases/
+    <name>@<version>``. ``fetch_packages`` puts it there, ``packages`` mounts it
+    from there, ``gc`` keeps it by it -- this one function for all three."""
+    return root / "opt" / stack / "releases" / package_release(package)
+
+
 class Checkout:
     """A bare repository and its release worktrees under ``/opt/<stack>``."""
 
@@ -456,7 +468,7 @@ class FetchPackages(_SourceStep):
         for slot, package in sorted(self.packages.items()):
             found = repo(package.repo)
             tag = f"v{package.version}"
-            release = f"{found.name}@{package.version}"
+            release = package_release(package)
             other = dirs.setdefault(release, (found.path, slot))
             if other[0] != found.path:
                 raise StepFailed(
