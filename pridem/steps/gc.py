@@ -1,0 +1,615 @@
+"""``gc``: the box's clean-up by labels, measured before and after (TZ 7.3;
+incident II).
+
+``check`` measures -- ``docker system df`` by category (images, containers,
+volumes, build cache), the releases of every stack in ``/opt/<stack>/releases``
+and the size of ``journal/`` -- and decides what ``act`` removes:
+
+- images: only those labelled ``pridem.commit``; never one whose commit is the
+  current or the previous release of a stack, never one a container, running or
+  stopped, was made from. An image without the label -- a base image of
+  ``FROM``, nginx, certbot, postgres -- is not even listed. The key is the
+  commit: ``pridem.release`` holds the ref, on test a branch that every commit
+  shares. An image with tags loses them all and goes with the last; one without
+  goes by its ID;
+- the build cache: ``docker builder prune --all --keep-storage <budget>`` when it
+  is over ``policies.gc.builder_cache_budget`` (without ``--all`` docker prunes
+  only dangling cache, which is never anything);
+- releases: per stack ``policies.gc.keep_releases`` worktrees stay -- the
+  current and any directory a container mounts, whatever the number, then the
+  previous, then the newest by mtime. A worktree goes
+  by ``git worktree remove`` in the bare repository it belongs to (the stack's
+  or a package's), then ``worktree prune``. A package directory stays while a
+  container mounts it or the previous release's composition names it.
+  ``<name>.tmp`` belongs to ``sources``;
+- journals: ``Box.evict_journals`` down to ``policies.gc.journal_budget``; the
+  journal of the current run is never evicted;
+- volumes: never. ``gc`` runs no volume command, and fewer volumes after than
+  before is red.
+
+The current release of a stack is the target of ``/opt/<stack>/current``, its
+commit read from the worktree. The previous is named by the newest green verdict
+in ``history/`` whose ``finalize`` put another release of the stack in
+``current``; its commit comes from that verdict's ``fetch_root`` and
+``fetch_services`` facts, else from its worktree. ``state.json`` is not read:
+it is a record of the box, not a basis of decisions.
+
+``verify`` measures again. What ``act`` removed and is still there -- an image,
+a release, a journal it could evict, a build cache over budget that did not
+shrink -- is red, ``gc:not-removed``. A number over budget after everything
+allowed went -- the build cache, ``journal/`` holding the current journal alone,
+more protected releases than ``keep_releases`` -- is ``incomplete {what: gc,
+code: gc:over-budget}`` with the numbers, exit code 2. Sizes are docker's text
+(decimal units) turned into bytes; budgets are the passport's (binary units).
+
+The passport is the one ``fetch_passport`` read, else the box's copy; neither is
+``gc:no-passport``. ``gc`` writes under the box lock (``evict_journals`` checks
+it). It is no point of no return: it removes only what neither the current nor
+the previous release nor a container needs, so a restore never misses it.
+"""
+
+import json
+import os
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import ClassVar
+
+from pridem.events import Fact, Json
+from pridem.report.schema import Verdict
+from pridem.stacks.passport import Gc as GcPolicy
+from pridem.stacks.passport import Passport, load_passport, size_bytes
+from pridem.state import Box, VerdictDamaged
+from pridem.steps.base import (
+    CheckResult,
+    Mode,
+    Step,
+    StepContext,
+    StepFailed,
+    Verified,
+    local_code,
+)
+from pridem.steps.compose import out
+from pridem.steps.git import run_git
+from pridem.steps.passport import NO_PASSPORT, PASSPORT_COPY, Fetched
+
+GC_STACK = "box"
+"""The stack name a plan builder gives the ``gc`` step in ``finally``."""
+
+GC_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall", "gc"})
+PRUNE_TIMEOUT_S = 1800
+_CATEGORIES = {
+    "Images": "images",
+    "Containers": "containers",
+    "Local Volumes": "volumes",
+    "Build Cache": "build_cache",
+}
+_UNITS = {
+    "B": 1,
+    "kB": 1000,
+    "KB": 1000,
+    "MB": 1000**2,
+    "GB": 1000**3,
+    "TB": 1000**4,
+    "PB": 1000**5,
+}
+_SIZE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([kKMGTP]?B)$")
+_TEMP = ".tmp"
+
+
+def docker_size(text: str) -> int:
+    """``1.234GB`` -> bytes: docker prints sizes in decimal units."""
+    found = _SIZE.match(text.strip())
+    if found is None:
+        raise ValueError(f"not a docker size: {text!r}")
+    return round(float(found[1]) * _UNITS[found[2]])
+
+
+def system_df(ctx: StepContext) -> dict[str, Json]:
+    """``docker system df`` by category: ``{count, bytes}``; a category docker
+    did not print is zero."""
+    _, lines = out(
+        ctx, ["docker", "system", "df", "--format", "{{json .}}"], passed_on=False
+    )
+    found: dict[str, Json] = {
+        name: {"count": 0, "bytes": 0} for name in _CATEGORIES.values()
+    }
+    for line in lines:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError("docker system df printed a line that is not an object")
+        name = _CATEGORIES.get(str(row.get("Type")))
+        if name is not None:
+            found[name] = {
+                "count": int(str(row["TotalCount"])),
+                "bytes": docker_size(str(row["Size"])),
+            }
+    return found
+
+
+def _number(df: Mapping[str, Json], category: str, key: str) -> int:
+    part = df.get(category)
+    value = part.get(key) if isinstance(part, dict) else None
+    if not isinstance(value, int):
+        raise ValueError(f"no {key} of {category} in the measurement")
+    return value
+
+
+def _lines(ctx: StepContext, argv: Sequence[str]) -> list[str]:
+    _, lines = out(ctx, argv, passed_on=False)
+    return sorted({line.strip() for line in lines if line.strip()})
+
+
+def _inspect(ctx: StepContext, kind: str, ids: Sequence[str]) -> list[dict[str, Json]]:
+    if not ids:
+        return []
+    _, lines = out(ctx, ["docker", kind, "inspect", *ids], passed_on=False)
+    found = json.loads("\n".join(lines))
+    if not isinstance(found, list):
+        raise ValueError(f"docker {kind} inspect did not print a list")
+    return [item for item in found if isinstance(item, dict)]
+
+
+def labelled_images(ctx: StepContext) -> list[str]:
+    """IDs of the images that carry ``pridem.commit``; no other image is listed."""
+    return _lines(
+        ctx,
+        [
+            "docker",
+            "image",
+            "ls",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            "label=pridem.commit",
+        ],
+    )
+
+
+def _dicts(value: Json | None) -> list[dict[str, Json]]:
+    return (
+        [item for item in value if isinstance(item, dict)]
+        if isinstance(value, list)
+        else []
+    )
+
+
+def _short(image: str) -> str:
+    return image.removeprefix("sha256:")[:12]
+
+
+def _strings(value: Json | None) -> list[str]:
+    return (
+        [item for item in value if isinstance(item, str)]
+        if isinstance(value, list)
+        else []
+    )
+
+
+@dataclass(frozen=True)
+class _Release:
+    stack: str
+    path: Path
+    bare: Path
+    package: bool
+
+
+@dataclass
+class _Known:
+    """What the box says of its releases: current, previous, their commits."""
+
+    current: dict[str, Path]
+    previous: dict[str, str]
+    commits: set[str]
+    names: set[str]
+    """Composition values of the previous releases: their package directories."""
+    damaged: int
+
+
+def _finalized(verdict: Verdict) -> dict[str, str] | None:
+    for step in verdict.steps:
+        if (step.phase, step.name, step.status) == ("main", "finalize", "ok"):
+            current = (step.verify or {}).get("current")
+            if isinstance(current, dict):
+                return {k: v for k, v in current.items() if isinstance(v, str)}
+    return None
+
+
+def _heads(verdict: Verdict) -> dict[tuple[str, str], str]:
+    """``(stack, release) -> commit`` from the ``fetch_*`` facts of ``verdict``."""
+    found: dict[tuple[str, str], str] = {}
+    for step in verdict.steps:
+        if step.status != "ok" or step.verify is None:
+            continue
+        facts: list[Json] = []
+        if step.name == "fetch_root":
+            facts = [step.verify]
+        elif step.name == "fetch_services":
+            services = step.verify.get("services")
+            facts = services if isinstance(services, list) else []
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            stack, release, head = (fact.get(k) for k in ("stack", "release", "head"))
+            if (
+                isinstance(stack, str)
+                and isinstance(release, str)
+                and isinstance(head, str)
+            ):
+                found[(stack, release)] = head
+    return found
+
+
+class Gc(Step):
+    """Remove what the box no longer needs, by labels, and measure it."""
+
+    name = "gc"
+    order = 1
+    modes = GC_MODES
+    codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
+        "clean": (
+            "remove {images} images and the releases {releases}; prune the build "
+            "cache: {build_cache}; evict journals: {journals}"
+        ),
+        "not-removed": "gc removed {objects} and they are still there",
+        "volumes-changed": (
+            "volumes went from {before} to {after}; gc never touches a volume"
+        ),
+        "over-budget": (
+            "over budget: {over}; build cache {builder_cache_bytes} of "
+            "{builder_cache_budget} bytes, journal/ {journal_bytes} of "
+            "{journal_budget} bytes, releases {releases} with keep_releases "
+            "{keep_releases}"
+        ),
+    }
+
+    def __init__(
+        self,
+        *,
+        box: Box,
+        run_id: str,
+        fetched: Fetched,
+        root: Path = Path("/"),
+    ) -> None:
+        self.box = box
+        self.run_id = run_id
+        self.fetched = fetched
+        self.root = root
+
+    # --- the policy -------------------------------------------------------------
+
+    def _policy(self) -> GcPolicy:
+        passport: Passport | None = self.fetched.passport
+        if passport is None:
+            copy = self.root / PASSPORT_COPY
+            if not copy.is_file():
+                raise StepFailed("no-passport")
+            passport = load_passport(copy)
+        return passport.policies.gc
+
+    # --- what the box holds -------------------------------------------------------
+
+    def _stacks(self) -> list[str]:
+        opt = self.root / "opt"
+        return sorted(
+            path.parent.name for path in opt.glob("*/releases") if path.is_dir()
+        )
+
+    def _releases_dir(self, stack: str) -> Path:
+        return self.root / "opt" / stack / "releases"
+
+    def _head(self, ctx: StepContext, release: Path) -> str:
+        _, lines = run_git(ctx, self.root, ["-C", str(release), "rev-parse", "HEAD"])
+        return lines[0].strip()
+
+    def _known(self, ctx: StepContext, stacks: Sequence[str]) -> _Known:
+        current: dict[str, Path] = {}
+        commits: set[str] = set()
+        for stack in stacks:
+            link = self.root / "opt" / stack / "current"
+            if link.is_symlink():
+                target = Path(os.readlink(link))
+                current[stack] = target
+                if (target / ".git").exists():
+                    commits.add(self._head(ctx, target))
+        previous: dict[str, str] = {}
+        names: set[str] = set()
+        damaged = 0
+        for run_id in reversed(self.box.history_ids()):
+            if not set(current) - set(previous):
+                break
+            try:
+                verdict = self.box.read_verdict(run_id)
+            except VerdictDamaged:
+                damaged += 1
+                continue
+            finalized = _finalized(verdict) if verdict.result == "green" else None
+            if finalized is None:
+                continue
+            heads = _heads(verdict)
+            for stack in sorted(set(current) - set(previous)):
+                release = finalized.get(stack)
+                if release is None or release == current[stack].name:
+                    continue
+                previous[stack] = release
+                names.update(verdict.composition_after.values())
+                head = heads.get((stack, release))
+                path = self._releases_dir(stack) / release
+                if head is None and (path / ".git").exists():
+                    head = self._head(ctx, path)
+                if head is not None:
+                    commits.add(head)
+        return _Known(current, previous, commits, names, damaged)
+
+    def _releases(self, ctx: StepContext, stack: str) -> list[_Release]:
+        found: list[_Release] = []
+        directory = self._releases_dir(stack)
+        packages = (self.root / "opt" / stack / "packages").resolve()
+        for path in sorted(directory.iterdir()):
+            if not path.is_dir() or path.name.endswith(_TEMP) or path.name[0] == ".":
+                continue
+            _, lines = run_git(
+                ctx,
+                self.root,
+                [
+                    "-C",
+                    str(path),
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                ],
+            )
+            bare = Path(lines[0].strip())
+            found.append(_Release(stack, path, bare, bare.resolve().parent == packages))
+        return found
+
+    # --- the step -----------------------------------------------------------------
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        policy = self._policy()
+        df = system_df(ctx)
+        stacks = self._stacks()
+        known = self._known(ctx, stacks)
+        containers = _inspect(
+            ctx,
+            "container",
+            _lines(
+                ctx, ["docker", "container", "ls", "--all", "--quiet", "--no-trunc"]
+            ),
+        )
+        in_use = {str(c.get("Image")) for c in containers}
+        mounts = [
+            Path(str(m.get("Source")))
+            for c in containers
+            for m in _dicts(c.get("Mounts"))
+            if m.get("Source")
+        ]
+        images: list[Json] = []
+        for image in _inspect(ctx, "image", labelled_images(ctx)):
+            config = image.get("Config")
+            labels = config.get("Labels") if isinstance(config, dict) else None
+            commit = labels.get("pridem.commit") if isinstance(labels, dict) else None
+            ident = str(image.get("Id"))
+            if commit in known.commits or ident in in_use:
+                continue
+            images.append(
+                {"id": ident, "tags": list[Json](_strings(image.get("RepoTags")))}
+            )
+        removed: list[Json] = []
+        kept: dict[str, Json] = {}
+        for stack in stacks:
+            gone, stay = self._choose(ctx, stack, policy, known, mounts)
+            removed += [
+                {"stack": stack, "path": str(r.path), "bare": str(r.bare)} for r in gone
+            ]
+            kept[stack] = list[Json](stay)
+        cache = _number(df, "build_cache", "bytes")
+        prune = cache > size_bytes(policy.builder_cache_budget)
+        journal = self._journal_bytes()
+        evict = journal > size_bytes(policy.journal_budget)
+        data: dict[str, Json] = {
+            "before": {**df, "journal": {"bytes": journal}},
+            "images": images,
+            "releases": removed,
+            "prune": prune,
+            "evict": evict,
+            "kept_releases": kept,
+            "kept_commits": list[Json](sorted(known.commits)),
+            "in_use": list[Json](sorted(_short(i) for i in in_use)),
+            "history_damaged": known.damaged,
+        }
+        if not (images or removed or prune or evict):
+            return CheckResult(False, data=data)
+        names: list[Json] = [
+            f"{r['stack']}/{Path(str(r['path'])).name}" for r in _dicts(removed)
+        ]
+        would = local_code(
+            "clean",
+            {
+                "images": len(images),
+                "releases": names,
+                "build_cache": prune,
+                "journals": evict,
+            },
+        )
+        return CheckResult(True, would, data)
+
+    def _choose(
+        self,
+        ctx: StepContext,
+        stack: str,
+        policy: GcPolicy,
+        known: _Known,
+        mounts: Sequence[Path],
+    ) -> tuple[list[_Release], list[str]]:
+        """The releases of ``stack`` to remove, and the names that stay."""
+
+        def mounted(path: Path) -> bool:
+            return any(m.is_relative_to(path) or path.is_relative_to(m) for m in mounts)
+
+        current = known.current.get(stack)
+        previous = known.previous.get(stack)
+        gone: list[_Release] = []
+        stay: list[_Release] = []
+        others: list[_Release] = []
+        for release in self._releases(ctx, stack):
+            if release.package:
+                if mounted(release.path) or release.path.name in known.names:
+                    continue  # a package directory is not a release of the stack
+                gone.append(release)
+            elif release.path == current or mounted(release.path):
+                stay.append(release)
+            else:
+                others.append(release)
+        # the previous first, then the newest; the current and mounted ones hold
+        # their slots whatever the number
+        others.sort(
+            key=lambda r: (
+                r.path.name != previous,
+                -r.path.stat().st_mtime,
+                r.path.name,
+            )
+        )
+        room = max(policy.keep_releases - len(stay), 0)
+        stay += others[:room]
+        gone += others[room:]
+        names = sorted(r.path.name for r in stay)
+        return gone, names
+
+    def _journal_files(self) -> list[Path]:
+        return [
+            *self.box.journals.glob("*.jsonl"),
+            *self.box.journals.glob("*.jsonl.damaged"),
+        ]
+
+    def _journal_bytes(self) -> int:
+        return sum(path.stat().st_size for path in self._journal_files())
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        policy = self._policy()
+        for image in _dicts(check.data.get("images")):
+            tags = _strings(image.get("tags"))
+            out(ctx, ["docker", "image", "rm", *(tags or [str(image["id"])])])
+        bares: set[str] = set()
+        for release in _dicts(check.data.get("releases")):
+            bare = str(release["bare"])
+            run_git(
+                ctx,
+                self.root,
+                ["-C", bare, "worktree", "remove", "--force", str(release["path"])],
+            )
+            bares.add(bare)
+        for bare in sorted(bares):
+            run_git(ctx, self.root, ["-C", bare, "worktree", "prune"])
+        if check.data.get("prune"):
+            out(
+                ctx,
+                [
+                    "docker",
+                    "builder",
+                    "prune",
+                    "--force",
+                    "--all",
+                    "--keep-storage",
+                    str(size_bytes(policy.builder_cache_budget)),
+                ],
+                timeout=PRUNE_TIMEOUT_S,
+            )
+        if check.data.get("evict"):
+            self.box.evict_journals(size_bytes(policy.journal_budget), self.run_id)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        policy = self._policy()
+        data = check.data
+        before = data.get("before")
+        if not isinstance(before, dict):
+            raise ValueError("gc verify needs the measurement of its check")
+        after = system_df(ctx)
+        journal = self._journal_bytes()
+        cache_budget = size_bytes(policy.builder_cache_budget)
+        journal_budget = size_bytes(policy.journal_budget)
+        images = _dicts(data.get("images"))
+        releases = _dicts(data.get("releases"))
+        listed = set(labelled_images(ctx)) if images else set()
+        fact: Fact = {
+            "before": before,
+            "after": {**after, "journal": {"bytes": journal}},
+            "removed": {
+                "images": [_short(str(i["id"])) for i in images],
+                "releases": [str(r["path"]) for r in releases],
+            },
+            "kept": {
+                "commits": data.get("kept_commits"),
+                "in_use": data.get("in_use"),
+                "releases": data.get("kept_releases"),
+            },
+            "budget": {
+                "builder_cache": cache_budget,
+                "journal": journal_budget,
+                "keep_releases": policy.keep_releases,
+            },
+        }
+        volumes = (
+            _number(before, "volumes", "count"),
+            _number(after, "volumes", "count"),
+        )
+        if volumes[1] < volumes[0]:
+            raise StepFailed(
+                "volumes-changed", {"before": volumes[0], "after": volumes[1]}, fact
+            )
+        still: list[str] = [_short(str(i["id"])) for i in images if i["id"] in listed]
+        still += [str(r["path"]) for r in releases if Path(str(r["path"])).exists()]
+        cache = (
+            _number(before, "build_cache", "bytes"),
+            _number(after, "build_cache", "bytes"),
+        )
+        if data.get("prune") and cache[1] >= cache[0]:
+            still.append("build-cache")
+        current = f"{self.run_id}.jsonl"
+        if (
+            data.get("evict")
+            and journal > journal_budget
+            and any(path.name != current for path in self._journal_files())
+        ):
+            still.append("journals")
+        if still:
+            raise StepFailed("not-removed", {"objects": list[Json](still)}, fact)
+        over: list[str] = []
+        if cache[1] > cache_budget:
+            over.append("build-cache")
+        if journal > journal_budget:
+            over.append("journal")
+        crowded: list[str] = []
+        kept = data.get("kept_releases")
+        for stack, names in kept.items() if isinstance(kept, dict) else []:
+            if isinstance(names, list) and len(names) > policy.keep_releases:
+                crowded.append(f"{stack}:{len(names)}")
+        if crowded:
+            over.append("releases")
+        if not over:
+            return Verified(fact)
+        return Verified(
+            fact,
+            incomplete=local_code(
+                "over-budget",
+                {
+                    "over": list[Json](over),
+                    "builder_cache_bytes": cache[1],
+                    "builder_cache_budget": cache_budget,
+                    "journal_bytes": journal,
+                    "journal_budget": journal_budget,
+                    "releases": list[Json](crowded),
+                    "keep_releases": policy.keep_releases,
+                },
+            ),
+        )
+
+
+def gc_steps(root: Path, *, box: Box, run_id: str, fetched: Fetched) -> list[Step]:
+    """The ``gc`` a plan builder puts in ``finally`` of every plan, as stack
+    ``GC_STACK``; the verb ``gc`` runs the same step as its whole plan."""
+    return [Gc(box=box, run_id=run_id, fetched=fetched, root=root)]

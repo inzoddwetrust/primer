@@ -26,9 +26,11 @@ from pridem.events import Code, Fact, Json
 from pridem.report.codes import LOCAL_CODE
 from pridem.runner import OnLine, Runner
 
-Mode = Literal["install", "deploy", "reinstall"]
+Mode = Literal["install", "deploy", "reinstall", "gc", "renew"]
+"""The plans a step can belong to: the three of a deploy, and the one-step
+plans of the verbs ``gc`` and ``ssl renew``."""
 Role = Literal["test", "prod", "preview"]
-MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
+MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall", "gc", "renew"})
 
 
 def local_code(code: str, params: Mapping[str, Json] | None = None) -> Code:

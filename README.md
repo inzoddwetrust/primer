@@ -4,7 +4,7 @@ pridem is the deploy machine of the Primer project: a Python 3.12 package that i
 installed on every box of every project and brings the box to the state described
 by the stacks' `primer.yaml` files and the box passport. The repository holds the
 contracts, the parts the machine is built from and its first verbs,
-`pridem version` and `pridem status`:
+`pridem version`, `pridem status`, `pridem gc` and `pridem ssl renew`:
 
 - `pridem/stacks/` -- contract 1 (passport) and contract 3 (`primer.yaml`,
   `primer.lock`) as models, rules and loaders; the YAML loader refuses anchors,
@@ -19,10 +19,14 @@ contracts, the parts the machine is built from and its first verbs,
 - `pridem/verbs/` -- the verbs: each an argument schema and a run, shared by
   the CLI and, later, the Panel's queue; `version` prints the installed
   version, `status` takes the box's lock, recovers runs that ended without a
-  verdict and writes its own verdict with no steps;
+  verdict and writes its own verdict with no steps; `gc` and `ssl renew` run
+  one step as their whole plan under the lock (`pridem/steps/gc.py`, the
+  clean-up by labels every plan also runs in `finally`; `ssl_renew` in
+  `pridem/steps/ssl.py`), and the box's systemd timers run them
+  (`pridem/steps/timers.py`);
 - `pridem/cli.py` -- the command line turned into a verb's arguments
-  (`pridem [--json] <verb>`); an unknown verb, option or argument and a busy
-  box are refused before anything runs: exit 1, stderr, no verdict;
+  (`pridem [--json] [--timer] <verb>`); an unknown verb, option or argument and
+  a busy box are refused before anything runs: exit 1, stderr, no verdict;
 - `install.sh` -- the only shell file: the bootstrap of a box in five actions
   (host check; packages, `sops` by version and sha256; the pinned clone; a venv
   without an index from `wheels/` plus the pridem wheel; the links). In the

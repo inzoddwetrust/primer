@@ -1,5 +1,6 @@
-"""``tls_files`` and ``ssl`` (DM-17): the four modes of ``policies.ssl``.
-``openssl`` runs for real; docker and the network follow a strict script."""
+"""``tls_files`` and ``ssl`` (DM-17), ``ssl_renew`` (DM-20): the four modes of
+``policies.ssl``. ``openssl`` runs for real; docker and the network follow a
+strict script."""
 
 import json
 import re
@@ -30,7 +31,7 @@ from pridem.steps.edge import (
     mode_of,
 )
 from pridem.steps.passport import Fetched
-from pridem.steps.ssl import Ssl, TlsFiles, cert_path, key_path
+from pridem.steps.ssl import Ssl, SslRenew, TlsFiles, cert_path, key_path
 
 NAMES = list(DOMAINS.values())
 
@@ -226,3 +227,74 @@ def test_probe_DM_49_certbot_image_is_pinned_by_digest(tmp_path: Path) -> None:
         outcome, _ = run(ladder(root, fetched), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert any("certonly" in argv for argv in runner.argvs)
+
+
+# --- DM-20: ssl renew, the plan of the verb and of its timer -------------------
+
+
+def _placed(root: Path, cert: str, key: str) -> None:
+    cert_path(root).parent.mkdir(parents=True, exist_ok=True)
+    cert_path(root).write_text(cert)
+    key_path(root).write_text(key)
+    key_path(root).chmod(0o600)
+
+
+def test_ssl_renew_in_letsencrypt_runs_certbot_copies_and_reloads(
+    tmp_path: Path,
+) -> None:
+    root, fetched = passport(tmp_path, ssl="letsencrypt")
+    issued_cert, issued_key = issued_pair(tmp_path, NAMES)
+    _placed(root, *self_signed_pair(tmp_path, NAMES))
+    live = letsencrypt_dir(root) / "live" / "pridem"
+    live.mkdir(parents=True)
+    (live / "fullchain.pem").write_text(issued_cert)
+    (live / "privkey.pem").write_text(issued_key)
+    renew = argv(root, "run", "--rm", "certbot", "renew", "--webroot", "-w",
+                  "/var/www/acme")  # fmt: skip
+    secrets = Secrets(())
+    with Mixed(
+        FakeCall(tuple(renew)),
+        exec_call(root, "nginx", "-t"),
+        exec_call(root, "nginx", "-s", "reload"),
+    ) as runner:
+        outcome, _ = run(
+            [SslRenew(fetched=fetched, secrets=secrets, root=root)],
+            runner,
+            mode="renew",
+        )
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert cert_path(root).read_text() == issued_cert
+    verify = outcome.steps[0].verify
+    assert (verify["mode"], verify["self_signed"], verify["key_mode"]) == (
+        "letsencrypt",
+        False,
+        oct(0o600),
+    )
+
+
+def test_ssl_renew_outside_letsencrypt_never_calls_certbot(tmp_path: Path) -> None:
+    for mode in ("self-signed", "defer"):
+        root, fetched = passport(tmp_path / mode, ssl=mode)
+        cert, key = self_signed_pair(tmp_path, NAMES)
+        _placed(root, cert, key)
+        with Mixed() as runner:  # openssl only: no docker, no certbot
+            outcome, _ = run(
+                [SslRenew(fetched=fetched, secrets=Secrets(()), root=root)],
+                runner,
+                mode="renew",
+            )
+        assert outcome.code is ExitCode.OK, outcome.steps
+        assert not [a for a in runner.argvs if a[0] != "openssl"]
+        verify = outcome.steps[0].verify
+        assert (verify["mode"], verify["self_signed"]) == (mode, True)
+        assert cert_path(root).read_text() == cert  # nothing replaced
+
+
+def test_ssl_renew_without_a_passport_refuses(tmp_path: Path) -> None:
+    with Mixed() as runner:
+        outcome, _ = run(
+            [SslRenew(fetched=Fetched(), secrets=Secrets(()), root=tmp_path)],
+            runner,
+            mode="renew",
+        )
+    assert outcome.steps[0].reason == Code("ssl_renew:no-passport")

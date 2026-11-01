@@ -85,6 +85,7 @@ LAYERS: Layers = (
             "pridem.steps.finalize",
             "pridem.steps.frontend",
             "pridem.steps.env",
+            "pridem.steps.gc",
             "pridem.steps.host",
             "pridem.steps.git",
             "pridem.steps.keys",
@@ -95,6 +96,7 @@ LAYERS: Layers = (
             "pridem.steps.sources",
             "pridem.steps.ssl",
             "pridem.steps.tests",
+            "pridem.steps.timers",
             "pridem.steps.types",
             "pridem.steps.up",
         ),
@@ -105,6 +107,9 @@ LAYERS: Layers = (
         (
             "pridem.verbs",
             "pridem.verbs.base",
+            "pridem.verbs.gc",
+            "pridem.verbs.run",
+            "pridem.verbs.ssl",
             "pridem.verbs.status",
             "pridem.verbs.version",
         ),
@@ -717,10 +722,14 @@ def test_fence_reports_stale_map_entry(tmp_path: Path) -> None:
 
 
 def test_fence_reports_module_in_two_layers(tmp_path: Path) -> None:
+    """The doubled module is ``pridem.cli``, which no module imports: in either
+    of its two layers it adds no edge, so the map's hit is the only one.
+    (``pridem.plan`` was doubled into ``top`` until a verb imported the plan,
+    DM-20: that import then read as one against the layer direction.)"""
     _copy_tree(tmp_path)
-    report = scan(tmp_path, _layers_with("top", "pridem.plan"))
+    report = scan(tmp_path, _layers_with("verbs", "pridem.cli"))
     assert report.violations == (
-        Hit(MAP_PATH, 0, "pridem.plan is in two layers of the map"),
+        Hit(MAP_PATH, 0, "pridem.cli is in two layers of the map"),
     )
 
 

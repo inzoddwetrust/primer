@@ -11,7 +11,8 @@ calls ``verify`` of every green step of ``main`` once more, with the check it
 was run with; one red fails it by the step's name and code, and the steps after
 it (``finalize``) do not run.
 
-In ``install``, ``deploy`` and ``reinstall`` every step runs ``check``, then
+In every mode but ``doctor`` -- ``install``, ``deploy``, ``reinstall`` and the
+one-step plans ``gc`` and ``renew`` -- every step runs ``check``, then
 ``act`` if needed, then ``verify``. The first failed step stops the ladder: the
 rest are ``skipped`` with the reason. If the plan has not yet started the
 ``act`` of a point-of-no-return step, the caller's ``restore`` steps run; after

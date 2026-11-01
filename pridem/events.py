@@ -39,7 +39,7 @@ type Fact = Mapping[str, Json]
 
 Status = Literal["ok", "failed", "skipped"]
 Phase = Literal["main", "restore", "finally"]
-PlanMode = Literal["install", "deploy", "doctor", "reinstall"]
+PlanMode = Literal["install", "deploy", "doctor", "reinstall", "gc", "renew"]
 RunMode = PlanMode | Literal["status"]
 """What a run is: a plan's mode, or a verb that runs no plan (``status``)."""
 

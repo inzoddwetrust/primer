@@ -20,7 +20,9 @@ nginx always reads ``/opt/pridem/edge/certs/{fullchain,privkey}.pem`` (the key
 after ``nginx``) issues and reports ``cert_expires``. A key found with another
 mode than 0600 is refused, never re-moded. ``renew`` and ``status`` are what
 the verb ``ssl renew|status`` and the renewal timer (DM-20) call; ``renew`` runs
-under ``Box.lock`` like every command of a box.
+under ``Box.lock`` like every command of a box. ``ssl_renew`` -- the whole plan
+of ``ssl renew`` -- calls certbot only in ``letsencrypt``: in the other modes no
+certbot certificate exists to renew, and the step reads back ``status``.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -54,6 +56,7 @@ from pridem.steps.host import dns_table
 from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
+RENEW_MODES: frozenset[Mode] = frozenset({"renew"})
 RENEW_BEFORE = timedelta(days=30)
 SELF_SIGNED_DAYS = 90
 CERT_NAME = "pridem"
@@ -383,3 +386,37 @@ class Ssl(Step):
         if mode == "defer":
             return Verified(fact, incomplete=Code("deferred"))
         return Verified(fact)
+
+
+class SslRenew(Step):
+    """``ssl renew``: certbot renews what is due in ``letsencrypt``; every mode
+    reads back what nginx serves."""
+
+    name = "ssl_renew"
+    order = 1
+    modes = RENEW_MODES
+    codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
+        "renew": "renew the Let's Encrypt certificate if it is due",
+        "key-mode": "the TLS key {path} is {mode}, not 0o600; it is left as it is",
+        "config-invalid": "nginx -t is red in {where}; nothing reloaded",
+    }
+
+    def __init__(
+        self, *, fetched: Fetched, secrets: Secrets, root: Path = Path("/")
+    ) -> None:
+        self.fetched = fetched
+        self.secrets = secrets
+        self.root = root
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        if _passport(self.fetched).policies.ssl != "letsencrypt":
+            return CheckResult(False)
+        return CheckResult(True, local_code("renew"))
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        renew(ctx, self.root, self.secrets)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        mode = _passport(self.fetched).policies.ssl
+        return Verified({"mode": mode, **status(ctx, self.root)})

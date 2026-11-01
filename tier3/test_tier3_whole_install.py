@@ -1,13 +1,14 @@
-"""Tier 3 probe (DM-19, DM-50): the whole ``install`` of ``primer-blank``.
+"""Tier 3 probe (DM-19, DM-50, DM-20): the whole ``install`` of ``primer-blank``.
 
 One plan installs the blank on a clean runner -- the host steps, the passport
-(a file), the sources (a ``file://`` mirror of the blank at its pinned
-commit, so no key of CI is needed), the blank's ladder (``seams_check``,
+(a file), the timers, the sources (a ``file://`` mirror of the blank at its
+pinned commit, so no key of CI is needed), the blank's ladder (``seams_check``,
 ``render_env``, ``build``, ``packages``, ``tests``, ``migrate``, ``up``),
 ``types``, the edge (``tls_files``, ``nginx``, ``ssl``), ``frontend``, the
-final check and ``finalize`` -- and the same plan runs a second time, then
-once as ``doctor``. The blank is built and brought up once in the whole tier
-3: every check of it lives here (DM-50), against what that one install left:
+final check and ``finalize``, ``gc`` in ``finally`` -- and the same plan runs a
+second time, then once as ``doctor``. The blank is built and brought up once in
+the whole tier 3: every check of it lives here (DM-50), against what that one
+install left:
 
 - the env: modes, keys, the minted password -- the same on the second run,
   never printed --, ``docker compose config`` byte for byte;
@@ -17,7 +18,12 @@ once as ``doctor``. The blank is built and brought up once in the whole tier
 - the routes: by ``Host`` on localhost, 301 to https, HSTS and ``nosniff``, a
   stranger ``Host`` gets no page;
 - the tests in ``blank_test`` from the test target, ``current``,
-  ``state.json``, the live database's head.
+  ``state.json``, the live database's head;
+- ``gc`` (DM-20): green in ``finally`` of both runs; a planted image labelled
+  with a foreign commit goes when the ``gc`` timer's service runs, the
+  unlabelled images, the release's own and the volumes stay; the renewal
+  timer's service is green on the self-signed box; both timers are enabled and
+  active.
 
 Two short checks need no install: what a single-quoted value is to compose,
 and that the tag certbot is pinned by still names the pinned digest. The file
@@ -45,6 +51,8 @@ MINTED = Path("/opt/blank/env/minted.yaml")
 FRONTEND = "tier3-env.test"
 API = "api.tier3-env.test"
 JOURNAL_TAIL = 120
+PLANTED_COMMIT = "f" * 40
+PLANTED_IMAGE = "pridem-planted:dm20"
 URL_SAFE = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
 GIT_ENV = {
     "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -71,6 +79,7 @@ from pridem.steps.build import Build
 from pridem.steps.env import RenderEnv, SeamsCheck
 from pridem.steps.finalize import FinalCheck, Finalize
 from pridem.steps.frontend import Frontend
+from pridem.steps.gc import GC_STACK, gc_steps
 from pridem.steps.host import host_steps
 from pridem.steps.migrate import Migrate
 from pridem.steps.nginx import Nginx
@@ -79,6 +88,7 @@ from pridem.steps.passport import passport_steps
 from pridem.steps.sources import source_steps
 from pridem.steps.ssl import Ssl, TlsFiles
 from pridem.steps.tests import TestReport, Tests
+from pridem.steps.timers import timer_steps
 from pridem.steps.types import Types
 from pridem.steps.up import Up
 
@@ -92,6 +102,7 @@ box, secrets = Box(Path("/opt/pridem")), Secrets(())
 memory, report = SeamMemory(), TestReport()
 host, final = host_steps(root)
 fetched, first = passport_steps(root, secrets=secrets, server=None, file=passport)
+timers = timer_steps(root, fetched=fetched)
 _, sources = source_steps(
     root, stack="blank", address=f"file://{mirror}", ref="main", tag=False
 )
@@ -140,15 +151,17 @@ with box.lock("tier3-install"):
                       composition_before={"pridem": __version__}),
         secrets,
     )
+    clean = gc_steps(root, box=box, run_id=run_id, fetched=fetched)
     try:
         outcome = Plan(
             [StackSteps("host", host), StackSteps("passport", first),
+             StackSteps("timers", timers),
              StackSteps("sources", sources), StackSteps("blank", ladder),
              StackSteps("types", types), StackSteps("edge", edge),
              StackSteps("frontend", front), StackSteps("finalize", tail, root=True)],
             mode=mode, role="test", runner=SubprocessRunner(),
             sink=Both(ConsoleSink(sys.stdout, secrets), journal),
-            finally_=[StackSteps("host", final)],
+            finally_=[StackSteps("host", final), StackSteps(GC_STACK, clean)],
         ).run()
     finally:
         journal.close()
@@ -157,7 +170,8 @@ with box.lock("tier3-install"):
         failed = [r.reason.code for r in outcome.steps if r.reason is not None]
         print("FAILED " + json.dumps(failed))
         sys.exit(0)
-    every = [*host, *first, *sources, *ladder, *types, *edge, *front, *tail, *final]
+    every = [*host, *first, *timers, *sources, *ladder, *types, *edge, *front, *tail,
+             *final, *clean]
     verdict = build_verdict(
         outcome, run_id=run_id, verb="install", args={},
         actor={"type": "machine", "via": "local"}, started=started,
@@ -259,6 +273,16 @@ def _passport(tmp: Path) -> Path:
     file = tmp / "passport.yaml"
     file.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return file
+
+
+def _verdicts(verb: str) -> Verdict:
+    """The one verdict of ``verb`` in the box's history."""
+    found = [
+        Verdict.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in sorted(Path("/opt/pridem/history").glob("*.json"))
+    ]
+    [one] = [v for v in found if v.verb == verb]
+    return one
 
 
 def _journal_tail(verdict: Verdict) -> str:
@@ -572,6 +596,70 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
         ]
     )
     assert "1" in [x.strip() for x in test_db], test_db
+
+    # gc (DM-20): in finally of both runs, by its timer, by labels only
+    for run in (verdict, again):
+        [gc] = [s for s in run.steps if (s.phase, s.name) == ("finally", "gc")]
+        assert gc.status == "ok" and gc.verify is not None, run.steps
+        assert {"before", "after", "removed", "kept"} <= set(gc.verify), gc.verify
+    every_image = set(_stdout(["docker", "image", "ls", "-q", "--no-trunc"]))
+    unlabelled = every_image - set(images)
+    assert unlabelled, every_image  # postgres, nginx: pulled, never labelled
+    volumes_before = sorted(_stdout(["docker", "volume", "ls", "-q"]))
+    assert volumes_before
+    [nginx] = _stdout(
+        [
+            "docker",
+            "ps",
+            "-q",
+            "--filter",
+            "label=com.docker.compose.project=pridem-edge",
+            "--filter",
+            "label=com.docker.compose.service=nginx",
+        ]
+    )
+    _run(
+        [
+            "docker",
+            "commit",
+            "--pause=false",
+            "--change",
+            "LABEL pridem.stack=planted",
+            "--change",
+            f"LABEL pridem.commit={PLANTED_COMMIT}",
+            nginx,
+            PLANTED_IMAGE,
+        ]
+    )
+    [planted_id] = _stdout(
+        ["docker", "image", "inspect", "-f", "{{.Id}}", PLANTED_IMAGE]
+    )
+    _run(["systemctl", "start", "pridem-gc.service"], timeout=1800)
+    by_timer = _verdicts("gc")
+    assert (by_timer.result, by_timer.actor.type, by_timer.actor.via) == (
+        "green",
+        "machine",
+        "timer",
+    ), _journal_tail(by_timer)
+    [step] = by_timer.steps
+    removed = (step.verify or {}).get("removed")
+    assert isinstance(removed, dict), step
+    assert removed["images"] == [planted_id.removeprefix("sha256:")[:12]], removed
+    left = set(_stdout(["docker", "image", "ls", "-q", "--no-trunc"]))
+    assert planted_id not in left
+    assert unlabelled | set(images) <= left, left
+    assert sorted(_stdout(["docker", "volume", "ls", "-q"])) == volumes_before
+    # the renewal by its timer: self-signed, so certbot is not called
+    _run(["systemctl", "start", "pridem-ssl-renew.service"], timeout=900)
+    renewed = _verdicts("ssl renew")
+    assert (renewed.result, renewed.actor.via) == ("green", "timer"), _journal_tail(
+        renewed
+    )
+    assert [s.name for s in renewed.steps] == ["ssl_renew"], renewed.steps
+    assert (renewed.steps[0].verify or {}).get("mode") == "self-signed", renewed.steps
+    for timer in ("pridem-gc.timer", "pridem-ssl-renew.timer"):
+        assert _stdout(["systemctl", "is-enabled", timer]) == ["enabled"], timer
+        assert _stdout(["systemctl", "is-active", timer]) == ["active"], timer
 
 
 def test_tier3_compose_takes_a_single_quoted_value_as_it_is(tmp_path: Path) -> None:
