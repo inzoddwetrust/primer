@@ -215,10 +215,8 @@ def test_a_dependency_mount_is_not_done_here(tmp_path: Path) -> None:
         package_mounts(stack, ENTRY, fetched.passport, root)
 
 
-def test_front_answers_200_or_the_step_is_red(tmp_path: Path) -> None:
-    root, fetched = passport(tmp_path)
-    step = Frontend(product(), fetched=fetched, root=root)
-    curl = (
+def _curl(root: Path) -> tuple[str, ...]:
+    return (
         "curl",
         "-k",
         "-sS",
@@ -232,18 +230,40 @@ def test_front_answers_200_or_the_step_is_red(tmp_path: Path) -> None:
         "%{http_code}",
         f"https://{DOMAINS['frontend']}/",
     )
-    ok = [
-        exec_call(root, "nginx", "-t"),
-        exec_call(root, "nginx", "-s", "reload"),
-        FakeCall(curl, lines=stdout("200")),
-    ]
-    with Mixed(*ok) as runner:
+
+
+def test_probe_DM_51_frontend_needs_no_reload_when_config_and_front_are_live(
+    tmp_path: Path,
+) -> None:
+    root, fetched = passport(tmp_path)
+    step = Frontend(product(), fetched=fetched, root=root)
+    live = [FakeCall(_curl(root), lines=stdout("200"))] * 2  # check, verify
+    with Mixed(*live) as runner:  # no nginx -t, no reload
         outcome = run([step], runner)
-    assert outcome.code is ExitCode.OK
-    bad = [
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[0].verify == {"domain": DOMAINS["frontend"], "status": 200}
+    # the pair: a front that does not answer 200 -- reload, then verify again;
+    # curl exits 0 on a 502 too: the status decides, not the exit code
+    down = [
+        FakeCall(_curl(root), lines=stdout("502")),
         exec_call(root, "nginx", "-t"),
         exec_call(root, "nginx", "-s", "reload"),
-        FakeCall(curl, lines=stdout("502")),
+        FakeCall(_curl(root), lines=stdout("200")),
+    ]
+    with Mixed(*down) as runner:
+        outcome = run([step], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+
+
+def test_front_answers_200_or_the_step_is_red(tmp_path: Path) -> None:
+    """DM-51: a front still not 200 after the reload is red by its status."""
+    root, fetched = passport(tmp_path)
+    step = Frontend(product(), fetched=fetched, root=root)
+    bad = [
+        FakeCall(_curl(root), lines=stdout("502")),
+        exec_call(root, "nginx", "-t"),
+        exec_call(root, "nginx", "-s", "reload"),
+        FakeCall(_curl(root), lines=stdout("502")),
     ]
     with Mixed(*bad) as runner:
         outcome = run([step], runner)

@@ -427,7 +427,7 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
     assert password not in printed_again
     assert _app() == container, printed_again
 
-    # doctor: only the front's reload, a known defect (DM-50 observation)
+    # doctor on an unchanged box: nothing to do (TZ 7.1; DM-51)
     out = _run(
         [
             PYTHON,
@@ -443,7 +443,7 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
     )
     [diff] = [x for x in out if x.startswith("DIFF ")]
     [red] = [x for x in out if x.startswith("FAILED ")]
-    assert json.loads(diff.removeprefix("DIFF ")) == ["frontend:reload"], out
+    assert json.loads(diff.removeprefix("DIFF ")) == [], out
     assert json.loads(red.removeprefix("FAILED ")) == [], out
 
     # compose config byte for byte (R10)

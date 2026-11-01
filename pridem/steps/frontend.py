@@ -2,11 +2,14 @@
 
 The front is built with the stack (``build``, DM-18) and its packages are
 validated and mounted before ``up`` (``packages``); this step closes the front
-of the plan: nginx reloads after its config test (the packages may have
-replaced what the front serves), then ``https://<frontend domain>/`` asked on
-the box itself answers 200. The domain is the passport's for the route that
-goes to a stack's declared ``frontend``; a product without one has nothing to
-ask.
+of the plan by its live answer: ``https://<frontend domain>/`` asked on the box
+itself. 200 -- nothing to do: nginx reaches the front through its resolver
+(``set $upstream``), a recreated container is picked up without a reload, and
+a changed config is the ``nginx`` step's to test and reload (DM-17). Anything
+else -- nginx is reloaded after its config test, and the front must answer 200
+then. The status is what counts, never curl's exit code: without ``-f`` it is
+0 on a 502 too. The domain is the passport's for the route that goes to a
+stack's declared ``frontend``; a product without one has nothing to ask.
 """
 
 from pathlib import Path
@@ -40,7 +43,7 @@ class Frontend(Step):
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
         **NO_PASSPORT,
-        "reload": "reload nginx for the front of {domain}",
+        "reload": "reload nginx: the front of {domain} answers {status}",
         "not-200": "https://{domain}/ answers {status}",
         "config-invalid": "nginx -t is red in {where}; nothing reloaded",
     }
@@ -70,15 +73,15 @@ class Frontend(Step):
         domain = self._domain()
         if domain is None:
             return CheckResult(False)
-        return CheckResult(True, local_code("reload", {"domain": domain}))
+        status = self._status(ctx, domain)
+        if status == "200":
+            return CheckResult(False)
+        return CheckResult(
+            True, local_code("reload", {"domain": domain, "status": status})
+        )
 
-    def act(self, ctx: StepContext, check: CheckResult) -> None:
-        reload_nginx(ctx, self.root)
-
-    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        domain = self._domain()
-        if domain is None:
-            return Verified({"frontend": "none"})
+    def _status(self, ctx: StepContext, domain: str) -> str:
+        """The HTTP status the front answers on the box; ``000`` -- no answer."""
         body = self.root / "opt" / "pridem" / "edge" / "frontend-probe"
         body.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -102,7 +105,16 @@ class Frontend(Step):
             )
         finally:
             body.unlink(missing_ok=True)
-        status = lines[-1].strip() if lines else "000"
+        return lines[-1].strip() if lines else "000"
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        reload_nginx(ctx, self.root)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        domain = self._domain()
+        if domain is None:
+            return Verified({"frontend": "none"})
+        status = self._status(ctx, domain)
         if status != "200":
             raise StepFailed("not-200", {"domain": domain, "status": status})
         result: dict[str, Json] = {"domain": domain, "status": 200}
