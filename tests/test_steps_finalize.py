@@ -4,6 +4,7 @@ only after a green final check; the final check re-verifies every green step."""
 import os
 from pathlib import Path
 
+import pytest
 from env_support import box as passport_box
 from env_support import passport_data
 from plan_support import Journal, ScriptedStep, plan
@@ -162,3 +163,53 @@ def test_current_is_replaced_atomically(tmp_path: Path) -> None:
         str(current_link(tmp_path, "blank")),
     ) in replaced
     assert Path(os.readlink(current_link(tmp_path, "blank"))) == release
+
+
+@pytest.mark.parametrize("red", ["last", "middle"])
+def test_final_check_reverifies_every_green_step_and_names_the_red_one(
+    tmp_path: Path, red: str
+) -> None:
+    """DM-19 fix: a red re-verify anywhere among several green steps fails the
+    final check by that step's name; every green step is verified again."""
+    box = Box(tmp_path / "pridem")
+    step, _ = finalize(tmp_path, box)
+    journal = Journal()
+    names = ["build", "migrate", "up"]
+    flipping = names[-1] if red == "last" else names[1]
+    steps: list[Step] = [
+        Flips(name, order, journal)
+        if name == flipping
+        else ScriptedStep(name, order, journal, fact={"seen": "ok"})
+        for name, order in zip(names, (10, 11, 12), strict=True)
+    ]
+    with box.lock("probe"):
+        outcome = plan(tail(*steps, FinalCheck(), step), "install")[0].run()
+        written = box.read_state()
+    final = outcome.steps[3]
+    assert final.reason == Code(
+        "final_check:red",
+        {"stack": "blank", "step": flipping, "reason": f"{flipping}:wrong-state"},
+    )
+    assert outcome.code is ExitCode.FAILED and written is None
+    # the pair: every green step up to the red one was verified a second time
+    # (Flips logs only its green call; its own count says the second came)
+    for name in names[: names.index(flipping)]:
+        assert journal.count(f"blank/{name}:verify") == 2, (name, journal)
+    [flips] = [s for s in steps if isinstance(s, Flips)]
+    assert flips.calls == 2
+
+
+def test_a_green_final_check_verified_every_green_step(tmp_path: Path) -> None:
+    box = Box(tmp_path / "pridem")
+    step, _ = finalize(tmp_path, box)
+    journal = Journal()
+    names = ["build", "migrate", "up"]
+    steps: list[Step] = [
+        ScriptedStep(name, order, journal, fact={"seen": "ok"})
+        for name, order in zip(names, (10, 11, 12), strict=True)
+    ]
+    with box.lock("probe"):
+        outcome = plan(tail(*steps, FinalCheck(), step), "install")[0].run()
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[3].verify == {"verified": 3}
+    assert [journal.count(f"blank/{name}:verify") for name in names] == [2, 2, 2]
