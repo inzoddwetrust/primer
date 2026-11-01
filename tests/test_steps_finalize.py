@@ -133,36 +133,49 @@ def test_doctor_shows_current_behind_after_a_red_final_check(tmp_path: Path) -> 
     assert outcome.code is ExitCode.INCOMPLETE
 
 
-def test_current_is_replaced_atomically(tmp_path: Path) -> None:
+def test_current_is_replaced_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``current`` is never absent: a temporary symlink replaces it. DM-54:
+    ``unlink`` and ``symlink`` are watched too -- neither ever touches
+    ``current`` itself, and ``current`` is there at every call."""
     box = Box(tmp_path / "pridem")
     step, release = finalize(tmp_path, box)
     old = release.parent / ("b" * 40)
     old.mkdir()
-    os.symlink(old, current_link(tmp_path, "blank"))
-    replaced: list[tuple[str, str]] = []
-    real = os.replace
+    link = current_link(tmp_path, "blank")
+    os.symlink(old, link)
+    calls: list[tuple[str, str]] = []
+    real_replace, real_unlink, real_symlink = os.replace, os.unlink, os.symlink
 
-    def watch(src: object, dst: object) -> None:
-        replaced.append((str(src), str(dst)))
-        assert current_link(tmp_path, "blank").is_symlink()  # never absent
-        real(src, dst)  # type: ignore[arg-type]
+    def watch_replace(src: str, dst: str) -> None:
+        calls.append(("replace", f"{src} -> {dst}"))
+        assert link.is_symlink()  # never absent
+        real_replace(src, dst)
 
-    os.replace = watch  # type: ignore[assignment]
-    try:
-        with box.lock("probe"):
-            plan(
-                tail(
-                    ScriptedStep("up", 12, Journal(), fact={"a": 1}), FinalCheck(), step
-                ),
-                "install",
-            )[0].run()
-    finally:
-        os.replace = real
-    assert (
-        str(current_link(tmp_path, "blank").with_name(".current.tmp")),
-        str(current_link(tmp_path, "blank")),
-    ) in replaced
-    assert Path(os.readlink(current_link(tmp_path, "blank"))) == release
+    def watch_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        calls.append(("unlink", str(path)))
+        assert link.is_symlink()
+        real_unlink(path, dir_fd=dir_fd)
+
+    def watch_symlink(src: str, dst: str) -> None:
+        calls.append(("symlink", str(dst)))
+        assert link.is_symlink()
+        real_symlink(src, dst)
+
+    monkeypatch.setattr(os, "replace", watch_replace)
+    monkeypatch.setattr(os, "unlink", watch_unlink)
+    monkeypatch.setattr(os, "symlink", watch_symlink)
+    with box.lock("probe"):
+        plan(
+            tail(ScriptedStep("up", 12, Journal(), fact={"a": 1}), FinalCheck(), step),
+            "install",
+        )[0].run()
+    temp = link.with_name(".current.tmp")
+    assert ("symlink", str(temp)) in calls
+    assert ("replace", f"{temp} -> {link}") in calls
+    assert not [c for c in calls if c[0] in ("unlink", "symlink") and c[1] == str(link)]
+    assert Path(os.readlink(link)) == release
 
 
 @pytest.mark.parametrize("red", ["last", "middle"])

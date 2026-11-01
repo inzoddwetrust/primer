@@ -3,8 +3,10 @@
 Two pairs in ``/etc/systemd/system``, a oneshot service and its timer each:
 
 - ``pridem-gc`` -- ``pridem --timer gc`` on ``policies.timers.gc``;
-- ``pridem-ssl-renew`` -- ``pridem --timer ssl renew`` daily: the passport has no
-  field for it, and certbot renews only what is due.
+- ``pridem-ssl-renew`` -- ``pridem --timer ssl renew`` daily, started up to
+  ``RENEW_DELAY`` later at random (``RandomizedDelaySec``), so boxes do not
+  all ask Let's Encrypt at midnight: the passport has no field for it, and
+  certbot renews only what is due.
 
 Both commands take the box lock like any other: a timer that fires during a run
 is refused (exit 1, no verdict) and tries again on its next day -- ``gc`` already
@@ -12,18 +14,18 @@ ran in that run's ``finally``, and a certificate is renewed 30 days before it
 ends. ``Persistent=true`` runs a day missed while the box was off.
 
 ``check`` compares each file with its render and asks systemd whether each timer
-is enabled and active. ``act`` writes what differs (temp, fsync, rename; 0644),
+is enabled and active. ``act`` writes what differs (``atomic_write``, 0644),
 reloads systemd when a file changed, enables the timers and restarts them, so a
 changed calendar is the one that runs. ``verify`` reads back the files, then
 ``is-enabled`` and ``is-active`` of each timer. Other timers of the host are
 never touched.
 """
 
-import os
 from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
+from pridem.files import atomic_write
 from pridem.stacks.passport import Passport
 from pridem.steps.base import (
     CheckResult,
@@ -42,6 +44,9 @@ PRIDEM = "/usr/local/bin/pridem"
 """The link ``install.sh`` makes to the installed machine."""
 RENEW_CALENDAR = "daily"
 """When the renewal timer runs: a constant of the machine, not a passport field."""
+RENEW_DELAY = "1h"
+"""The renewal timer's random delay; ``gc`` has none: its load is the box's own."""
+DELAYS = {"pridem-ssl-renew.timer": RENEW_DELAY}
 TIMER_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
 
@@ -56,13 +61,15 @@ def _service(verb: str) -> str:
     )
 
 
-def _timer(verb: str, calendar: str) -> str:
+def _timer(verb: str, calendar: str, delay: str | None) -> str:
+    spread = f"RandomizedDelaySec={delay}\n" if delay is not None else ""
     return (
         "[Unit]\n"
         f"Description=pridem {verb}, {calendar}\n"
         "\n"
         "[Timer]\n"
         f"OnCalendar={calendar}\n"
+        f"{spread}"
         "Persistent=true\n"
         "\n"
         "[Install]\n"
@@ -83,22 +90,13 @@ def unit_files(passport: Passport) -> dict[str, str]:
     files: dict[str, str] = {}
     for timer, (verb, calendar) in units(passport).items():
         files[timer.removesuffix(".timer") + ".service"] = _service(verb)
-        files[timer] = _timer(verb, calendar)
+        files[timer] = _timer(verb, calendar, DELAYS.get(timer))
     return files
 
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
+    atomic_write(path, text, 0o644)
 
 
 def _state(ctx: StepContext, question: str, timer: str) -> str:

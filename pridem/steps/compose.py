@@ -25,13 +25,13 @@ product's file and carries what the machine adds:
 """
 
 import json
-import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from pridem.events import Json
+from pridem.files import atomic_write
 from pridem.runner import Stream
 from pridem.stacks.routes import alias, routed_services
 from pridem.stacks.schema import Product, Service
@@ -212,18 +212,10 @@ def override_text(
 
 
 def write_override(compose: ComposeStack, text: str) -> None:
-    """The override file, replaced whole: temp, fsync, rename."""
+    """The override file, replaced whole by ``atomic_write`` (0644)."""
     path = compose.override
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
-    try:
-        with temp.open("w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
+    atomic_write(path, text, 0o644)
 
 
 def image_of(ctx: StepContext, compose: ComposeStack, service: str) -> list[str]:

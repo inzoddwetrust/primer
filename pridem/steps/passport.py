@@ -35,7 +35,8 @@ The server's name is a DNS label in lower case (``SERVER_NAME``, the rule of
 sops runs, since it is a path in the ops repository.
 
 Nothing is written until the passport loads clean and names this server:
-the copy is replaced by rename of the checked temporary file. ``check`` reads
+the copy is replaced by ``staged_write``, which renames its temporary file
+only after the passport is loaded from it and checked. ``check`` reads
 only: ``git ls-remote`` against the head of the bare repository on disk and,
 when they match, a decryption into a scratch file compared with the copy;
 ``fetch`` happens in ``act`` only, so ``doctor`` moves nothing.
@@ -62,6 +63,7 @@ import yaml
 from pydantic import SecretStr, ValidationError
 
 from pridem.events import Fact, Json, Secrets
+from pridem.files import fsync_dir, staged_write
 from pridem.runner import OnLine, Stream
 from pridem.stacks.loader import ContractError, load_yaml_mapping, render_path
 from pridem.stacks.passport import PASSPORT, SERVER_NAME, Passport, load_passport
@@ -177,14 +179,6 @@ def _mode(path: Path) -> str:
     return oct(path.stat().st_mode & 0o777)
 
 
-def _fsync_dir(directory: Path) -> None:
-    fd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def _empty_0600(path: Path) -> None:
     """``path`` empty and 0600, whatever was there and whatever the umask."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -237,7 +231,7 @@ class AgeKey(Step):
         ctx.runner.run(["age-keygen", "-o", str(temp)], timeout=60, on_line=ctx.on_line)
         temp.chmod(0o600)
         os.replace(temp, self._key)
-        _fsync_dir(keys)
+        fsync_dir(keys)
         ctx.on_line(Stream.STDOUT, "age key of this box:", False)
         ctx.on_line(Stream.STDOUT, self._read(ctx), False)
 
@@ -380,17 +374,27 @@ def _copy_data(copy: Path) -> Data | None:
         return None  # a damaged cache is replaced, not trusted
 
 
-def _write_checked(temp: Path, data: Data) -> Passport:
-    """``data`` written to ``temp`` (0600) and loaded clean, or ``invalid``."""
-    _empty_0600(temp)
-    with temp.open("w", encoding="utf-8") as handle:
-        yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=True)
-        handle.flush()
-        os.fsync(handle.fileno())
+def _yaml(data: Data) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+def _loaded(path: Path) -> Passport:
+    """The passport in ``path`` loaded clean, or ``invalid``."""
     try:
-        return load_passport(temp)
+        return load_passport(path)
     except ContractError as error:
         raise StepFailed("invalid", {"problems": _problems(error)}) from None
+
+
+def _write_checked(scratch: Path, data: Data) -> Passport:
+    """``data`` written to the scratch file ``scratch`` (0600) and loaded clean,
+    or ``invalid``; the scratch is never renamed."""
+    _empty_0600(scratch)
+    with scratch.open("w", encoding="utf-8") as handle:
+        handle.write(_yaml(data))
+        handle.flush()
+        os.fsync(handle.fileno())
+    return _loaded(scratch)
 
 
 def copy_data(root: Path) -> Data:
@@ -401,14 +405,8 @@ def copy_data(root: Path) -> Data:
 def rewrite_copy(root: Path, data: Data) -> Passport:
     """The local copy replaced by ``data`` once it loads clean (answers of
     ``install``, contract 1 rule 3); the version is the caller's to keep."""
-    copy = root / PASSPORT_COPY
-    temp = copy.with_name(copy.name + ".tmp")
-    try:
-        passport = _write_checked(temp, data)
-        os.replace(temp, copy)
-        _fsync_dir(copy.parent)
-    finally:
-        temp.unlink(missing_ok=True)
+    with staged_write(root / PASSPORT_COPY, _yaml(data), 0o600) as temp:
+        passport = _loaded(temp)
     return passport
 
 
@@ -623,9 +621,9 @@ class FetchPassport(Step):
             _put(data, leaf, _answer(answer, schema))
         return data, False
 
-    def _accept(self, temp: Path, data: Data) -> Passport:
-        """``data`` written to ``temp`` (0600), loaded clean, for this server."""
-        passport = _write_checked(temp, data)
+    def _accept(self, temp: Path) -> Passport:
+        """The passport in ``temp`` loaded clean, for this server."""
+        passport = _loaded(temp)
         if self.server is not None and passport.server.name != self.server:
             raise StepFailed(
                 "name-mismatch",
@@ -695,16 +693,15 @@ class FetchPassport(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         self._copy.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        temp = self._copy.with_name(self._copy.name + ".tmp")
+        decrypted = self._copy.with_name(self._copy.name + ".tmp")
         try:
             commit = self._fetch(ctx) if self.ops is not None else None
-            data = self._wait(ctx, temp, commit)
+            data = self._wait(ctx, decrypted, commit)
             composed, _ = self._compose(data, asking=True)
-            self._accept(temp, composed)
-            os.replace(temp, self._copy)
-            _fsync_dir(self._copy.parent)
+            with staged_write(self._copy, _yaml(composed), 0o600) as temp:
+                self._accept(temp)
         finally:
-            temp.unlink(missing_ok=True)
+            decrypted.unlink(missing_ok=True)
 
     def _fetch(self, ctx: StepContext) -> str:
         self._checkout().fetch(ctx)

@@ -370,6 +370,33 @@ def test_probe_DM_13_file_path_bypasses_ops_repo(tmp_path: Path) -> None:
     assert {"git", "sops"} <= set(recording.programs())
 
 
+def test_a_copy_with_another_mode_is_red_and_left_as_it_is(tmp_path: Path) -> None:
+    """DM-54: ``verify`` reads the copy's mode; a copy that is not 0600 is
+    ``copy-mode`` and is never re-moded. The pair: the same copy at 0600 is
+    green with no act."""
+    root = tmp_path / "box"
+    given = write_file(tmp_path, passport(version=4))
+    _, steps = file_steps(root, given)
+    with FakeRunner() as runner:
+        assert run(steps, runner)[0].code is ExitCode.OK
+    copy = root / PASSPORT_COPY
+    copy.chmod(0o644)
+    _, steps = file_steps(root, given)
+    with FakeRunner() as runner:
+        outcome, _ = run(steps, runner)
+    assert failed(outcome) == (
+        "fetch_passport:copy-mode",
+        {"path": str(copy), "mode": oct(0o644)},
+    )
+    assert mode_of(copy) == oct(0o644)
+    copy.chmod(0o600)
+    _, steps = file_steps(root, given)
+    with FakeRunner() as runner:
+        outcome, _ = run(steps, runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert fact(outcome, "fetch_passport")["source"] == "file"
+
+
 def test_probe_DM_13_install_asks_only_missing_fields(tmp_path: Path) -> None:
     root = tmp_path / "box"
     data = passport(version=5)

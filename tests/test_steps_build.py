@@ -2,6 +2,8 @@
 touches no container, the machine's override."""
 
 import json
+import os
+import stat
 from pathlib import Path
 
 from compose_support import (
@@ -112,6 +114,21 @@ def test_the_same_commit_again_needs_no_build(tmp_path: Path) -> None:
         outcome, _ = run([steps(tmp_path)[0]], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert cs.override.read_text() == override_text(cs, CONFIG)
+
+
+def test_the_override_is_written_0644_whatever_the_umask(tmp_path: Path) -> None:
+    """DM-54: the machine's override is read by compose, not a secret: 0644,
+    written whole by ``atomic_write`` with no file left beside it."""
+    cs = compose(tmp_path)
+    old = os.umask(0o077)
+    try:
+        with FakeRunner(*green_build(tmp_path)) as runner:
+            outcome, _ = run([steps(tmp_path)[0]], runner)
+    finally:
+        os.umask(old)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert stat.S_IMODE(cs.override.stat().st_mode) == 0o644
+    assert [p.name for p in cs.override.parent.iterdir()] == [cs.override.name]
 
 
 def test_build_args_in_the_products_compose_are_refused(tmp_path: Path) -> None:

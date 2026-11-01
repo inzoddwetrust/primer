@@ -13,8 +13,9 @@ no command into values and keeps the two files of a stack's environment under
   is taken as it is by compose's ``--env-file``, with no interpolation. A value
   with ``'`` or a line break cannot be written so: refused, by its key only.
 
-Both are written as a temporary 0600 file, fsync and rename. A file found
-with another mode is refused, never ``chmod``-ed.
+Both are written by ``atomic_write`` with 0600 (temp, fsync, rename, fsync of
+the directory). A file found with another mode is refused, never
+``chmod``-ed.
 
 ``resolve`` answers every source but ``derived`` (a command in the stack's
 container: the step runs it) and reports the fields the passport lacks
@@ -24,7 +25,6 @@ secrets; ``asked`` and ``minted`` are, and so is a ``seam`` from a provider
 whose variable is one -- the provider's step put it in the run's set first.
 """
 
-import os
 import re
 import secrets as token
 from collections.abc import Mapping
@@ -34,6 +34,7 @@ from pathlib import Path
 import yaml
 
 from pridem.events import Json
+from pridem.files import atomic_write
 from pridem.stacks.loader import ContractError, load_yaml_mapping
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import (
@@ -82,29 +83,10 @@ def mode_of(path: Path) -> str:
     return oct(path.stat().st_mode & 0o777)
 
 
-def _fsync_dir(directory: Path) -> None:
-    fd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def write_private(path: Path, text: str) -> None:
-    """``text`` to ``path`` (0600, directory 0700): temp, fsync, rename."""
+    """``text`` to ``path`` (0600, directory 0700) by ``atomic_write``."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-        _fsync_dir(path.parent)
-    finally:
-        temp.unlink(missing_ok=True)
+    atomic_write(path, text, 0o600)
 
 
 def private_mode(path: Path, code: str) -> None:

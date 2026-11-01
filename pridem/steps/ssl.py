@@ -31,7 +31,7 @@ from typing import ClassVar
 
 from pydantic import SecretStr
 
-from pridem.events import Code, Json, Secrets
+from pridem.events import Code, Json, Secrets, strings
 from pridem.stacks.passport import Passport
 from pridem.stacks.routes import domains
 from pridem.stacks.schema import Product
@@ -123,7 +123,7 @@ def cert_facts(ctx: StepContext, root: Path) -> dict[str, Json]:
 
 def _fresh(facts: dict[str, Json], wanted: list[str], now: datetime) -> bool:
     expires = datetime.strptime(str(facts["cert_expires"]), "%Y-%m-%dT%H:%M:%SZ")
-    covered = set(wanted) <= {str(name) for name in facts["domains"]}  # type: ignore[union-attr]
+    covered = set(wanted) <= set(strings(facts["domains"]))
     return covered and expires.replace(tzinfo=UTC) - now > RENEW_BEFORE
 
 

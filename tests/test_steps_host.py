@@ -5,6 +5,7 @@ in the scenario, in order, and nothing else. Host files live under a temporary
 
 import json
 import os
+import stat
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
@@ -15,12 +16,16 @@ from report_support import SECRETS
 
 from pridem.events import Code, PlanOutcome
 from pridem.plan import Plan, StackSteps
+from pridem.report.catalog import ENGLISH, with_steps
+from pridem.report.catalog import text as words_of
 from pridem.report.codes import ExitCode
 from pridem.report.schema import build_verdict
 from pridem.runner import FakeCall, FakeRunner, Stream
 from pridem.steps.base import Step
 from pridem.steps.host import (
     APT_LOCK_TIMEOUT_S,
+    APT_SERVICES,
+    APT_TIMERS,
     ECHO_SERVICES,
     HOST_PACKAGES,
     PAUSED,
@@ -42,8 +47,26 @@ def out(*lines: str) -> tuple[tuple[Stream, str], ...]:
     return tuple((Stream.STDOUT, line) for line in lines)
 
 
-def call(*argv: str, code: int = 0, lines: tuple[str, ...] = ()) -> FakeCall:
-    return FakeCall(argv, code=code, lines=out(*lines))
+def call(
+    *argv: str,
+    code: int = 0,
+    lines: tuple[str, ...] = (),
+    env: dict[str, str] | None = None,
+) -> FakeCall:
+    return FakeCall(argv, code=code, lines=out(*lines), env=env)
+
+
+APT_VARIABLES = {"DEBIAN_FRONTEND": "noninteractive", "NEEDRESTART_MODE": "a"}
+
+
+def apt_get_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """apt-get's whole environment: the machine's one and the two that make it
+    ask nothing (DM-54). The two are taken out of the test's own environment
+    first (a sandbox may set ``DEBIAN_FRONTEND``), so only the step can put them
+    in; every other command of the host gets no environment of its own."""
+    for name in APT_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    return {**os.environ, **APT_VARIABLES}
 
 
 def dpkg(package: str, installed: bool = True) -> FakeCall:
@@ -224,12 +247,18 @@ def test_probe_DM_12_disk_below_threshold_is_red(tmp_path: Path) -> None:
     assert run([Preflight(root, min_free_gib=0)], preflight_calls()).code is ExitCode.OK
 
 
-def test_probe_DM_12_apt_always_passes_lock_timeout(tmp_path: Path) -> None:
+def test_probe_DM_12_apt_always_passes_lock_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every apt-get with the lock timeout. DM-54: the strict scenario holds the
+    environment too -- both apt-get calls run with ``apt_get_env``, every other
+    command (``dpkg-query``, ``systemctl``, ``docker``) with none of its own."""
     root = box(tmp_path)
+    env = apt_get_env(monkeypatch)
     timeout = f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_S}"
     before = [dpkg(p, p != "docker.io") for p in HOST_PACKAGES]
     apt = [
-        call("apt-get", "-o", timeout, "update"),
+        call("apt-get", "-o", timeout, "update", env=env),
         call(
             "apt-get",
             "-o",
@@ -238,6 +267,7 @@ def test_probe_DM_12_apt_always_passes_lock_timeout(tmp_path: Path) -> None:
             "-y",
             "--no-install-recommends",
             "docker.io",
+            env=env,
         ),
     ]
     after = [dpkg(p) for p in HOST_PACKAGES]
@@ -254,9 +284,12 @@ def test_probe_DM_12_apt_always_passes_lock_timeout(tmp_path: Path) -> None:
             runner=runner,
             sink=ListSink(),
         ).run()
-    # the strict scenario was consumed: every apt-get ran with the timeout
+    # the strict scenario was consumed: every apt-get ran with the timeout and
+    # the environment, every other command with none
     assert outcome.code is ExitCode.OK
     assert len(apt) == 2 and all(c.argv[1:3] == ("-o", timeout) for c in apt)
+    assert all(c.env == env for c in apt)
+    assert all(c.env is None for c in (*before, *after, *tail))
 
 
 def test_probe_DM_12_paused_timers_restored_in_finally(tmp_path: Path) -> None:
@@ -315,13 +348,67 @@ def test_a_record_left_by_a_dead_run_is_restored(tmp_path: Path) -> None:
     assert outcome.code is ExitCode.OK and not (root / PAUSED).exists()
 
 
-def test_probe_DM_12_package_verify_reads_dpkg_not_exit_code(tmp_path: Path) -> None:
+BROKEN_RECORDS = [
+    (b'["apt-daily.timer"', "line 1"),
+    (b"\xff\xfe", "not UTF-8"),
+    (b'{"timers": ["apt-daily.timer"]}', "not a list"),
+    (b'["apt-daily.timer", 7]', "not a list of strings"),
+]
+
+
+@pytest.mark.parametrize(("data", "problem"), BROKEN_RECORDS)
+def test_a_broken_record_of_paused_timers_is_red_by_code_in_both_steps(
+    tmp_path: Path, data: bytes, problem: str
+) -> None:
+    """DM-54: a record that is not a JSON list of timer names is
+    ``paused-broken`` with its problem in ``restore_timers`` and in
+    ``wait_host_quiet`` -- never an exception -- and stays as it is: which
+    timers it held is not known, and writing over it would lose them."""
+    root = box(tmp_path)
+    record = root / PAUSED
+    record.parent.mkdir(parents=True)
+    record.write_bytes(data)
+    params = {"path": str(record), "problem": problem}
+    words = with_steps(
+        ENGLISH, ((s.name, s.codes) for s in (WaitHostQuiet, RestoreTimers))
+    )
+    outcome = run([RestoreTimers(root)], [])  # nothing runs
+    assert outcome.steps[0].reason == Code("restore_timers:paused-broken", params)
+    said = words_of(words, "restore_timers:paused-broken", params)  # declared
+    assert said == f"{record} is not a JSON list of timer names: {problem}"
+    quiet = [active(u, False) for u in (*APT_TIMERS, *APT_SERVICES)]
+    outcome = run([WaitHostQuiet(root)], quiet)  # verify reads the record
+    assert outcome.steps[0].reason == Code("wait_host_quiet:paused-broken", params)
+    assert words_of(words, "wait_host_quiet:paused-broken", params) == said
+    busy = [active("apt-daily.timer", True), active("apt-daily-upgrade.timer", False)]
+    busy += [active(u, False) for u in APT_SERVICES]
+    outcome = run([WaitHostQuiet(root)], [*busy, dpkg("cloud-init", False)])
+    assert outcome.steps[0].reason == Code("wait_host_quiet:paused-broken", params)
+    assert record.read_bytes() == data
+
+
+def test_an_empty_record_of_paused_timers_starts_nothing(tmp_path: Path) -> None:
+    """The pair of the broken record: an empty JSON list is a record that
+    holds no timer -- green, nothing runs, the record stays."""
+    root = box(tmp_path)
+    record = root / PAUSED
+    record.parent.mkdir(parents=True)
+    record.write_text("[]")
+    outcome = run([RestoreTimers(root)], [])
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[0].verify == {"restored": [], "record": True}
+
+
+def test_probe_DM_12_package_verify_reads_dpkg_not_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """apt-get exits 0 and the package is not there: verify is red."""
     root = box(tmp_path)
+    env = apt_get_env(monkeypatch)
     timeout = f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_S}"
     before = [dpkg(p, p != "docker.io") for p in HOST_PACKAGES]
     apt = [
-        call("apt-get", "-o", timeout, "update"),
+        call("apt-get", "-o", timeout, "update", env=env),
         call(
             "apt-get",
             "-o",
@@ -330,6 +417,7 @@ def test_probe_DM_12_package_verify_reads_dpkg_not_exit_code(tmp_path: Path) -> 
             "-y",
             "--no-install-recommends",
             "docker.io",
+            env=env,
         ),
     ]
     after = [
@@ -563,16 +651,61 @@ def test_a_daemon_json_that_is_not_json_is_refused_and_left(tmp_path: Path) -> N
 def test_daemon_json_is_flushed_to_disk_before_it_replaces_the_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    synced: list[int] = []
-    real = os.fsync
+    """DM-54: the file is fsynced before the rename and its directory after
+    it (``atomic_write``); before, the directory was not fsynced, and the test
+    counted one fsync."""
+    order: list[str] = []
+    fsync, replace = os.fsync, os.replace
 
-    def fsync(fd: int) -> None:
-        synced.append(fd)
-        real(fd)
+    def watch_fsync(fd: int) -> None:
+        directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+        order.append("fsync dir" if directory else "fsync file")
+        fsync(fd)
 
-    monkeypatch.setattr(os, "fsync", fsync)
+    def watch_replace(src: str, dst: str) -> None:
+        order.append(f"replace {Path(dst).name}")
+        replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", watch_fsync)
+    monkeypatch.setattr(os, "replace", watch_replace)
     root = daemon_box(tmp_path, {})
     calls = [call(*INFO, lines=("local",)), call(*INFO, lines=("local",))]
     assert run_mode([DaemonJson(root)], calls, "deploy").code is ExitCode.OK
-    assert len(synced) == 1
-    assert not (root / "etc" / "docker" / "daemon.json.tmp").exists()
+    assert order == ["fsync file", "replace daemon.json", "fsync dir"]
+    assert [p.name for p in (root / "etc" / "docker").iterdir()] == ["daemon.json"]
+
+
+def test_daemon_json_is_written_0644_over_another_mode(tmp_path: Path) -> None:
+    """DM-54: ``daemon.json`` is written with 0644 whatever mode the file had
+    and whatever the umask -- the mode is the machine's, not inherited."""
+    root = daemon_box(tmp_path, {"data-root": "/srv/docker"})
+    path = root / "etc" / "docker" / "daemon.json"
+    path.chmod(0o600)
+    calls = [call(*INFO, lines=("local",)), call(*INFO, lines=("local",))]
+    old = os.umask(0o077)
+    try:
+        assert run_mode([DaemonJson(root)], calls, "deploy").code is ExitCode.OK
+    finally:
+        os.umask(old)
+    assert json.loads(path.read_text()) == {
+        "data-root": "/srv/docker",
+        "log-driver": "local",
+    }
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_the_record_of_paused_timers_is_0600(tmp_path: Path) -> None:
+    """DM-54: the record ``wait_host_quiet`` leaves for ``finally`` is the
+    machine's alone (contract 2 section 3): 0600, a JSON list of the names."""
+    root = box(tmp_path)
+    check = [active("apt-daily.timer", True), active("apt-daily-upgrade.timer", False)]
+    check += [active(u, False) for u in APT_SERVICES]
+    act = [dpkg("cloud-init", False), call("systemctl", "stop", "apt-daily.timer")]
+    act += [active(u, False) for u in APT_SERVICES]
+    verify = [active("apt-daily.timer", False)]
+    verify += [active(u, False) for u in APT_SERVICES]
+    outcome = run([WaitHostQuiet(root)], [*check, *act, *verify])
+    assert outcome.code is ExitCode.OK, outcome.steps
+    record = root / PAUSED
+    assert json.loads(record.read_text()) == ["apt-daily.timer"]
+    assert stat.S_IMODE(record.stat().st_mode) == 0o600

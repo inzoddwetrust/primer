@@ -43,6 +43,9 @@ name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write(json.dumps([name, *args]) + "\\n")
+with open(os.environ["STUB_LOG"] + ".env", "a") as log:
+    asks = [os.environ.get(v) for v in ("DEBIAN_FRONTEND", "NEEDRESTART_MODE")]
+    log.write(json.dumps([name, *asks]) + "\\n")
 if name == "uname":
     print(os.environ["STUB_ARCH"])
 elif name == "id":
@@ -149,6 +152,11 @@ class Box:
             return []
         return [json.loads(line) for line in log.read_text().splitlines()]
 
+    def envs(self) -> list[list[str | None]]:
+        """``[program, DEBIAN_FRONTEND, NEEDRESTART_MODE]`` of every call."""
+        log = self.root / "calls.jsonl.env"
+        return [json.loads(line) for line in log.read_text().splitlines()]
+
     def names(self) -> list[str]:
         return [call[0] for call in self.calls()]
 
@@ -212,6 +220,18 @@ def test_probe_DM_25_apt_called_with_lock_timeout(tmp_path: Path) -> None:
     install = apts[1]
     assert install[3:5] == ["install", "-y"]
     assert set(install[5:]) == {"python3", "python3-venv", "git", "curl", "age"}
+
+
+def test_apt_get_alone_asks_nothing(tmp_path: Path) -> None:
+    """DM-54: both apt-get calls run with ``DEBIAN_FRONTEND=noninteractive``
+    and ``NEEDRESTART_MODE=a``; no other command gets them (they are not
+    exported to the script). The test's environment has neither."""
+    envs = _clean(tmp_path).envs()
+    apt = [env for env in envs if env[0] == "apt-get"]
+    assert apt == [["apt-get", "noninteractive", "a"]] * 2
+    others = [env for env in envs if env[0] != "apt-get"]
+    assert {"git", "curl", "python3"} <= {env[0] for env in others}
+    assert all(env[1:] == [None, None] for env in others), others
 
 
 @pytest.mark.parametrize(

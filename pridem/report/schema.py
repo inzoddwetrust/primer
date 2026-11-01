@@ -65,7 +65,15 @@ from pridem.contract import (
     Strict,
     schema_text,
 )
-from pridem.events import Fact, Json, Phase, PlanOutcome, Secrets, StepRecord
+from pridem.events import (
+    Fact,
+    Json,
+    Phase,
+    PlanOutcome,
+    Secrets,
+    StepRecord,
+    as_list,
+)
 from pridem.report.catalog import ENGLISH, Catalog, missing
 from pridem.report.codes import (
     INCOMPLETE_CODES,
@@ -585,8 +593,7 @@ def build_verdict(
         found = [
             entry
             for record in (*outcome.steps, *outcome.restore, *outcome.finally_)
-            for entry in (record.verify.get("dns") or [])  # type: ignore[union-attr]
-            if isinstance(record.verify.get("dns"), list)
+            for entry in as_list(record.verify.get("dns"))
         ]
         dns = [entry for entry in found if isinstance(entry, dict)] or None
     if dns is not None:

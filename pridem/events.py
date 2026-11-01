@@ -37,6 +37,18 @@ from pridem.runner import Stream
 type Json = None | bool | int | float | str | list[Json] | dict[str, Json]
 type Fact = Mapping[str, Json]
 
+
+def as_list(value: Json) -> list[Json]:
+    """``value`` when it is a JSON list, else empty: a fact or a check's data
+    read back by key."""
+    return value if isinstance(value, list) else []
+
+
+def strings(value: Json) -> list[str]:
+    """Each item of ``as_list(value)`` as a string."""
+    return [str(item) for item in as_list(value)]
+
+
 Status = Literal["ok", "failed", "skipped"]
 Phase = Literal["main", "restore", "finally"]
 PlanMode = Literal["install", "deploy", "doctor", "reinstall", "gc", "renew"]

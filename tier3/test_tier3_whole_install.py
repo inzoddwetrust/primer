@@ -706,6 +706,15 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
     for timer in ("pridem-gc.timer", "pridem-ssl-renew.timer"):
         assert _stdout(["systemctl", "is-enabled", timer]) == ["enabled"], timer
         assert _stdout(["systemctl", "is-active", timer]) == ["active"], timer
+    # DM-54: the renewal timer has its random delay in the unit and in what
+    # systemd loaded; gc has none
+    renew_unit = _stdout(["systemctl", "cat", "pridem-ssl-renew.timer"])
+    assert "RandomizedDelaySec=1h" in renew_unit, renew_unit
+    gc_unit = _stdout(["systemctl", "cat", "pridem-gc.timer"])
+    assert not [line for line in gc_unit if "RandomizedDelaySec" in line], gc_unit
+    loaded = ["systemctl", "show", "--property", "RandomizedDelayUSec"]
+    assert _stdout([*loaded, "pridem-ssl-renew.timer"]) == ["RandomizedDelayUSec=1h"]
+    assert _stdout([*loaded, "pridem-gc.timer"]) == ["RandomizedDelayUSec=0"]
 
 
 def test_tier3_compose_takes_a_single_quoted_value_as_it_is(tmp_path: Path) -> None:

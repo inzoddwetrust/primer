@@ -31,7 +31,7 @@ from typing import ClassVar
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
-from pridem.events import Fact, Json
+from pridem.events import Fact, Json, strings
 from pridem.stacks.loader import ContractError
 from pridem.stacks.lock import Lock, check_lock, parse_primer_lock
 from pridem.stacks.package import PACKAGE_FILE, parse_primer_package
@@ -317,7 +317,7 @@ class FetchRoot(_SourceStep):
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         target = _known(self.target, "the target")
-        drift = [str(p) for p in check.data.get("drift", []) or []]  # type: ignore[union-attr]
+        drift = strings(check.data.get("drift"))
         product = self.resolved.product
         fact: Fact = {"stack": self.stack, "drift_discarded": _j(drift)}
         fact = _verify_release(ctx, self.checkout, target, fact)

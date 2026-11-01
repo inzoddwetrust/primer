@@ -136,6 +136,24 @@ def test_ceremony_mints_waits_and_never_shows_the_private_part(tmp_path: Path) -
     assert outcome.code is ExitCode.OK
 
 
+@pytest.mark.parametrize("mode", [0o600, 0o640])
+def test_key_mode_is_the_mode_of_the_key_on_disk(tmp_path: Path, mode: int) -> None:
+    """DM-54: the fact ``key_mode`` is read from the key file, so a key found
+    with another mode is named with it, not with the mode the step mints."""
+    key = tmp_path / KEYS / repo(ADDRESS).alias
+    key.parent.mkdir(parents=True)
+    key.write_text(PRIVATE)
+    key.with_name(key.name + ".pub").write_text(PUBLIC + "\n")
+    key.chmod(mode)
+    outcome, _ = run(
+        tmp_path,
+        DeployKey(ADDRESS, tmp_path),
+        [lsremote(tmp_path, 0), lsremote(tmp_path, 0)],
+    )
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[0].verify["key_mode"] == oct(mode)
+
+
 def test_no_access_by_the_deadline_is_red_with_the_public_part_only(
     tmp_path: Path,
 ) -> None:

@@ -18,8 +18,10 @@ killed. Every step reads its fact back: a package is installed when
   services waited out. The stopped timers are recorded in
   ``host/paused-timers.json`` before they stop, so a run that dies still
   leaves the record; ``restore_timers`` in ``finally`` starts exactly them and
-  deletes the record (contract 2 section 3).
-- ``provision_host`` -- the host packages, docker among them, from noble.
+  deletes the record (contract 2 section 3). A record that is not a JSON list
+  of timer names is ``paused-broken`` in both steps and stays as it is.
+- ``provision_host`` -- the host packages, docker among them, from noble;
+  ``apt-get`` runs with ``APT_ENV`` and asks nothing.
 - ``daemon_json`` -- docker's log driver ``local`` (TZ section 7.3); docker is
   restarted only by ``install``, see ``DaemonJson``.
 - ``ensure_network`` -- the shared network ``pridem``.
@@ -33,11 +35,12 @@ import ipaddress
 import json
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import ClassVar
 
-from pridem.events import Json
+from pridem.events import Json, strings
+from pridem.files import atomic_write
 from pridem.runner import Stream
 from pridem.steps.base import (
     CheckResult,
@@ -66,12 +69,25 @@ ECHO_SERVICES = ("https://api.ipify.org", "https://checkip.amazonaws.com")
 NETWORK = "pridem"
 UTF8_LOCALES = ("C.UTF-8", "en_US.UTF-8")
 PAUSED = Path("opt/pridem/host/paused-timers.json")
+PAUSED_CODES = {"paused-broken": "{path} is not a JSON list of timer names: {problem}"}
+"""The code of a record of paused timers that cannot be read; both steps that
+read it say it."""
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
+
+
+APT_ENV = {"DEBIAN_FRONTEND": "noninteractive", "NEEDRESTART_MODE": "a"}
+"""What ``apt-get`` needs to ask nobody: no debconf dialog, and needrestart
+restarts services by itself instead of asking (Ubuntu 24.04 asks)."""
 
 
 def apt_get(*args: str, timeout_s: int) -> list[str]:
     """``apt-get`` that waits for a held dpkg lock instead of failing on it."""
     return ["apt-get", "-o", f"DPkg::Lock::Timeout={timeout_s}", *args]
+
+
+def apt_env() -> dict[str, str]:
+    """The environment of ``apt-get``: the machine's whole one and ``APT_ENV``."""
+    return {**os.environ, **APT_ENV}
 
 
 def _out(
@@ -80,6 +96,7 @@ def _out(
     *,
     expect: tuple[int, ...] = (0,),
     timeout: float = 120,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[int, list[str]]:
     """Run ``argv``; its stdout lines, and every line to the step's log."""
     lines: list[str] = []
@@ -89,7 +106,9 @@ def _out(
         if stream is Stream.STDOUT:
             lines.append(line)
 
-    result = ctx.runner.run(list(argv), expect=expect, timeout=timeout, on_line=keep)
+    result = ctx.runner.run(
+        list(argv), expect=expect, timeout=timeout, env=env, on_line=keep
+    )
     return result.code, lines
 
 
@@ -236,6 +255,7 @@ class WaitHostQuiet(_HostStep):
         "pause": "stop {timers} and wait for {services}",
         "host-busy": "{services} still running after {timeout_s} s",
         "timers-running": "{timers} still active after the pause",
+        **PAUSED_CODES,
     }
 
     def __init__(
@@ -267,7 +287,7 @@ class WaitHostQuiet(_HostStep):
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         if _installed(ctx, "cloud-init"):
             _out(ctx, ["cloud-init", "status", "--wait"], timeout=self.timeout_s)
-        timers = [str(timer) for timer in check.data.get("timers", []) or []]  # type: ignore[union-attr]
+        timers = strings(check.data.get("timers"))
         if timers:
             _record_paused(
                 self.root, timers
@@ -295,25 +315,38 @@ class WaitHostQuiet(_HostStep):
 
 
 def _paused(root: Path) -> list[str]:
+    """The timers in the record; a record that is not a JSON list of names is
+    ``paused-broken`` and stays as it is: which timers it held is not known."""
     path = root / PAUSED
     if not path.exists():
         return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return [str(timer) for timer in data]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        raise StepFailed(
+            "paused-broken", {"path": str(path), "problem": "not UTF-8"}
+        ) from None
+    except json.JSONDecodeError as error:
+        raise StepFailed(
+            "paused-broken", {"path": str(path), "problem": f"line {error.lineno}"}
+        ) from None
+    if not isinstance(data, list):
+        raise StepFailed("paused-broken", {"path": str(path), "problem": "not a list"})
+    timers = [timer for timer in data if isinstance(timer, str)]
+    if len(timers) != len(data):
+        raise StepFailed(
+            "paused-broken", {"path": str(path), "problem": "not a list of strings"}
+        )
+    return timers
 
 
 def _record_paused(root: Path, timers: Sequence[str]) -> None:
-    """Add ``timers`` to the record (0600, temp + rename); a crash keeps the old one."""
+    """Add ``timers`` to the record (0600, ``atomic_write``); a crash keeps the
+    old one."""
     path = root / PAUSED
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     merged = sorted({*_paused(root), *timers})
-    temp = path.with_name(path.name + ".tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(merged))
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp, path)
+    atomic_write(path, json.dumps(merged), 0o600)
 
 
 class RestoreTimers(_HostStep):
@@ -324,6 +357,7 @@ class RestoreTimers(_HostStep):
     codes: ClassVar[dict[str, str]] = {
         "restore": "start {timers}",
         "timers-stopped": "{timers} did not start again",
+        **PAUSED_CODES,
     }
 
     def check(self, ctx: StepContext) -> CheckResult:
@@ -340,7 +374,7 @@ class RestoreTimers(_HostStep):
         (self.root / PAUSED).unlink()
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        timers = [str(t) for t in check.data.get("timers", []) or []]  # type: ignore[union-attr]
+        timers = strings(check.data.get("timers"))
         stopped = [timer for timer in timers if not _active(ctx, timer)]
         if stopped:
             raise StepFailed("timers-stopped", {"timers": _j(stopped)})
@@ -380,9 +414,10 @@ class ProvisionHost(_HostStep):
         )
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        missing = [str(p) for p in check.data.get("missing", []) or []]  # type: ignore[union-attr]
+        missing = strings(check.data.get("missing"))
         timeout = self.lock_timeout_s + 1800
-        _out(ctx, apt_get("update", timeout_s=self.lock_timeout_s), timeout=timeout)
+        update = apt_get("update", timeout_s=self.lock_timeout_s)
+        _out(ctx, update, timeout=timeout, env=apt_env())
         install = apt_get(
             "install",
             "-y",
@@ -390,7 +425,7 @@ class ProvisionHost(_HostStep):
             *missing,
             timeout_s=self.lock_timeout_s,
         )
-        _out(ctx, install, timeout=timeout)
+        _out(ctx, install, timeout=timeout, env=apt_env())
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         missing = [package for package in self.packages if not _installed(ctx, package)]
@@ -407,8 +442,8 @@ class ProvisionHost(_HostStep):
 class DaemonJson(_HostStep):
     """docker logs with ``local``: in ``daemon.json`` and in the running daemon.
 
-    The file is written when it says otherwise (temp, fsync, rename; its other
-    keys kept). Whether docker must restart is the running daemon's driver
+    The file is written when it says otherwise (``atomic_write``, 0644; its
+    other keys kept). Whether docker must restart is the running daemon's driver
     (``docker info``), not the file: a daemon already on ``local`` needs none.
     Only ``install`` restarts docker -- on a box that runs its stacks
     (``deploy``, ``reinstall``) a restart would stop every container, so a
@@ -468,12 +503,7 @@ class DaemonJson(_HostStep):
             config = {**config, "log-driver": "local"}  # other keys are kept
             path = self.root / self.PATH
             path.parent.mkdir(parents=True, exist_ok=True)
-            temp = path.with_name(path.name + ".tmp")
-            with temp.open("w", encoding="utf-8") as handle:
-                handle.write(json.dumps(config, indent=2) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp, path)
+            atomic_write(path, json.dumps(config, indent=2) + "\n", 0o644)
         if check.data.get("restart") is True:  # only install decides so
             _out(ctx, ["systemctl", "restart", "docker"])
 

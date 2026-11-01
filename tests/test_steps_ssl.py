@@ -63,6 +63,20 @@ def test_probe_DM_17_defer_gives_exit_2_with_incomplete_ssl(tmp_path: Path) -> N
     assert outcome.code is ExitCode.OK and outcome.incomplete == ()
 
 
+def test_the_certificate_is_0644_and_its_key_0600(tmp_path: Path) -> None:
+    """DM-54: ``write_file`` of edge writes the mode each file is given -- the
+    certificate world-readable, its key private -- not one mode for both."""
+    cert, key = self_signed_pair(tmp_path, [*NAMES])
+    root, fetched = passport(tmp_path, ssl="provided", tls=(cert, key))
+    with Mixed() as runner:
+        outcome, _ = run(ladder(root, fetched), runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert (mode_of(cert_path(root)), mode_of(key_path(root))) == (
+        oct(0o644),
+        oct(0o600),
+    )
+
+
 def test_probe_DM_17_provided_cert_installed_without_certbot_call(
     tmp_path: Path,
 ) -> None:

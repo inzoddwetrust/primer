@@ -10,6 +10,7 @@ not of the script.
 import os
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -234,6 +235,32 @@ def test_probe_DM_14_derived_runs_in_container_and_fails_on_nonzero(
     assert not env_of(root, "comms").exists()
 
 
+@pytest.mark.parametrize("ends", ["exit-3", "timeout"])
+def test_the_env_file_of_derive_goes_when_the_command_fails(
+    tmp_path: Path, ends: str
+) -> None:
+    """DM-54: ``derive.env`` holds the stack's values only while its command
+    runs -- it is there, 0600, when ``docker run`` starts, and gone after a
+    non-zero exit or a timeout as after a success."""
+    made, comms, root, fetched = comms_box(tmp_path, derived=True)
+    env_file = root / "opt" / "comms" / "env" / "derive.env"
+    call = derive_call(env_file, code=3)
+    if ends == "timeout":
+        call = replace(call, code=0, outcome="timeout")
+    with Reading(call) as runner:
+        outcome, _ = run(
+            [render(comms, root, fetched, product=made, image=IMAGE)], runner
+        )
+    [step] = outcome.steps
+    assert step.status == "failed" and step.reason is not None
+    assert step.reason.code == (
+        "render_env:derive-failed" if ends == "exit-3" else "command-timed-out"
+    )
+    assert len(runner.files) == 2 and runner.files[1] == oct(0o600)
+    assert f"TELEGRAM_BOT_TOKEN={ASKED}\n" in runner.files[0]
+    assert not env_file.exists()
+
+
 def test_probe_DM_14_verify_reads_env_back(tmp_path: Path) -> None:
     made, comms, root, fetched = comms_box(tmp_path)
     step = render(comms, root, fetched, product=made)
@@ -446,6 +473,24 @@ def test_missing_domain_and_param_are_asked_and_checked(tmp_path: Path) -> None:
     assert outcome.steps[0].reason is not None
     assert outcome.steps[0].reason.code == "render_env:invalid"
     assert (root2 / PASSPORT_COPY).read_bytes() == before
+
+
+def test_answers_go_to_a_copy_that_is_0600(tmp_path: Path) -> None:
+    """DM-54: the copy rewritten with the answers is 0600 whatever mode it was
+    found with -- the mode ``fetch_passport`` requires of it."""
+    env = {"API_BASE_URL": {"source": "passport", "key": "domains.api"}}
+    made = product(tmp_path, env, domains=["api"])
+    root, fetched = box(tmp_path, passport_data(domains={}))
+    (root / PASSPORT_COPY).chmod(0o644)
+
+    def ask(field: str, schema: Mapping[str, Json]) -> str | None:
+        return "api.example.org"
+
+    outcome, _ = run([render(made, root, fetched, ask=ask)], FakeRunner())
+    assert outcome.code is ExitCode.OK, outcome.steps
+    copy = root / PASSPORT_COPY
+    assert "api.example.org" in copy.read_text()
+    assert oct(copy.stat().st_mode & 0o777) == oct(0o600)
 
 
 def test_a_short_asked_answer_is_refused_and_never_known(tmp_path: Path) -> None:

@@ -11,7 +11,7 @@ from edge_support import DOMAINS, Mixed, exec_call, passport, product
 from env_support import box, passport_data
 from plan_support import ListSink
 
-from pridem.events import Code, PlanOutcome
+from pridem.events import Code, Json, PlanOutcome
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
@@ -185,6 +185,62 @@ def test_red_validate_stops_before_anything_is_switched(tmp_path: Path) -> None:
     assert outcome.steps[0].reason is not None
     assert outcome.steps[0].reason.code == "command-failed"
     assert cs.override.exists() is False  # nothing switched
+
+
+@pytest.mark.parametrize("build", [True, False])
+def test_an_image_named_in_compose_is_used_only_without_build(
+    tmp_path: Path, build: bool
+) -> None:
+    """DM-54 (the condition kept when its ``type: ignore`` went): no image of
+    the commit carries the service's label -- a service that is built has no
+    image to validate (``no-image``); one that only names an image validates
+    that image."""
+    stack = made(tmp_path, skin_product("css"))
+    root, fetched, package = skin_box(tmp_path)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    front: dict[str, Json] = {"image": "front:1", "networks": {"default": None}}
+    if build:
+        front["build"] = {"context": "/r/frontend", "dockerfile": "Dockerfile"}
+    services = CONFIG["services"]
+    assert isinstance(services, dict)
+    document = {**CONFIG, "services": {**services, "frontend": front}}
+    config = FakeCall(
+        tuple(cs.product_argv("config", "--format", "json")),
+        lines=stdout(json.dumps(document)),
+    )
+    labels = (
+        "label=pridem.stack=blank",
+        "--filter",
+        f"label=pridem.commit={SHA}",
+        "--filter",
+        "label=pridem.service=frontend",
+    )
+    none = FakeCall(
+        ("docker", "image", "ls", "--quiet", "--no-trunc", "--filter", *labels)
+    )
+    calls = [config, config, none]
+    if not build:
+        validate = (
+            "docker",
+            "run",
+            "--rm",
+            *("--label", "pridem.stack=blank", "--label", "pridem.release=main"),
+            *("--label", f"pridem.commit={SHA}"),
+            *("-v", f"{package / 'css'}:/srv/skin:ro"),
+            *("front:1", "validate-skin", "/srv/skin"),
+        )
+        calls += [FakeCall(validate, code=3)]
+    with FakeRunner(*calls) as runner:
+        outcome = run([packages(root, fetched, stack)], runner)
+    reason = outcome.steps[0].reason
+    assert reason is not None
+    if build:
+        assert reason == Code(
+            "packages:no-image",
+            {"slot": "skin", "service": "frontend", "commit": SHA},
+        )
+    else:  # the named image reached validate (which says no here)
+        assert reason.code == "command-failed"
 
 
 def test_a_dependency_mount_is_not_done_here(tmp_path: Path) -> None:

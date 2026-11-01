@@ -79,8 +79,12 @@ def test_a_fresh_box_gets_both_timers(tmp_path: Path) -> None:
     renew = (root / UNIT_DIR / "pridem-ssl-renew.service").read_text(encoding="utf-8")
     assert "ExecStart=/usr/local/bin/pridem --timer ssl renew\n" in renew
     timer = (root / UNIT_DIR / "pridem-gc.timer").read_text(encoding="utf-8")
-    assert "OnCalendar=daily\nPersistent=true\n" in timer
+    assert "OnCalendar=daily\nPersistent=true\n" in timer  # gc: no random delay
     assert "WantedBy=timers.target" in timer
+    # DM-54: the renewal starts up to an hour late at random, so boxes do not
+    # all ask Let's Encrypt at midnight
+    timer = (root / UNIT_DIR / "pridem-ssl-renew.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=daily\nRandomizedDelaySec=1h\nPersistent=true\n" in timer
     assert outcome.steps[0].verify == {
         "timers": [
             {"timer": TIMERS[0], "runs": "pridem gc", "on_calendar": "daily"},

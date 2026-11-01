@@ -11,10 +11,10 @@ Every object carries ``pridem.stack=edge``. Images are pinned by digest.
 """
 
 import json
-import os
 from pathlib import Path
 
 from pridem.events import Json
+from pridem.files import atomic_write
 from pridem.steps.compose import NETWORK
 
 PROJECT = "pridem-edge"
@@ -103,20 +103,10 @@ def compose_text(root: Path) -> str:
 
 
 def write_file(path: Path, data: bytes, mode: int) -> None:
-    """``data`` to ``path`` with ``mode`` from the first byte: temp, fsync,
-    rename; the directory 0700."""
+    """``data`` to ``path`` with ``mode`` by ``atomic_write``; the directory
+    0700."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
+    atomic_write(path, data, mode)
 
 
 def mode_of(path: Path) -> str:

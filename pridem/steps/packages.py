@@ -179,9 +179,10 @@ class Packages(Step):
         if len(found) == 1:
             return found[0]
         body = known.get(mount.service)
-        image = body.get("image") if isinstance(body, dict) else None
-        if isinstance(image, str) and "build" not in body:  # type: ignore[operator]
-            return image
+        if isinstance(body, dict):
+            image = body.get("image")
+            if isinstance(image, str) and "build" not in body:
+                return image
         raise StepFailed(
             "no-image",
             {

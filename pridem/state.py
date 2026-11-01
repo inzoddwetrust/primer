@@ -8,23 +8,24 @@
   Every write below requires the lock; it is checked, not hoped for.
 - ``state.json`` -- composition, passport version, the ops repository commit
   the passport came from (absent for a passport given as a file), ``current``
-  of each stack, last ``run_id`` per verb; replaced atomically (temp + fsync +
-  rename + fsync of the directory).
-- ``history/<run_id>.json`` -- every verdict, append-only: written as temp +
-  fsync + ``link`` to the final name, so a name already taken is
-  ``HistoryExists`` and the first verdict stays as it was. Nothing here edits
-  or removes a verdict.
+  of each stack, last ``run_id`` per verb; replaced by ``atomic_write`` (temp +
+  fsync + rename + fsync of the directory).
+- ``history/<run_id>.json`` -- every verdict, append-only: ``atomic_write``
+  with ``exclusive`` links the temp file to the final name, so a name already
+  taken is ``HistoryExists`` and the first verdict stays as it was. Nothing
+  here edits or removes a verdict.
 - ``journal/<run_id>.jsonl`` -- the header first (``run_id, verb, mode, args,
   actor, started, passport_version, composition_before``), created with it by
-  temp + link before the first step, so no journal exists without one; then
-  one JSON line per step event and log line, each with its plan phase. Known
-  secrets are cleaned on write. A line is flushed when written; the file is
-  fsynced on every finished step and when closed. A reader drops a torn last
-  line (the writer died in it) and stops at the first damaged line after the
-  header, naming it; a damaged header is ``JournalDamaged``. Journals are
-  evicted oldest ``run_id`` first down to the passport's budget, quarantined
-  ones (``<run_id>.jsonl.damaged``) with them; the journal of the current run is
-  never evicted, and a verdict outlives its journal.
+  ``atomic_write`` with ``exclusive`` before the first step, so no journal
+  exists without one; then one JSON line per step event and log line, each
+  with its plan phase. Known secrets are cleaned on write. A line is flushed
+  when written; the file is fsynced on every finished step and when closed. A
+  reader drops a torn last line (the writer died in it) and stops at the first
+  damaged line after the header, naming it; a damaged header is
+  ``JournalDamaged``. Journals are evicted oldest ``run_id`` first down to the
+  passport's budget, quarantined ones (``<run_id>.jsonl.damaged``) with them;
+  the journal of the current run is never evicted, and a verdict outlives its
+  journal.
 
 A run that ended without a verdict (journal, no verdict) is recovered under
 the lock before a new journal opens: a red verdict whose steps are the
@@ -70,6 +71,7 @@ from pridem.events import (
     StepRecord,
     StepStarted,
 )
+from pridem.files import TEMP_SUFFIX, atomic_write, fsync_dir
 from pridem.report.catalog import ENGLISH, Catalog
 from pridem.report.codes import ExitCode
 from pridem.report.schema import (
@@ -88,7 +90,6 @@ STATE = "state.json"
 LOCK = "lock"
 HISTORY = "history"
 JOURNAL = "journal"
-_TEMP_SUFFIX = ".tmp"
 _QUARANTINE_SUFFIX = ".damaged"
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
@@ -218,43 +219,6 @@ class Recovery:
 
 def _stamp(moment: datetime) -> str:
     return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
-def _fsync_dir(directory: Path) -> None:
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _temp(final: Path) -> Path:
-    return final.with_name(f".{final.name}{_TEMP_SUFFIX}")
-
-
-def _write_new(final: Path, text: str, *, replace: bool) -> None:
-    """Write ``text`` to ``final`` atomically.
-
-    ``replace`` renames over an existing file; otherwise the temp file is linked
-    to ``final`` and an existing ``final`` is ``FileExistsError``, untouched.
-    """
-    temp = _temp(final)
-    # private from creation: a umask can only narrow 0600, never widen it
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _FILE_MODE)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if replace:
-            os.replace(temp, final)
-        else:
-            os.link(temp, final)
-    finally:
-        # a failed write leaves no temp behind (O_EXCL would refuse the next one);
-        # after replace there is none, after link the final name holds the data
-        temp.unlink(missing_ok=True)
-    _fsync_dir(final.parent)
 
 
 def _event_line(event: JournalEvent, secrets: Secrets) -> str:
@@ -480,7 +444,7 @@ class Box:
     def _remove_temps(self) -> None:
         """Temp files a dead writer left; none is a verdict, a state or a journal."""
         for directory in (self.root, self.history, self.journals):
-            for temp in directory.glob(f".*{_TEMP_SUFFIX}"):
+            for temp in directory.glob(f".*{TEMP_SUFFIX}"):
                 temp.unlink()
 
     # --- state.json -------------------------------------------------------------
@@ -504,14 +468,14 @@ class Box:
         if not self._locked:
             raise StateDamaged(f"{path} is damaged ({kind})") from None
         os.replace(path, path.with_name(STATE + _QUARANTINE_SUFFIX))
-        _fsync_dir(self.root)
+        fsync_dir(self.root)
         self.state_quarantined = True
         return None
 
     def write_state(self, state: BoxState) -> None:
         """Replace ``state.json`` atomically."""
         self._require_lock()
-        _write_new(self.root / STATE, state.model_dump_json(indent=2), replace=True)
+        atomic_write(self.root / STATE, state.model_dump_json(indent=2), _FILE_MODE)
 
     # --- history/ ---------------------------------------------------------------
 
@@ -537,7 +501,9 @@ class Box:
         self._require_lock()
         final = self.history / f"{verdict.run_id}.json"
         try:
-            _write_new(final, verdict.model_dump_json(indent=2), replace=False)
+            atomic_write(
+                final, verdict.model_dump_json(indent=2), _FILE_MODE, exclusive=True
+            )
         except FileExistsError as error:
             raise HistoryExists(f"history already holds {verdict.run_id}") from error
         state = self.read_state()
@@ -557,7 +523,7 @@ class Box:
         raw = header.model_dump(mode="json", exclude_none=True)
         raw["args"] = secrets.value(raw["args"])
         line = json.dumps({"event": "header", **raw}, ensure_ascii=False) + "\n"
-        _write_new(final, line, replace=False)
+        atomic_write(final, line, _FILE_MODE, exclusive=True)
         return JournalSink(final, secrets)
 
     def read_journal(self, run_id: str) -> Journal | None:
@@ -585,7 +551,7 @@ class Box:
             total -= sizes[path]
             evicted.append(_run_of(path))
         if evicted:
-            _fsync_dir(self.journals)
+            fsync_dir(self.journals)
         return {"evicted": evicted, "kept_bytes": total, "over_budget": total > budget}
 
     # --- a run that ended without a verdict ---------------------------------------
@@ -623,7 +589,7 @@ class Box:
                 journal = read_journal(path)
             except JournalDamaged:
                 path.rename(path.with_name(path.name + _QUARANTINE_SUFFIX))
-                _fsync_dir(self.journals)
+                fsync_dir(self.journals)
                 quarantined.append(path.stem)
                 continue
             verdict = self._orphan_verdict(

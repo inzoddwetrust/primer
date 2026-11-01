@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
+from pridem.files import atomic_write
 from pridem.runner import Stream
 from pridem.steps.base import (
     CheckResult,
@@ -128,13 +129,6 @@ def _blocks(text: str) -> dict[str, str]:
     return found
 
 
-def _replace(path: Path, text: str) -> None:
-    temp = path.with_name(path.name + ".tmp")
-    temp.write_text(text, encoding="utf-8")
-    temp.chmod(0o600)
-    temp.replace(path)
-
-
 def write_ssh_config(root: Path, repos: Sequence[Repo]) -> None:
     """Draw the blocks of ``repos`` into the machine's ``ssh_config`` (0600),
     keeping the other blocks; write ``known_hosts.github`` when one of them is
@@ -149,12 +143,12 @@ def write_ssh_config(root: Path, repos: Sequence[Repo]) -> None:
             blocks[found.alias] = _block(keys, found)
     text = "\n".join(blocks.values())
     if text != present:
-        _replace(config, text)
+        atomic_write(config, text, 0o600)
     pinned = keys / PINNED
     if any(found.pinned for found in repos if not found.local):
         wanted = pinned_known_hosts()
         if not pinned.exists() or pinned.read_text(encoding="utf-8") != wanted:
-            _replace(pinned, wanted)
+            atomic_write(pinned, wanted, 0o600)
 
 
 def has_access(ctx: StepContext, root: Path, found: Repo) -> bool:

@@ -56,10 +56,14 @@ echo "1/5 host: Ubuntu 24.04 x86_64, root"
 if [[ -x $TARGET/venv/bin/pridem && $("$TARGET/venv/bin/pridem" version) == "pridem ${TAG#v}" ]]; then
     echo "2-4/5 pridem $TAG is installed already"
 else
-    # 2. Packages: apt waits for the dpkg lock instead of breaking it; sops is
-    #    not in apt on 24.04 and comes from its release by version and sha256.
-    apt-get -o DPkg::Lock::Timeout=600 update
-    apt-get -o DPkg::Lock::Timeout=600 install -y python3 python3-venv git curl age
+    # 2. Packages: apt waits for the dpkg lock instead of breaking it and asks
+    #    nothing (no debconf dialog, needrestart restarts by itself) -- the two
+    #    variables are for the apt calls alone; sops is not in apt on 24.04 and
+    #    comes from its release by version and sha256.
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+        apt-get -o DPkg::Lock::Timeout=600 update
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+        apt-get -o DPkg::Lock::Timeout=600 install -y python3 python3-venv git curl age
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
     curl -fsSL -o "$work/sops" \
