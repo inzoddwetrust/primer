@@ -27,6 +27,7 @@ from compose_support import (
     migrate_call,
     observe_calls,
     ps_call,
+    raw_config_call,
     run,
     up_call,
 )
@@ -153,6 +154,7 @@ def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
         Up(cs.stack, cs.entry, **parts),  # type: ignore[arg-type]
     ]
     script = [
+        raw_config_call(cs),
         config_call(cs),
         config_call(cs),
         build_call(cs),

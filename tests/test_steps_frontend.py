@@ -8,6 +8,7 @@ import pytest
 import yaml
 from compose_support import CONFIG, ENTRY, REF, SHA, in_release, stdout
 from compose_support import config_call as compose_config
+from compose_support import raw_config_call as compose_raw_config
 from edge_support import DOMAINS, Mixed, exec_call, passport, product
 from env_support import box, passport_data
 from plan_support import ListSink
@@ -269,7 +270,8 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
         root=root,
         fetched=fetched,
     )
-    with FakeRunner(compose_config(cs, lacking)) as runner:  # nothing is built
+    script = [compose_raw_config(cs, lacking), compose_config(cs, lacking)]
+    with FakeRunner(*script) as runner:  # nothing is built
         outcome = run([step], runner)
     assert outcome.steps[0].reason == Code(
         "build:compose-forbidden",

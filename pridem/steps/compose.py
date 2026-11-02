@@ -25,18 +25,19 @@ product's file and carries what the machine adds:
 
 ``forbidden`` is the trust boundary of a stack's compose, read from the same
 ``config`` output (anchors, ``extends`` and relative paths already resolved;
-top-level ``x-`` keys are not services and are not read): what would give a
-container the host is refused before anything is built (contract 3 rules 9,
-12; TZ 7.3). A service may not be ``privileged``, add capabilities, take
-devices, share a namespace of the host (``pid``, ``ipc``, ``network_mode``,
-``userns_mode``, ``cgroup``) or another container's (``network_mode`` or
-``volumes_from`` ``container:``), drop its confinement (``security_opt``
-``unconfined``, ``label:disable``), mount ``docker.sock``, bind or build from
-a path that resolves out of the release (a symlink of the release counts
-where it leads), or publish a port of the host its stack does not declare in
-``host.ports`` (a product declares none). A named volume that binds a path out
-of the release, a ``configs`` or ``secrets`` file out of it, and a package
-mounted into a service the compose does not have are refused the same way.
+top-level ``x-`` keys are not services and are not read). It is a list of what
+a stack may use, not of what it may not (the owner's decision: anything else
+and the instance does not start; contract 3 rules 9, 12; TZ 7.3): a service
+has only the keys of ``SERVICE_KEYS``, its ``build`` only those of
+``BUILD_KEYS`` and its ``volumes`` are named volumes or binds of the release
+(``realpath``: a symlink of the release counts where it leads; ``docker.sock``
+is named as such). A port of the host is one its stack declares in
+``host.ports`` (a product declares none). A top-level volume or network may
+not be ``external``, and a named volume may not bind a path out of the
+release. A package mounted into a service the compose does not have is refused
+the same way. ``config`` inlines ``env_file`` into ``environment``; its paths
+are read from ``config --no-interpolate`` (``env_files_out_of_release``) and
+must be in the release too.
 """
 
 import json
@@ -163,11 +164,15 @@ def out(
     return result.code, lines
 
 
-def config(ctx: StepContext, compose: ComposeStack) -> dict[str, Json]:
-    """``docker compose config --format json`` of the product's file."""
-    _, lines = out(
-        ctx, compose.product_argv("config", "--format", "json"), passed_on=False
+def config(
+    ctx: StepContext, compose: ComposeStack, *, interpolate: bool = True
+) -> dict[str, Json]:
+    """``docker compose config --format json`` of the product's file; without
+    ``interpolate`` -- ``--no-interpolate``, where ``env_file`` is still named."""
+    argv = ["config", "--format", "json"] + (
+        [] if interpolate else ["--no-interpolate"]
     )
+    _, lines = out(ctx, compose.product_argv(*argv), passed_on=False)
     document = json.loads("\n".join(lines))
     if not isinstance(document, dict):
         raise ValueError("docker compose config did not print an object")
@@ -178,8 +183,33 @@ def _mapping(value: Json | None) -> dict[str, Json]:
     return value if isinstance(value, dict) else {}
 
 
-_HOST_NAMESPACES = ("pid", "ipc", "network_mode", "userns_mode", "cgroup")
-_UNCONFINED = re.compile(r"^(?:[a-z_]+[:=]unconfined|label[:=]disable)$")
+SERVICE_KEYS = frozenset(
+    {
+        "image",
+        "build",
+        "environment",
+        "volumes",
+        "networks",
+        "depends_on",
+        "healthcheck",
+        "command",
+        "entrypoint",
+        "restart",
+        "ports",
+        "labels",
+        "user",
+        "working_dir",
+    }
+)
+"""What a service may have. ``config`` adds ``command``, ``entrypoint`` (null)
+and ``networks`` (``default``) to every service itself -- all on this list."""
+BUILD_KEYS = frozenset({"context", "dockerfile", "target", "args"})
+"""What a ``build`` may have; ``config`` adds ``dockerfile`` itself."""
+VOLUME_KEYS = frozenset({"type", "source", "target", "read_only", "volume", "bind"})
+"""What an entry of ``volumes`` may have; ``config`` adds ``volume: {}`` to a
+named volume and ``bind: {create_host_path: true}`` to a short bind itself."""
+VOLUME_TYPES = frozenset({"volume", "bind"})
+BIND_KEYS = frozenset({"create_host_path"})
 
 
 def _within(path: str, release: Path) -> bool:
@@ -192,43 +222,35 @@ def _socket(path: str) -> bool:
     return "docker.sock" in (Path(path).name, Path(os.path.realpath(path)).name)
 
 
-def _item(value: Json) -> str:
-    """One element of a compose list as it reads: a string, or its source."""
-    if isinstance(value, dict):
-        return str(value.get("source", json.dumps(value, sort_keys=True)))
-    return str(value)
+def _extra(found: Mapping[str, Json], allowed: frozenset[str]) -> list[str]:
+    return sorted(key for key in found if key not in allowed)
+
+
+def _volume_problems(volume: Mapping[str, Json], release: Path) -> list[str]:
+    kind = volume.get("type")
+    found = [f"volumes.{key}" for key in _extra(volume, VOLUME_KEYS)]
+    found += [
+        f"volumes.bind.{key}" for key in _extra(_mapping(volume.get("bind")), BIND_KEYS)
+    ]
+    if kind not in VOLUME_TYPES:
+        found.append(f"volumes type={kind}")
+    elif kind == "bind":
+        source = str(volume.get("source", ""))
+        if _socket(source):
+            found.append("volumes=docker.sock")
+        elif not _within(source, release):
+            found.append(f"volumes={source}")
+    return found
 
 
 def _service_problems(
     body: Mapping[str, Json], release: Path, declared: set[tuple[str, int]]
 ) -> list[str]:
-    found: list[str] = []
-    if body.get("privileged") is True:
-        found.append("privileged")
-    found += [f"cap_add={_item(cap)}" for cap in as_list(body.get("cap_add"))]
-    found += [f"devices={_item(dev)}" for dev in as_list(body.get("devices"))]
-    for key in _HOST_NAMESPACES:
-        if body.get(key) == "host":
-            found.append(f"{key}=host")
-    mode = body.get("network_mode")
-    if isinstance(mode, str) and mode.startswith("container:"):
-        found.append(f"network_mode={mode}")
-    for option in as_list(body.get("security_opt")):
-        if _UNCONFINED.match(_item(option)):
-            found.append(f"security_opt={_item(option)}")
-    for source in as_list(body.get("volumes_from")):
-        if _item(source).startswith("container:"):
-            found.append(f"volumes_from={_item(source)}")
+    found = _extra(body, SERVICE_KEYS)
     for volume in as_list(body.get("volumes")):
-        mount = _mapping(volume)
-        if mount.get("type") != "bind":
-            continue
-        source = str(mount.get("source", ""))
-        if _socket(source):
-            found.append("volumes=docker.sock")
-        elif not _within(source, release):
-            found.append(f"volumes={source}")
+        found += _volume_problems(_mapping(volume), release)
     build = _mapping(body.get("build"))
+    found += [f"build.{key}" for key in _extra(build, BUILD_KEYS)]
     context = build.get("context")
     if isinstance(context, str):
         dockerfile = build.get("dockerfile")
@@ -270,17 +292,34 @@ def forbidden(
         problems = _service_problems(_mapping(body), release, declared)
         found += [f"{name}: {problem}" for problem in problems]
     for name, body in _mapping(document.get("volumes")).items():
-        device = _mapping(_mapping(body).get("driver_opts")).get("device")
+        volume = _mapping(body)
+        if volume.get("external"):
+            found.append(f"volumes.{name}: external")
+        device = _mapping(volume.get("driver_opts")).get("device")
         if device is not None and not _within(str(device), release):
             found.append(f"volumes.{name}: driver_opts.device={device}")
-    for kind in ("configs", "secrets"):
-        for name, body in _mapping(document.get(kind)).items():
-            file = _mapping(body).get("file")
-            if isinstance(file, str) and not _within(file, release):
-                found.append(f"{kind}.{name}: file={file}")
+    for name, body in _mapping(document.get("networks")).items():
+        if _mapping(body).get("external"):
+            found.append(f"networks.{name}: external")
     for slot, service in mounts:
         if service not in services:
             found.append(f"{service}: packages.{slot}.mount (no such service)")
+    return sorted(found)
+
+
+def env_files_out_of_release(
+    compose: ComposeStack, uninterpolated: Mapping[str, Json]
+) -> list[str]:
+    """The ``env_file`` paths of ``config --no-interpolate`` (where they are
+    still named, absolute, ``extends`` resolved) that are not in the release; a
+    path that still holds a variable cannot be checked and is one of them."""
+    found: list[str] = []
+    for name, body in _mapping(uninterpolated.get("services")).items():
+        for entry in as_list(_mapping(body).get("env_file")):
+            path = _mapping(entry).get("path") if isinstance(entry, dict) else entry
+            text = str(path)
+            if "$" in text or not _within(text, compose.release):
+                found.append(f"{name}: env_file={text}")
     return sorted(found)
 
 

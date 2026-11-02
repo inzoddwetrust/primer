@@ -107,18 +107,24 @@ def _forms(secret: str) -> set[str]:
     return {secret} | {form for form in derived if len(form) >= SECRET_MIN_LENGTH}
 
 
+class ShortSecret(ValueError):
+    """A value too short to be a secret was given to ``Secrets``."""
+
+
 class Secrets:
     """Known secret values and the exact-match cleaning of text and facts.
 
     Every secret contributes its forms (``_forms``); the forms of all secrets
     are one set, replaced longest first, so a secret that contains another --
-    or contains its own lines -- is replaced whole, with no pieces left. An
-    empty value is an error: it matches everywhere.
+    or contains its own lines -- is replaced whole, with no pieces left.
 
     The set of a run grows and never shrinks: a secret that appears during the
     run (the passport's after ``fetch_passport``, an answer of ``install``, a
     ``derived`` value) is ``add``-ed to the one object every sink and the
-    verdict hold, before the first line that could carry it. The journal's cut
+    verdict hold, before the first line that could carry it. A value shorter
+    than ``SECRET_MIN_LENGTH`` is refused here, for every path that adds one
+    (``ShortSecret``): cleaned out of every text it would cut ordinary words,
+    and it is too short to be a secret. The journal's cut
     of a long line is computed from this set on every piece (``safe_cut``), so
     a larger ``longest`` holds from the next piece on; the pieces written
     before could not carry a value the run did not know yet.
@@ -132,8 +138,10 @@ class Secrets:
     def add(self, values: Iterable[SecretStr]) -> None:
         """Know ``values`` too, from now on, wherever this object cleans."""
         plain = {value.get_secret_value() for value in values}
-        if "" in plain:
-            raise ValueError("an empty secret would match every position of a text")
+        if any(len(secret) < SECRET_MIN_LENGTH for secret in plain):
+            raise ShortSecret(  # the value itself is never in the message
+                f"a secret is shorter than {SECRET_MIN_LENGTH} characters"
+            )
         forms = set(self._values).union(*(_forms(secret) for secret in plain))
         self._values = tuple(sorted(forms, key=len, reverse=True))
         self._pattern = (

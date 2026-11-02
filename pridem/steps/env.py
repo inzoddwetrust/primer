@@ -319,6 +319,8 @@ class RenderEnv(Step):
         if any(key not in on_disk for key in resolved.derived):
             return needed
         held = {key: on_disk[key] for key in resolved.derived}
+        if any(len(value) < SECRET_MIN_LENGTH for value in held.values()):
+            return needed  # too short to be what derive gives: act derives it again
         self.secrets.add(SecretStr(value) for value in held.values())
         if env_text({**resolved.values, **held}) != present:
             return needed

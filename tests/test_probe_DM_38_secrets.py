@@ -6,7 +6,7 @@ import pytest
 from pydantic import SecretStr
 
 from pridem.contract import SECRET_MIN_LENGTH
-from pridem.events import REDACTED, Secrets
+from pridem.events import REDACTED, Secrets, ShortSecret
 
 BODY = [
     "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj",
@@ -60,8 +60,20 @@ def test_derived_forms_start_at_16_characters(form: str) -> None:
     assert _clean(long, f"[{sixteen}]") == f"[{REDACTED}]"
 
 
-def test_whole_secret_is_cleaned_at_any_length() -> None:
-    assert _clean("abc", "x-abc-y") == f"x-{REDACTED}-y"
+def test_a_secret_is_cleaned_whole_from_the_minimum_length_on() -> None:
+    """DM-55 FIX: a value shorter than ``SECRET_MIN_LENGTH`` is no secret to
+    clean -- ``Secrets`` refuses it, on construction and on ``add``, and the
+    set stays as it was; before, any length was cleaned (``abc`` too)."""
+    value = "abcdefghijklmnop"
+    assert len(value) == SECRET_MIN_LENGTH
+    assert _clean(value, f"x-{value}-y") == f"x-{REDACTED}-y"
+    for short in ("", value[:-1]):
+        with pytest.raises(ShortSecret):
+            Secrets([SecretStr(short)])
+    known = Secrets([SecretStr(value)])
+    with pytest.raises(ShortSecret):
+        known.add([SecretStr("q" * 20), SecretStr(value[:-1])])
+    assert known.text(f"{value} {'q' * 20}") == f"{REDACTED} {'q' * 20}"
 
 
 def test_forms_shared_by_two_secrets_are_one_form() -> None:

@@ -144,6 +144,17 @@ def config_call(cs: ComposeStack, document: Mapping[str, Json] = CONFIG) -> Fake
     )
 
 
+def raw_config_call(
+    cs: ComposeStack, document: Mapping[str, Json] = CONFIG
+) -> FakeCall:
+    """``config --no-interpolate``: what ``build`` checks ``env_file`` on
+    (DM-55 FIX); the fixture's services have none."""
+    return FakeCall(
+        tuple(cs.product_argv("config", "--format", "json", "--no-interpolate")),
+        lines=stdout(json.dumps(in_release(document, cs.release))),
+    )
+
+
 def image_call(cs: ComposeStack, service: str, *ids: str) -> FakeCall:
     return FakeCall(
         (

@@ -31,6 +31,7 @@ from pridem.runner import (
     SubprocessRunner,
 )
 from pridem.state import Box, JournalHeader
+from pridem.steps import gc as gc_module
 from pridem.steps.gc import GC_STACK, Gc, docker_size, gc_steps
 from pridem.steps.passport import PASSPORT_COPY, Fetched
 
@@ -932,3 +933,48 @@ def test_packages_of_the_current_release_stay_without_containers(
     assert outcome.code is ExitCode.OK, outcome.steps
     assert by_passport.is_dir() and by_current.is_dir() and not loose.exists()
     assert previous.is_dir() and current.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("printed", "kind"),
+    [
+        ("not json at all", "JSONDecodeError"),
+        ('["a list"]', "UnreadableOutput"),
+        ('{"Type": "Images", "TotalCount": "many", "Size": "1GB"}', "UnreadableOutput"),
+        ('{"Type": "Images", "Size": "1GB"}', "UnreadableOutput"),
+        ('{"Type": "Images", "TotalCount": "1", "Size": "3GiB"}', "UnreadableOutput"),
+    ],
+)
+def test_docker_output_gc_cannot_read_is_not_started(
+    tmp_path: Path, printed: str, kind: str
+) -> None:
+    """DM-55 FIX: what docker printed and gc cannot read is ``not-started``
+    ``unreadable`` with its exception -- these exceptions of reading alone."""
+    world, previous, current = kept_world(tmp_path)
+    with GitReal(FakeCall(DF, lines=out(printed))) as runner:
+        outcome, _ = run_gc(world, runner)
+    assert outcome.code is ExitCode.INCOMPLETE
+    [entry] = outcome.incomplete
+    assert entry.reason == Code(
+        "gc:not-started", {"cause": "unreadable", "command": kind}
+    )
+    assert previous.is_dir() and current.is_dir()
+
+
+def test_a_fault_of_the_machine_in_gc_is_red_not_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DM-55 FIX: a ``ValueError`` that is not a reading of docker's output --
+    a fault of the machine -- is not turned into ``not-started``: the step is
+    red. Until then every ``ValueError`` of ``check`` became ``unreadable``."""
+    world, _, _ = kept_world(tmp_path)
+
+    def broken(ctx: object) -> dict[str, Json]:
+        raise ValueError("a fault of the machine")
+
+    monkeypatch.setattr(gc_module, "system_df", broken)
+    with GitReal() as runner:
+        outcome, _ = run_gc(world, runner)
+    assert outcome.code is ExitCode.FAILED
+    assert outcome.incomplete == ()
+    assert outcome.steps[0].status == "failed"

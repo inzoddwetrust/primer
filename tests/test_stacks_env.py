@@ -565,6 +565,45 @@ def test_write_private_is_0600_whatever_the_umask(tmp_path: Path) -> None:
 # --- DM-53: check reads, it never runs derive ----------------------------------
 
 
+@pytest.mark.parametrize("held", ["missing", "short"])
+def test_a_derived_value_the_file_lacks_or_holds_short_is_derived_again(
+    tmp_path: Path, held: str
+) -> None:
+    """DM-55 FIX: ``check`` takes a derived value from ``.env`` only when it
+    is there and could be one -- a file without the key, or with a value
+    shorter than ``SECRET_MIN_LENGTH``, needs ``act`` (``doctor`` names it,
+    runs nothing, raises nothing: no ``KeyError``, no ``ShortSecret``), and
+    ``act`` derives it again."""
+    made, comms, root, fetched = comms_box(tmp_path, derived=True)
+    env_file = root / "opt" / "comms" / "env" / "derive.env"
+    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+        outcome, _ = run(
+            [render(comms, root, fetched, product=made, image=IMAGE)], runner
+        )
+    assert outcome.code is ExitCode.OK, outcome.steps
+    env = env_of(root, "comms")
+    values = parse_env(env.read_text())
+    if held == "missing":
+        del values["TELEGRAM_BOT_URL"]
+    else:
+        values["TELEGRAM_BOT_URL"] = "short"
+    write_private(env, env_text(values))
+    with Reading() as runner:
+        outcome, _ = run(
+            [render(comms, root, fetched, product=made, image=IMAGE)],
+            runner,
+            mode="doctor",
+        )
+    [item] = outcome.doctor_diff
+    assert item.reason.code == "render_env:render" and runner.argvs == []
+    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+        outcome, _ = run(
+            [render(comms, root, fetched, product=made, image=IMAGE)], runner
+        )
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED
+
+
 def test_check_takes_derived_values_from_the_file_and_runs_no_container(
     tmp_path: Path,
 ) -> None:

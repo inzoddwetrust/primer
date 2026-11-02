@@ -15,6 +15,7 @@ from compose_support import (
     compose,
     config_call,
     image_call,
+    raw_config_call,
     run,
 )
 
@@ -40,6 +41,7 @@ def steps(root: Path) -> tuple[Build, Migrate, Up]:
 def green_build(root: Path) -> list[FakeCall]:
     cs = compose(root)
     return [
+        raw_config_call(cs),  # check: env_file (DM-55 FIX)
         config_call(cs),  # check: no override yet
         config_call(cs),  # act
         build_call(cs),
@@ -54,7 +56,12 @@ def green_build(root: Path) -> list[FakeCall]:
 
 def test_probe_DM_18_red_build_leaves_site_untouched(tmp_path: Path) -> None:
     cs = compose(tmp_path)
-    script = [config_call(cs), config_call(cs), build_call(cs, code=1)]
+    script = [
+        raw_config_call(cs),
+        config_call(cs),
+        config_call(cs),
+        build_call(cs, code=1),
+    ]
     with FakeRunner(*script) as runner:  # nothing else may run: no ps, no up
         outcome, _ = run(list(steps(tmp_path)), runner)
     assert outcome.code is ExitCode.FAILED
@@ -98,6 +105,7 @@ def test_the_same_commit_again_needs_no_build(tmp_path: Path) -> None:
     with FakeRunner(*green_build(tmp_path)) as runner:
         run([steps(tmp_path)[0]], runner)
     again = [
+        raw_config_call(cs),
         config_call(cs),
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),
@@ -135,7 +143,7 @@ def test_build_args_in_the_products_compose_are_refused(tmp_path: Path) -> None:
     cs = compose(tmp_path)
     document = json.loads(json.dumps(CONFIG))
     document["services"]["frontend"]["build"]["args"] = {"VITE_API_URL": "x"}
-    with FakeRunner(config_call(cs, document)) as runner:
+    with FakeRunner(raw_config_call(cs, document), config_call(cs, document)) as runner:
         outcome, _ = run([steps(tmp_path)[0]], runner)
     assert outcome.steps[0].reason == Code(
         "build:instance-args", {"stack": "blank", "services": ["frontend"]}

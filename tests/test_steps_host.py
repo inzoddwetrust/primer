@@ -709,3 +709,28 @@ def test_the_record_of_paused_timers_is_0600(tmp_path: Path) -> None:
     record = root / PAUSED
     assert json.loads(record.read_text()) == ["apt-daily.timer"]
     assert stat.S_IMODE(record.stat().st_mode) == 0o600
+
+
+def test_install_restarts_docker_and_a_daemon_still_not_local_is_red(
+    tmp_path: Path,
+) -> None:
+    """DM-55 FIX: ``install`` restarts docker and ``verify`` reads the driver
+    again -- a daemon still on another driver after the restart is red
+    ``log-driver-wrong``, never green and never incomplete. The pair: the
+    daemon on ``local`` after the restart is green."""
+    for after, green in (("json-file", False), ("local", True)):
+        root = daemon_box(tmp_path / after, {})
+        calls = [
+            call(*INFO, lines=("json-file",)),  # check: install decides a restart
+            call("systemctl", "restart", "docker"),
+            call(*INFO, lines=(after,)),  # verify reads the running daemon
+        ]
+        outcome = run_mode([DaemonJson(root)], calls, "install")
+        [step] = outcome.steps
+        if green:
+            assert outcome.code is ExitCode.OK and outcome.incomplete == ()
+            assert step.verify["log_driver"] == "local"
+        else:
+            assert step.reason == Code(
+                "daemon_json:log-driver-wrong", {"found": "json-file"}
+            )

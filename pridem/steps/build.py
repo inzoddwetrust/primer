@@ -7,9 +7,11 @@ one image for every instance of a commit; a ``build.args`` in the product's
 compose would carry an instance's value and is refused before anything is
 built. So is a compose that asks the host for more than the stack's trust
 (``compose-forbidden``, every finding of ``steps.compose.forbidden``): the
-check reads it, so ``doctor`` names it too. Images carry ``pridem.stack``,
-``pridem.release``, ``pridem.commit`` and ``pridem.service`` from the
-machine's override (``steps/compose.py``), which this step writes.
+check reads it, so ``doctor`` names it too; ``check`` also reads
+``config --no-interpolate``, the only output that still names ``env_file``.
+Images carry ``pridem.stack``, ``pridem.release``, ``pridem.commit`` and
+``pridem.service`` from the machine's override (``steps/compose.py``), which
+this step writes.
 
 A red build stops the plan: nothing has touched a running container -- the
 build only makes images. ``check`` needs no ``act`` when every built service
@@ -18,6 +20,7 @@ names every image and the ``app`` image, which ``render_env`` gets for
 ``derive``.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar
 
@@ -37,6 +40,7 @@ from pridem.steps.compose import (
     ComposeStack,
     built_services,
     config,
+    env_files_out_of_release,
     forbidden,
     image_of,
     out,
@@ -98,7 +102,11 @@ class Build(Step):
             raise StepFailed("no-passport")
         return package_mounts(stack, stack.name, passport, self.compose.root)
 
-    def _rendered(self, ctx: StepContext) -> tuple[list[str], str]:
+    def _rendered(
+        self, ctx: StepContext, also: Sequence[str] = ()
+    ) -> tuple[list[str], str]:
+        """The built services and the override; ``also`` -- findings of the
+        caller, refused with those of ``forbidden`` in one code."""
         document = config(ctx, self.compose)
         services = document.get("services")
         if isinstance(services, dict):
@@ -116,7 +124,7 @@ class Build(Step):
                 )
         mounts = self._mounts()
         bound = [(mount.slot, mount.service) for mount in mounts]
-        found = forbidden(self.compose, document, bound)
+        found = sorted([*forbidden(self.compose, document, bound), *also])
         if found:
             raise StepFailed(
                 "compose-forbidden",
@@ -126,7 +134,9 @@ class Build(Step):
         return built_services(document), text
 
     def check(self, ctx: StepContext) -> CheckResult:
-        built, text = self._rendered(ctx)
+        uninterpolated = config(ctx, self.compose, interpolate=False)
+        outside = env_files_out_of_release(self.compose, uninterpolated)
+        built, text = self._rendered(ctx, outside)
         params: dict[str, Json] = {
             "stack": self.compose.entry,
             "commit": self.compose.commit,

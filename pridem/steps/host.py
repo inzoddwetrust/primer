@@ -445,6 +445,9 @@ class DaemonJson(_HostStep):
     The file is written when it says otherwise (``atomic_write``, 0644; its
     other keys kept). Whether docker must restart is the running daemon's driver
     (``docker info``), not the file: a daemon already on ``local`` needs none.
+    ``install`` restarts docker (``systemctl restart docker``) when the running
+    daemon is on another driver, and its ``verify`` reads the driver again: a
+    daemon still not on ``local`` after the restart is red ``log-driver-wrong``.
     Only ``install`` restarts docker -- on a box that runs its stacks
     (``deploy``, ``reinstall``) a restart would stop every container, so a
     daemon still on another driver is ``incomplete restart-needed`` (exit 2),

@@ -109,11 +109,15 @@ _SIZE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([kKMGTP]?B)$")
 _TEMP = ".tmp"
 
 
+class UnreadableOutput(ValueError):
+    """docker printed what its measurement cannot be read from."""
+
+
 def docker_size(text: str) -> int:
     """``1.234GB`` -> bytes: docker prints sizes in decimal units."""
     found = _SIZE.match(text.strip())
     if found is None:
-        raise ValueError(f"not a docker size: {text!r}")
+        raise UnreadableOutput(f"not a docker size: {text!r}")
     return round(float(found[1]) * _UNITS[found[2]])
 
 
@@ -131,12 +135,17 @@ def system_df(ctx: StepContext) -> dict[str, Json]:
             continue
         row = json.loads(line)
         if not isinstance(row, dict):
-            raise ValueError("docker system df printed a line that is not an object")
+            raise UnreadableOutput(
+                "docker system df printed a line that is not an object"
+            )
         name = _CATEGORIES.get(str(row.get("Type")))
         if name is not None:
+            count = str(row.get("TotalCount"))
+            if not count.isdigit():
+                raise UnreadableOutput(f"not a count of docker system df: {count!r}")
             found[name] = {
-                "count": int(str(row["TotalCount"])),
-                "bytes": docker_size(str(row["Size"])),
+                "count": int(count),
+                "bytes": docker_size(str(row.get("Size"))),
             }
     return found
 
@@ -145,7 +154,7 @@ def _number(df: Mapping[str, Json], category: str, key: str) -> int:
     part = df.get(category)
     value = part.get(key) if isinstance(part, dict) else None
     if not isinstance(value, int):
-        raise ValueError(f"no {key} of {category} in the measurement")
+        raise UnreadableOutput(f"no {key} of {category} in the measurement")
     return value
 
 
@@ -160,7 +169,7 @@ def _inspect(ctx: StepContext, kind: str, ids: Sequence[str]) -> list[dict[str, 
     _, lines = out(ctx, ["docker", kind, "inspect", *ids], passed_on=False)
     found = json.loads("\n".join(lines))
     if not isinstance(found, list):
-        raise ValueError(f"docker {kind} inspect did not print a list")
+        raise UnreadableOutput(f"docker {kind} inspect did not print a list")
     return [item for item in found if isinstance(item, dict)]
 
 
@@ -412,7 +421,8 @@ class Gc(Step):
             return _not_started(cause, " ".join(error.argv[:3]))
         except ContractError:
             return _not_started("passport-invalid", str(self.root / PASSPORT_COPY))
-        except ValueError as error:
+        except (UnreadableOutput, json.JSONDecodeError) as error:
+            # what docker printed, not a fault of the machine: that one is red
             return _not_started("unreadable", type(error).__name__)
 
     def _check(self, ctx: StepContext) -> CheckResult:

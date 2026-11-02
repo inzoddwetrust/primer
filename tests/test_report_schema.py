@@ -20,7 +20,15 @@ from report_support import (
 )
 
 from pridem.contract import SCHEMA_DIR
-from pridem.events import Code, Incomplete, Json, PlanOutcome, Secrets, StepRecord
+from pridem.events import (
+    Code,
+    Incomplete,
+    Json,
+    PlanOutcome,
+    Secrets,
+    ShortSecret,
+    StepRecord,
+)
 from pridem.plan import StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, Stream
@@ -319,16 +327,19 @@ def test_doctor_check_command_failure_reason_has_no_output() -> None:
 # --- secrets --------------------------------------------------------------------
 
 
-def test_secrets_longest_first_keys_included_empty_refused() -> None:
-    secrets = Secrets([SecretStr("abc"), SecretStr("abcdef"), SecretStr("abc")])
-    assert secrets.text("x abcdef y abc") == "x [redacted] y [redacted]"
-    assert secrets.fact({"k-abc": ["abcdef", 1, None]}) == {
+def test_secrets_longest_first_keys_included_short_refused() -> None:
+    """The values are 16 characters and longer since DM-55 FIX: a shorter one
+    -- the empty one too -- is refused (``ShortSecret``)."""
+    short, long = "secret-abc-00000", "secret-abc-00000-def"
+    secrets = Secrets([SecretStr(short), SecretStr(long), SecretStr(short)])
+    assert secrets.text(f"x {long} y {short}") == "x [redacted] y [redacted]"
+    assert secrets.fact({f"k-{short}": [long, 1, None]}) == {
         "k-[redacted]": ["[redacted]", 1, None]
     }
-    with pytest.raises(ValueError, match="empty secret"):
+    with pytest.raises(ShortSecret, match="shorter than 16"):
         Secrets([SecretStr("")])
     with pytest.raises(ValueError, match="after cleaning"):
-        secrets.fact({"abc": 1, "abcdef": 2})
+        secrets.fact({short: 1, long: 2})
 
 
 def test_validation_error_never_quotes_a_secret() -> None:
