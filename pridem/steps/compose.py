@@ -32,12 +32,20 @@ has only the keys of ``SERVICE_KEYS``, its ``build`` only those of
 ``BUILD_KEYS`` and its ``volumes`` are named volumes or binds of the release
 (``realpath``: a symlink of the release counts where it leads; ``docker.sock``
 is named as such). A port of the host is one its stack declares in
-``host.ports`` (a product declares none). A top-level volume or network may
-not be ``external``, and a named volume may not bind a path out of the
-release. A package mounted into a service the compose does not have is refused
-the same way. ``config`` inlines ``env_file`` into ``environment``; its paths
-are read from ``config --no-interpolate`` (``env_files_out_of_release``) and
-must be in the release too.
+``host.ports`` (a product declares none). The top level is a list too: only
+the keys of ``TOP_KEYS`` (``x-`` ones are not read); a volume has only those
+of ``TOP_VOLUME_KEYS`` -- its ``driver`` is ``local`` or none and its
+``driver_opts`` are exactly a bind of the release -- and a network only those
+of ``TOP_NETWORK_KEYS`` -- its ``driver`` is ``bridge`` or none and its
+``ipam`` the empty one ``config`` prints itself. The ``name`` of either is
+the one ``config`` gives it under the machine's project (``<project>_<key>``):
+another name takes another stack's object past ``-p`` and the labels gc goes
+by. So ``external`` is refused by the list, and so are ``labels``, driver
+options of a network and every driver but these two. A package mounted into a
+service the compose does not have is refused the same way. ``config``
+inlines ``env_file`` into ``environment``; its paths are read from ``config
+--no-interpolate`` (``env_files_out_of_release``) and must be in the release
+too.
 """
 
 import json
@@ -210,6 +218,17 @@ VOLUME_KEYS = frozenset({"type", "source", "target", "read_only", "volume", "bin
 named volume and ``bind: {create_host_path: true}`` to a short bind itself."""
 VOLUME_TYPES = frozenset({"volume", "bind"})
 BIND_KEYS = frozenset({"create_host_path"})
+TOP_KEYS = frozenset({"name", "services", "volumes", "networks"})
+"""What the top level may have (``x-`` keys aside); ``config`` prints ``name``
+itself, from ``-p``, and ``configs``/``secrets`` only for a service that uses
+them."""
+TOP_VOLUME_KEYS = frozenset({"name", "driver", "driver_opts"})
+"""What a top-level volume may have; ``config`` gives one ``{}`` its
+``name``."""
+TOP_NETWORK_KEYS = frozenset({"name", "driver", "ipam"})
+"""What a top-level network may have; ``config`` gives every one its ``name``
+and ``ipam: {}``."""
+BIND_OPTIONS = frozenset({"type", "o", "device"})
 
 
 def _within(path: str, release: Path) -> bool:
@@ -240,6 +259,47 @@ def _volume_problems(volume: Mapping[str, Json], release: Path) -> list[str]:
             found.append("volumes=docker.sock")
         elif not _within(source, release):
             found.append(f"volumes={source}")
+    return found
+
+
+def _top_name(kind: str, key: str, body: Mapping[str, Json], project: str) -> list[str]:
+    name = body.get("name")
+    if name is None or name == f"{project}_{key}":
+        return []
+    return [f"{kind}.{key}: name={name}"]
+
+
+def _top_volume_problems(
+    key: str, body: Mapping[str, Json], project: str, release: Path
+) -> list[str]:
+    found = [f"volumes.{key}: {extra}" for extra in _extra(body, TOP_VOLUME_KEYS)]
+    found += _top_name("volumes", key, body, project)
+    driver = body.get("driver")
+    if driver not in (None, "local"):
+        found.append(f"volumes.{key}: driver={driver}")
+    if "driver_opts" in body:
+        options = _mapping(body.get("driver_opts"))
+        device = options.get("device")
+        bind = set(options) == BIND_OPTIONS and options.get("type") == "none"
+        if not bind or options.get("o") != "bind":
+            found.append(f"volumes.{key}: driver_opts (not the options of a bind)")
+        elif not _within(str(device), release):
+            found.append(
+                f"volumes.{key}: driver_opts (device={device} not in the release)"
+            )
+    return found
+
+
+def _top_network_problems(
+    key: str, body: Mapping[str, Json], project: str
+) -> list[str]:
+    found = [f"networks.{key}: {extra}" for extra in _extra(body, TOP_NETWORK_KEYS)]
+    found += _top_name("networks", key, body, project)
+    driver = body.get("driver")
+    if driver not in (None, "bridge"):
+        found.append(f"networks.{key}: driver={driver}")
+    if "ipam" in body and body.get("ipam") != {}:
+        found.append(f"networks.{key}: ipam")
     return found
 
 
@@ -278,9 +338,11 @@ def forbidden(
     document: Mapping[str, Json],
     mounts: Sequence[tuple[str, str]] = (),
 ) -> list[str]:
-    """What the compose ``document`` asks of the host beyond the stack's trust,
-    one ``<where>: <key>`` per finding, sorted; ``mounts`` -- the packages'
-    ``(slot, service)`` the machine would bind."""
+    """What the compose ``document`` uses beyond the lists of what a stack may
+    use -- of its services, of its top level and of the volumes and networks
+    there -- one ``<where>: <key>`` per finding, sorted (``compose: <key>`` for
+    the top level); ``mounts`` -- the packages' ``(slot, service)`` the machine
+    would bind."""
     release = compose.release
     stack = compose.stack
     declared: set[tuple[str, int]] = set()
@@ -291,16 +353,13 @@ def forbidden(
     for name, body in services.items():
         problems = _service_problems(_mapping(body), release, declared)
         found += [f"{name}: {problem}" for problem in problems]
+    top = [key for key in document if not key.startswith("x-")]
+    found += [f"compose: {key}" for key in sorted(top) if key not in TOP_KEYS]
+    project = compose.project
     for name, body in _mapping(document.get("volumes")).items():
-        volume = _mapping(body)
-        if volume.get("external"):
-            found.append(f"volumes.{name}: external")
-        device = _mapping(volume.get("driver_opts")).get("device")
-        if device is not None and not _within(str(device), release):
-            found.append(f"volumes.{name}: driver_opts.device={device}")
+        found += _top_volume_problems(name, _mapping(body), project, release)
     for name, body in _mapping(document.get("networks")).items():
-        if _mapping(body).get("external"):
-            found.append(f"networks.{name}: external")
+        found += _top_network_problems(name, _mapping(body), project)
     for slot, service in mounts:
         if service not in services:
             found.append(f"{service}: packages.{slot}.mount (no such service)")

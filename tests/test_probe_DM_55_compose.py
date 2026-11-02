@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from compose_support import (
     APP_IMAGE,
+    CONFIG,
     ENTRY,
     FRONT_IMAGE,
     REF,
@@ -39,6 +40,9 @@ from pridem.steps.build import Build
 from pridem.steps.compose import (
     BUILD_KEYS,
     SERVICE_KEYS,
+    TOP_KEYS,
+    TOP_NETWORK_KEYS,
+    TOP_VOLUME_KEYS,
     VOLUME_KEYS,
     ComposeStack,
     env_files_out_of_release,
@@ -351,33 +355,212 @@ def test_a_service_publishes_only_what_host_ports_declares(tmp_path: Path) -> No
     ]
 
 
-def test_what_comes_from_the_top_level_is_the_stacks_own(tmp_path: Path) -> None:
-    """A volume or a network of the top level is not ``external`` (another
-    stack's, or the host's), and a named volume does not bind a path out of
-    the release."""
+# --- the top level, as a list too (FIX 2) ---------------------------------------
+
+
+def _top(**top: Json) -> dict[str, Json]:
+    """``app()`` with these top-level keys beside its ``services``."""
+    return {**app(), **top}
+
+
+def test_every_top_level_key_of_the_list_is_green(tmp_path: Path) -> None:
+    """What ``config`` prints for the live forms -- the blank's ``pgdata: {}``
+    and its ``default`` network -- and every key of the three lists in the form
+    it may have is green."""
     cs = released(tmp_path)
-    inside = str(cs.release / "conf")
-    document = app()
-    document["volumes"] = {
-        "pgdata": {"name": "blank_pgdata"},
-        "theirs": {"name": "other_pgdata", "external": True},
-        "here": {
-            "driver": "local",
-            "driver_opts": {"type": "none", "o": "bind", "device": inside},
-        },
-        "root": {
-            "driver": "local",
-            "driver_opts": {"type": "none", "o": "bind", "device": "/"},
-        },
+    inside = str(cs.release / "data")
+    volume: dict[str, Json] = {
+        "name": "blank_files",
+        "driver": "local",
+        "driver_opts": {"type": "none", "o": "bind", "device": inside},
     }
-    document["networks"] = {
-        "default": {"name": "blank_default", "ipam": {}},
-        "pridem": {"name": "pridem", "external": True},
+    network: dict[str, Json] = {"name": "blank_lan", "driver": "bridge", "ipam": {}}
+    document = _top(
+        name="blank",
+        volumes={"files": volume, "pgdata": {"name": "blank_pgdata"}},
+        networks={"lan": network, "default": {"name": "blank_default", "ipam": {}}},
+    )
+    assert set(document) == TOP_KEYS
+    assert set(volume) == TOP_VOLUME_KEYS and set(network) == TOP_NETWORK_KEYS
+    assert forbidden(cs, document) == []
+
+
+@pytest.mark.parametrize("form", ["blank", "harness"])
+def test_the_live_forms_are_green(tmp_path: Path, form: str) -> None:
+    """The blank's ``config`` (``pgdata: {}`` -> ``blank_pgdata``, the
+    ``default`` network with ``ipam: {}``) and the harness's ``CONFIG``
+    (``default`` without ``ipam``) are green: their names are the ones
+    ``config`` gives under the project ``blank``, so a wrong formula of the
+    name turns both red, not only a foreign name."""
+    cs = released(tmp_path)
+    document = BLANK if form == "blank" else CONFIG
+    assert forbidden(cs, in_release(document, cs.release)) == []
+
+
+@pytest.mark.parametrize("key", ["configs", "secrets", "models", "include"])
+def test_a_top_level_key_off_the_list_is_named(tmp_path: Path, key: str) -> None:
+    """``x-`` keys are not read; every other key off the list is named --
+    ``configs``/``secrets`` a second time, beside the service's own key, and a
+    section a later ``config`` may print is stopped by the list."""
+    cs = released(tmp_path)
+    extra: dict[str, Json] = {
+        key: {"c": {"file": str(cs.release)}},
+        "x-anchor": {"a": 1},
     }
+    document = _top(**extra)
+    assert forbidden(cs, document) == [f"compose: {key}"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("external", True), ("labels", {"pridem.stack": "other"}), ("driver_opts_x", 1)],
+)
+def test_a_top_level_volume_key_off_the_list_is_named(
+    tmp_path: Path, key: str, value: Json
+) -> None:
+    cs = released(tmp_path)
+    document = _top(volumes={"pgdata": {"name": "blank_pgdata", key: value}})
+    assert forbidden(cs, document) == [f"volumes.pgdata: {key}"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("external", True),
+        ("labels", {"a": "b"}),
+        ("driver_opts", {"parent": "eth0"}),
+        ("internal", True),
+        ("attachable", True),
+        ("enable_ipv6", True),
+    ],
+)
+def test_a_top_level_network_key_off_the_list_is_named(
+    tmp_path: Path, key: str, value: Json
+) -> None:
+    """``driver_opts`` of a network is off the list with or without a
+    ``driver`` -- ``config`` keeps it either way."""
+    cs = released(tmp_path)
+    network: dict[str, Json] = {"name": "blank_lan", "ipam": {}, key: value}
+    assert forbidden(cs, _top(networks={"lan": network})) == [f"networks.lan: {key}"]
+
+
+def test_a_volume_driver_and_its_options_are_the_local_bind_of_the_release(
+    tmp_path: Path,
+) -> None:
+    """``driver`` is none or ``local``; ``driver_opts`` exactly ``{type: none,
+    o: bind, device}`` with the device in the release -- any other form is one
+    finding with its reason. With the name and the external tests it replaces
+    ``test_what_comes_from_the_top_level_is_the_stacks_own``: until FIX 2 the
+    top level caught ``external`` and a device out of the release alone, so a
+    plugin driver, an nfs or cifs mount and a device of the release under
+    another type passed."""
+    cs = released(tmp_path)
+    inside, outside = str(cs.release / "data"), "/"
+    opts = "driver_opts (not the options of a bind)"
+    cases: list[tuple[dict[str, Json], list[str]]] = [
+        ({}, []),
+        ({"driver": "local"}, []),
+        ({"driver": "some/plugin"}, ["driver=some/plugin"]),
+        ({"driver_opts": {"type": "none", "o": "bind", "device": inside}}, []),
+        (
+            {"driver_opts": {"type": "none", "o": "bind", "device": outside}},
+            [f"driver_opts (device={outside} not in the release)"],
+        ),
+        ({"driver": "local", "driver_opts": {"type": "nfs", "device": inside}}, [opts]),
+        (
+            {"driver_opts": {"type": "nfs", "o": "addr=10.0.0.1", "device": ":/x"}},
+            [opts],
+        ),
+        (
+            {"driver_opts": {"type": "cifs", "o": "username=u", "device": "//h/s"}},
+            [opts],
+        ),
+        ({"driver_opts": {"type": "tmpfs", "device": "tmpfs"}}, [opts]),
+        ({"driver_opts": {"type": "ext4", "device": inside}}, [opts]),
+        ({"driver_opts": {"type": "none", "o": "rbind", "device": inside}}, [opts]),
+        ({"driver_opts": {"type": "ext4", "o": "bind", "device": inside}}, [opts]),
+        (
+            {"driver_opts": {"type": "none", "o": "bind", "device": inside, "x": "1"}},
+            [opts],
+        ),
+        ({"driver_opts": {}}, [opts]),
+    ]
+    for body, found in cases:
+        document = _top(volumes={"data": {"name": "blank_data", **body}})
+        assert forbidden(cs, document) == [f"volumes.data: {f}" for f in found], body
+
+
+@pytest.mark.parametrize(
+    ("body", "found"),
+    [
+        ({}, []),
+        ({"driver": "bridge"}, []),
+        ({"driver": "macvlan"}, ["driver=macvlan"]),
+        ({"driver": "ipvlan"}, ["driver=ipvlan"]),
+        ({"driver": "overlay"}, ["driver=overlay"]),
+        ({"driver": "host"}, ["driver=host"]),
+        ({"driver": "none"}, ["driver=none"]),
+        ({"ipam": {}}, []),
+        (
+            {"ipam": {"driver": "default", "config": [{"subnet": "172.30.0.0/16"}]}},
+            ["ipam"],
+        ),
+        ({"ipam": {"driver": "default"}}, ["ipam"]),
+    ],
+)
+def test_a_network_driver_is_bridge_and_ipam_is_what_config_prints(
+    tmp_path: Path, body: dict[str, Json], found: list[str]
+) -> None:
+    cs = released(tmp_path)
+    document = _top(networks={"lan": {"name": "blank_lan", **body}})
+    assert forbidden(cs, document) == [f"networks.lan: {f}" for f in found]
+
+
+def test_a_name_is_the_one_config_gives_under_the_machines_project(
+    tmp_path: Path,
+) -> None:
+    """``config`` names a volume or a network ``<project>_<key>`` itself, the
+    project being the machine's ``-p`` (the stack's entry); another name takes
+    another stack's object past ``-p`` and the labels gc goes by. An external
+    object is named twice -- it is external, and its name is not its own."""
+    cs = released(tmp_path)
+    assert cs.project == ENTRY == "blank"
+    document = _top(
+        volumes={
+            "own": {"name": "blank_own"},
+            "data": {"name": "velo_data"},
+            "theirs": {"name": "someone_else", "external": True},
+        },
+        networks={"default": {"name": "blank_default"}, "lan": {"name": "pridem"}},
+    )
     assert forbidden(cs, document) == [
-        "networks.pridem: external",
-        "volumes.root: driver_opts.device=/",
+        "networks.lan: name=pridem",
+        "volumes.data: name=velo_data",
         "volumes.theirs: external",
+        "volumes.theirs: name=someone_else",
+    ]
+
+
+def test_the_dispatchers_macvlan_and_plugin_document_is_red(tmp_path: Path) -> None:
+    """The hole of the top level as the dispatcher found it on ``cbf011d``: a
+    ``macvlan`` network puts the container on the host's network past nginx
+    and ``host.ports``, a volume of another driver passed -- ``[]`` then."""
+    service: dict[str, Json] = {
+        "image": "app:1",
+        "networks": {"lan": None},
+        "volumes": [
+            {"type": "volume", "source": "remote", "target": "/d", "volume": {}}
+        ],
+    }
+    document: dict[str, Json] = {
+        "services": {"app": service},
+        "networks": {"lan": {"driver": "macvlan", "driver_opts": {"parent": "eth0"}}},
+        "volumes": {"remote": {"driver": "some/plugin"}},
+    }
+    assert forbidden(released(tmp_path), document) == [
+        "networks.lan: driver=macvlan",
+        "networks.lan: driver_opts",
+        "volumes.remote: driver=some/plugin",
     ]
 
 
