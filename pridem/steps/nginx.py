@@ -71,6 +71,7 @@ class Nginx(Step):
         "route-ambiguous": "route {route} goes to {to}, declared by {stacks}",
         "domain-missing": "the passport has no domain for route {route}",
         "header-unsafe": "the value of {header} has a quote, a $ or a line break",
+        "path-unsafe": "the path {path} of the app of {route} is not a plain path",
         "secret-damaged": "{path} is not a preview secret of this machine",
         "drift": "the live config differs from the rendered one: {diff}",
         "not-running": "nginx is not running",

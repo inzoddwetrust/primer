@@ -343,3 +343,79 @@ def test_certificates_exist_before_the_test_aside(tmp_path: Path) -> None:
     cert, key = self_signed_pair(tmp_path, list(DOMAINS.values()))
     assert "BEGIN CERTIFICATE" in cert and "PRIVATE KEY" in key
     assert Nginx.order > 1
+
+
+def _server_of(text: str, domain: str) -> str:
+    """The 443 server of ``domain`` in a rendered config."""
+    [block] = [
+        chunk for chunk in text.split("server {") if f"server_name {domain};" in chunk
+    ]
+    return block
+
+
+def test_the_app_route_answers_health_and_ready_404_itself(tmp_path: Path) -> None:
+    """FIX 3 (protocol 9.3): a route to an ``app`` answers its ``health`` and
+    ``ready`` paths with 404 in nginx, before anything is proxied -- an exact
+    ``location`` wins over the prefix ``/`` whatever their order, so only the
+    rendering is checked; the pair: every other path goes to ``location /``
+    and is proxied, and a route to the frontend closes nothing."""
+    _, fetched = passport(tmp_path)
+    assert fetched.passport is not None
+    text = render(product(), fetched.passport, None)
+    api = _server_of(text, DOMAINS["api"])
+    assert "  location = /h { return 404; }" in api
+    assert "  location = /r { return 404; }" in api
+    assert "  location / {\n" in api and "proxy_pass $upstream;" in api
+    assert api.count("location = ") == 2
+    front = _server_of(text, DOMAINS["frontend"])
+    assert "location = " not in front and "proxy_pass $upstream;" in front
+
+
+def test_one_location_for_health_and_ready_on_one_path(tmp_path: Path) -> None:
+    _, fetched = passport(tmp_path)
+    assert fetched.passport is not None
+    stacks = {
+        "blank": {
+            "compose": "docker-compose.yml",
+            "app": {"service": "app", "port": 8000, "health": "/s", "ready": "/s"},
+            "frontend": {"service": "frontend", "port": 80},
+        }
+    }
+    api = _server_of(
+        render(product(stacks=stacks), fetched.passport, None), DOMAINS["api"]
+    )
+    assert api.count("  location = /s { return 404; }") == 1
+
+
+def test_a_preview_box_closes_health_beside_its_entry(tmp_path: Path) -> None:
+    root, fetched = passport(tmp_path, role="preview")
+    assert fetched.passport is not None
+    api = _server_of(render(product(), fetched.passport, "s" * 32), DOMAINS["api"])
+    entry = api.index("location = /__pridem/preview {")
+    closed = api.index("  location = /h { return 404; }")
+    assert entry < closed < api.index("  location / {")
+
+
+@pytest.mark.parametrize("path", ["/h; deny all", "/h {", "/h\nx", "/h$", "/h?x=1"])
+def test_a_path_that_reads_as_more_than_a_path_is_refused(
+    tmp_path: Path, path: str
+) -> None:
+    """The path goes into the config as it is: ``UrlPath`` lets any text after
+    the slash pass, so one that could read as a directive is ``path-unsafe``
+    before anything is rendered. The pair: the plain paths above render."""
+    _, fetched = passport(tmp_path)
+    assert fetched.passport is not None
+    stacks = {
+        "blank": {
+            "compose": "docker-compose.yml",
+            "app": {"service": "app", "port": 8000, "health": path, "ready": "/r"},
+            "frontend": {"service": "frontend", "port": 80},
+        }
+    }
+    with pytest.raises(StepFailed) as raised:
+        render(product(stacks=stacks), fetched.passport, None)
+    reason = raised.value.reason
+    assert (reason.code, dict(reason.params)) == (
+        "path-unsafe",
+        {"route": "api", "path": path},
+    )

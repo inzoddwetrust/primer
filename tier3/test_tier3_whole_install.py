@@ -579,7 +579,13 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
     assert front.startswith("200"), front
     assert "strict-transport-security: max-age=31536000" in front_headers
     assert "x-content-type-options: nosniff" in front_headers
-    api, _ = _curl(tmp_path, "https://localhost/health", API)
+    # /health and /ready are not seen from outside (protocol 9.3, FIX 3 of
+    # DM-55): nginx answers 404 itself -- the app answers /health 200 -- and
+    # the rest of the route is proxied (FastAPI's /openapi.json of the blank)
+    for closed in ("/health", "/ready"):
+        api, _ = _curl(tmp_path, f"https://localhost{closed}", API)
+        assert api.startswith("404"), (closed, api)
+    api, _ = _curl(tmp_path, "https://localhost/openapi.json", API)
     assert api.startswith("200"), api
     plain, _ = _curl(tmp_path, "http://localhost/", FRONTEND)
     assert plain == f"301 https://{FRONTEND}/", plain

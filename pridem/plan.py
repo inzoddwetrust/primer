@@ -73,6 +73,7 @@ from pridem.events import (
     StepRecord,
     StepStarted,
     after_failure,
+    cut_ctx,
     role_skip,
 )
 from pridem.report.catalog import ENGLISH, Catalog, with_steps
@@ -276,8 +277,28 @@ class Plan:
         return outcome
 
     def _context(self, phase: Phase, stack: str, step: Step) -> StepContext:
+        pieces: set[Stream] = set()  # streams in the middle of a line cut in pieces
+
         def on_line(stream: Stream, line: str, continued: bool) -> None:
             before = self._run.interrupt
+            # KNOWN CEILING: a line longer than the runner's LINE_LIMIT.
+            # 1. mechanics: it arrives in pieces, none of them JSON, so its ctx
+            #    is not measured and not cut (protocol 9.4: over 8 KB, cut);
+            #    its secrets are still cleaned by the sinks, across the pieces.
+            # 2. status: acknowledged by design.
+            # 3. task: none -- no stack writes such a line yet.
+            # 4. trigger: a journal holding a log line of a stack, with ctx,
+            #    longer than LINE_LIMIT.
+            # 5. agreed fix: join the pieces of a line here up to a bound
+            #    before cut_ctx, and pass the rest as pieces.
+            # 6. rejected: keeping the head of a cut ctx -- cut before the
+            #    sinks clean secrets, it could carry a part of one.
+            if continued:
+                pieces.add(stream)
+            elif stream in pieces:
+                pieces.discard(stream)  # the last piece of a long line
+            else:
+                line = cut_ctx(line)
             self._emit(LogLine(phase, stack, step.name, stream, line, continued))
             if self._run.interrupt is not None and self._run.interrupt is not before:
                 raise self._run.interrupt  # the runner stops the command's group

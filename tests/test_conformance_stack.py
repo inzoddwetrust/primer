@@ -25,7 +25,7 @@ from pridem.conformance.stack import (
     problems_param,
     size_bytes,
 )
-from pridem.events import Json
+from pridem.events import FREE_LIMIT, Json, free_size
 from pridem.runner import FakeCall, FakeRunner, Stream, SubprocessRunner
 from pridem.stacks.schema import PRIMER_YAML, Product
 from pridem.steps.base import StepContext
@@ -381,7 +381,9 @@ def test_ci_runs_every_conformance_selftest() -> None:
 
 
 def test_an_eighth_log_field_is_red_by_its_name() -> None:
-    """The seven fields of TZ 11 item 5 are exact: an extra one alone is red."""
+    """The seven fields of protocol 9.4 and the optional ``ctx`` are all a line
+    may have: an extra one alone is red (until FIX 3 of DM-55 the seven were
+    exact; ``ctx`` is allowed since)."""
     line = GOOD.logs[0][:-1] + ', "trace": "t"}'
     assert json.loads(line)["trace"] == "t"
     [problem] = check_stack(stack(), "blank", replace(GOOD, logs=[GOOD.logs[0], line]))
@@ -389,3 +391,94 @@ def test_an_eighth_log_field_is_red_by_its_name() -> None:
         "log-fields",
         {"line": 2, "missing": [], "extra": ["trace"]},
     )
+
+
+def _found(
+    seen: Observed, *, migrate: bool = True
+) -> list[tuple[str, dict[str, Json]]]:
+    return [
+        (problem.code, dict(problem.params))
+        for problem in check_stack(stack(migrate=migrate), "blank", seen)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("details", "problem"),
+    [
+        ("<absent>", None),
+        ({}, None),
+        ({"queue": {"depth": 3}, "mail": "error"}, None),
+        ("x" * 10, "type"),
+        ([1, 2], "type"),
+        (None, "type"),
+    ],
+)
+def test_health_details_is_an_optional_object(
+    details: object, problem: str | None
+) -> None:
+    """Protocol 9.1 (FIX 3): ``details`` may be there, as an object; the eleven
+    fields stay what they were."""
+    body = health() if details == "<absent>" else health(details=details)
+    found = _found(replace(GOOD, health=body))
+    expected: list[tuple[str, dict[str, Json]]] = (
+        []
+        if problem is None
+        else [("health-field", {"field": "details", "problem": problem})]
+    )
+    assert found == expected
+
+
+def test_health_details_is_at_most_8_kb_of_compact_json() -> None:
+    """``FREE_LIMIT`` bytes of the compact UTF-8 JSON: 8192 is green, one
+    more is ``size``; a non-ASCII character counts its UTF-8 bytes."""
+    frame = len(json.dumps({"x": ""}, separators=(",", ":")))
+    at: dict[str, Json] = {"x": "y" * (FREE_LIMIT - frame)}
+    assert free_size(at) == FREE_LIMIT
+    assert _found(replace(GOOD, health=health(details=at))) == []
+    over: dict[str, Json] = {
+        "x": "y" * (FREE_LIMIT - frame - 1) + "ж"
+    }  # one character, two bytes
+    assert free_size(over) == FREE_LIMIT + 1
+    assert _found(replace(GOOD, health=health(details=over))) == [
+        ("health-field", {"field": "details", "problem": "size"})
+    ]
+
+
+def test_a_twelfth_health_field_but_details_is_extra() -> None:
+    assert _found(replace(GOOD, health=health(trace="t"))) == [
+        ("health-field", {"field": "trace", "problem": "extra"})
+    ]
+
+
+def test_a_degraded_stack_is_not_red_for_a_null_head() -> None:
+    """Protocol 9.5 (FIX 3): a degraded stack's head is not read -- degraded
+    and ``alembic_head: null`` is ``health-degraded`` alone; ``ok`` and null
+    of a stack with migrations is ``alembic-head-null`` as before."""
+    degraded = health(status="degraded", checks={"db": "error"}, alembic_head=None)
+    assert _found(replace(GOOD, health=degraded)) == [
+        ("health-degraded", {"checks": ["db"]})
+    ]
+    assert _found(replace(GOOD, health=health(alembic_head=None))) == [
+        ("alembic-head-null", {})
+    ]
+
+
+@pytest.mark.parametrize(
+    ("ctx", "red"),
+    [
+        ({}, False),
+        ({"job": "7", "sqlstate": "23505"}, False),
+        ("job 7", True),
+        ([1], True),
+        (None, True),
+    ],
+)
+def test_a_log_line_may_carry_ctx_as_an_object(ctx: object, red: bool) -> None:
+    """Protocol 9.4 (FIX 3): ``ctx`` beside the seven fields, an object of any
+    size (over ``FREE_LIMIT`` the machine cuts it itself); any other eighth
+    field is red as before."""
+    line = json.dumps({**json.loads(GOOD.logs[0]), "ctx": ctx})
+    found = _found(replace(GOOD, logs=[GOOD.logs[0], line]))
+    assert found == ([("log-ctx", {"line": 2})] if red else [])
+    big = json.dumps({**json.loads(GOOD.logs[0]), "ctx": {"x": "y" * FREE_LIMIT}})
+    assert _found(replace(GOOD, logs=[big])) == []

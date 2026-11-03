@@ -8,7 +8,8 @@ as an entry without ``published``. The documents here are in that form; the
 blank's is the measured output (``fixtures/compose/blank-config.json``, its
 paths ``/r/...`` in the release). Since the FIX it is a list of what a stack
 may use: every group of keys off the list has a red case, the keys on it a
-green one; ``env_file`` is read from ``config --no-interpolate``.
+green one; ``env_file`` -- refused in any form since FIX 3 -- is read from
+``config --no-interpolate``.
 """
 
 import json
@@ -45,7 +46,7 @@ from pridem.steps.compose import (
     TOP_VOLUME_KEYS,
     VOLUME_KEYS,
     ComposeStack,
-    env_files_out_of_release,
+    env_files,
     forbidden,
 )
 
@@ -180,6 +181,10 @@ def test_every_key_of_the_list_is_green(tmp_path: Path) -> None:
         "labels": {"a": "b"},
         "user": "1000",
         "working_dir": "/app",
+        # protocol 3.3 (FIX 3): as config prints them -- the period as written,
+        # the size in bytes
+        "stop_grace_period": "1m30s",
+        "shm_size": "268435456",
     }
     assert set(body) == SERVICE_KEYS
     assert forbidden(cs, {"services": {"app": body}}) == []
@@ -222,6 +227,7 @@ BUILD_OFF = [
     "cache_from",
     "platforms",
     "tags",
+    "args",  # protocol 3.3: the build arguments are the machine's (FIX 3)
 ]
 
 
@@ -233,7 +239,7 @@ def test_a_service_key_off_the_list_is_named(tmp_path: Path, key: str) -> None:
 @pytest.mark.parametrize("key", BUILD_OFF)
 def test_a_build_key_off_the_list_is_named(tmp_path: Path, key: str) -> None:
     cs = released(tmp_path)
-    build: dict[str, Json] = {"context": str(cs.release), "args": {"A": "1"}, key: "x"}
+    build: dict[str, Json] = {"context": str(cs.release), key: "x"}
     assert forbidden(cs, app(build=build)) == [f"app: build.{key}"]
 
 
@@ -374,7 +380,12 @@ def test_every_top_level_key_of_the_list_is_green(tmp_path: Path) -> None:
         "driver": "local",
         "driver_opts": {"type": "none", "o": "bind", "device": inside},
     }
-    network: dict[str, Json] = {"name": "blank_lan", "driver": "bridge", "ipam": {}}
+    network: dict[str, Json] = {
+        "name": "blank_lan",
+        "driver": "bridge",
+        "ipam": {},
+        "internal": True,  # protocol 3.5; config prints it only when true
+    }
     document = _top(
         name="blank",
         volumes={"files": volume, "pgdata": {"name": "blank_pgdata"}},
@@ -429,7 +440,6 @@ def test_a_top_level_volume_key_off_the_list_is_named(
         ("external", True),
         ("labels", {"a": "b"}),
         ("driver_opts", {"parent": "eth0"}),
-        ("internal", True),
         ("attachable", True),
         ("enable_ipv6", True),
     ],
@@ -564,10 +574,12 @@ def test_the_dispatchers_macvlan_and_plugin_document_is_red(tmp_path: Path) -> N
     ]
 
 
-def test_an_env_file_is_read_from_the_release_only(tmp_path: Path) -> None:
-    """``config`` inlines ``env_file``; ``config --no-interpolate`` still names
-    it, absolute and with ``extends`` resolved (measured): a path out of the
-    release, or one that still holds a variable, is named."""
+def test_a_service_has_no_env_file_in_any_form(tmp_path: Path) -> None:
+    """Protocol 3.4 (FIX 3): values come from the machine alone, so any
+    ``env_file`` is named -- in the release, out of it, with a variable, short
+    or long form. Until FIX 3 one in the release was green.
+    ``config --no-interpolate`` still names it (measured); the pair: a service
+    without one."""
     cs = released(tmp_path)
     inside = str(cs.release / "app.env")
     uninterpolated: dict[str, Json] = {
@@ -575,17 +587,20 @@ def test_an_env_file_is_read_from_the_release_only(tmp_path: Path) -> None:
             "app": {"env_file": [{"path": inside, "required": True}]},
             "ext": {"env_file": [{"path": "/etc/environment", "required": True}]},
             "var": {"env_file": [{"path": f"{cs.release}/${{WHERE}}.env"}]},
+            "short": {"env_file": inside},
             "postgres": {"image": "postgres:16"},
         }
     }
-    assert env_files_out_of_release(cs, uninterpolated) == [
-        "ext: env_file=/etc/environment",
-        f"var: env_file={cs.release}/${{WHERE}}.env",
+    assert env_files(uninterpolated) == [
+        "app: env_file",
+        "ext: env_file",
+        "short: env_file",
+        "var: env_file",
     ]
-    assert env_files_out_of_release(cs, {"services": {"app": {"image": "a"}}}) == []
+    assert env_files({"services": {"app": {"image": "a"}}}) == []
 
 
-def test_build_names_an_env_file_out_of_the_release_before_anything(
+def test_build_names_an_env_file_before_anything(
     tmp_path: Path,
 ) -> None:
     cs = released(tmp_path)
@@ -595,7 +610,7 @@ def test_build_names_an_env_file_out_of_the_release_before_anything(
         outcome, _ = run([build(tmp_path)], runner)
     assert outcome.steps[0].reason == Code(
         "build:compose-forbidden",
-        {"stack": ENTRY, "found": ["app: env_file=/root/.env"]},
+        {"stack": ENTRY, "found": ["app: env_file"]},
     )
     assert not cs.override.exists()
 

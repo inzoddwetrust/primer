@@ -22,6 +22,12 @@ the secret in its query, so it is never in the access log: its location has
 ``access_log off`` on 443 and, for a link opened over http, on port 80, where
 it is redirected to https.
 
+``/health`` and ``/ready`` are not seen from outside (protocol 9.3): a route
+to an ``app`` answers 404 itself on that app's ``health`` and ``ready`` paths,
+before anything is proxied (``location =``); the machine reads them on the
+network ``pridem``. A path that could read as more than a path in the config
+(``path-unsafe``) is refused before it is rendered.
+
 ``normalized`` is the config as nginx would read it -- comments, empty lines
 and runs of blanks are not drift; a domain, a header, an order is.
 """
@@ -44,6 +50,7 @@ PREVIEW_COOKIE = "pridem_preview"
 HSTS = "max-age=31536000; includeSubDomains"
 GZIP_TYPES = "text/css application/javascript application/json image/svg+xml text/plain"
 _UNSAFE = re.compile(r'["$\\\n\r]')
+_PATH = re.compile(r"/[A-Za-z0-9._~/-]*")
 _COMMENT = re.compile(r"#.*$")
 _BLANKS = re.compile(r"\s+")
 
@@ -55,6 +62,8 @@ class Target:
     entry: str
     service: str
     port: int
+    closed: tuple[str, ...] = ()
+    """Paths nginx answers 404 itself: ``health`` and ``ready`` of an ``app``."""
 
     @property
     def alias(self) -> str:
@@ -69,9 +78,12 @@ def alias(entry: str, service: str) -> str:
 def _declared(product: Product) -> list[Target]:
     found: list[Target] = []
     for entry, stage in product.stacks.items():
-        for part in (stage.app, stage.frontend):
-            if part is not None:
-                found.append(Target(entry, part.service, part.port))
+        if stage.app is not None:
+            app = stage.app
+            paths = tuple(dict.fromkeys((app.health, app.ready)))  # one if the same
+            found.append(Target(entry, app.service, app.port, paths))
+        if stage.frontend is not None:
+            found.append(Target(entry, stage.frontend.service, stage.frontend.port))
     return found
 
 
@@ -100,6 +112,18 @@ def routed_services(product: Product, entry: str) -> list[str]:
     return sorted({t.service for t in targets(product).values() if t.entry == entry})
 
 
+def _closed(name: str, target: Target) -> list[str]:
+    """The ``location`` of every path of ``target`` nginx answers itself: a
+    path is written into the config as it is, so one that could read as more
+    than a path is refused."""
+    lines: list[str] = []
+    for path in target.closed:
+        if not _PATH.fullmatch(path):
+            raise StepFailed("path-unsafe", {"route": name, "path": path})
+        lines.append(f"  location = {path} {{ return 404; }}")
+    return lines
+
+
 def _quoted(name: str, value: str) -> str:
     if _UNSAFE.search(value):
         raise StepFailed("header-unsafe", {"header": name})
@@ -121,6 +145,7 @@ def _headers(product: Product, preview: bool) -> list[str]:
 
 
 def _server(
+    name: str,
     domain: str,
     route: Route,
     target: Target,
@@ -152,6 +177,9 @@ def _server(
             "    return 302 /;",
             "  }",
         ]
+    # what the machine reads of the app it reads on the network pridem, never
+    # here (protocol 9.3); an exact location wins over the prefix / in nginx
+    lines += _closed(name, target)
     lines += ["  location / {"]
     if secret is not None:
         lines.append(
@@ -212,7 +240,7 @@ def render(product: Product, passport: Passport, secret: str | None) -> str:
         domain = passport.domains.get(name)
         if domain is None:
             raise StepFailed("domain-missing", {"route": name})
-        lines += _server(domain, route, found[name], headers, secret)
+        lines += _server(name, domain, route, found[name], headers, secret)
     return "\n".join(lines) + "\n"
 
 

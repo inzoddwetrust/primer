@@ -3,14 +3,20 @@
 After ``up`` the machine reads what the stack's application says of itself
 and checks it, for every entry of ``stacks`` with an ``app``:
 
-- ``GET <app.health>``: exactly the eleven fields of TZ 11 item 4, each of its
-  type; ``status: degraded`` is red, and so is ``alembic_head: null`` of a
-  stack that declares ``migrate`` (a stack without a database has no head);
+- ``GET <app.health>``: the eleven fields of protocol 9.1, each of its type,
+  and no other but the optional ``details`` -- an object of at most
+  ``FREE_LIMIT`` bytes; ``status: degraded`` is red, and so is ``alembic_head:
+  null`` of a stack that declares ``migrate`` and is not ``degraded`` (a stack
+  without a database has no head; a degraded one's head is not read, protocol
+  9.5);
 - ``GET <app.ready>``: 200;
 - the last ``LOG_TAIL`` lines of the ``app`` container, read after the
-  ``/health`` request: every one a JSON object with exactly the seven fields
-  of TZ 11 item 5 (owner's decision of 25.10: only ``app``; images of others --
-  nginx, postgres -- write no JSON by construction);
+  ``/health`` request: every one a JSON object with the seven fields of
+  protocol 9.4 and no other but the optional ``ctx`` -- an object of any size:
+  over ``FREE_LIMIT`` the machine cuts it where it writes the line
+  (``events.cut_ctx``), so its size is no conformance (owner's decision of
+  25.10: only ``app``; images of others -- nginx, postgres -- write no JSON by
+  construction);
 - every route to ``<app.service>:<app.port>`` with ``max_body``: equal, in
   bytes, to ``limits.max_upload_mb`` MiB (nginx sizes: ``k``, ``m``, ``g`` are
   binary multiples, no suffix is bytes);
@@ -41,7 +47,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from pridem.events import Json
+from pridem.events import FREE_LIMIT, Json, free_size
 from pridem.runner import Stream
 from pridem.stacks.schema import PRIMER_YAML, Product, Service
 from pridem.steps.base import StepContext
@@ -59,7 +65,9 @@ HEALTH_FIELDS = (
     "edition",
     "modules",
 )
+HEALTH_OPTIONAL = "details"
 LOG_FIELDS = ("ts", "level", "service", "release", "request_id", "event", "msg")
+LOG_OPTIONAL = "ctx"
 LOG_TAIL = 50
 HTTP_TIMEOUT_S = 5.0
 COMMAND_TIMEOUT_S = 120
@@ -152,7 +160,7 @@ def _type_ok(name: str, value: Json) -> bool:
 
 
 def check_health(body: bytes | None, *, migrate: bool) -> list[Problem]:
-    """``/health`` against the form of TZ 11 item 4."""
+    """``/health`` against the form of protocol 9.1."""
     if body is None:
         return [Problem("health-unreachable")]
     try:
@@ -168,8 +176,18 @@ def check_health(body: bytes | None, *, migrate: bool) -> list[Problem]:
         elif not _type_ok(name, document[name]):
             out.append(Problem("health-field", {"field": name, "problem": "type"}))
     for name in document:
-        if name not in HEALTH_FIELDS:
+        if name not in (*HEALTH_FIELDS, HEALTH_OPTIONAL):
             out.append(Problem("health-field", {"field": name, "problem": "extra"}))
+    if HEALTH_OPTIONAL in document:
+        details = document[HEALTH_OPTIONAL]
+        if not isinstance(details, dict):
+            out.append(
+                Problem("health-field", {"field": HEALTH_OPTIONAL, "problem": "type"})
+            )
+        elif free_size(details) > FREE_LIMIT:
+            out.append(
+                Problem("health-field", {"field": HEALTH_OPTIONAL, "problem": "size"})
+            )
     limits = document.get("limits")
     if isinstance(limits, dict):
         upload = limits.get("max_upload_mb")
@@ -190,7 +208,9 @@ def check_health(body: bytes | None, *, migrate: bool) -> list[Problem]:
     if document.get("status") == "degraded" and isinstance(checks, dict):
         failing = sorted(str(name) for name, state in checks.items() if state != "ok")
         out.append(Problem("health-degraded", {"checks": list[Json](failing)}))
-    if migrate and "alembic_head" in document and document["alembic_head"] is None:
+    degraded = document.get("status") == "degraded"
+    head = document.get("alembic_head", "<absent>")
+    if migrate and head is None and not degraded:  # degraded: its head is not read
         out.append(Problem("alembic-head-null"))
     return out
 
@@ -204,7 +224,8 @@ def check_ready(status: int | None) -> list[Problem]:
 
 
 def check_logs(lines: Sequence[str]) -> list[Problem]:
-    """Every line a JSON object with exactly the fields of TZ 11 item 5."""
+    """Every line a JSON object with the fields of protocol 9.4, ``ctx`` an
+    object if it is there."""
     if not lines:
         return [Problem("logs-empty")]
     out: list[Problem] = []
@@ -218,7 +239,11 @@ def check_logs(lines: Sequence[str]) -> list[Problem]:
             out.append(Problem("log-not-json", {"line": number}))
             continue
         missing = [name for name in LOG_FIELDS if name not in record]
-        extra = sorted(str(name) for name in record if name not in LOG_FIELDS)
+        extra = sorted(
+            str(name) for name in record if name not in (*LOG_FIELDS, LOG_OPTIONAL)
+        )
+        if LOG_OPTIONAL in record and not isinstance(record[LOG_OPTIONAL], dict):
+            out.append(Problem("log-ctx", {"line": number}))
         if missing or extra:
             out.append(
                 Problem(
@@ -527,8 +552,14 @@ def _planted() -> list[tuple[str, Callable[[], list[Problem]]]]:
             "log-fields",
             with_(replace(good, logs=[_GOOD_LOG.replace('"request_id"', '"rid"')])),
         ),
-        # an eighth field alone: the seven are exact, an extra one is red too
+        # an eighth field alone that is not ctx: an extra one is red too
         ("log-fields", with_(replace(good, logs=[_GOOD_LOG[:-1] + ', "trace": "t"}']))),
+        ("log-ctx", with_(replace(good, logs=[_GOOD_LOG[:-1] + ', "ctx": "job 7"}']))),
+        ("health-field", with_(replace(good, health=_health(details=[1])))),
+        (
+            "health-field",
+            with_(replace(good, health=_health(details={"x": "y" * FREE_LIMIT}))),
+        ),
         ("max-body", with_(good, "2M")),
         ("max-body", with_(good, "1000k")),
         (

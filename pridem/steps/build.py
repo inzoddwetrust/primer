@@ -40,7 +40,7 @@ from pridem.steps.compose import (
     ComposeStack,
     built_services,
     config,
-    env_files_out_of_release,
+    env_files,
     forbidden,
     image_of,
     out,
@@ -135,7 +135,7 @@ class Build(Step):
 
     def check(self, ctx: StepContext) -> CheckResult:
         uninterpolated = config(ctx, self.compose, interpolate=False)
-        outside = env_files_out_of_release(self.compose, uninterpolated)
+        outside = env_files(uninterpolated)
         built, text = self._rendered(ctx, outside)
         params: dict[str, Json] = {
             "stack": self.compose.entry,

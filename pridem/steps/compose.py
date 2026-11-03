@@ -28,24 +28,24 @@ product's file and carries what the machine adds:
 top-level ``x-`` keys are not services and are not read). It is a list of what
 a stack may use, not of what it may not (the owner's decision: anything else
 and the instance does not start; contract 3 rules 9, 12; TZ 7.3): a service
-has only the keys of ``SERVICE_KEYS``, its ``build`` only those of
-``BUILD_KEYS`` and its ``volumes`` are named volumes or binds of the release
-(``realpath``: a symlink of the release counts where it leads; ``docker.sock``
-is named as such). A port of the host is one its stack declares in
-``host.ports`` (a product declares none). The top level is a list too: only
-the keys of ``TOP_KEYS`` (``x-`` ones are not read); a volume has only those
-of ``TOP_VOLUME_KEYS`` -- its ``driver`` is ``local`` or none and its
-``driver_opts`` are exactly a bind of the release -- and a network only those
-of ``TOP_NETWORK_KEYS`` -- its ``driver`` is ``bridge`` or none and its
-``ipam`` the empty one ``config`` prints itself. The ``name`` of either is
-the one ``config`` gives it under the machine's project (``<project>_<key>``):
-another name takes another stack's object past ``-p`` and the labels gc goes
-by. So ``external`` is refused by the list, and so are ``labels``, driver
-options of a network and every driver but these two. A package mounted into a
-service the compose does not have is refused the same way. ``config``
-inlines ``env_file`` into ``environment``; its paths are read from ``config
---no-interpolate`` (``env_files_out_of_release``) and must be in the release
-too.
+has only the keys of ``SERVICE_KEYS`` (protocol 3.3), its ``build`` only those
+of ``BUILD_KEYS`` and its ``volumes`` are named volumes or binds of the
+release (``realpath``: a symlink of the release counts where it leads;
+``docker.sock`` is named as such). A port of the host is one its stack
+declares in ``host.ports`` (a product declares none). The top level is a list
+too: only the keys of ``TOP_KEYS`` (``x-`` ones are not read); a volume has
+only those of ``TOP_VOLUME_KEYS`` -- its ``driver`` is ``local`` or none and
+its ``driver_opts`` are exactly a bind of the release -- and a network only
+those of ``TOP_NETWORK_KEYS`` -- its ``driver`` is ``bridge`` or none, its
+``ipam`` the empty one ``config`` prints itself, and it may be ``internal``.
+The ``name`` of either is the one ``config`` gives it under the machine's
+project (``<project>_<key>``): another name takes another stack's object past
+``-p`` and the labels gc goes by. So ``external`` is refused by the list, and
+so are ``labels``, driver options of a network and every driver but these two.
+A package mounted into a service the compose does not have is refused the same
+way. A service has no ``env_file`` (protocol 3.4: values come from the machine
+alone); ``config`` inlines it into ``environment``, so it is read from
+``config --no-interpolate`` (``env_files``), where it is still named.
 """
 
 import json
@@ -207,12 +207,16 @@ SERVICE_KEYS = frozenset(
         "labels",
         "user",
         "working_dir",
+        "stop_grace_period",
+        "shm_size",
     }
 )
 """What a service may have. ``config`` adds ``command``, ``entrypoint`` (null)
 and ``networks`` (``default``) to every service itself -- all on this list."""
-BUILD_KEYS = frozenset({"context", "dockerfile", "target", "args"})
-"""What a ``build`` may have; ``config`` adds ``dockerfile`` itself."""
+BUILD_KEYS = frozenset({"context", "dockerfile", "target"})
+"""What a ``build`` may have; ``config`` adds ``dockerfile`` itself. Build
+arguments are the machine's (``PRIMER_RELEASE``, ``PRIMER_COMMIT``,
+``PRIMER_EDITION``; protocol 3.4): ``args`` is off the list."""
 VOLUME_KEYS = frozenset({"type", "source", "target", "read_only", "volume", "bind"})
 """What an entry of ``volumes`` may have; ``config`` adds ``volume: {}`` to a
 named volume and ``bind: {create_host_path: true}`` to a short bind itself."""
@@ -225,9 +229,9 @@ them."""
 TOP_VOLUME_KEYS = frozenset({"name", "driver", "driver_opts"})
 """What a top-level volume may have; ``config`` gives one ``{}`` its
 ``name``."""
-TOP_NETWORK_KEYS = frozenset({"name", "driver", "ipam"})
+TOP_NETWORK_KEYS = frozenset({"name", "driver", "ipam", "internal"})
 """What a top-level network may have; ``config`` gives every one its ``name``
-and ``ipam: {}``."""
+and ``ipam: {}``, and prints ``internal`` only when it is ``true``."""
 BIND_OPTIONS = frozenset({"type", "o", "device"})
 
 
@@ -366,20 +370,16 @@ def forbidden(
     return sorted(found)
 
 
-def env_files_out_of_release(
-    compose: ComposeStack, uninterpolated: Mapping[str, Json]
-) -> list[str]:
-    """The ``env_file`` paths of ``config --no-interpolate`` (where they are
-    still named, absolute, ``extends`` resolved) that are not in the release; a
-    path that still holds a variable cannot be checked and is one of them."""
-    found: list[str] = []
-    for name, body in _mapping(uninterpolated.get("services")).items():
-        for entry in as_list(_mapping(body).get("env_file")):
-            path = _mapping(entry).get("path") if isinstance(entry, dict) else entry
-            text = str(path)
-            if "$" in text or not _within(text, compose.release):
-                found.append(f"{name}: env_file={text}")
-    return sorted(found)
+def env_files(uninterpolated: Mapping[str, Json]) -> list[str]:
+    """Every service of ``config --no-interpolate`` (the only output that still
+    names ``env_file``; ``config`` inlines it into ``environment``) with an
+    ``env_file``: values come from the machine alone (protocol 3.4)."""
+    services = _mapping(uninterpolated.get("services"))
+    return sorted(
+        f"{name}: env_file"
+        for name, body in services.items()
+        if "env_file" in _mapping(body)
+    )
 
 
 def built_services(document: Mapping[str, Json]) -> list[str]:

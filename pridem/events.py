@@ -98,13 +98,55 @@ NO_FACT = Code("no-fact")
 def _forms(secret: str) -> set[str]:
     """The exact forms of ``secret`` that are cleaned (contract 2 rule 2).
 
-    The value whole, at any length; the value without whitespace at its edges
-    and each of its lines (a PEM, a YAML block) when at least
-    ``SECRET_MIN_LENGTH`` long. A shorter derived form is left alone, as the
-    owner accepted (the short tail of a PEM body): it would match ordinary text.
+    The value whole, at any length; the value as a JSON string writes it,
+    without its quotes, both with ``\\uXXXX`` for every non-ASCII character
+    and without (a stack's JSON log line -- its ``ctx`` too -- escapes a
+    quote, a backslash or a control character, protocol 9.4); the value
+    without whitespace at its edges and each of its lines (a PEM, a YAML
+    block) when at least ``SECRET_MIN_LENGTH`` long. A shorter derived form is
+    left alone, as the owner accepted (the short tail of a PEM body): it would
+    match ordinary text.
     """
     derived = {secret.strip(), *secret.splitlines()}
-    return {secret} | {form for form in derived if len(form) >= SECRET_MIN_LENGTH}
+    escaped = {json.dumps(secret, ensure_ascii=ascii)[1:-1] for ascii in (True, False)}
+    long = {form for form in derived if len(form) >= SECRET_MIN_LENGTH}
+    return {secret} | escaped | long
+
+
+FREE_LIMIT = 8192
+"""The most a stack's free object may take -- ``details`` of ``/health``,
+``ctx`` of a log line (protocol 9.1, 9.4): bytes of its compact JSON in UTF-8
+(``free_size``)."""
+CUT_MARK = "pridem_cut_bytes"
+"""What a cut ``ctx`` becomes: ``{CUT_MARK: <its size>}``."""
+
+
+def free_size(value: Json) -> int:
+    """The bytes of ``value`` as compact JSON in UTF-8."""
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return len(text.encode("utf-8"))
+
+
+def cut_ctx(line: str) -> str:
+    """``line`` with its ``ctx`` cut when it is over ``FREE_LIMIT`` (protocol
+    9.4): a JSON object of a stack's log keeps its other fields, and its
+    ``ctx`` -- whatever it is -- becomes ``{CUT_MARK: <size>}``. Nothing of the
+    cut ``ctx`` is kept: a kept head would be cut before the secrets of the
+    line are cleaned (the sinks clean the whole line, ``ctx`` with it) and could
+    carry a part of one. Any other line is returned as it came."""
+    if not line.lstrip().startswith("{"):
+        return line
+    try:
+        record = json.loads(line)
+    except (json.JSONDecodeError, RecursionError):
+        return line  # not a log line of a stack: it passes as it is
+    if not isinstance(record, dict) or "ctx" not in record:
+        return line
+    size = free_size(record["ctx"])
+    if size <= FREE_LIMIT:
+        return line
+    record["ctx"] = {CUT_MARK: size}
+    return json.dumps(record, ensure_ascii=False, separators=(",", ":"))
 
 
 class ShortSecret(ValueError):
