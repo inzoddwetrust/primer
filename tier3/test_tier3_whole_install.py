@@ -48,6 +48,7 @@ name): docker is on the runner only after the host steps.
 import json
 import os
 import shutil
+import warnings
 from pathlib import Path
 
 import pytest
@@ -964,9 +965,32 @@ def _body(path: str, host: str) -> str:
     return "\n".join(lines)
 
 
-def _frontend_images() -> dict[str, str]:
-    """The images of the blank's frontend by their key: ``<edition> <package>``."""
-    ids = _stdout(
+def _image_labels(image: str) -> dict[str, str]:
+    [text] = _stdout(
+        ["docker", "image", "inspect", "-f", "{{json .Config.Labels}}", image]
+    )
+    labels = json.loads(text)
+    assert isinstance(labels, dict)
+    return {str(k): str(v) for k, v in labels.items()}
+
+
+def _report_old_image(image: str) -> None:
+    """Diagnostic, no colour (DM-61 FIX 3): once compose moved the tag of
+    frontend to another image, is the old one still on the box, and does
+    ``docker image ls`` -- what ``image_of`` reads -- still list it? The answer
+    goes to the report: it decides whether the KNOWN CEILING of ``gc`` holds."""
+    alive = (
+        SubprocessRunner()
+        .run(
+            ["docker", "image", "inspect", image],
+            expect=(0, 1),
+            timeout=60,
+            on_line=lambda stream, line, cut: None,
+        )
+        .code
+        == 0
+    )
+    listed = image in _stdout(
         [
             "docker",
             "image",
@@ -975,20 +999,14 @@ def _frontend_images() -> dict[str, str]:
             "--no-trunc",
             "--filter",
             "label=pridem.service=frontend",
-            "--filter",
-            "label=pridem.stack=blank",
-            "--filter",
-            "label=pridem.edition",
         ]
     )
-    found: dict[str, str] = {}
-    for image in sorted(set(ids)):
-        [text] = _stdout(
-            ["docker", "image", "inspect", "-f", "{{json .Config.Labels}}", image]
-        )
-        labels = json.loads(text)
-        found[f"{labels['pridem.edition']} {labels['pridem.package.skin']}"] = image
-    return found
+    warnings.warn(
+        f"DM-61 diagnostic: the old image {image} of frontend (edition core) "
+        f"after the build of edition full: inspect={'alive' if alive else 'gone'}, "
+        f"image ls={'listed' if listed else 'not listed'}",
+        stacklevel=2,
+    )
 
 
 def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
@@ -1071,7 +1089,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     assert (red.stack, red.name) == ("blank", "build"), bad.steps
     assert _body("/skin/skin.css", FRONTEND) == "two"
 
-    # edition full, version 1.1.0: another image beside core's
+    # edition full, version 1.1.0: an image of its own, not core's
     full, printed = _install(
         copy, passport(5, "1.1.0", "full"), mirror, commit, "deploy"
     )
@@ -1079,9 +1097,28 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     assert _body("/edition.txt", FRONTEND) == "full"
     # the pair on the backend: EDITION of the passport reached app
     assert _app_health()["edition"] == "full"
-    found = _frontend_images()
-    assert {"core skin@1.1.0", "full skin@1.1.0"} <= set(found), found
-    assert found["core skin@1.1.0"] != found["full skin@1.1.0"]
+    facts = {(s.stack, s.name): s.verify or {} for s in full.steps}
+    built = facts[("blank", "build")]["images"]
+    assert isinstance(built, dict)
+    assert built["frontend"] != again["frontend"], (again, built)
+    labels = _image_labels(str(built["frontend"]))
+    assert (labels["pridem.edition"], labels["pridem.package.skin"]) == (
+        "full",
+        "skin@1.1.0",
+    ), labels
+    _report_old_image(str(again["frontend"]))
+
+    # back to edition core, version 1.1.0: green, core again on both sides --
+    # from a living image or a build from the cache, whichever docker keeps
+    back, printed = _install(copy, passport(6, "1.1.0"), mirror, commit, "deploy")
+    assert back.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in back.steps}
+    assert facts[("blank", "build")]["keys"] == {
+        "frontend": {"pridem.edition": "core", "pridem.package.skin": "skin@1.1.0"}
+    }, facts[("blank", "build")]
+    assert _body("/edition.txt", FRONTEND) == "core"
+    assert _body("/skin/skin.css", FRONTEND) == "two"
+    assert _app_health()["edition"] == "core"
     # doctor on that box: nothing to do
     out = _run(
         [
@@ -1089,7 +1126,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
             "-c",
             PLAN,
             str(copy),
-            str(passport(5, "1.1.0", "full")),
+            str(passport(6, "1.1.0")),
             str(mirror),
             commit,
             "doctor",
