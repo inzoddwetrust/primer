@@ -64,6 +64,27 @@
       "title": "Asked",
       "type": "object"
     },
+    "BuildPlace": {
+      "additionalProperties": false,
+      "description": "Where ``apply: build`` puts a package: ``path`` inside the build context\nof ``service`` (rule 10, the owner's decision of 02.11).",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "service": {
+          "minLength": 1,
+          "title": "Service",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "path"
+      ],
+      "title": "BuildPlace",
+      "type": "object"
+    },
     "Dependency": {
       "additionalProperties": false,
       "properties": {
@@ -239,16 +260,34 @@
     },
     "Package": {
       "additionalProperties": false,
+      "description": "Checked as a whole by rule 10 in the rule layer: ``apply: runtime``\nmounts (``mount``, ``validate``), ``apply: build`` builds (``build``).",
       "properties": {
+        "apply": {
+          "default": "runtime",
+          "enum": [
+            "runtime",
+            "build"
+          ],
+          "title": "Apply",
+          "type": "string"
+        },
+        "build": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BuildPlace"
+          },
+          "title": "Build",
+          "type": "array"
+        },
         "contract": {
           "title": "Contract",
           "type": "string"
         },
         "mount": {
+          "default": [],
           "items": {
             "$ref": "#/$defs/Mount"
           },
-          "minItems": 1,
           "title": "Mount",
           "type": "array"
         },
@@ -259,9 +298,7 @@
         }
       },
       "required": [
-        "contract",
-        "validate",
-        "mount"
+        "contract"
       ],
       "title": "Package",
       "type": "object"

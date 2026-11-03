@@ -50,8 +50,15 @@ The ``name`` of either is the one ``config`` gives it under the machine's
 project (``<project>_<key>``): another name takes another stack's object past
 ``-p`` and the labels gc goes by. So ``external`` is refused by the list, and
 so are ``labels``, driver options of a network and every driver but these two.
-A package mounted into a service the compose does not have is refused the same
-way. A service has no ``env_file`` (protocol 3.4: values come from the machine
+A product's service is not named as the machine names things on the shared
+networks (``reserved``): ``pridem-*`` (the proxy's alias), the alias
+``<entry>-<service>`` of another entry of the product on ``pridem``, and
+``<dependency>-*`` -- another project's -- are ``<service>: name reserved``.
+Where a package goes is the product's, not one compose's (``package_places``):
+a ``mount`` or a ``build`` place whose service is in no compose of the
+product's stacks, or a ``build`` place on a service with no ``build``, is a
+finding for every stack; a service of another stack is none. A service has no
+``env_file`` (protocol 3.4: values come from the machine
 alone); ``config`` inlines it into ``environment``, so it is read from
 ``config --no-interpolate`` (``env_files``), where it is still named.
 """
@@ -381,16 +388,66 @@ def _service_problems(
     return found
 
 
-def forbidden(
-    compose: ComposeStack,
-    document: Mapping[str, Json],
-    mounts: Sequence[tuple[str, str]] = (),
+def reserved(
+    stack: Product | Service, entry: str
+) -> tuple[frozenset[str], tuple[str, ...]]:
+    """The names a product's service of ``entry`` may not have, exactly, and
+    the prefixes of names it may not have: the aliases of the product's other
+    entries on ``pridem`` (``<entry>-<app>`` and the services routes go to:
+    computed from ``primer.yaml`` alike in ``pridem check`` and on a box), and
+    ``pridem-`` and ``<dependency>-`` (another project's names). A service's
+    stack reserves nothing."""
+    if not isinstance(stack, Product):
+        return frozenset(), ()
+    names: set[str] = set()
+    for other, stage in stack.stacks.items():
+        if other == entry:
+            continue
+        if stage.app is not None:
+            names.add(alias(other, stage.app.service))
+        names |= {alias(other, name) for name in routed_services(stack, other)}
+    prefixes = ("pridem-", *(f"{name}-" for name in sorted(stack.dependencies)))
+    return frozenset(names), prefixes
+
+
+def package_places(
+    stack: Product | Service, documents: Mapping[str, Mapping[str, Json]]
 ) -> list[str]:
+    """Where the product's packages go, against the compose ``documents`` of
+    all its stack entries: a ``mount`` or ``build`` place whose service is in
+    none of them, or a ``build`` place on a service with no ``build``, one
+    ``<service>: packages.<slot>.<form> (...)`` each, sorted. A service of
+    another entry is no finding: a package belongs to the stack its service is
+    in. One function for ``build`` and ``pridem check``."""
+    if not isinstance(stack, Product):
+        return []
+    bodies: dict[str, dict[str, Json]] = {}
+    for document in documents.values():
+        for name, body in _mapping(document.get("services")).items():
+            bodies.setdefault(name, _mapping(body))
+    found: list[str] = []
+    for slot, package in sorted(stack.packages.items()):
+        for mount in package.mount:
+            if mount.service is not None and mount.service not in bodies:
+                found.append(
+                    f"{mount.service}: packages.{slot}.mount (no such service)"
+                )
+        for place in package.build:
+            body = bodies.get(place.service)
+            if body is None:
+                found.append(
+                    f"{place.service}: packages.{slot}.build (no such service)"
+                )
+            elif "build" not in body:
+                found.append(f"{place.service}: packages.{slot}.build (no build)")
+    return sorted(set(found))
+
+
+def forbidden(compose: ComposeStack, document: Mapping[str, Json]) -> list[str]:
     """What the compose ``document`` uses beyond the lists of what a stack may
     use -- of its services, of its top level and of the volumes and networks
-    there -- one ``<where>: <key>`` per finding, sorted (``compose: <key>`` for
-    the top level); ``mounts`` -- the packages' ``(slot, service)`` the machine
-    would bind."""
+    there -- and the names it may not give its services, one ``<where>: <key>``
+    per finding, sorted (``compose: <key>`` for the top level)."""
     release = compose.release
     stack = compose.stack
     declared: set[tuple[str, int]] = set()
@@ -408,9 +465,12 @@ def forbidden(
         found += _top_volume_problems(name, _mapping(body), project, release)
     for name, body in _mapping(document.get("networks")).items():
         found += _top_network_problems(name, _mapping(body), project)
-    for slot, service in mounts:
-        if service not in services:
-            found.append(f"{service}: packages.{slot}.mount (no such service)")
+    exact, prefixes = reserved(stack, compose.entry)
+    found += [
+        f"{name}: name reserved"
+        for name in services
+        if name in exact or name.startswith(prefixes)
+    ]
     return sorted(found)
 
 
@@ -476,13 +536,15 @@ def variables(uninterpolated: Mapping[str, Json], env: Iterable[str]) -> list[st
 def refusal(
     compose: ComposeStack,
     document: Mapping[str, Json],
-    mounts: Sequence[tuple[str, str]] = (),
     also: Sequence[str] = (),
 ) -> tuple[str, dict[str, Json]] | None:
     """What ``build`` refuses ``document`` with, as its code and parameters,
     or ``None``: build arguments first (``instance-args``), then every finding
-    of ``forbidden`` with ``also`` (``compose-forbidden``). One function for
-    the step and for ``pridem check`` (protocol 10.1)."""
+    of ``forbidden`` with ``also`` (``compose-forbidden``; ``package_places``
+    is one of the callers' ``also``). One function for the step and for
+    ``pridem check`` (protocol 10.1). ``document`` is the product's ``config``
+    without the machine's override: ``PRIMER_EDITION`` is the machine's own
+    build argument, given only by the override, and never read here."""
     services = document.get("services")
     if isinstance(services, dict):
         given = sorted(
@@ -497,7 +559,7 @@ def refusal(
                 "stack": compose.entry,
                 "services": list[Json](given),
             }
-    found = sorted([*forbidden(compose, document, mounts), *also])
+    found = sorted([*forbidden(compose, document), *also])
     if found:
         return "compose-forbidden", {"stack": compose.entry, "found": list[Json](found)}
     return None
@@ -519,9 +581,14 @@ def override_text(
     compose: ComposeStack,
     document: Mapping[str, Json],
     mounts: Mapping[str, Sequence[str]] | None = None,
+    builds: Mapping[str, Mapping[str, Json]] | None = None,
 ) -> str:
     """The machine's override for the product's compose ``document``;
-    ``mounts`` -- read-only binds of the instance's packages by service."""
+    ``mounts`` -- read-only binds of the instance's packages by service;
+    ``builds`` -- by service a package is built into (``apply: build``), what
+    its ``build`` gets beside the labels: the context with the package, the
+    ``Dockerfile`` in it, ``PRIMER_EDITION`` and the labels of the image's key
+    (``steps/packages.py``)."""
     services: dict[str, Json] = {}
     app = compose.app_service
     aliased = {app} if app is not None else set()
@@ -536,7 +603,9 @@ def override_text(
                 **compose.release_labels(),
                 "pridem.service": name,
             }
-            part["build"] = {"labels": labels}
+            extra = dict((builds or {}).get(name, {}))
+            labels.update(_mapping(extra.pop("labels", None)))
+            part["build"] = {**extra, "labels": labels}
         if name in aliased or egress:
             networks: dict[str, Json] = dict(_mapping(_mapping(body).get("networks")))
             if not networks:
@@ -581,8 +650,23 @@ def write_override(compose: ComposeStack, text: str) -> None:
     atomic_write(path, text, 0o644)
 
 
-def image_of(ctx: StepContext, compose: ComposeStack, service: str) -> list[str]:
-    """IDs of the images built for ``service`` at this commit, by labels."""
+def image_of(
+    ctx: StepContext,
+    compose: ComposeStack,
+    service: str,
+    key: Mapping[str, str] | None = None,
+) -> list[str]:
+    """IDs of the images of ``service`` by labels: the stack, the commit, the
+    service, and ``key`` -- for a service a package is built into
+    (``apply: build``), the edition and the packages' releases
+    (``steps.packages.image_key``); empty for every other service, whose
+    image is the commit's."""
+    filters = [
+        f"label=pridem.stack={compose.entry}",
+        f"label=pridem.commit={compose.commit}",
+        f"label=pridem.service={service}",
+        *(f"label={name}={value}" for name, value in sorted((key or {}).items())),
+    ]
     _, lines = out(
         ctx,
         [
@@ -591,12 +675,7 @@ def image_of(ctx: StepContext, compose: ComposeStack, service: str) -> list[str]
             "ls",
             "--quiet",
             "--no-trunc",
-            "--filter",
-            f"label=pridem.stack={compose.entry}",
-            "--filter",
-            f"label=pridem.commit={compose.commit}",
-            "--filter",
-            f"label=pridem.service={service}",
+            *(word for found in filters for word in ("--filter", found)),
         ],
         passed_on=False,
     )

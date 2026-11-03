@@ -21,7 +21,7 @@ from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import Product, load_primer_yaml
 from pridem.steps.base import Step
 from pridem.steps.build import Build
-from pridem.steps.compose import ComposeStack, forbidden, override_text
+from pridem.steps.compose import ComposeStack, override_text, package_places
 from pridem.steps.frontend import Frontend
 from pridem.steps.packages import Packages, package_mounts, volumes
 from pridem.steps.passport import Fetched
@@ -277,8 +277,8 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
         "build:compose-forbidden",
         {"stack": ENTRY, "found": ["frontend: packages.skin.mount (no such service)"]},
     )
-    whole = in_release(CONFIG, cs.release)
-    assert forbidden(cs, whole, [("skin", "frontend")]) == []
+    whole = in_release(CONFIG, cs.release)  # the pair: a compose with frontend
+    assert package_places(stack, {ENTRY: whole}) == []
 
 
 def test_a_dependency_mount_is_not_done_here(tmp_path: Path) -> None:

@@ -7,11 +7,12 @@ and the size of ``journal/`` -- and decides what ``act`` removes:
 
 - images: only those labelled ``pridem.commit``; never one whose commit is the
   current or the previous release of a stack, never one a container, running or
-  stopped, was made from. An image without the label -- a base image of
-  ``FROM``, nginx, certbot, postgres -- is not even listed. The key is the
-  commit: ``pridem.release`` holds the ref, on test a branch that every commit
-  shares. An image with tags loses them all and goes with the last; one without
-  goes by its ID;
+  stopped, was made from. Every image of such a commit is kept, of every
+  edition and package version (KNOWN CEILING in ``check``, DM-61). An image
+  without the label -- a base image of ``FROM``, nginx, certbot, postgres --
+  is not even listed. The key is the commit: ``pridem.release`` holds the
+  ref, on test a branch that every commit shares. An image with tags loses
+  them all and goes with the last; one without goes by its ID;
 - the build cache: ``docker builder prune --all --keep-storage <budget>`` when it
   is over ``policies.gc.builder_cache_budget`` (without ``--all`` docker prunes
   only dangling cache, which is never anything);
@@ -456,6 +457,24 @@ class Gc(Step):
             labels = config.get("Labels") if isinstance(config, dict) else None
             commit = labels.get("pridem.commit") if isinstance(labels, dict) else None
             ident = str(image.get("Id"))
+            # KNOWN CEILING (DM-61): the images of one commit are kept whole.
+            # 1. Mechanism: a service a package is built into (apply: build) has
+            #    an image per edition and package versions on one commit
+            #    (steps.packages.image_key); a new skin version on the same
+            #    commit leaves the image of the old one, kept here by its
+            #    commit until the commit is neither current nor previous.
+            # 2. Status: acknowledged by design.
+            # 3. Task: none -- no box changes package versions often enough on
+            #    one commit to fill a disk before its next release.
+            # 4. Trigger: the images of one commit and one service outnumber
+            #    policies.gc.keep_releases + 1 (docker image ls by the labels
+            #    pridem.commit and pridem.service).
+            # 5. Agreed fix: of the current and the previous commit, remove an
+            #    image whose key (pridem.edition, pridem.package.*) is not the
+            #    current passport's and that no container uses.
+            # 6. Rejected: removing by "no container uses it" alone removes the
+            #    previous release's image, which gc never removes (passport
+            #    rule 16); keying images by commit alone mixes the editions.
             if commit in known.commits or ident in in_use:
                 continue
             images.append(

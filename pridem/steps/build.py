@@ -1,9 +1,10 @@
 """``build``: the images of one stack entry at one commit (TZ 7.3; contract 3
-rules 18-19).
+rules 10, 11, 18-19).
 
-``docker compose … build`` from the release, with exactly two build
-arguments: ``PRIMER_RELEASE`` (tag or branch) and ``PRIMER_COMMIT`` (sha) --
-one image for every instance of a commit; a ``build.args`` in the product's
+``docker compose … build`` from the release, with two build arguments for
+every service: ``PRIMER_RELEASE`` (tag or branch) and ``PRIMER_COMMIT`` (sha)
+-- one image for every instance of a commit, but for a service a package is
+built into (below); a ``build.args`` in the product's
 compose would carry an instance's value and is refused before anything is
 built. So is a compose that asks the host for more than the stack's trust
 (``compose-forbidden``, every finding of ``steps.compose.forbidden``): the
@@ -19,19 +20,38 @@ Images carry ``pridem.stack``, ``pridem.release``, ``pridem.commit`` and
 ``pridem.service`` from the machine's override (``steps/compose.py``), which
 this step writes.
 
+A package of ``apply: build`` (contract 3 rules 10, 11, 19; the owner's
+decision of 02.11) is built into the image of its service: ``act`` writes the
+service's context with the package in it out of the release
+(``steps.packages.write_context``), and the override points the service's
+``build`` there, with ``PRIMER_EDITION`` -- the passport's edition, one of
+``editions`` -- as the third and last build argument, for that service alone,
+and the labels of the image's key (``steps.packages.image_key``). So the image
+of such a service is the commit's, the edition's and the packages': a new
+version of a package or another edition makes another override and another
+build on the same commit; the same ones make none. The product's
+``config`` the step refuses by is read without the override: the machine's
+own argument is never a ``build.args`` of the product. A package that fails the
+product's build fails ``build``: the old image and its containers stay. Where a
+package goes is checked against the compose of every entry of the product
+(``package_places``): a service of another entry is that entry's.
+
 A red build stops the plan: nothing has touched a running container -- the
 build only makes images. ``check`` needs no ``act`` when every built service
-has its image of this commit and the override is the rendered one. The fact
-names every image and the ``app`` image, which ``render_env`` gets for
+has its image of this commit (and key) and the override is the rendered one.
+The fact names every image and the ``app`` image, which ``render_env`` gets for
 ``derive``.
 """
 
-from collections.abc import Sequence
+import os
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
 from pridem.stacks.egress import UNLISTED, unlisted
+from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
     CheckResult,
@@ -52,11 +72,22 @@ from pridem.steps.compose import (
     image_of,
     out,
     override_text,
+    package_places,
     refusal,
     variables,
     write_override,
 )
-from pridem.steps.packages import PackageMount, package_mounts, volumes
+from pridem.steps.packages import (
+    KEY_CODES,
+    PackageMount,
+    PackagePlace,
+    build_places,
+    context_dir,
+    image_key,
+    package_mounts,
+    volumes,
+    write_context,
+)
 from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
@@ -72,17 +103,41 @@ def build_args(compose: ComposeStack) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class Rendered:
+    """What ``build`` renders for its entry: the built services, the override
+    and, by service of ``apply: build``, its context and places."""
+
+    built: list[str]
+    text: str
+    contexts: dict[str, tuple[Path, Path, list[PackagePlace]]]
+    """service -> (the context in the release, the context with the packages,
+    the places)."""
+
+
+def copied_dockerfile(context: Path, dockerfile: str) -> str:
+    """The ``Dockerfile`` of a context copied out of the release: relative,
+    when it lies inside the context (as it usually does); else its absolute
+    path in the release."""
+    full = Path(os.path.realpath(os.path.join(context, dockerfile)))
+    inside = Path(os.path.realpath(context))
+    return str(full.relative_to(inside)) if full.is_relative_to(inside) else str(full)
+
+
 class Build(Step):
-    """The images of one stack entry, built once per commit."""
+    """The images of one stack entry: once per commit, and per edition and
+    package versions for a service a package is built into."""
 
     name = "build"
     order = 8
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
         **NO_PASSPORT,
+        **KEY_CODES,
         "build": "build {services} of {stack} at {commit}",
         **REFUSAL_CODES,
         "egress-unlisted": UNLISTED,
+        "missing-release": "{slot}: {path} is not on the box",
         "no-image": "no image of {service} at {commit} after the build",
         "two-images": "{count} images of {service} at {commit}",
     }
@@ -101,29 +156,102 @@ class Build(Step):
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
         self.fetched = fetched
 
-    def _mounts(self) -> list[PackageMount]:
-        """The packages' binds: in the override from the build on (DM-19)."""
+    def _passport(self) -> Passport | None:
+        return None if self.fetched is None else self.fetched.passport
+
+    def _mounts(self, services: set[str]) -> list[PackageMount]:
+        """The packages' binds of this entry's services (DM-19, DM-61)."""
         stack = self.compose.stack
         if self.fetched is None or not isinstance(stack, Product):
             return []
         passport = self.fetched.passport
         if passport is None:
             raise StepFailed("no-passport")
-        return package_mounts(stack, stack.name, passport, self.compose.root)
+        return package_mounts(stack, stack.name, passport, self.compose.root, services)
 
-    def _rendered(
-        self, ctx: StepContext, also: Sequence[str] = ()
-    ) -> tuple[list[str], str]:
-        """The built services and the override; ``also`` -- findings of the
-        caller, refused with those of ``forbidden`` in one code."""
-        document = config(ctx, self.compose)
-        mounts = self._mounts()
-        bound = [(mount.slot, mount.service) for mount in mounts]
-        refused = refusal(self.compose, document, bound, also)
+    def _places(self, services: set[str]) -> list[PackagePlace]:
+        """The build places of this entry's services (``apply: build``)."""
+        stack = self.compose.stack
+        if not isinstance(stack, Product) or not any(
+            place.service in services
+            for package in stack.packages.values()
+            for place in package.build
+        ):
+            return []
+        passport = self._passport()
+        if passport is None:
+            raise StepFailed("no-passport")
+        places = build_places(stack, stack.name, passport, self.compose.root, services)
+        for place in places:
+            if not place.source.is_dir():
+                raise StepFailed(
+                    "missing-release", {"slot": place.slot, "path": str(place.source)}
+                )
+        return places
+
+    def _documents(
+        self, ctx: StepContext, document: dict[str, Json]
+    ) -> dict[str, Mapping[str, Json]]:
+        """The ``config`` of every entry of the product, this one's given."""
+        compose = self.compose
+        found: dict[str, Mapping[str, Json]] = {compose.entry: document}
+        if isinstance(compose.stack, Product):
+            for entry in sorted(compose.stack.stacks):
+                if entry != compose.entry:
+                    other = ComposeStack(
+                        compose.stack,
+                        entry,
+                        compose.release,
+                        compose.ref,
+                        compose.commit,
+                        compose.root,
+                    )
+                    found[entry] = config(ctx, other)
+        return found
+
+    def _rendered(self, ctx: StepContext, also: Sequence[str] = ()) -> Rendered:
+        """The built services, the override and the contexts; ``also`` --
+        findings of the caller, refused with those of ``forbidden`` and
+        ``package_places`` in one code."""
+        compose = self.compose
+        document = config(ctx, compose)
+        places_found = package_places(compose.stack, self._documents(ctx, document))
+        refused = refusal(compose, document, [*places_found, *also])
         if refused is not None:
             raise StepFailed(*refused)
-        text = override_text(self.compose, document, volumes(mounts))
-        return built_services(document), text
+        bodies = document.get("services")
+        services = set(bodies) if isinstance(bodies, dict) else set()
+        mounts = self._mounts(services)
+        places = self._places(services)
+        builds: dict[str, dict[str, Json]] = {}
+        contexts: dict[str, tuple[Path, Path, list[PackagePlace]]] = {}
+        for service in sorted({place.service for place in places}):
+            body = bodies.get(service) if isinstance(bodies, dict) else None
+            build = body.get("build") if isinstance(body, dict) else None
+            context = build.get("context") if isinstance(build, dict) else None
+            if not isinstance(build, dict) or not isinstance(context, str):
+                continue  # package_places has refused a service with no build
+            source = Path(context)
+            target = context_dir(
+                compose.root, compose.stack.name, compose.entry, service
+            )
+            key = image_key(compose.stack, service, self._passport())
+            given = str(build.get("dockerfile") or "Dockerfile")
+            extra: dict[str, Json] = {
+                "context": str(target),
+                "dockerfile": copied_dockerfile(source, given),
+                "labels": dict[str, Json](key),
+            }
+            if "pridem.edition" in key:
+                extra["args"] = {"PRIMER_EDITION": key["pridem.edition"]}
+            builds[service] = extra
+            mine = [place for place in places if place.service == service]
+            contexts[service] = (source, target, mine)
+        text = override_text(compose, document, volumes(mounts), builds)
+        return Rendered(built_services(document), text, contexts)
+
+    def _key(self, service: str) -> dict[str, str]:
+        return image_key(self.compose.stack, service, self._passport())
 
     def check(self, ctx: StepContext) -> CheckResult:
         stack = self.compose.stack
@@ -134,23 +262,28 @@ class Build(Step):
         uninterpolated = config(ctx, self.compose, interpolate=False)
         keys = self.compose.stack.env
         found = [*env_files(uninterpolated), *variables(uninterpolated, keys)]
-        built, text = self._rendered(ctx, found)
+        rendered = self._rendered(ctx, found)
         params: dict[str, Json] = {
             "stack": self.compose.entry,
             "commit": self.compose.commit,
-            "services": list[Json](built),
+            "services": list[Json](rendered.built),
         }
         needed = CheckResult(True, local_code("build", params))
         path = self.compose.override
-        if not path.exists() or path.read_text(encoding="utf-8") != text:
+        if not path.exists() or path.read_text(encoding="utf-8") != rendered.text:
             return needed
-        if any(not image_of(ctx, self.compose, service) for service in built):
+        if any(
+            not image_of(ctx, self.compose, service, self._key(service))
+            for service in rendered.built
+        ):
             return needed
         return CheckResult(False)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        _, text = self._rendered(ctx)
-        write_override(self.compose, text)
+        rendered = self._rendered(ctx)
+        for source, target, places in rendered.contexts.values():
+            write_context(source, target, places)
+        write_override(self.compose, rendered.text)
         out(
             ctx,
             self.compose.argv("build", *build_args(self.compose)),
@@ -158,10 +291,10 @@ class Build(Step):
         )
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        built, _ = self._rendered(ctx)
+        rendered = self._rendered(ctx)
         images: dict[str, Json] = {}
-        for service in built:
-            found = image_of(ctx, self.compose, service)
+        for service in rendered.built:
+            found = image_of(ctx, self.compose, service, self._key(service))
             if not found:
                 raise StepFailed(
                     "no-image", {"service": service, "commit": self.compose.commit}
@@ -181,6 +314,9 @@ class Build(Step):
             "commit": self.compose.commit,
             "images": images,
         }
+        keys = {service: self._key(service) for service in rendered.contexts}
+        if keys:
+            fact["keys"] = {name: dict[str, Json](key) for name, key in keys.items()}
         app = self.compose.app_service
         if app is not None and app in images:
             fact["app_image"] = images[app]

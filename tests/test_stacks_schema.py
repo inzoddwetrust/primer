@@ -428,9 +428,12 @@ def test_package_mount(
 
 
 def test_package_needs_a_mount(tmp_path: Path) -> None:
+    """A package of ``apply: runtime`` (the default) is mounted: no mount is
+    rule 10 -- since DM-61 a rule of the slot as a whole (``apply: build``
+    has no mount), not the length of the field."""
     data = example("product.yaml")
     node(data, "packages", "skin")["mount"] = []
-    assert yaml_problems(tmp_path, data) == [("packages.skin.mount", "too_short")]
+    assert yaml_problems(tmp_path, data) == [("packages.skin", "R10.apply")]
 
 
 def test_mount_dependency_must_be_declared(tmp_path: Path) -> None:

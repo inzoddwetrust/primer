@@ -52,8 +52,10 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.build import build_args
+from pridem.steps.build import build_args, copied_dockerfile
 from pridem.steps.compose import BUILD_TIMEOUT_S, ComposeStack, config, out
+from pridem.steps.packages import KEY_CODES, context_dir, image_key
+from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 TEST_ROLES: frozenset[Role] = frozenset({"test"})
@@ -160,6 +162,8 @@ class Tests(Step):
     modes = ALL_MODES
     roles = TEST_ROLES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
+        **KEY_CODES,
         "run": "run the tests of {stack} at {commit} in {test_db}",
         "no-database-url": "{service} has no DATABASE_URL to take the database from",
         "test-db-is-live": "the test database {test} would be the live {live}",
@@ -181,8 +185,10 @@ class Tests(Step):
         report: TestReport,
         secrets: Secrets,
         root: Path = Path("/"),
+        fetched: Fetched | None = None,
     ) -> None:
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.fetched = fetched
         stage = stack.stacks[entry]
         if stage.test is None or stage.app is None:
             raise ValueError(f"{entry} declares no test or no app")
@@ -278,7 +284,19 @@ class Tests(Step):
         if not isinstance(build, dict) or not isinstance(build.get("context"), str):
             raise StepFailed("no-test", {"stack": self.compose.entry})
         context = Path(str(build["context"]))
-        dockerfile = context / str(build.get("dockerfile") or "Dockerfile")
+        given = str(build.get("dockerfile") or "Dockerfile")
+        dockerfile = context / given
+        passport = None if self.fetched is None else self.fetched.passport
+        key = image_key(self.compose.stack, self.app, passport)
+        edition: list[str] = []
+        if key:  # a package is built into app: the context build wrote, as build
+            built = context_dir(
+                self.compose.root, self.compose.stack.name, self.compose.entry, self.app
+            )
+            dockerfile = built / copied_dockerfile(context, given)
+            context = built
+            if "pridem.edition" in key:
+                edition = ["--build-arg", f"PRIMER_EDITION={key['pridem.edition']}"]
         self._home.mkdir(mode=0o700, parents=True, exist_ok=True)
         iidfile = self._home / "image.id"
         iidfile.unlink(missing_ok=True)
@@ -295,6 +313,7 @@ class Tests(Step):
                 "-t",
                 self.image_name,
                 *build_args(self.compose),
+                *edition,
                 *[w for k, v in labels.items() for w in ("--label", f"{k}={v}")],
                 "-f",
                 str(dockerfile),

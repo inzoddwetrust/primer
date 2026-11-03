@@ -10,6 +10,12 @@ Rule layer: cross-field rules of the contract (rule 3 single-point pins, rule
 4, 10, 11, 13 and the referential checks), run only when the field layer is
 clean, each collecting every violation. Every problem names the path in the file.
 
+A package slot (rule 10) is applied as the product declares: ``apply:
+runtime`` (the default) mounts it by ``mount`` and checks it by ``validate``;
+``apply: build`` puts it into the build context of a service at ``build[].path``
+and is checked by the product's own build -- it has no ``mount`` and no
+``validate`` (the owner's decision of 02.11).
+
 ``egress`` of a product (protocol 4.1, 4.2) -- the external hosts the product
 still reaches itself, through the machine's proxy -- is a list of host names:
 lowercase labels, at least two, the last not all digits; a pattern, a port, a
@@ -72,6 +78,16 @@ RULES = {
     "R4.route-domain": (4, "a route is declared only for a name in host.domains"),
     "R5.file-seam": (5, "product data reaches a service through its API, not files"),
     "R9.branch": (9, "a service is installed from release tags only, no branch"),
+    "R10.apply": (
+        10,
+        "apply: runtime mounts (mount and validate, no build); apply: build "
+        "builds (build, no mount, no validate: the build is the check)",
+    ),
+    "R10.build": (
+        10,
+        "a build place is a service and a relative normalized path inside its "
+        "build context, without ..; one place once",
+    ),
     "R10.mount": (
         10,
         "a package mount is either service with an absolute container path or "
@@ -317,10 +333,23 @@ class Mount(Strict):
     env: Name | None = None
 
 
+class BuildPlace(Strict):
+    """Where ``apply: build`` puts a package: ``path`` inside the build context
+    of ``service`` (rule 10, the owner's decision of 02.11)."""
+
+    service: Name
+    path: str
+
+
 class Package(Strict):
+    """Checked as a whole by rule 10 in the rule layer: ``apply: runtime``
+    mounts (``mount``, ``validate``), ``apply: build`` builds (``build``)."""
+
     contract: Range
-    validate_: Command = Field(alias="validate")
-    mount: list[Mount] = Field(min_length=1)
+    validate_: Command | None = Field(default=None, alias="validate")
+    apply: Literal["runtime", "build"] = "runtime"
+    mount: list[Mount] = []
+    build: list[BuildPlace] = []
 
 
 class Route(Strict):
@@ -508,6 +537,54 @@ def _r10_mounts(stack: Product | Service) -> list[Problem]:
     ]
 
 
+def _r10_apply(stack: Product | Service) -> list[Problem]:
+    """``runtime``: ``mount`` and ``validate``, no ``build``; ``build``:
+    ``build``, no ``mount``, no ``validate``; every place's ``path`` relative,
+    normalized, without ``..``; a ``(service, path)`` once in the product."""
+    if not isinstance(stack, Product):
+        return []
+    out: list[Problem] = []
+    seen: set[tuple[str, str]] = set()
+    for name, package in sorted(stack.packages.items()):
+        at = ("packages", name)
+        if package.apply == "runtime":
+            if not package.mount:
+                out.append(problem_at(at, "R10.apply", "runtime needs mount"))
+            if package.build:
+                out.append(problem_at((*at, "build"), "R10.apply", "runtime builds no"))
+            if package.validate_ is None:
+                out.append(problem_at(at, "R10.apply", "runtime needs validate"))
+        else:
+            if not package.build:
+                out.append(problem_at(at, "R10.apply", "build needs build"))
+            if package.mount:
+                out.append(problem_at((*at, "mount"), "R10.apply", "build mounts no"))
+            if package.validate_ is not None:
+                out.append(
+                    problem_at((*at, "validate"), "R10.apply", "build has no validate")
+                )
+        for index, place in enumerate(package.build):
+            where = (*at, "build", index)
+            p = PurePosixPath(place.path)
+            if (
+                not place.path
+                or p.is_absolute()
+                or ".." in p.parts
+                or str(p) != place.path
+                or place.path == "."
+            ):
+                out.append(
+                    problem_at(
+                        (*where, "path"), "R10.build", f"not relative: {place.path!r}"
+                    )
+                )
+            key = (place.service, place.path)
+            if key in seen:
+                out.append(problem_at(where, "R10.build", f"{key} twice"))
+            seen.add(key)
+    return out
+
+
 def _s_mount_dependency(stack: Product | Service) -> list[Problem]:
     if not isinstance(stack, Product):
         return []
@@ -616,6 +693,7 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r3_single_point,
     _r4_route_domains,
     _r10_mounts,
+    _r10_apply,
     _s_mount_dependency,
     _r11_editions,
     _r13_seams,

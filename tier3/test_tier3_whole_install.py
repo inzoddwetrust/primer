@@ -29,10 +29,14 @@ install left:
   timer's service is green on the self-signed box; both timers are enabled and
   active.
 
-The probe of DM-64 runs next, on the box the install left: the blank reaches
+The probe of DM-64 and the build mode of DM-61 run next, on the box the
+install left. DM-64: the blank reaches
 nothing outside the box; a release of it with ``egress`` reaches its host
 through the machine's proxy and no other; the release after it, without
-``egress``, has no proxy left. It deploys through the same mirror.
+``egress``, has no proxy left. DM-61: a copy of the blank builds a skin
+package of a local repository into its frontend -- a new version rebuilds on
+the same commit, a skin its build refuses is red with the old one served,
+another edition is another image. Both deploy through the same mirror.
 
 Two short checks need no install: what a single-quoted value is to compose,
 and that the tags certbot and squid are pinned by still name the pinned
@@ -90,6 +94,7 @@ from pridem.plan import Plan, StackSteps
 from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.schema import build_verdict
 from pridem.runner import SubprocessRunner
+from pridem.stacks.passport import load_passport
 from pridem.stacks.schema import load_primer_yaml
 from pridem.stacks.seams import SeamMemory
 from pridem.state import Box, JournalHeader
@@ -123,7 +128,8 @@ host, final = host_steps(root)
 fetched, first = passport_steps(root, secrets=secrets, server=None, file=passport)
 timers = timer_steps(root, fetched=fetched)
 _, sources = source_steps(
-    root, stack="blank", address=f"file://{mirror}", ref="main", tag=False
+    root, stack="blank", address=f"file://{mirror}", ref="main", tag=False,
+    packages=load_passport(passport).packages,
 )
 render = RenderEnv(
     blank, product=blank, fetched=fetched, secrets=secrets, memory=memory, root=root
@@ -133,10 +139,10 @@ ladder = [
     SeamsCheck(blank, {}, fetched), render,
     Build(blank, "blank", **parts, fetched=fetched),
     Packages(blank, "blank", **parts, fetched=fetched),
-    Tests(blank, "blank", **parts, report=report, secrets=secrets),
-    Migrate(blank, "blank", **parts),
+    Tests(blank, "blank", **parts, report=report, secrets=secrets, fetched=fetched),
+    Migrate(blank, "blank", **parts, fetched=fetched),
     Egress(blank, root=root),
-    Up(blank, "blank", **parts, memory=memory, render=render),
+    Up(blank, "blank", **parts, memory=memory, render=render, fetched=fetched),
 ]
 types = [Types(blank, "blank", **parts, role="test", branch="main", run_id="tier3",
                push_to=f"file://{mirror}", git_dir=Path("/opt/blank/git"))]
@@ -293,12 +299,18 @@ def _blank(tmp: Path) -> Path:
     return checkout
 
 
-def _passport(tmp: Path) -> Path:
+def _passport(
+    tmp: Path,
+    *,
+    version: int = 1,
+    edition: str = "core",
+    packages: dict[str, dict[str, str]] | None = None,
+) -> Path:
     data = {
         "schema": 1,
-        "version": 1,
+        "version": version,
         "server": {"name": "tier3-env", "role": "test", "os": "ubuntu-24.04"},
-        "edition": "core",
+        "edition": edition,
         "product": {"repo": BLANK, "ref": REF},
         "domains": {"frontend": FRONTEND, "api": API},
         "access": {"mode": "deploy-keys"},
@@ -314,10 +326,10 @@ def _passport(tmp: Path) -> Path:
             "backup": {"enabled": False},
             "timers": {"gc": "daily"},
         },
-        "packages": {},
+        "packages": packages or {},
         "cloud": {},
     }
-    file = tmp / "passport.yaml"
+    file = tmp / f"passport-{version}.yaml"
     file.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return file
 
@@ -886,6 +898,182 @@ def test_probe_DM_64_product_reaches_only_its_egress_hosts(
     assert last["HTTPS_PROXY"] is None, last
     for key in ("direct_allowed", "direct_address", "via_allowed", "via_other"):
         assert last[key] != "reached", last
+
+
+SKIN_DOCKERFILE_CHECK = """COPY . .
+RUN test -f public/skin/skin.css
+ARG PRIMER_EDITION
+RUN test -n "$PRIMER_EDITION" && printf '%s' "$PRIMER_EDITION" > public/edition.txt
+"""
+"""What the blank's copy of DM-61 adds to the build stage of its frontend: the
+skin is checked by the build -- none, and the build fails -- and the edition
+the build got is served at ``/edition.txt``."""
+
+
+def _skin_repository(tmp: Path) -> Path:
+    """A skin package, three tags: ``v1.0.0`` (``one``), ``v1.1.0`` (``two``)
+    and ``v1.2.0`` with no ``skin.css`` -- the build of the blank refuses it."""
+    work = tmp / "skin-work"
+    work.mkdir()
+    _git("init", "-q", str(work))
+    (work / "primer-package.yaml").write_text('schema: 1\ncontract: "1.0"\n')
+    for tag, text in (("v1.0.0", "one"), ("v1.1.0", "two"), ("v1.2.0", None)):
+        skin = work / "skin.css"
+        if text is None:
+            skin.unlink()
+        else:
+            skin.write_text(text)
+        _git("-C", str(work), "add", "-A")
+        _git("-C", str(work), "commit", "-q", "-m", tag)
+        _git("-C", str(work), "tag", tag)
+    bare = tmp / "skin.git"
+    _run(["git", "clone", "-q", "--bare", str(work), str(bare)], env=GIT_ENV)
+    return bare
+
+
+def _body(path: str, host: str) -> str:
+    lines = _stdout(
+        [
+            "curl",
+            "-k",
+            "-sS",
+            "--max-time",
+            "10",
+            "-H",
+            f"Host: {host}",
+            f"https://localhost{path}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _frontend_images() -> dict[str, str]:
+    """The images of the blank's frontend by their key: ``<edition> <package>``."""
+    ids = _stdout(
+        [
+            "docker",
+            "image",
+            "ls",
+            "-q",
+            "--no-trunc",
+            "--filter",
+            "label=pridem.service=frontend",
+            "--filter",
+            "label=pridem.stack=blank",
+            "--filter",
+            "label=pridem.edition",
+        ]
+    )
+    found: dict[str, str] = {}
+    for image in sorted(set(ids)):
+        [text] = _stdout(
+            ["docker", "image", "inspect", "-f", "{{json .Config.Labels}}", image]
+        )
+        labels = json.loads(text)
+        found[f"{labels['pridem.edition']} {labels['pridem.package.skin']}"] = image
+    return found
+
+
+def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
+    """DM-61 on the box the install left: a copy of the blank builds a skin
+    into its frontend (``apply: build``); a new version of the skin rebuilds on
+    the same commit; a skin its build refuses is red and the old one stays
+    served; another edition is another image."""
+    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    skin = _skin_repository(tmp_path)
+
+    def passport(version: int, tag: str, edition: str = "core") -> Path:
+        package = {"skin": {"repo": f"file://{skin}", "version": tag}}
+        return _passport(tmp_path, version=version, edition=edition, packages=package)
+
+    # the copy: a second edition, the skin built into frontend, checked there
+    [base] = _stdout(["git", "--git-dir", str(mirror), "rev-parse", "refs/heads/main"])
+    copy = tmp_path / "blank-skin"
+    _run(["git", "clone", "-q", str(mirror), str(copy)], env=GIT_ENV)
+    _run(["git", "-C", str(copy), "checkout", "-q", base], env=GIT_ENV)
+    primer = copy / "primer.yaml"
+    text = primer.read_text(encoding="utf-8")
+    text = text.replace(
+        "  core: { services: [] }\n",
+        "  core: { services: [] }\n  full: { services: [] }\n",
+    )
+    text += (
+        'packages:\n  skin:\n    contract: ">=1,<2"\n    apply: build\n'
+        "    build:\n      - { service: frontend, path: public/skin }\n"
+    )
+    primer.write_text(text, encoding="utf-8")
+    dockerfile = copy / "frontend" / "Dockerfile"
+    body = dockerfile.read_text(encoding="utf-8")
+    assert body.count("COPY . .\n") == 1
+    dockerfile.write_text(body.replace("COPY . .\n", SKIN_DOCKERFILE_CHECK))
+    _git("-C", str(copy), "commit", "-q", "-am", "DM-61: the skin built into frontend")
+    [commit] = _git("-C", str(copy), "rev-parse", "HEAD")
+    _git("-C", str(copy), "push", "-q", str(mirror), "HEAD:refs/heads/main")
+
+    # version 1.0.0, edition core: built with the skin
+    first, printed = _install(copy, passport(2, "1.0.0"), mirror, commit, "deploy")
+    assert first.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in first.steps}
+    keys = facts[("blank", "build")]["keys"]
+    assert keys == {
+        "frontend": {"pridem.edition": "core", "pridem.package.skin": "skin@1.0.0"}
+    }, keys
+    assert _body("/skin/skin.css", FRONTEND) == "one"
+    assert _body("/edition.txt", FRONTEND) == "core"
+    images = facts[("blank", "build")]["images"]
+    assert isinstance(images, dict)
+
+    # version 1.1.0 on the same commit: frontend rebuilt, app the same image
+    second, printed = _install(copy, passport(3, "1.1.0"), mirror, commit, "deploy")
+    assert second.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in second.steps}
+    again = facts[("blank", "build")]["images"]
+    assert isinstance(again, dict)
+    assert again["frontend"] != images["frontend"], (images, again)
+    assert again["app"] == images["app"], (images, again)
+    assert _body("/skin/skin.css", FRONTEND) == "two"
+
+    # the same version again: no build (the step has nothing to do)
+    same, printed = _install(copy, passport(3, "1.1.0"), mirror, commit, "deploy")
+    assert same.result == "green", printed
+    [build] = [s for s in same.steps if (s.stack, s.name) == ("blank", "build")]
+    assert build.status == "ok" and build.verify is not None, build
+    assert build.verify["images"] == again, (again, build.verify)
+
+    # version 1.2.0 has no skin.css: the build is red, version 1.1.0 stays
+    bad, printed = _install(copy, passport(4, "1.2.0"), mirror, commit, "deploy")
+    assert bad.result != "green", printed
+    [red] = [s for s in bad.steps if s.status == "failed"]
+    assert (red.stack, red.name) == ("blank", "build"), bad.steps
+    assert _body("/skin/skin.css", FRONTEND) == "two"
+
+    # edition full, version 1.1.0: another image beside core's
+    full, printed = _install(
+        copy, passport(5, "1.1.0", "full"), mirror, commit, "deploy"
+    )
+    assert full.result == "green", printed
+    assert _body("/edition.txt", FRONTEND) == "full"
+    found = _frontend_images()
+    assert {"core skin@1.1.0", "full skin@1.1.0"} <= set(found), found
+    assert found["core skin@1.1.0"] != found["full skin@1.1.0"]
+    # doctor on that box: nothing to do
+    out = _run(
+        [
+            PYTHON,
+            "-c",
+            PLAN,
+            str(copy),
+            str(passport(5, "1.1.0", "full")),
+            str(mirror),
+            commit,
+            "doctor",
+        ],
+        timeout=1800,
+    )
+    [diff] = [x for x in out if x.startswith("DIFF ")]
+    [failed] = [x for x in out if x.startswith("FAILED ")]
+    assert json.loads(diff.removeprefix("DIFF ")) == [], out
+    assert json.loads(failed.removeprefix("FAILED ")) == [], out
 
 
 def _check(directory: Path) -> tuple[int, dict[str, object]]:

@@ -2,7 +2,8 @@
 container -- the point of no return (TZ 7.3; contract 3 section 1).
 
 The stack is the blank's (TZ 2): its migrations are alembic's. ``check`` reads
-the heads of the image ``build`` made for this commit (found by its labels)
+the heads of the image ``build`` made for this commit (found by its labels,
+the key of ``steps.packages.image_key`` among them)
 with ``docker run --rm --network none <image> python -m alembic heads`` -- no
 compose, no dependency, no network: the scripts of the image, nothing else. A stack that
 declares ``migrate`` has a head: none read is red (``no-heads``), never "no
@@ -44,6 +45,8 @@ from pridem.steps.compose import (
     image_of,
     out,
 )
+from pridem.steps.packages import KEY_CODES, image_key
+from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 MIGRATE_TIMEOUT_S = 1800
@@ -78,6 +81,8 @@ class Migrate(Step):
     modes = ALL_MODES
     point_of_no_return = True
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
+        **KEY_CODES,
         "migrate": "migrate {stack} to {head}",
         "alembic-heads": "the migrations of {stack} have {count} heads: {heads}",
         "no-heads": "no alembic head read from the image of {stack} in {lines} lines",
@@ -94,8 +99,10 @@ class Migrate(Step):
         ref: str,
         commit: str,
         root: Path = Path("/"),
+        fetched: Fetched | None = None,
     ) -> None:
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.fetched = fetched
         stage = stack.stacks[entry]
         if stage.migrate is None or stage.app is None:
             raise ValueError(f"{entry} has no migrate to run in an app container")
@@ -104,7 +111,9 @@ class Migrate(Step):
 
     def _heads(self, ctx: StepContext) -> tuple[list[str], int]:
         """Heads of the built image, by ``docker run`` on it; and the line count."""
-        images = image_of(ctx, self.compose, self.app)
+        passport = None if self.fetched is None else self.fetched.passport
+        key = image_key(self.compose.stack, self.app, passport)
+        images = image_of(ctx, self.compose, self.app, key)
         if len(images) != 1:
             raise StepFailed(
                 "no-image", {"service": self.app, "commit": self.compose.commit}

@@ -9,8 +9,10 @@ stays. No ``down``, no ``rm``, no ``--remove-orphans``: they remove
 containers.
 
 ``verify`` reads the fact back: the ``app`` container runs on the image built
-for this commit, the stack passes conformance (DM-15: ``/health`` by its form,
-``/ready`` 200, JSON logs, ``max_body``, no ``logging``), and ``/health`` says
+for this commit (and, when a package is built into ``app``, for its edition
+and package versions: ``steps.packages.image_key``), the stack passes
+conformance (DM-15: ``/health`` by its form, ``/ready`` 200, JSON logs,
+``max_body``, no ``logging``), and ``/health`` says
 the release and the commit the build got. Then the stack's ``provides`` reach
 the plan's seam memory -- after its health (TZ 7.1). ``check`` needs no
 ``act`` when all of that already holds.
@@ -46,6 +48,8 @@ from pridem.steps.compose import (
     running_image,
 )
 from pridem.steps.env import RenderEnv
+from pridem.steps.packages import KEY_CODES, image_key
+from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
@@ -61,12 +65,14 @@ def _document(seen: Observed) -> dict[str, Json]:
 
 
 class Up(Step):
-    """One stack entry up on the images of this commit, checked live."""
+    """One stack entry up on the images of this commit and key, checked live."""
 
     name = "up"
     order = 13  # after egress (12): the application starts with its proxy ready
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
+        **KEY_CODES,
         "up": "bring {stack} up at {commit}",
         "no-image": "no image of {service} at {commit}: build runs before up",
         "old-image": "{service} runs on {running}, not on {expected}",
@@ -88,17 +94,22 @@ class Up(Step):
         root: Path = Path("/"),
         memory: SeamMemory | None = None,
         render: RenderEnv | None = None,
+        fetched: Fetched | None = None,
     ) -> None:
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.fetched = fetched
         self.memory = memory
         self.render = render
 
     def _expected(self, ctx: StepContext) -> str | None:
-        """The image ``app`` must run on: the one built for this commit."""
+        """The image ``app`` must run on: the one built for this commit and,
+        when a package is built into it, its key."""
         app = self.compose.app_service
         if app is None:
             return None
-        found = image_of(ctx, self.compose, app)
+        passport = None if self.fetched is None else self.fetched.passport
+        key = image_key(self.compose.stack, app, passport)
+        found = image_of(ctx, self.compose, app, key)
         return found[0] if len(found) == 1 else None
 
     def _problems(self, ctx: StepContext) -> tuple[list[str], dict[str, Json]]:

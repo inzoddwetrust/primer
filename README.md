@@ -142,6 +142,36 @@ jobs:
 No value and no secret is needed: a repository holds none, and the check gives
 every key of `env` a stand-in.
 
+## Packages: mounted or built in
+
+A package slot of `primer.yaml` (contract 3 rule 10) is applied as the product
+declares. `apply: runtime`, the default, binds the package read-only into a
+service (`mount`) and checks it with the product's `validate` before `up`.
+`apply: build` puts it into the build context of a service at a path inside
+it:
+
+```yaml
+packages:
+  skin:
+    contract: ">=1,<2"
+    apply: build
+    build:
+      - { service: frontend, path: public/skin }
+```
+
+The machine copies the service's build context out of the immutable release
+into `/opt/<stack>/contexts/<entry>/<service>`, puts the package there in place
+of `path`, and builds the service from it with `PRIMER_EDITION` -- the
+passport's edition, one of `editions` -- as its third and last build argument;
+no `validate`: the product's build is the package's check, and a build that
+fails leaves the old image running. The image is labelled with the edition and
+the packages' versions, so another version or edition in the passport is a new
+build on the same commit and the same ones none. A package belongs to the stack
+whose compose has its service; a service in no stack of the product is a
+finding of `build` and `pridem check`. A product's service may not be named
+`pridem-*`, `<dependency>-*` or as the alias of another of its stacks on the
+machine's network.
+
 ## A product's way out
 
 A product has no way out of its box (protocol 4.1). The machine's networks

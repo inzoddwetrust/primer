@@ -20,8 +20,12 @@ daemon and no network. One step each, in this order (``CHECKS``):
   wrong, ``config`` with a stand-in value (``STAND_IN``) for every key of
   ``env`` -- in the environment of compose alone, its ``.env`` off, nothing
   written -- gives what ``refusal`` refuses: the codes and parameters of
-  ``build`` on the box, from one dictionary. No compose -- ``incomplete
-  compose:not-found``, exit 2;
+  ``build`` on the box, from one dictionary, with the places of the packages
+  against the compose of every stack (``package_places``: a service of
+  another stack is that stack's; one in none is a finding of each). The
+  product's ``config`` is read without the machine's override: the machine's
+  ``PRIMER_EDITION`` is not a ``build.args`` of the product. No compose --
+  ``incomplete compose:not-found``, exit 2;
 - ``packages`` -- the ``primer-package.yaml`` of every package directory given
   (``<slot>=<directory>``) by ``package_contract``; none given -- the step is
   skipped and says which slots were not checked.
@@ -70,6 +74,7 @@ from pridem.steps.compose import (
     ComposeStack,
     config,
     env_files,
+    package_places,
     refusal,
     variables,
 )
@@ -216,46 +221,65 @@ def _drop(stream: Stream, line: str, cut: bool) -> None:
     """The version compose prints is not the verdict's."""
 
 
-def _mounts(stack: Stack) -> list[tuple[str, str]]:
-    """Every ``(slot, service)`` the product declares: a box binds those of its
-    passport's packages, a repository has no passport."""
-    if not isinstance(stack, Product):
-        return []
-    return [
-        (slot, mount.service)
-        for slot, package in stack.packages.items()
-        for mount in package.mount
-        if mount.service is not None
-    ]
+@dataclass
+class Read:
+    """What ``config`` gave of one entry's compose: its findings so far, and
+    its document when every variable was right; or the code it failed by."""
+
+    file: str
+    raw: dict[str, Json] = field(default_factory=dict)
+    document: dict[str, Json] | None = None
+    found: list[str] = field(default_factory=list)
+    failed: StepFailed | None = None
 
 
-def _compose(checked: Checked, stack: Stack, entry: str) -> None:
+def _read(checked: Checked, stack: Stack, entry: str) -> Read:
     compose = ComposeStack(stack, entry, checked.root, "check", "", checked.root)
-    ctx = checked.ctx
+    file = stack.stacks[entry].compose
+    read = Read(file)
+    if not compose.compose_file.exists():
+        read.failed = StepFailed("no-compose", {"file": file, "stack": entry})
+        return read
+    stand_ins = dict.fromkeys(stack.env, STAND_IN)
+    try:
+        read.raw = config(checked.ctx, compose, interpolate=False, values=stand_ins)
+        wrong = variables(read.raw, stack.env)
+        read.found = [*env_files(read.raw), *wrong]
+        if not wrong:  # config stops at the first one, and names it as text
+            read.document = config(checked.ctx, compose, values=stand_ins)
+    except CommandFailed as failed:
+        read.failed = StepFailed(
+            "config-failed", {"stack": entry, "exit_code": failed.code}
+        )
+    return read
 
-    def run() -> Fact:
-        file = stack.stacks[entry].compose
-        if not compose.compose_file.exists():
-            raise StepFailed("no-compose", {"file": file, "stack": entry})
-        stand_ins = dict.fromkeys(stack.env, STAND_IN)
-        try:
-            raw = config(ctx, compose, interpolate=False, values=stand_ins)
-            wrong = variables(raw, stack.env)
-            found = [*env_files(raw), *wrong]
-            if wrong:  # config stops at the first one, and names it as text
-                refused = refusal(compose, {}, (), found)
-            else:
-                document = config(ctx, compose, values=stand_ins)
-                refused = refusal(compose, document, _mounts(stack), found)
-        except CommandFailed as failed:
-            raise StepFailed(
-                "config-failed", {"stack": entry, "exit_code": failed.code}
-            ) from None
-        if refused is not None:
-            raise StepFailed(*refused)
-        return {"file": file, "services": list[Json](sorted(_services(raw)))}
 
-    checked.steps.append(_record(entry, "compose", 3, run))
+def _composes(checked: Checked, stack: Stack) -> None:
+    """The compose of every entry: read first, all of them -- where a package
+    goes is checked against them all (``package_places``) -- then refused by
+    the function ``build`` refuses by."""
+    reads = {entry: _read(checked, stack, entry) for entry in stack.stacks}
+    documents = {e: r.document for e, r in reads.items() if r.document is not None}
+    places: list[str] = []
+    if len(documents) == len(reads):  # an entry unread could hold any service
+        places = package_places(stack, documents)
+    for entry, read in reads.items():
+        compose = ComposeStack(stack, entry, checked.root, "check", "", checked.root)
+
+        def run(read: Read = read, compose: ComposeStack = compose) -> Fact:
+            if read.failed is not None:
+                raise read.failed
+            document = {} if read.document is None else read.document
+            also = [*read.found, *(places if read.document is not None else [])]
+            refused = refusal(compose, document, also)
+            if refused is not None:
+                raise StepFailed(*refused)
+            return {
+                "file": read.file,
+                "services": list[Json](sorted(_services(read.raw))),
+            }
+
+        checked.steps.append(_record(entry, "compose", 3, run))
 
 
 def _services(document: Mapping[str, Json]) -> list[str]:
@@ -318,8 +342,7 @@ def _run_checks(checked: Checked) -> None:
     for check in CHECKS:
         check(checked, stack)
     if _compose_found(checked.ctx):
-        for entry in stack.stacks:
-            _compose(checked, stack, entry)
+        _composes(checked, stack)
     else:
         reason = Code("compose:not-found")
         checked.incomplete.append(Incomplete("compose", reason))

@@ -48,6 +48,7 @@ from pridem.steps.compose import (
     ComposeStack,
     env_files,
     forbidden,
+    package_places,
 )
 
 BLANK = json.loads(
@@ -616,9 +617,23 @@ def test_build_names_an_env_file_before_anything(
 
 
 def test_a_package_goes_into_a_service_the_compose_has(tmp_path: Path) -> None:
-    cs = released(tmp_path)
-    assert forbidden(cs, app(), [("skin", "app")]) == []
-    assert forbidden(cs, app(), [("skin", "frontend")]) == [
+    """Where a package goes is checked against the compose of every entry of
+    the product (DM-61, ``package_places``; ``forbidden`` took the mounts of
+    one compose before)."""
+    stack = released(tmp_path).stack
+    data = json.loads(stack.model_dump_json(by_alias=True, exclude_none=True))
+    data["packages"] = {
+        "skin": {
+            "contract": ">=1,<2",
+            "validate": "true",
+            "mount": [{"service": "app", "path": "/srv/skin"}],
+        }
+    }
+    product = PRIMER_YAML.validate_python(data)
+    assert package_places(product, {"blank": app()}) == []
+    data["packages"]["skin"]["mount"] = [{"service": "frontend", "path": "/srv/skin"}]
+    product = PRIMER_YAML.validate_python(data)
+    assert package_places(product, {"blank": app()}) == [
         "frontend: packages.skin.mount (no such service)"
     ]
 
