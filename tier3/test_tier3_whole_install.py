@@ -910,6 +910,23 @@ skin is checked by the build -- none, and the build fails -- and the edition
 the build got is served at ``/edition.txt``."""
 
 
+EDITIONS_LINE = 'EDITIONS: dict[str, tuple[str, ...]] = {"core": ()}\n'
+EDITIONS_FULL = 'EDITIONS: dict[str, tuple[str, ...]] = {"core": (), "full": ()}\n'
+"""The blank's backend table of editions (``backend/app/editions.py``) and
+the one of the DM-61 copy, which declares ``full`` in ``primer.yaml`` too."""
+
+
+def _app_health() -> dict[str, object]:
+    """``/health`` of the blank's app, read inside its container: nginx closes
+    it on the public routes (protocol 9.3)."""
+    read = "import urllib.request; print(urllib.request.urlopen("
+    read += "'http://127.0.0.1:8000/health', timeout=5).read().decode())"
+    [line] = _stdout(["docker", "exec", _app(), "python", "-c", read])
+    found = json.loads(line)
+    assert isinstance(found, dict)
+    return found
+
+
 def _skin_repository(tmp: Path) -> Path:
     """A skin package, three tags: ``v1.0.0`` (``one``), ``v1.1.0`` (``two``)
     and ``v1.2.0`` with no ``skin.css`` -- the build of the blank refuses it."""
@@ -1006,6 +1023,12 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     body = dockerfile.read_text(encoding="utf-8")
     assert body.count("COPY . .\n") == 1
     dockerfile.write_text(body.replace("COPY . .\n", SKIN_DOCKERFILE_CHECK))
+    # the backend's own table of editions knows full too (protocol: the table
+    # "edition -> modules" is the product's; the backend refuses another)
+    editions = copy / "backend" / "app" / "editions.py"
+    table = editions.read_text(encoding="utf-8")
+    assert table.count(EDITIONS_LINE) == 1
+    editions.write_text(table.replace(EDITIONS_LINE, EDITIONS_FULL))
     _git("-C", str(copy), "commit", "-q", "-am", "DM-61: the skin built into frontend")
     [commit] = _git("-C", str(copy), "rev-parse", "HEAD")
     _git("-C", str(copy), "push", "-q", str(mirror), "HEAD:refs/heads/main")
@@ -1020,6 +1043,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     }, keys
     assert _body("/skin/skin.css", FRONTEND) == "one"
     assert _body("/edition.txt", FRONTEND) == "core"
+    assert _app_health()["edition"] == "core"
     images = facts[("blank", "build")]["images"]
     assert isinstance(images, dict)
 
@@ -1053,6 +1077,8 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     )
     assert full.result == "green", printed
     assert _body("/edition.txt", FRONTEND) == "full"
+    # the pair on the backend: EDITION of the passport reached app
+    assert _app_health()["edition"] == "full"
     found = _frontend_images()
     assert {"core skin@1.1.0", "full skin@1.1.0"} <= set(found), found
     assert found["core skin@1.1.0"] != found["full skin@1.1.0"]
