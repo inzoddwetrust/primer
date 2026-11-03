@@ -971,8 +971,7 @@
     "composition_before",
     "composition_after",
     "steps",
-    "report",
-    "log_ref"
+    "report"
   ],
   "title": "verdict v1",
   "type": "object"

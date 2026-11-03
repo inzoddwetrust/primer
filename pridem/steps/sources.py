@@ -429,6 +429,39 @@ class FetchServices(_SourceStep):
         return Verified({"services": done})
 
 
+PACKAGE_CODES = {
+    "no-manifest": "{slot}: {path} is missing at {tag}",
+    "invalid-manifest": "{slot}: {path} at {tag} breaks its contract: {codes}",
+    "contract": "{slot}: package contract {found} is outside {wanted}",
+}
+"""The texts of ``package_contract``'s codes, for every step that gives them."""
+
+
+def package_contract(
+    product: Product, slot: str, text: str | None, path: str, tag: str
+) -> str:
+    """The contract version of the package of ``slot``, read from the text of
+    its ``primer-package.yaml`` (``None`` -- there is none), inside the
+    product's range, or red (``no-manifest``, ``invalid-manifest``,
+    ``contract``). One function for ``fetch_packages`` and ``pridem check``."""
+    if text is None:
+        raise StepFailed("no-manifest", {"slot": slot, "path": path, "tag": tag})
+    try:
+        manifest = parse_primer_package(text, f"{path}@{tag}")
+    except ContractError as error:
+        codes = sorted({problem.code for problem in error.problems})
+        raise StepFailed(
+            "invalid-manifest",
+            {"slot": slot, "path": path, "tag": tag, "codes": _j(codes)},
+        ) from None
+    wanted = product.packages[slot].contract
+    if not SpecifierSet(wanted).contains(Version(manifest.contract)):
+        raise StepFailed(
+            "contract", {"slot": slot, "found": manifest.contract, "wanted": wanted}
+        )
+    return manifest.contract
+
+
 class FetchPackages(_SourceStep):
     """The instance's packages at ``v<version>``, their contract checked first."""
 
@@ -440,9 +473,7 @@ class FetchPackages(_SourceStep):
         "undeclared": "the product declares no package slot {slots}",
         "missing-tag": "{slot}: tag {tag} is not on {repo}",
         "dir-clash": "{slots} would share the release directory {release}",
-        "no-manifest": "{slot}: {path} is missing at {tag}",
-        "contract": "{slot}: package contract {found} is outside {wanted}",
-        "invalid-manifest": "{slot}: {path} at {tag} breaks its contract: {codes}",
+        **PACKAGE_CODES,
     }
 
     def __init__(
@@ -494,22 +525,7 @@ class FetchPackages(_SourceStep):
         product = _known(self.resolved.product, "primer.yaml")
         text = checkout.show(ctx, target.commit, path)
         tag = f"v{target.ref.rsplit('@', 1)[1]}"
-        if text is None:
-            raise StepFailed("no-manifest", {"slot": slot, "path": path, "tag": tag})
-        try:
-            manifest = parse_primer_package(text, f"{path}@{tag}")
-        except ContractError as error:
-            codes = sorted({problem.code for problem in error.problems})
-            raise StepFailed(
-                "invalid-manifest",
-                {"slot": slot, "path": path, "tag": tag, "codes": _j(codes)},
-            ) from None
-        wanted = product.packages[slot].contract
-        if not SpecifierSet(wanted).contains(Version(manifest.contract)):
-            raise StepFailed(
-                "contract", {"slot": slot, "found": manifest.contract, "wanted": wanted}
-            )
-        return manifest.contract
+        return package_contract(product, slot, text, path, tag)
 
     def check(self, ctx: StepContext) -> CheckResult:
         stale = [

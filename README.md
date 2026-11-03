@@ -4,7 +4,8 @@ pridem is the deploy machine of the Primer project: a Python 3.12 package that i
 installed on every box of every project and brings the box to the state described
 by the stacks' `primer.yaml` files and the box passport. The repository holds the
 contracts, the parts the machine is built from and its first verbs,
-`pridem version`, `pridem status`, `pridem gc` and `pridem ssl renew`:
+`pridem version`, `pridem status`, `pridem gc`, `pridem ssl renew` and
+`pridem check`:
 
 - `pridem/stacks/` -- contract 1 (passport) and contract 3 (`primer.yaml`,
   `primer.lock`) as models, rules and loaders; the YAML loader refuses anchors,
@@ -23,7 +24,8 @@ contracts, the parts the machine is built from and its first verbs,
   one step as their whole plan under the lock (`pridem/steps/gc.py`, the
   clean-up by labels every plan also runs in `finally`; `ssl_renew` in
   `pridem/steps/ssl.py`), and the box's systemd timers run them
-  (`pridem/steps/timers.py`);
+  (`pridem/steps/timers.py`); `check` checks a project's repository with no
+  box (`pridem/verbs/check.py`, below);
 - `pridem/cli.py` -- the command line turned into a verb's arguments
   (`pridem [--json] [--timer] <verb>`); an unknown verb, option or argument and
   a busy box are refused before anything runs: exit 1, stderr, no verdict;
@@ -85,3 +87,56 @@ first parent of `main`. Tier 1 runs on the tag's commit first; then the wheel
 is built and the GitHub Release gets two assets: the wheel and `install.sh`
 with its pins set to the tag, its commit, the wheel's sha256 and the GitHub
 addresses.
+
+## `pridem check` in a project's CI
+
+`pridem check <directory> [<slot>=<directory> ...]` checks a repository of a
+project as the machine checks it on a box, by the same functions (protocol
+10.1): `primer.yaml` and `primer.lock` by the machine's loaders, the compose
+file of every stack by the machine's lists (`docker compose config`; the
+binary alone, no daemon, and the repository's `.env` is not read), every
+compose variable `${VAR:?}` and a key of `env`, and the `primer-package.yaml`
+of each package directory given. It writes nothing and needs no box and no
+network; its verdict has the form of contract 2 with no journal, exit 0 green,
+1 red, 2 when `docker compose` is not found. `--json` prints the verdict.
+
+A workflow of a project, with the machine pinned by its release tag and the
+sha256 of its wheel and of its lock (the first tag of the machine is issued by
+Primer; `vX.Y.Z` and the sha256 sums below are placeholders):
+
+```yaml
+name: primer check
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04  # has docker compose
+    env:
+      PRIDEM_TAG: vX.Y.Z
+      PRIDEM_WHEEL_SHA256: "<sha256 of pridem-X.Y.Z-py3-none-any.whl>"
+      PRIDEM_LOCK_SHA256: "<sha256 of requirements.lock at vX.Y.Z>"
+    steps:
+      - uses: actions/checkout@<commit sha>  # pin actions by commit
+      - uses: actions/setup-python@<commit sha>
+        with:
+          python-version: "3.12"
+      - name: pridem, pinned
+        run: |
+          base=https://github.com/inzoddwetrust/primer
+          wheel="pridem-${PRIDEM_TAG#v}-py3-none-any.whl"
+          curl -fsSLO "$base/releases/download/$PRIDEM_TAG/$wheel"
+          curl -fsSL -o requirements.lock "https://raw.githubusercontent.com/inzoddwetrust/primer/$PRIDEM_TAG/requirements.lock"
+          echo "$PRIDEM_WHEEL_SHA256  $wheel" | sha256sum -c --strict
+          echo "$PRIDEM_LOCK_SHA256  requirements.lock" | sha256sum -c --strict
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install --no-deps "$wheel"
+      - name: pridem check
+        run: pridem check .
+```
+
+No value and no secret is needed: a repository holds none, and the check gives
+every key of `env` a stand-in.
+

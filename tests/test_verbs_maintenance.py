@@ -76,6 +76,7 @@ def test_gc_writes_one_verdict_and_its_journal(tmp_path: Path) -> None:
         ("box", "gc", "main")
     ]
     assert out.startswith("gc → green · ")
+    assert verdict.log_ref is not None  # gc keeps a journal
     journal = root / "opt" / "pridem" / verdict.log_ref
     header = json.loads(journal.read_text(encoding="utf-8").splitlines()[0])
     assert (header["verb"], header["mode"]) == ("gc", "gc")

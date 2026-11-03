@@ -1,0 +1,108 @@
+{
+  "name": "blank",
+  "networks": {
+    "default": {
+      "name": "blank_default"
+    }
+  },
+  "services": {
+    "app": {
+      "build": {
+        "context": "/r/backend",
+        "dockerfile": "Dockerfile",
+        "target": "runtime"
+      },
+      "depends_on": {
+        "postgres": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "environment": {
+        "DATABASE_URL": "postgresql+asyncpg://blank:${POSTGRES_PASSWORD:?}@postgres:5432/blank",
+        "EDITION": "${EDITION:?}"
+      },
+      "healthcheck": {
+        "interval": "10s",
+        "retries": 3,
+        "start_period": "15s",
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"
+        ],
+        "timeout": "5s"
+      },
+      "networks": {
+        "default": null
+      },
+      "restart": "unless-stopped"
+    },
+    "frontend": {
+      "build": {
+        "context": "/r/frontend",
+        "dockerfile": "Dockerfile",
+        "target": "runtime"
+      },
+      "environment": {
+        "API_BASE_URL": "${API_BASE_URL:?}"
+      },
+      "healthcheck": {
+        "interval": "10s",
+        "retries": 3,
+        "start_period": "10s",
+        "test": [
+          "CMD",
+          "wget",
+          "-q",
+          "--spider",
+          "http://127.0.0.1/config.json"
+        ],
+        "timeout": "5s"
+      },
+      "networks": {
+        "default": null
+      },
+      "restart": "unless-stopped"
+    },
+    "postgres": {
+      "environment": {
+        "POSTGRES_DB": "blank",
+        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:?}",
+        "POSTGRES_USER": "blank"
+      },
+      "healthcheck": {
+        "interval": "5s",
+        "retries": 10,
+        "test": [
+          "CMD",
+          "pg_isready",
+          "-U",
+          "blank",
+          "-d",
+          "blank"
+        ],
+        "timeout": "3s"
+      },
+      "image": "postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36",
+      "networks": {
+        "default": null
+      },
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "source": "pgdata",
+          "target": "/var/lib/postgresql/data",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "pgdata": {
+      "name": "blank_pgdata"
+    }
+  }
+}

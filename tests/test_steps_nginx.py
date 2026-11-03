@@ -400,20 +400,22 @@ def test_a_preview_box_closes_health_beside_its_entry(tmp_path: Path) -> None:
 def test_a_path_that_reads_as_more_than_a_path_is_refused(
     tmp_path: Path, path: str
 ) -> None:
-    """The path goes into the config as it is: ``UrlPath`` lets any text after
-    the slash pass, so one that could read as a directive is ``path-unsafe``
-    before anything is rendered. The pair: the plain paths above render."""
+    """The path goes into the config as it is: one that could read as a
+    directive is ``path-unsafe`` before anything is rendered. Since DM-57 the
+    loader refuses it first (``UrlPath``); this is the second line, so the
+    product is built past the schema (``model_copy`` validates nothing).
+    The pair: the plain paths above render."""
     _, fetched = passport(tmp_path)
     assert fetched.passport is not None
-    stacks = {
-        "blank": {
-            "compose": "docker-compose.yml",
-            "app": {"service": "app", "port": 8000, "health": path, "ready": "/r"},
-            "frontend": {"service": "frontend", "port": 80},
-        }
-    }
+    made = product()
+    stage = made.stacks["blank"]
+    assert stage.app is not None
+    app = stage.app.model_copy(update={"health": path})
+    made = made.model_copy(
+        update={"stacks": {"blank": stage.model_copy(update={"app": app})}}
+    )
     with pytest.raises(StepFailed) as raised:
-        render(product(stacks=stacks), fetched.passport, None)
+        render(made, fetched.passport, None)
     reason = raised.value.reason
     assert (reason.code, dict(reason.params)) == (
         "path-unsafe",

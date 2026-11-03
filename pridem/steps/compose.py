@@ -51,7 +51,7 @@ alone); ``config`` inlines it into ``environment``, so it is read from
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -122,6 +122,19 @@ class ComposeStack:
             *args,
         ]
 
+    def checked_argv(self, *args: str) -> list[str]:
+        """Compose of the product's file with no env file: what ``pridem
+        check`` reads in a repository, its values in the environment."""
+        return [
+            "docker",
+            "compose",
+            "-p",
+            self.project,
+            "-f",
+            str(self.compose_file),
+            *args,
+        ]
+
     def argv(self, *args: str) -> list[str]:
         """Compose of the product's file with the machine's override."""
         return [
@@ -156,6 +169,7 @@ def out(
     expect: tuple[int, ...] = (0,),
     timeout: float = COMMAND_TIMEOUT_S,
     passed_on: bool = True,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[int, list[str]]:
     """Run ``argv``; its exit code and stdout lines. ``passed_on`` -- every line
     also goes to the run's sinks (a build's output); off -- kept by the step
@@ -168,19 +182,36 @@ def out(
         if stream is Stream.STDOUT:
             lines.append(line)
 
-    result = ctx.runner.run(argv, expect=expect, timeout=timeout, on_line=keep)
+    result = ctx.runner.run(argv, expect=expect, timeout=timeout, env=env, on_line=keep)
     return result.code, lines
 
 
 def config(
-    ctx: StepContext, compose: ComposeStack, *, interpolate: bool = True
+    ctx: StepContext,
+    compose: ComposeStack,
+    *,
+    interpolate: bool = True,
+    values: Mapping[str, str] | None = None,
 ) -> dict[str, Json]:
     """``docker compose config --format json`` of the product's file; without
-    ``interpolate`` -- ``--no-interpolate``, where ``env_file`` is still named."""
-    argv = ["config", "--format", "json"] + (
+    ``interpolate`` -- ``--no-interpolate``, where ``env_file`` and the
+    variables are still as written. ``values`` -- the check of a repository
+    (``pridem check``): no env file is read or written, the values are the
+    environment of compose alone (``PATH``, ``HOME`` and them), and compose's
+    own ``.env`` of the directory is off (``COMPOSE_DISABLE_ENV_FILE``)."""
+    args = ["config", "--format", "json"] + (
         [] if interpolate else ["--no-interpolate"]
     )
-    _, lines = out(ctx, compose.product_argv(*argv), passed_on=False)
+    if values is None:
+        _, lines = out(ctx, compose.product_argv(*args), passed_on=False)
+    else:
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "COMPOSE_DISABLE_ENV_FILE": "true",
+            **values,
+        }
+        _, lines = out(ctx, compose.checked_argv(*args), passed_on=False, env=env)
     document = json.loads("\n".join(lines))
     if not isinstance(document, dict):
         raise ValueError("docker compose config did not print an object")
@@ -380,6 +411,90 @@ def env_files(uninterpolated: Mapping[str, Json]) -> list[str]:
         for name, body in services.items()
         if "env_file" in _mapping(body)
     )
+
+
+_VARIABLE = re.compile(r"\$(?:\$|\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_REQUIRED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*:\?.*", re.DOTALL)
+"""``${NAME:?}`` and ``${NAME:?message}``: a variable that must have a value
+(protocol 3.4); every other form may leave it empty or give it a default."""
+
+
+def _strings(value: Json, where: str) -> list[tuple[str, str]]:
+    if isinstance(value, str):
+        return [(where, value)]
+    if isinstance(value, list):
+        return [found for item in value for found in _strings(item, where)]
+    if isinstance(value, dict):
+        return [found for item in value.values() for found in _strings(item, where)]
+    return []
+
+
+def variables(uninterpolated: Mapping[str, Json], env: Iterable[str]) -> list[str]:
+    """The variables of ``config --no-interpolate`` (written as in the file)
+    that are not ``${NAME:?}`` or ``${NAME:?message}`` and those whose name is
+    not a key of the stack's ``env`` (protocol 3.4, contract 3 rule 18), one
+    ``<where>: ...`` each, sorted; ``$$`` is a dollar, not a variable.
+    ``<where>`` is the service, or the top-level section and its entry."""
+    keys = set(env)
+    places: list[tuple[str, str]] = []
+    for section, body in uninterpolated.items():
+        if section.startswith("x-") or section == "name":
+            continue
+        for name, entry in _mapping(body).items():
+            where = name if section == "services" else f"{section}.{name}"
+            places += _strings(entry, where)
+    found: set[str] = set()
+    for where, text in places:
+        for match in _VARIABLE.finditer(text):
+            braced, bare = match.group(1), match.group(2)
+            if braced is None and bare is None:
+                continue  # $$
+            inner = braced if braced is not None else bare
+            head = _NAME.match(inner)
+            name = head.group(0) if head else inner
+            if braced is None or not _REQUIRED.fullmatch(braced):
+                found.add(f"{where}: {match.group(0)} is not ${{{name}:?}}")
+            if name not in keys:
+                found.add(f"{where}: {name} is not a key of env")
+    return sorted(found)
+
+
+def refusal(
+    compose: ComposeStack,
+    document: Mapping[str, Json],
+    mounts: Sequence[tuple[str, str]] = (),
+    also: Sequence[str] = (),
+) -> tuple[str, dict[str, Json]] | None:
+    """What ``build`` refuses ``document`` with, as its code and parameters,
+    or ``None``: build arguments first (``instance-args``), then every finding
+    of ``forbidden`` with ``also`` (``compose-forbidden``). One function for
+    the step and for ``pridem check`` (protocol 10.1)."""
+    services = document.get("services")
+    if isinstance(services, dict):
+        given = sorted(
+            name
+            for name, body in services.items()
+            if isinstance(body, dict)
+            and isinstance(build := body.get("build"), dict)
+            and build.get("args")
+        )
+        if given:
+            return "instance-args", {
+                "stack": compose.entry,
+                "services": list[Json](given),
+            }
+    found = sorted([*forbidden(compose, document, mounts), *also])
+    if found:
+        return "compose-forbidden", {"stack": compose.entry, "found": list[Json](found)}
+    return None
+
+
+REFUSAL_CODES = {
+    "instance-args": "the compose of {stack} gives build arguments to {services}",
+    "compose-forbidden": "the compose of {stack} asks the host for {found}",
+}
+"""The texts of ``refusal``'s codes, for every step that gives them."""
 
 
 def built_services(document: Mapping[str, Json]) -> list[str]:

@@ -108,6 +108,7 @@ LAYERS: Layers = (
         (
             "pridem.verbs",
             "pridem.verbs.base",
+            "pridem.verbs.check",
             "pridem.verbs.gc",
             "pridem.verbs.run",
             "pridem.verbs.ssl",

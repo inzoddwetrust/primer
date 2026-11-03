@@ -2,8 +2,9 @@
 a run that ended without one (``recover``, contract 2 rule 4), then opens its
 own journal.
 
-The verbs are taken from ``VERBS`` -- each one whose ``verdict`` is true -- so a
-new verb joins the probe by itself; ``ARGV`` names its command line, and a
+The verbs are taken from ``VERBS`` -- each one whose ``verdict`` is true and
+that works on a box (``box``, since DM-57) -- so a new verb joins the probe by
+itself; ``ARGV`` names its command line, and a
 verb with a verdict missing there is red. The fact is the box's ``history/``:
 the dead run's red verdict and the verb's own; the order is that of ``recover``
 and ``open_journal`` on the ``Box``.
@@ -26,14 +27,20 @@ from pridem.verbs import VERBS
 NO_SECRETS = Secrets(())
 ARGV = {"status": ["status"], "gc": ["gc"], "ssl": ["ssl", "renew"]}
 """The command line of each verb with a verdict."""
-WITH_VERDICT = sorted(name for name, verb in VERBS.items() if verb.verdict)
+WITH_VERDICT = sorted(name for name, verb in VERBS.items() if verb.verdict and verb.box)
+"""The verbs of the box that end with a verdict. DM-57 added ``check``: a
+verdict of a repository with no box -- no lock, no journal, nothing to recover
+-- so the probe takes the verbs with a verdict that work on a box
+(``Verb.box``), and its pair holds that ``check`` is the only one without."""
 
 
 def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
-    """The pair of the probe: the verbs it runs are not an empty list, and
-    ``version`` (no verdict) is not among them."""
+    """The pair of the probe: the verbs it runs are not an empty list,
+    ``version`` (no verdict) is not among them, and the verbs without a box
+    are exactly ``check`` -- a new verb does not leave ``recover`` by a flag."""
     assert WITH_VERDICT == ["gc", "ssl", "status"]
     assert "version" in VERBS and not VERBS["version"].verdict
+    assert {name for name, verb in VERBS.items() if not verb.box} == {"check"}
 
 
 @pytest.mark.parametrize("name", WITH_VERDICT)

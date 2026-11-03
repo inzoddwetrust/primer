@@ -36,6 +36,7 @@ name): docker is on the runner only after the host steps.
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import yaml
@@ -317,6 +318,8 @@ def _verdicts(verb: str) -> Verdict:
 
 def _journal_tail(verdict: Verdict) -> str:
     """The end of the run's journal: the console shows no command output."""
+    if verdict.log_ref is None:  # a verb of the box always keeps one
+        return "\n(the verdict names no journal)"
     journal = Path("/opt/pridem") / verdict.log_ref
     if not journal.is_file():
         return f"\n(no journal at {journal})"
@@ -721,6 +724,46 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
     loaded = ["systemctl", "show", "--property", "RandomizedDelayUSec"]
     assert _stdout([*loaded, "pridem-ssl-renew.timer"]) == ["RandomizedDelayUSec=1h"]
     assert _stdout([*loaded, "pridem-gc.timer"]) == ["RandomizedDelayUSec=0"]
+
+
+def _check(directory: Path) -> tuple[int, dict[str, object]]:
+    """``pridem --json check`` of ``directory``: its exit code and verdict."""
+    out: list[str] = []
+
+    def keep(stream: Stream, line: str, cut: bool) -> None:
+        if stream is Stream.STDOUT:
+            out.append(line)
+
+    done = SubprocessRunner().run(
+        ["/usr/local/bin/pridem", "--json", "check", str(directory)],
+        expect=(0, 1, 2),
+        timeout=300,
+        on_line=keep,
+    )
+    verdict = json.loads("\n".join(out))
+    assert isinstance(verdict, dict)
+    return done.code, verdict
+
+
+def test_tier3_check_of_the_blank_and_of_a_planted_copy(tmp_path: Path) -> None:
+    """DM-57: ``pridem check`` of the blank's repository with the real
+    ``docker compose`` -- after the whole install, whose ``provision_host``
+    put docker back on the runner (tier 3 removes the runner's own first) --
+    is green; a copy with ``privileged`` on its app is red by name."""
+    _stdout(["docker", "compose", "version"])  # the precondition, said loudly
+    checkout = _blank(tmp_path)
+    code, verdict = _check(checkout)
+    assert (code, verdict["result"]) == (0, "green"), verdict
+    planted = tmp_path / "planted"
+    shutil.copytree(checkout, planted, ignore=shutil.ignore_patterns(".git"))
+    compose = planted / "docker-compose.yml"
+    text = compose.read_text(encoding="utf-8")
+    assert text.count("\n  app:\n") == 1
+    compose.write_text(text.replace("\n  app:\n", "\n  app:\n    privileged: true\n"))
+    code, verdict = _check(planted)
+    assert (code, verdict["result"]) == (1, "red"), verdict
+    found = json.dumps(verdict["steps"])
+    assert "compose:compose-forbidden" in found and "app: privileged" in found, found
 
 
 def test_tier3_compose_takes_a_single_quoted_value_as_it_is(tmp_path: Path) -> None:

@@ -486,7 +486,9 @@ class Verdict(Strict):
     steps: list[Step]
     report: Report
     junit: Junit | None = Field(default=None, exclude_if=_is_none)
-    log_ref: Text
+    log_ref: Text | None = Field(default=None, exclude_if=_is_none)
+    """The run's journal; absent when the verb keeps none (``check`` writes
+    nothing), as every key with nothing to say (contract 2 section 1)."""
 
     @model_validator(mode="after")
     def _rules(self) -> Self:
@@ -508,7 +510,7 @@ class Verdict(Strict):
             raise ValueError(
                 "exit code 2 needs report.incomplete or report.doctor_diff not empty"
             )
-        if self.log_ref != f"journal/{self.run_id}.jsonl":
+        if self.log_ref is not None and self.log_ref != f"journal/{self.run_id}.jsonl":
             raise ValueError(f"log_ref must be journal/{self.run_id}.jsonl")
         if self.started > self.finished:
             raise ValueError("started is after finished")
@@ -555,6 +557,7 @@ def build_verdict(
     dns: Sequence[Fact] | None = None,
     junit: Mapping[str, int] | None = None,
     catalog: Catalog = ENGLISH,
+    journal: bool = True,
 ) -> Verdict:
     """The verdict of a plan, cleaned of ``secrets`` before it is validated.
 
@@ -617,7 +620,7 @@ def build_verdict(
             *(_step("finally", record) for record in outcome.finally_),
         ],
         "report": report,
-        "log_ref": f"journal/{run_id}.jsonl",
+        **({"log_ref": f"journal/{run_id}.jsonl"} if journal else {}),
     }
     if junit is not None:
         raw["junit"] = dict(junit)

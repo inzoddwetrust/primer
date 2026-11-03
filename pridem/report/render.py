@@ -270,7 +270,8 @@ def _closing(verdict: Verdict, catalog: Catalog) -> list[str]:
                 skipped=junit.skipped,
             )
         )
-    out.append(say(catalog, "@closing.log", log_ref=verdict.log_ref))
+    if verdict.log_ref is not None:
+        out.append(say(catalog, "@closing.log", log_ref=verdict.log_ref))
     return out
 
 

@@ -19,7 +19,7 @@
       "additionalProperties": false,
       "properties": {
         "health": {
-          "pattern": "^/",
+          "pattern": "^/[A-Za-z0-9._~/-]*$",
           "title": "Health",
           "type": "string"
         },
@@ -30,7 +30,7 @@
           "type": "integer"
         },
         "ready": {
-          "pattern": "^/",
+          "pattern": "^/[A-Za-z0-9._~/-]*$",
           "title": "Ready",
           "type": "string"
         },
@@ -511,7 +511,7 @@
           "type": "string"
         },
         "path": {
-          "pattern": "^/",
+          "pattern": "^/[A-Za-z0-9._~/-]*$",
           "title": "Path",
           "type": "string"
         }
@@ -542,7 +542,7 @@
       "additionalProperties": false,
       "properties": {
         "health": {
-          "pattern": "^/",
+          "pattern": "^/[A-Za-z0-9._~/-]*$",
           "title": "Health",
           "type": "string"
         },
@@ -556,7 +556,7 @@
           "type": "string"
         },
         "ready": {
-          "pattern": "^/",
+          "pattern": "^/[A-Za-z0-9._~/-]*$",
           "title": "Ready",
           "type": "string"
         }
@@ -858,7 +858,7 @@
           "type": "string"
         },
         "openapi": {
-          "pattern": "^/",
+          "pattern": "^/[A-Za-z0-9._~/-]*$",
           "title": "Openapi",
           "type": "string"
         },

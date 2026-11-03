@@ -7,11 +7,12 @@ message on stderr, no verdict (contract 2 v1.9).
 """
 
 from pridem.verbs.base import Context, Refused, Verb
+from pridem.verbs.check import CHECK
 from pridem.verbs.gc import GC
 from pridem.verbs.ssl import SSL
 from pridem.verbs.status import STATUS
 from pridem.verbs.version import VERSION
 
-VERBS: dict[str, Verb] = {verb.name: verb for verb in (VERSION, STATUS, GC, SSL)}
+VERBS: dict[str, Verb] = {verb.name: verb for verb in (VERSION, STATUS, GC, SSL, CHECK)}
 
 __all__ = ["VERBS", "Context", "Refused", "Verb"]

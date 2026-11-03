@@ -1,0 +1,29 @@
+schema: 1
+name: blank
+kind: product
+
+editions:
+  core: { services: [] }
+
+stacks:
+  blank:
+    compose: docker-compose.yml
+    app:      { service: app, port: 8000, health: /health, ready: /ready }
+    frontend: { service: frontend, port: 80 }
+    migrate:  python -m alembic upgrade head
+    test:     { run: python -m pytest tests/ --junitxml=/tmp/junit.xml, target: test }
+    seeds:
+      bootstrap: { run: python -m app.seed bootstrap, when: install }
+
+env:
+  POSTGRES_PASSWORD: { source: minted }
+  EDITION:           { source: passport, key: edition, enum: editions }
+  API_BASE_URL:      { source: passport, key: domains.api }
+
+host:
+  domains: [frontend, api]
+  routes:
+    frontend: { to: "frontend:80" }
+    api:      { to: "app:8000", max_body: 1M }
+
+report: { health: /health, ready: /ready, logs: json, junit: true }

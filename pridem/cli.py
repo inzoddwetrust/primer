@@ -57,12 +57,16 @@ def run(
             raise Refused(f"{name} writes no verdict: --json has nothing to print")
         if by_timer and not verb.timer:
             raise Refused(f"{name} is not run by a timer: --timer does not apply")
-        if len(rest) > len(verb.positionals):
-            raise Refused(f"{name}: unexpected arguments {list(rest)}")
+        given: dict[str, str | list[str]] = dict(
+            zip(verb.positionals, rest, strict=False)
+        )
+        tail = list(rest[len(verb.positionals) :])
+        if tail and verb.rest is None:
+            raise Refused(f"{name}: unexpected arguments {tail}")
+        if verb.rest is not None:
+            given[verb.rest] = tail
         try:
-            args = verb.args.model_validate(
-                dict(zip(verb.positionals, rest, strict=False))
-            )
+            args = verb.args.model_validate(given)
         except ValidationError as error:
             raise Refused(f"{name}: {error.error_count()} invalid arguments") from None
         context = Context(

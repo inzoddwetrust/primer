@@ -38,14 +38,19 @@ class Context:
 class Verb:
     """A verb: ``args`` validates the arguments, ``run`` returns the exit code.
 
-    ``positionals`` names the positional arguments in order; ``verdict`` says
-    whether the verb ends with a verdict, which ``--json`` prints; ``timer`` --
-    whether a timer of the box runs it, which ``--timer`` says.
+    ``positionals`` names the positional arguments in order; ``rest`` -- the
+    argument that takes the ones after them, as a list (``None``: none may
+    follow); ``verdict`` says whether the verb ends with a verdict, which
+    ``--json`` prints; ``timer`` -- whether a timer of the box runs it, which
+    ``--timer`` says; ``box`` -- whether it works on a box (its lock, its
+    journal and ``history/``): ``check`` reads a repository and has none.
     """
 
     name: str
     args: type[Strict]
     run: Callable[[Strict, Context], int]
     positionals: tuple[str, ...] = ()
+    rest: str | None = None
     verdict: bool = True
     timer: bool = False
+    box: bool = True

@@ -571,3 +571,24 @@ def test_paths_carry_no_union_tags(tmp_path: Path) -> None:
     assert ("env.X.run", "missing") in found
     assert all(path.startswith(("env.", "provides.")) for path, _ in found)
     assert all("derived" not in path and "product" not in path for path, _ in found)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/health x", "/health;", "/h{", "/h\n", "/h$", "/h?x=1", "health", "/h%20"],
+)
+def test_a_path_of_an_app_is_a_plain_one(tmp_path: Path, path: str) -> None:
+    """DM-57: the paths of an ``app`` go into the nginx config as they are, so
+    the loader refuses one that is not plain (``UrlPath``); ``path-unsafe`` of
+    the rendering stays the second line. The pair: plain paths load."""
+    for field in ("health", "ready"):
+        data = example("product.yaml")
+        entry = next(iter(node(data, "stacks")))
+        node(data, "stacks", entry, "app")[field] = path
+        assert yaml_problems(tmp_path, data) == [
+            (f"stacks.{entry}.app.{field}", "string_pattern_mismatch")
+        ]
+    data = example("product.yaml")
+    entry = next(iter(node(data, "stacks")))
+    node(data, "stacks", entry, "app")["health"] = "/api/v1/_health.json~2"
+    assert yaml_problems(tmp_path, data) == []

@@ -112,7 +112,10 @@ def _relative_path(value: str) -> str:
 
 Name = Annotated[str, Field(min_length=1)]
 Command = Annotated[str, Field(min_length=1)]
-UrlPath = Annotated[str, Field(pattern=r"^/")]
+UrlPath = Annotated[str, Field(pattern=r"^/[A-Za-z0-9._~/-]*$")]
+"""A path of an app: a plain one -- it goes into the nginx config of the box as
+it is (``location =``), so a space, ``;`` or ``{`` is refused here, before any
+step; ``path-unsafe`` of the rendering is the second line."""
 Port = Annotated[int, Field(ge=1, le=65535)]
 Range = Annotated[str, AfterValidator(_specifier)]
 RepoPath = Annotated[str, AfterValidator(_relative_path)]

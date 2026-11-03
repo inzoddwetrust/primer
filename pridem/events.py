@@ -52,8 +52,9 @@ def strings(value: Json) -> list[str]:
 Status = Literal["ok", "failed", "skipped"]
 Phase = Literal["main", "restore", "finally"]
 PlanMode = Literal["install", "deploy", "doctor", "reinstall", "gc", "renew"]
-RunMode = PlanMode | Literal["status"]
-"""What a run is: a plan's mode, or a verb that runs no plan (``status``)."""
+RunMode = PlanMode | Literal["status", "check"]
+"""What a run is: a plan's mode, or a verb that runs no plan (``status``,
+``check``)."""
 
 REDACTED = "[redacted]"
 

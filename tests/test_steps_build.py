@@ -149,3 +149,22 @@ def test_build_args_in_the_products_compose_are_refused(tmp_path: Path) -> None:
         "build:instance-args", {"stack": "blank", "services": ["frontend"]}
     )
     assert not cs.override.exists()
+
+
+def test_build_names_a_variable_that_is_loose_or_not_of_env(tmp_path: Path) -> None:
+    """DM-57: the same ``variables`` as ``pridem check`` -- one that may be
+    empty and one that is not a key of ``env`` are findings of
+    ``compose-forbidden``, before anything is built; the pair: the harness's
+    compose has no variable and its ``env`` none (the other tests of this
+    file stay green)."""
+    cs = compose(tmp_path)
+    raw = json.loads(json.dumps(CONFIG))
+    raw["services"]["app"]["environment"] = {"A": "$LOOSE"}
+    with FakeRunner(raw_config_call(cs, raw), config_call(cs)) as runner:
+        outcome, _ = run([steps(tmp_path)[0]], runner)
+    reason = outcome.steps[0].reason
+    assert reason is not None and reason.code == "build:compose-forbidden"
+    assert reason.params["found"] == [
+        "app: $LOOSE is not ${LOOSE:?}",
+        "app: LOOSE is not a key of env",
+    ]

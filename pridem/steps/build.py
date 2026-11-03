@@ -8,7 +8,10 @@ compose would carry an instance's value and is refused before anything is
 built. So is a compose that asks the host for more than the stack's trust
 (``compose-forbidden``, every finding of ``steps.compose.forbidden``): the
 check reads it, so ``doctor`` names it too; ``check`` also reads
-``config --no-interpolate``, the only output that still names ``env_file``.
+``config --no-interpolate``, the only output that still names ``env_file``
+and writes the variables as the file does: one that may be empty or has a
+default (not ``${NAME:?}``) and one that is not a key of ``env`` are findings
+of the same code. ``pridem check`` refuses by the same ``refusal``.
 Images carry ``pridem.stack``, ``pridem.release``, ``pridem.commit`` and
 ``pridem.service`` from the machine's override (``steps/compose.py``), which
 this step writes.
@@ -37,14 +40,16 @@ from pridem.steps.base import (
 )
 from pridem.steps.compose import (
     BUILD_TIMEOUT_S,
+    REFUSAL_CODES,
     ComposeStack,
     built_services,
     config,
     env_files,
-    forbidden,
     image_of,
     out,
     override_text,
+    refusal,
+    variables,
     write_override,
 )
 from pridem.steps.packages import PackageMount, package_mounts, volumes
@@ -72,8 +77,7 @@ class Build(Step):
     codes: ClassVar[dict[str, str]] = {
         **NO_PASSPORT,
         "build": "build {services} of {stack} at {commit}",
-        "instance-args": "the compose of {stack} gives build arguments to {services}",
-        "compose-forbidden": "the compose of {stack} asks the host for {found}",
+        **REFUSAL_CODES,
         "no-image": "no image of {service} at {commit} after the build",
         "two-images": "{count} images of {service} at {commit}",
     }
@@ -108,35 +112,19 @@ class Build(Step):
         """The built services and the override; ``also`` -- findings of the
         caller, refused with those of ``forbidden`` in one code."""
         document = config(ctx, self.compose)
-        services = document.get("services")
-        if isinstance(services, dict):
-            given = sorted(
-                name
-                for name, body in services.items()
-                if isinstance(body, dict)
-                and isinstance(build := body.get("build"), dict)
-                and build.get("args")
-            )
-            if given:
-                raise StepFailed(
-                    "instance-args",
-                    {"stack": self.compose.entry, "services": list[Json](given)},
-                )
         mounts = self._mounts()
         bound = [(mount.slot, mount.service) for mount in mounts]
-        found = sorted([*forbidden(self.compose, document, bound), *also])
-        if found:
-            raise StepFailed(
-                "compose-forbidden",
-                {"stack": self.compose.entry, "found": list[Json](found)},
-            )
+        refused = refusal(self.compose, document, bound, also)
+        if refused is not None:
+            raise StepFailed(*refused)
         text = override_text(self.compose, document, volumes(mounts))
         return built_services(document), text
 
     def check(self, ctx: StepContext) -> CheckResult:
         uninterpolated = config(ctx, self.compose, interpolate=False)
-        outside = env_files(uninterpolated)
-        built, text = self._rendered(ctx, outside)
+        keys = self.compose.stack.env
+        found = [*env_files(uninterpolated), *variables(uninterpolated, keys)]
+        built, text = self._rendered(ctx, found)
         params: dict[str, Json] = {
             "stack": self.compose.entry,
             "commit": self.compose.commit,
