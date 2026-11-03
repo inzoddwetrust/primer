@@ -1,8 +1,12 @@
 """The machine's own stack ``edge``: nginx and certbot (TZ 7.3).
 
 The compose project ``pridem-edge`` from the machine's file
-``/opt/pridem/edge/compose.yml``: nginx runs on the network ``pridem``, holds
-the host's ports 80 and 443 (no application has a port of its own), reads its
+``/opt/pridem/edge/compose.yml``: nginx runs on the network ``pridem``, where it
+reaches the applications, and on the project's own network ``default``, an
+ordinary bridge: ``pridem`` is internal (protocol 4.1), and the host's ports 80
+and 443 nginx holds are published through ``default`` (no application has a
+port of its own). certbot runs on ``default`` alone, its way to the ACME
+server. nginx reads its
 config from ``/opt/pridem/edge/nginx`` and the certificate from
 ``/opt/pridem/edge/certs``; the ACME webroot is the volume ``acme`` it shares
 with certbot. certbot never runs as a service: ``run --rm`` when a
@@ -78,7 +82,7 @@ def compose_text(root: Path) -> str:
                 "image": NGINX_IMAGE,
                 "restart": "unless-stopped",
                 "ports": ["80:80", "443:443"],
-                "networks": [NETWORK],
+                "networks": [NETWORK, "default"],
                 "labels": labels,
                 "volumes": [
                     f"{nginx_dir(root)}:/etc/nginx/conf.d:ro",
@@ -97,7 +101,7 @@ def compose_text(root: Path) -> str:
             },
         },
         "volumes": {"acme": {"labels": labels}},
-        "networks": {NETWORK: {"external": True}},
+        "networks": {NETWORK: {"external": True}, "default": {"labels": labels}},
     }
     return json.dumps(document, indent=2, sort_keys=True) + "\n"
 

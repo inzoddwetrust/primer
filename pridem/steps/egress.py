@@ -1,0 +1,386 @@
+"""``egress``: the machine's proxy for a product's ``egress`` (protocol 4.1,
+4.2; DM-64).
+
+No container of a product has a route out of the box: the networks of its
+stacks are internal (the override, ``steps/compose.py``), and so are
+``pridem`` and ``pridem-egress`` (``ensure_network``). A product that declares
+``egress`` reaches exactly those hosts through this proxy: squid, from the
+image ``SQUID_IMAGE`` pinned by digest, in the compose project
+``pridem-egress`` of the machine's file ``/opt/pridem/egress/compose.yml``. The
+proxy sits on ``pridem-egress`` under ``PROXY_ALIAS`` -- every service of the
+product's stacks joins it and has the address as ``HTTPS_PROXY`` and
+``https_proxy`` -- and on its project's own ordinary network ``default``, its
+way out. Every object carries ``pridem.stack=egress``.
+
+The config (``/opt/pridem/egress/squid.conf``, rendered by ``config_text``) lets
+through ``CONNECT`` to port 443 of a host of ``egress``, by its name exactly
+(``dstdomain -n``, no leading dot: ``zoom.us`` is not ``api.zoom.us``), and
+nothing else: any other method, any other port, any address of a private range
+(a name that resolves into the box is refused) and any other host get 403. It
+keeps no cache and no access log.
+
+The step runs once per product, in its ladder after ``migrate`` -- the point of
+no return: a failed migration leaves the old code on the old list -- and before
+``up``: the new application starts with its proxy ready. ``check`` compares the
+rendered files with those on disk, the running container with the pinned image;
+``act`` writes the files (``atomic_write``, 0644: squid reads its config as its
+own user) and recreates the container (``up -d --force-recreate``). With
+``egress`` empty there is no proxy: ``act`` removes the one a previous release
+left (``down`` of its project, or ``rm -f`` by label when its file is gone) and
+the files. ``verify`` reads the fact back:
+
+- empty ``egress`` -- no container labelled ``pridem.stack=egress``, running or
+  not, and no file;
+- otherwise -- the files are the rendered ones; one container runs, on the
+  image of ``SQUID_IMAGE``; the config it reads is the rendered one; and the
+  behaviour: from the host, at the proxy's address on its own network,
+  ``CONNECT`` to ``SENTINEL`` -- a host on no list -- is 403, and to every host
+  of ``egress`` is anything but 403 (200, or a 5xx when the host itself does not
+  answer: the list is what is read, not the host's health).
+"""
+
+import json
+import socket
+import time
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import ClassVar
+
+from pridem.events import Json
+from pridem.stacks.schema import Product
+from pridem.steps.base import (
+    CheckResult,
+    Mode,
+    Step,
+    StepContext,
+    StepFailed,
+    Verified,
+    local_code,
+)
+from pridem.steps.compose import EGRESS_NETWORK, PROXY_ALIAS, PROXY_PORT, out
+from pridem.steps.edge import write_file
+
+ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
+PROJECT = "pridem-egress"
+STACK_LABEL = {"pridem.stack": "egress"}
+LABEL_FILTER = "label=pridem.stack=egress"
+OUTSIDE = f"{PROJECT}_default"
+"""The proxy's own ordinary network: its way out, and where the host reads it."""
+
+SQUID_IMAGE = (
+    "ubuntu/squid:6.6-24.04_beta@sha256:"
+    "6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
+)
+"""squid of Canonical on Ubuntu 24.04, pinned by digest: the index digest
+Docker Hub shows for the tag ``6.6-24.04_beta`` (DM-64). docker pulls by the
+digest; the tag is for people. Tier 3 checks on every run that this tag names
+this digest (``tier3/test_tier3_whole_install.py``)."""
+
+CONTAINER_CONFIG = "/etc/squid/squid.conf"
+SENTINEL = "refused.pridem.invalid"
+"""A host on no list (``.invalid`` never resolves): the proxy must refuse it."""
+PRIVATE = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "::1",
+    "fc00::/7",
+    "fe80::/10",
+)
+"""Addresses the proxy never connects to: the box and its networks."""
+CONNECT_TIMEOUT_S = 10
+"""How long squid waits for a host of ``egress`` to accept."""
+ANSWER_TIMEOUT_S = 20
+"""How long ``verify`` waits for the proxy's answer to one ``CONNECT``."""
+READY_S = 30
+"""How long ``verify`` waits for a recreated proxy to answer at all."""
+REFUSED = 403
+
+Answer = Callable[[str, int, str], int | None]
+"""The status of ``CONNECT <host>:443`` sent to the proxy at ``(address, port)``;
+``None`` -- no answer."""
+
+
+def home(root: Path) -> Path:
+    return root / "opt" / "pridem" / "egress"
+
+
+def config_file(root: Path) -> Path:
+    return home(root) / "squid.conf"
+
+
+def compose_file(root: Path) -> Path:
+    return home(root) / "compose.yml"
+
+
+def argv(root: Path, *args: str) -> list[str]:
+    return ["docker", "compose", "-p", PROJECT, "-f", str(compose_file(root)), *args]
+
+
+def config_text(hosts: Sequence[str]) -> str:
+    """squid's config: ``CONNECT`` to port 443 of ``hosts`` by name, nothing else."""
+    lines = [
+        "# rendered by pridem (protocol 4.2): CONNECT to the product's egress only",
+        f"http_port {PROXY_PORT}",
+        "acl SSL_ports port 443",
+        "acl CONNECT method CONNECT",
+        f"acl private dst {' '.join(PRIVATE)}",
+        f"acl egress dstdomain -n {' '.join(hosts)}",
+        "http_access deny !CONNECT",
+        "http_access deny !SSL_ports",
+        "http_access deny private",
+        "http_access allow egress",
+        "http_access deny all",
+        "cache deny all",
+        "access_log none",
+        f"connect_timeout {CONNECT_TIMEOUT_S} seconds",
+        "shutdown_lifetime 1 seconds",
+        "pid_filename none",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def compose_text(root: Path) -> str:
+    """The proxy's compose file: one service, on ``pridem-egress`` and its own
+    ``default``."""
+    labels: dict[str, Json] = dict[str, Json](STACK_LABEL)
+    document: dict[str, Json] = {
+        "services": {
+            "proxy": {
+                "image": SQUID_IMAGE,
+                "restart": "unless-stopped",
+                "labels": labels,
+                "networks": {
+                    EGRESS_NETWORK: {"aliases": [PROXY_ALIAS]},
+                    "default": None,
+                },
+                "volumes": [f"{config_file(root)}:{CONTAINER_CONFIG}:ro"],
+            },
+        },
+        "networks": {EGRESS_NETWORK: {"external": True}, "default": {"labels": labels}},
+    }
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"
+
+
+def connect_status(address: str, port: int, host: str) -> int | None:
+    """``CONNECT <host>:443`` to the proxy at ``(address, port)``: the status of
+    its answer, ``None`` when it gives none."""
+    request = f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n"
+    try:
+        with socket.create_connection((address, port), ANSWER_TIMEOUT_S) as conn:
+            conn.sendall(request.encode("ascii"))
+            line = conn.makefile("rb").readline(256)
+    except OSError:
+        return None
+    parts = line.split()
+    if len(parts) < 2 or not parts[0].startswith(b"HTTP/") or not parts[1].isdigit():
+        return None
+    return int(parts[1])
+
+
+class Egress(Step):
+    """The proxy of one product: there exactly when its ``egress`` is not empty."""
+
+    name = "egress"
+    order = 12
+    modes = ALL_MODES
+    codes: ClassVar[dict[str, str]] = {
+        "render": "run the proxy for {hosts}",
+        "remove": "remove the proxy: egress is empty ({found})",
+        "drift": "{files} are not the rendered ones",
+        "not-running": "{count} proxy containers run, not one",
+        "image-wrong": "the proxy runs on {running}, not on {expected}",
+        "config-not-seen": "the proxy reads another config than the rendered one",
+        "no-address": "the proxy has no address on {network}",
+        "proxy-silent": "the proxy at {address} does not answer for {host}",
+        "proxy-open": "the proxy lets {host} through: {status}, not 403",
+        "host-refused": "the proxy refuses {hosts} of egress",
+        "proxy-left": "egress is empty and the proxy is left: {found}",
+    }
+
+    def __init__(
+        self,
+        product: Product,
+        *,
+        root: Path = Path("/"),
+        answer: Answer = connect_status,
+        port: int = PROXY_PORT,
+        ready_s: float = READY_S,
+        poll_s: float = 1.0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.product = product
+        self.root = root
+        self.answer = answer
+        self.port = port
+        self.ready_s = ready_s
+        self.poll_s = poll_s
+        self.clock = clock
+        self.sleep = sleep
+
+    @property
+    def hosts(self) -> list[str]:
+        return list(self.product.egress)
+
+    def _files(self) -> list[Path]:
+        return [
+            path
+            for path in (config_file(self.root), compose_file(self.root))
+            if path.exists()
+        ]
+
+    def _drift(self) -> list[str]:
+        """The machine's files that differ from the rendered ones."""
+        wanted = {
+            config_file(self.root): config_text(self.hosts),
+            compose_file(self.root): compose_text(self.root),
+        }
+        return [
+            str(path)
+            for path, text in wanted.items()
+            if not path.exists() or path.read_text(encoding="utf-8") != text
+        ]
+
+    def _containers(self, ctx: StepContext, *, running: bool) -> list[str]:
+        args = ["docker", "ps", "-q", "--no-trunc", "--filter", LABEL_FILTER]
+        if not running:
+            args.insert(2, "-a")
+        _, lines = out(ctx, args, passed_on=False)
+        return [line.strip() for line in lines if line.strip()]
+
+    def _one(self, ctx: StepContext, argv_: list[str]) -> str:
+        _, lines = out(ctx, argv_, passed_on=False)
+        return lines[0].strip() if lines else ""
+
+    def _image(self, ctx: StepContext, container: str) -> tuple[str, str]:
+        """The image the container was made from, and the one of ``SQUID_IMAGE``."""
+        running = self._one(ctx, ["docker", "inspect", "-f", "{{.Image}}", container])
+        expected = self._one(
+            ctx, ["docker", "image", "inspect", "-f", "{{.Id}}", SQUID_IMAGE]
+        )
+        return running, expected
+
+    # --- the step ------------------------------------------------------------------
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        if not self.hosts:
+            found = self._containers(ctx, running=False)
+            files = self._files()
+            if not found and not files:
+                return CheckResult(False)
+            params: dict[str, Json] = {
+                "found": list[Json]([*found, *(str(path) for path in files)])
+            }
+            return CheckResult(True, local_code("remove", params), {"remove": True})
+        needed = CheckResult(
+            True, local_code("render", {"hosts": list[Json](self.hosts)})
+        )
+        if self._drift():
+            return needed
+        running = self._containers(ctx, running=True)
+        if len(running) != 1:
+            return needed
+        image, expected = self._image(ctx, running[0])
+        if not image or image != expected:
+            return needed
+        return CheckResult(False)
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        if check.data.get("remove") is True:
+            if compose_file(self.root).exists():
+                out(ctx, argv(self.root, "down"))
+            else:
+                found = self._containers(ctx, running=False)
+                if found:
+                    out(ctx, ["docker", "rm", "-f", *found])
+            for path in self._files():
+                path.unlink()
+            return
+        write_file(config_file(self.root), config_text(self.hosts).encode(), 0o644)
+        write_file(compose_file(self.root), compose_text(self.root).encode(), 0o644)
+        out(ctx, argv(self.root, "up", "-d", "--force-recreate", "proxy"))
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        if not self.hosts:
+            found = self._containers(ctx, running=False)
+            files = [str(path) for path in self._files()]
+            if found or files:
+                raise StepFailed("proxy-left", {"found": list[Json]([*found, *files])})
+            return Verified({"hosts": [], "proxy": "absent"})
+        drift = self._drift()
+        if drift:
+            raise StepFailed("drift", {"files": list[Json](drift)})
+        running = self._containers(ctx, running=True)
+        if len(running) != 1:
+            raise StepFailed("not-running", {"count": len(running)})
+        container = running[0]
+        image, expected = self._image(ctx, container)
+        if not image or image != expected:
+            raise StepFailed(
+                "image-wrong", {"running": image or "none", "expected": SQUID_IMAGE}
+            )
+        _, seen = out(
+            ctx, ["docker", "exec", container, "cat", CONTAINER_CONFIG], passed_on=False
+        )
+        if "\n".join(seen) + "\n" != config_text(self.hosts):
+            raise StepFailed("config-not-seen")
+        address = self._address(ctx, container)
+        refused = self._first_answer(address)
+        if refused != REFUSED:
+            raise StepFailed("proxy-open", {"host": SENTINEL, "status": refused})
+        allowed: dict[str, Json] = {}
+        denied: list[str] = []
+        for host in self.hosts:
+            status = self.answer(address, self.port, host)
+            if status is None:
+                raise StepFailed("proxy-silent", {"address": address, "host": host})
+            if status == REFUSED:
+                denied.append(host)
+            allowed[host] = status
+        if denied:
+            raise StepFailed("host-refused", {"hosts": list[Json](denied)})
+        return Verified(
+            {
+                "hosts": list[Json](self.hosts),
+                "image": SQUID_IMAGE,
+                "refused": {SENTINEL: REFUSED},
+                "allowed": allowed,
+            }
+        )
+
+    def _address(self, ctx: StepContext, container: str) -> str:
+        """The proxy's address on its own network, where the host reaches it."""
+        text = self._one(
+            ctx,
+            [
+                "docker",
+                "inspect",
+                "-f",
+                "{{json .NetworkSettings.Networks}}",
+                container,
+            ],
+        )
+        try:
+            networks = json.loads(text) if text else {}
+        except json.JSONDecodeError:
+            networks = {}
+        attached = networks.get(OUTSIDE) if isinstance(networks, dict) else None
+        address = attached.get("IPAddress") if isinstance(attached, dict) else None
+        if not isinstance(address, str) or not address:
+            raise StepFailed("no-address", {"network": OUTSIDE})
+        return address
+
+    def _first_answer(self, address: str) -> int:
+        """The answer for ``SENTINEL``, waiting up to ``ready_s`` for a
+        recreated proxy to answer at all."""
+        deadline = self.clock() + self.ready_s
+        while (status := self.answer(address, self.port, SENTINEL)) is None:
+            if self.clock() >= deadline:
+                raise StepFailed("proxy-silent", {"address": address, "host": SENTINEL})
+            self.sleep(self.poll_s)
+        return status

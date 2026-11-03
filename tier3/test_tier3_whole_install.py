@@ -3,7 +3,8 @@
 One plan installs the blank on a clean runner -- the host steps, the passport
 (a file), the timers, the sources (a ``file://`` mirror of the blank at its
 pinned commit, so no key of CI is needed), the blank's ladder (``seams_check``,
-``render_env``, ``build``, ``packages``, ``tests``, ``migrate``, ``up``),
+``render_env``, ``build``, ``packages``, ``tests``, ``migrate``, ``egress``,
+``up``),
 ``types``, the edge (``tls_files``, ``nginx``, ``ssl``), ``frontend``, the
 final check and ``finalize``, ``gc`` in ``finally`` -- and the same plan runs a
 second time, then once as ``doctor``. The blank is built and brought up once in
@@ -28,8 +29,14 @@ install left:
   timer's service is green on the self-signed box; both timers are enabled and
   active.
 
+The probe of DM-64 runs next, on the box the install left: the blank reaches
+nothing outside the box; a release of it with ``egress`` reaches its host
+through the machine's proxy and no other; the release after it, without
+``egress``, has no proxy left. It deploys through the same mirror.
+
 Two short checks need no install: what a single-quoted value is to compose,
-and that the tag certbot is pinned by still names the pinned digest. The file
+and that the tags certbot and squid are pinned by still name the pinned
+digests. The file
 runs after ``test_tier3_host.py`` (pytest takes a directory's files by
 name): docker is on the runner only after the host steps.
 """
@@ -39,11 +46,14 @@ import os
 import shutil
 from pathlib import Path
 
+import pytest
 import yaml
 
 from pridem.report.schema import Verdict
 from pridem.runner import CommandTimedOut, Stream, SubprocessRunner
+from pridem.steps.compose import PROXY_URL as PROXY
 from pridem.steps.edge import CERTBOT_IMAGE
+from pridem.steps.egress import SQUID_IMAGE
 
 PYTHON = "/opt/pridem/current/venv/bin/python"
 BLANK = "https://github.com/inzoddwetrust/primer-blank.git"
@@ -58,6 +68,10 @@ JOURNAL_TAIL = 120
 PLANTED_COMMIT = "f" * 40
 PLANTED_IMAGE = "pridem-planted:dm20"
 URL_SAFE = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+EGRESS_HOST = "api.github.com"
+"""The blank's row of the list agreed with Primer (DM-64)."""
+OTHER_HOST = "github.com"
+"""A host the runner reaches directly and the blank's list does not name."""
 GIT_ENV = {
     "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
     "HOME": "/nonexistent",
@@ -80,6 +94,7 @@ from pridem.stacks.schema import load_primer_yaml
 from pridem.stacks.seams import SeamMemory
 from pridem.state import Box, JournalHeader
 from pridem.steps.build import Build
+from pridem.steps.egress import Egress
 from pridem.steps.env import RenderEnv, SeamsCheck
 from pridem.steps.finalize import FinalCheck, Finalize
 from pridem.steps.frontend import Frontend
@@ -120,6 +135,7 @@ ladder = [
     Packages(blank, "blank", **parts, fetched=fetched),
     Tests(blank, "blank", **parts, report=report, secrets=secrets),
     Migrate(blank, "blank", **parts),
+    Egress(blank, root=root),
     Up(blank, "blank", **parts, memory=memory, render=render),
 ]
 types = [Types(blank, "blank", **parts, role="test", branch="main", run_id="tier3",
@@ -327,7 +343,13 @@ def _journal_tail(verdict: Verdict) -> str:
     return "\n--- journal tail ---\n" + "\n".join(tail)
 
 
-def _install(checkout: Path, passport: Path, mirror: Path) -> tuple[Verdict, str]:
+def _install(
+    checkout: Path,
+    passport: Path,
+    mirror: Path,
+    commit: str = BLANK_COMMIT,
+    mode: str = "install",
+) -> tuple[Verdict, str]:
     lines = _run(
         [
             PYTHON,
@@ -336,8 +358,8 @@ def _install(checkout: Path, passport: Path, mirror: Path) -> tuple[Verdict, str
             str(checkout),
             str(passport),
             str(mirror),
-            BLANK_COMMIT,
-            "install",
+            commit,
+            mode,
         ],
         timeout=3600,
         expect=(0, 1, 2),
@@ -431,9 +453,15 @@ def _curl(tmp: Path, url: str, host: str) -> tuple[str, str]:
     return (lines[-1] if lines else "000"), text.lower()
 
 
-def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def mirror(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The blank's mirror the sources fetch from: one for the whole install and
+    for the deploys of DM-64, which push their own commits to it."""
+    return tmp_path_factory.mktemp("mirror") / "blank-mirror.git"
+
+
+def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     checkout, passport = _blank(tmp_path), _passport(tmp_path)
-    mirror = tmp_path / "blank-mirror.git"
     _run(["git", "clone", "-q", "--mirror", str(checkout), str(mirror)])
     _run(
         ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
@@ -726,6 +754,140 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path) -> None:
     assert _stdout([*loaded, "pridem-gc.timer"]) == ["RandomizedDelayUSec=0"]
 
 
+REACH = """
+import json, os, socket, sys, urllib.error, urllib.request
+allowed, other, address = sys.argv[1:4]
+def direct(host):
+    try:
+        socket.create_connection((host, 443), timeout=5).close()
+        return "reached"
+    except OSError as error:
+        return type(error).__name__
+def via(host):
+    try:
+        urllib.request.urlopen(f"https://{host}/", timeout=30)
+        return "reached"
+    except urllib.error.HTTPError:
+        return "reached"  # the host answered, whatever it said
+    except (urllib.error.URLError, OSError) as error:
+        return "not reached: " + str(getattr(error, "reason", error))
+print("REACH " + json.dumps({
+    "HTTPS_PROXY": os.environ.get("HTTPS_PROXY"),
+    "https_proxy": os.environ.get("https_proxy"),
+    "direct_allowed": direct(allowed),
+    "direct_address": direct(address),
+    "via_allowed": via(allowed),
+    "via_other": via(other),
+}))
+"""
+"""Run in the blank's app: what it reaches, directly and through its proxy."""
+
+
+def _reach() -> dict[str, str | None]:
+    """What the blank's app reaches: ``EGRESS_HOST`` and an address of
+    ``OTHER_HOST`` directly, both hosts through ``HTTPS_PROXY`` when it has one."""
+    [address] = _stdout(["getent", "ahostsv4", OTHER_HOST])[:1]
+    ip = address.split()[0]
+    lines = _run(
+        ["docker", "exec", _app(), "python", "-c", REACH, EGRESS_HOST, OTHER_HOST, ip],
+        timeout=180,
+    )
+    [line] = [x for x in lines if x.startswith("REACH ")]
+    found = json.loads(line.removeprefix("REACH "))
+    assert isinstance(found, dict)
+    return found
+
+
+def _internal(network: str) -> str:
+    [value] = _stdout(["docker", "network", "inspect", "-f", "{{.Internal}}", network])
+    return value
+
+
+def _proxies() -> list[str]:
+    return _stdout(
+        ["docker", "ps", "-a", "-q", "--filter", "label=pridem.stack=egress"]
+    )
+
+
+def _git(*args: str) -> list[str]:
+    identity = ["-c", "user.name=tier3", "-c", "user.email=tier3@pridem.invalid"]
+    return _stdout(["git", *identity, *args])
+
+
+def test_probe_DM_64_product_reaches_only_its_egress_hosts(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """The blank -- on the box the whole install left -- reaches nothing outside
+    the box; a release of it with ``egress: [api.github.com]`` reaches that host
+    through the machine's proxy and not ``github.com``, and still nothing
+    directly; the release after it, without ``egress``, has no proxy left
+    (protocol 4.1, 4.2). The pair: the host of ``egress`` is reached."""
+    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    passport = _passport(tmp_path)
+    # the blank without egress: every network internal, no proxy, no way out
+    for network in ("pridem", "pridem-egress", "blank_default"):
+        assert _internal(network) == "true", network
+    assert _proxies() == []
+    before = _reach()
+    assert before["HTTPS_PROXY"] is None and before["https_proxy"] is None, before
+    for key in ("direct_allowed", "direct_address", "via_allowed", "via_other"):
+        assert before[key] != "reached", before
+
+    # a release with egress
+    [base] = _stdout(["git", "--git-dir", str(mirror), "rev-parse", "refs/heads/main"])
+    copy = tmp_path / "blank-egress"
+    _run(["git", "clone", "-q", str(mirror), str(copy)], env=GIT_ENV)
+    primer = copy / "primer.yaml"
+    text = primer.read_text(encoding="utf-8")
+    assert "egress" not in text
+    primer.write_text(text + f"egress:\n  - {EGRESS_HOST}\n", encoding="utf-8")
+    _git("-C", str(copy), "commit", "-q", "-am", "DM-64: egress of the blank")
+    [commit] = _git("-C", str(copy), "rev-parse", "HEAD")
+    _git("-C", str(copy), "push", "-q", str(mirror), "HEAD:refs/heads/main")
+    verdict, printed = _install(copy, passport, mirror, commit, "deploy")
+    assert verdict.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    egress = facts[("blank", "egress")]
+    assert egress["hosts"] == [EGRESS_HOST], egress
+    allowed = egress["allowed"]
+    assert isinstance(allowed, dict) and allowed[EGRESS_HOST] != 403, egress
+    assert len(_proxies()) == 1
+    after = _reach()
+    assert after["HTTPS_PROXY"] == after["https_proxy"] == PROXY, after
+    assert after["via_allowed"] == "reached", after  # the pair
+    other = after["via_other"]
+    assert isinstance(other, str) and other.startswith("not reached"), after
+    assert "403" in other, after  # refused by the proxy itself
+    assert after["direct_allowed"] != "reached", after
+    assert after["direct_address"] != "reached", after
+    # doctor on that box: nothing to do
+    out = _run(
+        [PYTHON, "-c", PLAN, str(copy), str(passport), str(mirror), commit, "doctor"],
+        timeout=1800,
+    )
+    [diff] = [x for x in out if x.startswith("DIFF ")]
+    [red] = [x for x in out if x.startswith("FAILED ")]
+    assert json.loads(diff.removeprefix("DIFF ")) == [], out
+    assert json.loads(red.removeprefix("FAILED ")) == [], out
+    # the routes still answer: nginx publishes through its own network
+    api, _ = _curl(tmp_path, "https://localhost/openapi.json", API)
+    assert api.startswith("200"), api
+
+    # the release after it, without egress: the proxy is gone, no way out still
+    _run(["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", base])
+    _run(["git", "-C", str(copy), "checkout", "-q", base], env=GIT_ENV)
+    back, printed = _install(copy, passport, mirror, base, "deploy")
+    assert back.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in back.steps}
+    assert facts[("blank", "egress")] == {"hosts": [], "proxy": "absent"}, facts
+    assert _proxies() == []
+    assert not Path("/opt/pridem/egress/squid.conf").exists()
+    last = _reach()
+    assert last["HTTPS_PROXY"] is None, last
+    for key in ("direct_allowed", "direct_address", "via_allowed", "via_other"):
+        assert last[key] != "reached", last
+
+
 def _check(directory: Path) -> tuple[int, dict[str, object]]:
     """``pridem --json check`` of ``directory``: its exit code and verdict."""
     out: list[str] = []
@@ -781,10 +943,12 @@ def test_tier3_compose_takes_a_single_quoted_value_as_it_is(tmp_path: Path) -> N
     assert config["postgres"]["POSTGRES_PASSWORD"].replace("$$", "$") == literal
 
 
-def test_tier3_certbot_tag_has_the_pinned_digest() -> None:
-    """W6 (DM-49): the tag ``CERTBOT_IMAGE`` names still points at its digest.
-    Not so -- red with the tag's digests as measured, for the next pin."""
-    tag, _, digest = CERTBOT_IMAGE.partition("@")
+@pytest.mark.parametrize("image", [CERTBOT_IMAGE, SQUID_IMAGE])
+def test_tier3_certbot_tag_has_the_pinned_digest(image: str) -> None:
+    """W6 (DM-49): the tag ``CERTBOT_IMAGE`` names still points at its digest;
+    so does the tag of ``SQUID_IMAGE``, the proxy of DM-64. Not so -- red with
+    the tag's digests as measured, for the next pin."""
+    tag, _, digest = image.partition("@")
     repository = tag.rpartition(":")[0]
     _run(["docker", "pull", "-q", tag], timeout=300)
     digests = json.loads(

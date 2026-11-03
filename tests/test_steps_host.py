@@ -22,12 +22,14 @@ from pridem.report.codes import ExitCode
 from pridem.report.schema import build_verdict
 from pridem.runner import FakeCall, FakeRunner, Stream
 from pridem.steps.base import Step
+from pridem.steps.compose import EGRESS_NETWORK, NETWORK
 from pridem.steps.host import (
     APT_LOCK_TIMEOUT_S,
     APT_SERVICES,
     APT_TIMERS,
     ECHO_SERVICES,
     HOST_PACKAGES,
+    NETWORKS,
     PAUSED,
     DaemonJson,
     EnsureNetwork,
@@ -152,17 +154,35 @@ def ready_calls() -> list[FakeCall]:
         call("docker", "version", "--format", "{{.Server.Version}}", lines=("27.5.1",))
     )
     info = call("docker", "info", "--format", "{{.LoggingDriver}}", lines=("local",))
-    inspect = call(
+    networks = [internal(network) for network in NETWORKS]
+    # daemon_json reads the running daemon's driver in check and in verify;
+    # ensure_network reads both networks in check and in verify (DM-64)
+    return [*preflight_calls(), *quiet, *provision, info, info, *networks, *networks]
+
+
+def internal(network: str, value: str = "true") -> FakeCall:
+    """``Internal`` of an existing machine network (DM-64)."""
+    return call(
         "docker",
         "network",
         "inspect",
         "--format",
-        "{{.Name}}",
-        "pridem",
-        lines=("pridem",),
+        "{{.Internal}}",
+        network,
+        lines=(value,),
     )
-    # daemon_json reads the running daemon's driver in check and in verify
-    return [*preflight_calls(), *quiet, *provision, info, info, inspect, inspect]
+
+
+def create(network: str) -> FakeCall:
+    return call(
+        "docker",
+        "network",
+        "create",
+        "--internal",
+        "--label",
+        "pridem.stack=host",
+        network,
+    )
 
 
 def ready(tmp_path: Path) -> Path:
@@ -176,7 +196,11 @@ def ready(tmp_path: Path) -> Path:
 
 def test_probe_DM_12_second_run_calls_no_act(tmp_path: Path) -> None:
     """A ready host: all checks green, no act -- the strict scenario holds only
-    check and verify commands. The pair: a host without the network acts."""
+    check and verify commands. The pair: a host without the network acts.
+
+    The machine has two networks since DM-64, both internal: the scenario reads
+    ``Internal`` of each (it read the name of ``pridem`` alone) and the pair
+    creates the missing one with ``--internal``."""
     root = ready(tmp_path)
     main, final = host_steps(root, min_free_gib=0)
     outcome = run(main, ready_calls(), final)
@@ -184,12 +208,8 @@ def test_probe_DM_12_second_run_calls_no_act(tmp_path: Path) -> None:
     assert [r.status for r in outcome.steps] == ["ok"] * 6
 
     missing = ready_calls()
-    inspect = missing[-2]
-    absent = FakeCall(inspect.argv, code=1)
-    create = call(
-        "docker", "network", "create", "--label", "pridem.stack=host", "pridem"
-    )
-    missing[-2:] = [absent, create, inspect]
+    absent = FakeCall(internal(NETWORK).argv, code=1)
+    missing[-4:] = [absent, internal(EGRESS_NETWORK), create(NETWORK), *missing[-2:]]
     main, final = host_steps(root, min_free_gib=0)
     assert run(main, missing, final).code is ExitCode.OK
 
@@ -467,13 +487,47 @@ def test_locale_is_set_to_utf8_and_read_back(tmp_path: Path) -> None:
 
 
 def test_network_is_created_with_the_machine_label(tmp_path: Path) -> None:
-    inspect = ("docker", "network", "inspect", "--format", "{{.Name}}", "pridem")
+    """Both networks, internal, with the machine's label (DM-64: ``pridem``
+    alone, not internal, before)."""
+    absent = [FakeCall(internal(network).argv, code=1) for network in NETWORKS]
     calls = [
-        FakeCall(inspect, code=1),
-        call("docker", "network", "create", "--label", "pridem.stack=host", "pridem"),
-        call(*inspect, lines=("pridem",)),
+        *absent,
+        *[create(network) for network in NETWORKS],
+        *[internal(network) for network in NETWORKS],
     ]
+    outcome = run([EnsureNetwork(tmp_path)], calls)
+    assert outcome.code is ExitCode.OK
+    assert outcome.steps[0].verify == {"networks": list(NETWORKS), "internal": True}
+
+
+def test_a_network_that_is_not_internal_is_red_and_never_recreated(
+    tmp_path: Path,
+) -> None:
+    """A ``pridem`` of another making -- not internal -- is red in check: no
+    command acts on it (DM-64). The pair: an internal one is green."""
+    calls = [internal(NETWORK, "false")]
+    outcome = run([EnsureNetwork(tmp_path)], calls)
+    assert outcome.steps[0].reason == Code(
+        "ensure_network:not-internal", {"network": NETWORK}
+    )
+    calls = [internal(n) for n in NETWORKS] * 2
     assert run([EnsureNetwork(tmp_path)], calls).code is ExitCode.OK
+
+
+def test_a_network_not_internal_after_create_is_red_in_verify(
+    tmp_path: Path,
+) -> None:
+    """``verify`` reads ``Internal`` back, not the exit code of ``create``."""
+    calls = [
+        FakeCall(internal(NETWORK).argv, code=1),
+        internal(EGRESS_NETWORK),
+        create(NETWORK),
+        internal(NETWORK, "false"),
+    ]
+    outcome = run([EnsureNetwork(tmp_path)], calls)
+    assert outcome.steps[0].reason == Code(
+        "ensure_network:not-internal", {"network": NETWORK}
+    )
 
 
 def test_report_dns_comes_from_the_dns_key_of_any_step(tmp_path: Path) -> None:

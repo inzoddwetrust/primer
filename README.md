@@ -92,7 +92,9 @@ addresses.
 
 `pridem check <directory> [<slot>=<directory> ...]` checks a repository of a
 project as the machine checks it on a box, by the same functions (protocol
-10.1): `primer.yaml` and `primer.lock` by the machine's loaders, the compose
+10.1): `primer.yaml` and `primer.lock` by the machine's loaders -- a host of a
+product's `egress` must be a row of the list agreed with Primer for that
+product (below) --, the compose
 file of every stack by the machine's lists (`docker compose config`; the
 binary alone, no daemon, and the repository's `.env` is not read), every
 compose variable `${VAR:?}` and a key of `env`, and the `primer-package.yaml`
@@ -139,4 +141,32 @@ jobs:
 
 No value and no secret is needed: a repository holds none, and the check gives
 every key of `env` a stand-in.
+
+## A product's way out
+
+A product has no way out of its box (protocol 4.1). The machine's networks
+`pridem` (nginx and the applications of the stacks) and `pridem-egress` are
+internal, and the machine's override makes every network of a product's compose
+internal too; nginx publishes the ports 80 and 443 through the edge's own
+network. A service keeps its networks and reaches the internet itself.
+
+In transition a product declares in `primer.yaml` the external hosts it still
+reaches itself (protocol 4.2), by name:
+
+```yaml
+egress:
+  - zoom.us
+  - api.zoom.us
+```
+
+Every host must be a row of the list agreed with Primer for that product
+(`pridem/stacks/egress.py`: changed by a release of the machine, a new host by
+the owner's word); `pridem check` and `build` on the box refuse any other. With
+`egress` declared, the box runs the machine's proxy -- squid, pinned by digest,
+in the compose project `pridem-egress` -- which lets through `CONNECT` to port
+443 of exactly those hosts and refuses the rest; every service of the product
+joins `pridem-egress` and gets the proxy's address as `HTTPS_PROXY` and
+`https_proxy` (neither may be a key of the product's `env`). An empty `egress`
+is a product with no way out and no proxy; the step `egress`
+(`pridem/steps/egress.py`) removes one a previous release left.
 

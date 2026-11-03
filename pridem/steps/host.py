@@ -24,7 +24,11 @@ killed. Every step reads its fact back: a package is installed when
   ``apt-get`` runs with ``APT_ENV`` and asks nothing.
 - ``daemon_json`` -- docker's log driver ``local`` (TZ section 7.3); docker is
   restarted only by ``install``, see ``DaemonJson``.
-- ``ensure_network`` -- the shared network ``pridem``.
+- ``ensure_network`` -- the machine's networks ``pridem`` (nginx and the
+  applications of the stacks) and ``pridem-egress`` (a product's services and
+  the proxy), both internal: no route out of the box goes through either
+  (protocol 4.1). ``verify`` reads ``Internal`` back; a network of that name
+  that is not internal is red, never recreated -- it is not this machine's.
 - ``locale`` -- a UTF-8 locale: the console writes ``→ — ✓ ✗``.
 
 Steps get their inputs from whoever builds the plan (domains, limits) and read
@@ -51,6 +55,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.base import Step as _Step
+from pridem.steps.compose import EGRESS_NETWORK, NETWORK
 
 APT_LOCK_TIMEOUT_S = 600
 """How long ``apt`` waits for a dpkg lock another actor holds: a constant of
@@ -66,7 +71,7 @@ HOST_PACKAGES = ("docker.io", "docker-compose-v2", "ca-certificates", "locales")
 APT_TIMERS = ("apt-daily.timer", "apt-daily-upgrade.timer")
 APT_SERVICES = ("apt-daily.service", "apt-daily-upgrade.service")
 ECHO_SERVICES = ("https://api.ipify.org", "https://checkip.amazonaws.com")
-NETWORK = "pridem"
+NETWORKS = (NETWORK, EGRESS_NETWORK)
 UTF8_LOCALES = ("C.UTF-8", "en_US.UTF-8")
 PAUSED = Path("opt/pridem/host/paused-timers.json")
 PAUSED_CODES = {"paused-broken": "{path} is not a JSON list of timer names: {problem}"}
@@ -529,28 +534,61 @@ class EnsureNetwork(_HostStep):
     name = "ensure_network"
     order = 5
     codes: ClassVar[dict[str, str]] = {
-        "create": "create the docker network {network}",
+        "create": "create the internal docker networks {networks}",
         "missing": "the docker network {network} is missing",
+        "not-internal": "the docker network {network} is not internal",
     }
-    INSPECT = ("docker", "network", "inspect", "--format", "{{.Name}}", NETWORK)
+
+    def _internal(self, ctx: StepContext, network: str) -> bool | None:
+        """Whether ``network`` is internal; ``None`` -- there is none."""
+        code, lines = _out(
+            ctx,
+            ["docker", "network", "inspect", "--format", "{{.Internal}}", network],
+            expect=(0, 1),
+        )
+        if code != 0:
+            return None
+        return lines == ["true"]
 
     def check(self, ctx: StepContext) -> CheckResult:
-        code, _ = _out(ctx, self.INSPECT, expect=(0, 1))
-        if code == 0:
+        missing: list[str] = []
+        for network in NETWORKS:
+            internal = self._internal(ctx, network)
+            if internal is None:
+                missing.append(network)
+            elif not internal:
+                raise StepFailed("not-internal", {"network": network})
+        if not missing:
             return CheckResult(False)
-        return CheckResult(True, local_code("create", {"network": NETWORK}))
-
-    def act(self, ctx: StepContext, check: CheckResult) -> None:
-        _out(
-            ctx,
-            ["docker", "network", "create", "--label", "pridem.stack=host", NETWORK],
+        return CheckResult(
+            True,
+            local_code("create", {"networks": _j(missing)}),
+            {"missing": _j(missing)},
         )
 
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        for network in strings(check.data.get("missing")):
+            _out(
+                ctx,
+                [
+                    "docker",
+                    "network",
+                    "create",
+                    "--internal",
+                    "--label",
+                    "pridem.stack=host",
+                    network,
+                ],
+            )
+
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        code, lines = _out(ctx, self.INSPECT, expect=(0, 1))
-        if code != 0 or lines != [NETWORK]:
-            raise StepFailed("missing", {"network": NETWORK})
-        return Verified({"network": NETWORK})
+        for network in NETWORKS:
+            internal = self._internal(ctx, network)
+            if internal is None:
+                raise StepFailed("missing", {"network": network})
+            if not internal:
+                raise StepFailed("not-internal", {"network": network})
+        return Verified({"networks": _j(NETWORKS), "internal": True})
 
 
 class Locale(_HostStep):

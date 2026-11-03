@@ -10,11 +10,23 @@ Rule layer: cross-field rules of the contract (rule 3 single-point pins, rule
 4, 10, 11, 13 and the referential checks), run only when the field layer is
 clean, each collecting every violation. Every problem names the path in the file.
 
+``egress`` of a product (protocol 4.1, 4.2) -- the external hosts the product
+still reaches itself, through the machine's proxy -- is a list of host names:
+lowercase labels, at least two, the last not all digits; a pattern, a port, a
+path, a scheme or an address is refused at the field layer (``S.egress-host``),
+a host named twice in the rule layer (``S.egress-duplicate``). The proxy's
+address reaches the product as ``HTTPS_PROXY`` and ``https_proxy``
+(``PROXY_VARIABLES``), names of the machine: a key of the product's ``env`` with
+either name is refused (``S.egress-env``). Whether a host is in the list agreed
+with Primer is the machine's check, not the contract's (``stacks/egress.py``).
+A service has no ``egress``: it reaches the internet itself.
+
 ``python -m pridem.stacks.schema --export`` writes the JSON Schema of
 ``primer.yaml`` to ``contract/schema/``; ``pridem.stacks.lock`` exports its own.
 """
 
 import argparse
+import re
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
@@ -75,7 +87,21 @@ RULES = {
     ),
     "S.seam-from": (0, "a seam names a stack this stack can be wired to"),
     "S.mount-dependency": (0, "a package mount names a declared dependency"),
+    "S.egress-host": (
+        0,
+        "protocol 4.2: an egress host is a name -- lowercase labels, no pattern, "
+        "port, path, scheme or address",
+    ),
+    "S.egress-duplicate": (0, "protocol 4.2: an egress host is named once"),
+    "S.egress-env": (
+        0,
+        "protocol 4.2: the proxy's variables are the machine's, not keys of env",
+    ),
 }
+
+PROXY_VARIABLES = ("HTTPS_PROXY", "https_proxy")
+"""The names the proxy's address reaches a product's services under: both,
+since curl and some clients read only the lowercase one."""
 
 
 def rule_message(code: str, detail: str) -> str:
@@ -110,7 +136,26 @@ def _relative_path(value: str) -> str:
     return value
 
 
+_HOST_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def _egress_host(value: str) -> str:
+    """A host name, nothing more (protocol 4.2): ``*.zoom.us``, ``zoom.us:443``,
+    ``zoom.us/x``, ``https://zoom.us``, ``1.2.3.4``, ``::1``, ``Zoom.us``,
+    ``zoom.us.`` and ``zoom`` are refused."""
+    labels = value.split(".")
+    if (
+        len(value) > 253
+        or len(labels) < 2
+        or not all(_HOST_LABEL.fullmatch(label) for label in labels)
+        or labels[-1].isdigit()
+    ):
+        raise _rule_error("S.egress-host", f"{value!r}")
+    return value
+
+
 Name = Annotated[str, Field(min_length=1)]
+EgressHost = Annotated[str, AfterValidator(_egress_host)]
 Command = Annotated[str, Field(min_length=1)]
 UrlPath = Annotated[str, Field(pattern=r"^/[A-Za-z0-9._~/-]*$")]
 """A path of an app: a plain one -- it goes into the nginx config of the box as
@@ -344,6 +389,7 @@ class Product(_Stack):
     packages: dict[Name, Package] = {}
     host: ProductHost | None = None
     verbs: dict[Name, Verb] = {}
+    egress: list[EgressHost] = []
 
 
 class Service(_Stack):
@@ -549,6 +595,23 @@ def _r13_seams(stack: Product | Service) -> list[Problem]:
     return out
 
 
+def _s_egress(stack: Product | Service) -> list[Problem]:
+    if not isinstance(stack, Product):
+        return []
+    out: list[Problem] = []
+    seen: set[str] = set()
+    for index, host in enumerate(stack.egress):
+        if host in seen:
+            out.append(problem_at(("egress", index), "S.egress-duplicate", f"{host!r}"))
+        seen.add(host)
+    for key in stack.env:
+        if key in PROXY_VARIABLES:
+            out.append(
+                problem_at(("env", key), "S.egress-env", f"{key!r} is the machine's")
+            )
+    return out
+
+
 RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r3_single_point,
     _r4_route_domains,
@@ -556,6 +619,7 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _s_mount_dependency,
     _r11_editions,
     _r13_seams,
+    _s_egress,
 )
 
 

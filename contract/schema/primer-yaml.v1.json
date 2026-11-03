@@ -332,6 +332,14 @@
           "title": "Editions",
           "type": "object"
         },
+        "egress": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Egress",
+          "type": "array"
+        },
         "env": {
           "additionalProperties": {
             "discriminator": {

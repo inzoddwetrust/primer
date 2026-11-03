@@ -19,7 +19,15 @@ product's file and carries what the machine adds:
   service a route of ``host.routes`` goes to, the alias ``<entry>-<service>``
   (TZ 7.3; nginx and the ``address`` source reach it there) next to the
   networks the service already had -- a service's ``networks`` in an override
-  replaces the implicit ``default``, so the override names it.
+  replaces the implicit ``default``, so the override names it;
+- for a product (protocol 4.1, 4.2): ``internal: true`` on every network of its
+  compose -- with ``pridem`` and ``pridem-egress`` internal too (the host steps)
+  no container of a product has a route out of the box. When the product
+  declares ``egress``, every service of the entry joins the external network
+  ``pridem-egress``, where the machine's proxy answers at ``PROXY_URL``, and
+  gets that address as ``HTTPS_PROXY`` and ``https_proxy``; with ``egress``
+  empty neither the network nor the variables are there. A service's stack
+  keeps its networks as they are: a service reaches the internet itself.
 
 ``down``, ``rm`` and ``--remove-orphans`` are never part of a command.
 
@@ -59,10 +67,15 @@ from pridem.events import Json, as_list
 from pridem.files import atomic_write
 from pridem.runner import Stream
 from pridem.stacks.routes import alias, routed_services
-from pridem.stacks.schema import Product, Service
+from pridem.stacks.schema import PROXY_VARIABLES, Product, Service
 from pridem.steps.base import StepContext
 
 NETWORK = "pridem"
+EGRESS_NETWORK = "pridem-egress"
+"""The internal network of a product's services and the machine's proxy."""
+PROXY_ALIAS = "pridem-egress-proxy"
+PROXY_PORT = 3128
+PROXY_URL = f"http://{PROXY_ALIAS}:{PROXY_PORT}"
 COMMAND_TIMEOUT_S = 120
 BUILD_TIMEOUT_S = 3600
 UP_WAIT_S = 300
@@ -512,6 +525,8 @@ def override_text(
     services: dict[str, Json] = {}
     app = compose.app_service
     aliased = {app} if app is not None else set()
+    product = isinstance(compose.stack, Product)
+    egress = isinstance(compose.stack, Product) and bool(compose.stack.egress)
     if isinstance(compose.stack, Product):
         aliased |= set(routed_services(compose.stack, compose.entry))
     for name, body in sorted(_mapping(document.get("services")).items()):
@@ -522,12 +537,17 @@ def override_text(
                 "pridem.service": name,
             }
             part["build"] = {"labels": labels}
-        if name in aliased:
+        if name in aliased or egress:
             networks: dict[str, Json] = dict(_mapping(_mapping(body).get("networks")))
             if not networks:
                 networks["default"] = None
-            networks[NETWORK] = {"aliases": [alias(compose.entry, name)]}
+            if name in aliased:
+                networks[NETWORK] = {"aliases": [alias(compose.entry, name)]}
+            if egress:
+                networks[EGRESS_NETWORK] = None
             part["networks"] = networks
+        if egress:
+            part["environment"] = {key: PROXY_URL for key in PROXY_VARIABLES}
         binds = (mounts or {}).get(name)
         if binds:
             part["volumes"] = list[Json](binds)
@@ -538,8 +558,16 @@ def override_text(
         if not _mapping(body).get("external")
     }
     networks_top: dict[str, Json] = {NETWORK: {"external": True}}
-    if "default" in _mapping(document.get("networks")):
-        networks_top["default"] = {"labels": dict[str, Json](compose.stack_labels())}
+    for name in sorted(_mapping(document.get("networks"))):
+        network: dict[str, Json] = {}
+        if name == "default":
+            network["labels"] = dict[str, Json](compose.stack_labels())
+        if product:
+            network["internal"] = True
+        if network:
+            networks_top[name] = network
+    if egress:
+        networks_top[EGRESS_NETWORK] = {"external": True}
     rendered: dict[str, Json] = {"services": services, "networks": networks_top}
     if volumes:
         rendered["volumes"] = volumes

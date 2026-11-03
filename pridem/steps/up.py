@@ -64,7 +64,7 @@ class Up(Step):
     """One stack entry up on the images of this commit, checked live."""
 
     name = "up"
-    order = 12
+    order = 13  # after egress (12): the application starts with its proxy ready
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
         "up": "bring {stack} up at {commit}",

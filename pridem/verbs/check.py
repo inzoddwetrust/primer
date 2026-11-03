@@ -7,7 +7,10 @@ nothing -- no journal, no ``history/``, no file -- with no box, no docker
 daemon and no network. One step each, in this order (``CHECKS``):
 
 - ``primer_yaml`` -- ``primer.yaml`` by the machine's loader (``invalid``: every
-  problem with its path and rule; the paths of an ``app`` are plain ones);
+  problem with its path and rule; the paths of an ``app`` are plain ones), then
+  the hosts of a product's ``egress`` against the list agreed with Primer by
+  ``unlisted``, the function ``build`` refuses by (``egress-unlisted``, every
+  such host named; the checks after it still run);
 - ``primer_lock`` -- ``primer.lock`` by the machine's loader and ``check_lock``
   (``lock-missing``, ``lock-range``); its tags and commits the box checks over
   the network, so the fact says they are not checked;
@@ -56,6 +59,7 @@ from pridem.report.codes import ExitCode
 from pridem.report.render import render_json, summary_line
 from pridem.report.schema import build_verdict
 from pridem.runner import CommandFailed, CommandNotStarted, Stream
+from pridem.stacks.egress import UNLISTED, unlisted
 from pridem.stacks.loader import ContractError
 from pridem.stacks.lock import check_lock, load_primer_lock
 from pridem.stacks.package import PACKAGE_FILE
@@ -86,6 +90,7 @@ CODES: dict[str, dict[str, str]] = {
     "primer_yaml": {
         "no-primer-yaml": "{file} is missing",
         "invalid": "{file} breaks its contract: {problems}",
+        "egress-unlisted": UNLISTED,
     },
     "primer_lock": {
         "lock-missing": "primer.lock is missing and the product has dependencies",
@@ -154,11 +159,18 @@ def _primer_yaml(checked: Checked) -> None:
                 "invalid", {"file": "primer.yaml", "problems": _problems(error)}
             ) from None
         stack = checked.stack
-        return {
+        if isinstance(stack, Product) and (hosts := unlisted(stack)):
+            raise StepFailed(
+                "egress-unlisted", {"product": stack.name, "hosts": list[Json](hosts)}
+            )
+        fact: dict[str, Json] = {
             "kind": stack.kind,
             "name": stack.name,
             "stacks": list[Json](stack.stacks),
         }
+        if isinstance(stack, Product):
+            fact["egress"] = list[Json](stack.egress)
+        return fact
 
     checked.steps.append(_record(checked.root.name, "primer_yaml", 1, run))
 

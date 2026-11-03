@@ -11,7 +11,10 @@ check reads it, so ``doctor`` names it too; ``check`` also reads
 ``config --no-interpolate``, the only output that still names ``env_file``
 and writes the variables as the file does: one that may be empty or has a
 default (not ``${NAME:?}``) and one that is not a key of ``env`` are findings
-of the same code. ``pridem check`` refuses by the same ``refusal``.
+of the same code. ``pridem check`` refuses by the same ``refusal``. A host of
+a product's ``egress`` that is not a row of the list agreed with Primer for
+that product is refused first, before any command (``egress-unlisted``;
+``stacks/egress.py``): ``pridem check`` refuses it by the same ``unlisted``.
 Images carry ``pridem.stack``, ``pridem.release``, ``pridem.commit`` and
 ``pridem.service`` from the machine's override (``steps/compose.py``), which
 this step writes.
@@ -28,6 +31,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
+from pridem.stacks.egress import UNLISTED, unlisted
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
     CheckResult,
@@ -78,6 +82,7 @@ class Build(Step):
         **NO_PASSPORT,
         "build": "build {services} of {stack} at {commit}",
         **REFUSAL_CODES,
+        "egress-unlisted": UNLISTED,
         "no-image": "no image of {service} at {commit} after the build",
         "two-images": "{count} images of {service} at {commit}",
     }
@@ -121,6 +126,11 @@ class Build(Step):
         return built_services(document), text
 
     def check(self, ctx: StepContext) -> CheckResult:
+        stack = self.compose.stack
+        if isinstance(stack, Product) and (hosts := unlisted(stack)):
+            raise StepFailed(
+                "egress-unlisted", {"product": stack.name, "hosts": list[Json](hosts)}
+            )
         uninterpolated = config(ctx, self.compose, interpolate=False)
         keys = self.compose.stack.env
         found = [*env_files(uninterpolated), *variables(uninterpolated, keys)]

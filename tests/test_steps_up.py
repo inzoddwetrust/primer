@@ -179,6 +179,11 @@ def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
 
 
 def test_probe_DM_18_every_created_object_has_labels(tmp_path: Path) -> None:
+    """Every object the stack's compose creates carries ``pridem.*`` labels.
+
+    DM-64: the project's network of a product is also internal (protocol 4.1),
+    so its rendered entry holds ``internal: true`` next to the label; the label
+    stays the stack's alone."""
     cs = compose(tmp_path)
     rendered = json.loads(override_text(cs, CONFIG))
     release = {"pridem.stack": "blank", "pridem.release": "main", "pridem.commit": SHA}
@@ -193,7 +198,7 @@ def test_probe_DM_18_every_created_object_has_labels(tmp_path: Path) -> None:
     # volumes and the project's network outlive a release: the stack alone
     assert rendered["volumes"] == {"pgdata": {"labels": {"pridem.stack": "blank"}}}
     assert rendered["networks"] == {
-        "default": {"labels": {"pridem.stack": "blank"}},
+        "default": {"labels": {"pridem.stack": "blank"}, "internal": True},
         NETWORK: {"external": True},
     }
     # app keeps its default network and joins pridem under <name>-<service>

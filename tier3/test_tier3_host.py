@@ -126,6 +126,9 @@ def test_probe_DM_12_host_steps_on_a_clean_runner() -> None:
     code, driver = _run(["docker", "info", "--format", "{{.LoggingDriver}}"])
     assert (code, driver) == (0, ["local"])
     assert _run(["docker", "network", "inspect", "pridem"])[0] == 0
+    for network in ("pridem", "pridem-egress"):  # internal, read back (DM-64)
+        inspect = ["docker", "network", "inspect", "--format", "{{.Internal}}", network]
+        assert _run(inspect) == (0, ["true"]), network
     # the second run on the ready host is green too, and acts on nothing it set
     again, _ = _plan("", 600)
     assert again.result == "green"

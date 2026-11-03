@@ -279,6 +279,9 @@ def test_probe_DM_17_preview_role_sets_noindex_on_every_route(tmp_path: Path) ->
 
 
 def test_first_install_starts_nginx_with_the_compose_of_edge(tmp_path: Path) -> None:
+    """nginx on ``pridem`` and on the edge's own ``default`` (DM-64: ``pridem``
+    is internal, the ports are published through ``default``); certbot names no
+    network, so it runs on ``default`` alone -- its way to the ACME server."""
     root, fetched = passport(tmp_path)
     with Mixed(*first_install(root)) as runner:
         outcome, _ = run([step(root, fetched)], runner)
@@ -292,8 +295,14 @@ def test_first_install_starts_nginx_with_the_compose_of_edge(tmp_path: Path) -> 
     document = json.loads(compose_file(root).read_text())
     nginx = document["services"]["nginx"]
     assert nginx["image"] == NGINX_IMAGE and "@sha256:" in nginx["image"]
-    assert nginx["ports"] == ["80:80", "443:443"] and nginx["networks"] == ["pridem"]
+    assert nginx["ports"] == ["80:80", "443:443"]
+    assert nginx["networks"] == ["pridem", "default"]
+    assert document["networks"] == {
+        "pridem": {"external": True},
+        "default": {"labels": {"pridem.stack": "edge"}},
+    }
     assert document["services"]["certbot"]["profiles"] == ["certbot"]
+    assert "networks" not in document["services"]["certbot"]
 
 
 @pytest.mark.parametrize(
