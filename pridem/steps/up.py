@@ -9,8 +9,10 @@ stays. No ``down``, no ``rm``, no ``--remove-orphans``: they remove
 containers.
 
 ``verify`` reads the fact back: the ``app`` container runs on the image built
-for this commit (and, when a package is built into ``app``, for its edition
-and package versions: ``steps.packages.image_key``), the stack passes
+for this commit, and so does every service of the entry a package is built
+into, on the image of its key (``steps.packages.image_key``: edition and
+package versions) -- on one commit only those change, so ``check`` acts when
+any of them runs on another image (DM-61 FIX); the stack passes
 conformance (DM-15: ``/health`` by its form, ``/ready`` 200, JSON logs,
 ``max_body``, no ``logging``), and ``/health`` says
 the release and the commit the build got. Then the stack's ``provides`` reach
@@ -43,6 +45,7 @@ from pridem.steps.base import (
 from pridem.steps.compose import (
     UP_WAIT_S,
     ComposeStack,
+    config,
     image_of,
     out,
     running_image,
@@ -101,15 +104,33 @@ class Up(Step):
         self.memory = memory
         self.render = render
 
-    def _expected(self, ctx: StepContext) -> str | None:
-        """The image ``app`` must run on: the one built for this commit and,
-        when a package is built into it, its key."""
+    def _watched(self, ctx: StepContext) -> list[str]:
+        """The services whose image ``up`` checks: ``app``, and every service
+        of this entry a package is built into (``apply: build``) -- on one
+        commit only those get a new image, by a new version or edition. Which
+        services the entry has is its ``config``, read only when the product
+        builds a package in."""
         app = self.compose.app_service
-        if app is None:
-            return None
+        watched = [] if app is None else [app]
+        stack = self.compose.stack
+        places = (
+            {place.service for slot in stack.packages.values() for place in slot.build}
+            if isinstance(stack, Product)
+            else set()
+        )
+        places.discard(app)
+        if places:
+            services = config(ctx, self.compose).get("services")
+            known = set(services) if isinstance(services, dict) else set()
+            watched += sorted(places & known)
+        return watched
+
+    def _expected(self, ctx: StepContext, service: str) -> str | None:
+        """The image ``service`` must run on: the one built for this commit and,
+        when a package is built into it, its key."""
         passport = None if self.fetched is None else self.fetched.passport
-        key = image_key(self.compose.stack, app, passport)
-        found = image_of(ctx, self.compose, app, key)
+        key = image_key(self.compose.stack, service, passport)
+        found = image_of(ctx, self.compose, service, key)
         return found[0] if len(found) == 1 else None
 
     def _problems(self, ctx: StepContext) -> tuple[list[str], dict[str, Json]]:
@@ -135,10 +156,12 @@ class Up(Step):
             "commit": self.compose.commit,
         }
         needed = CheckResult(True, local_code("up", params))
-        app = self.compose.app_service
-        if app is not None:
-            expected = self._expected(ctx)
-            if expected is None or running_image(ctx, self.compose, app) != expected:
+        for service in self._watched(ctx):
+            expected = self._expected(ctx, service)
+            if (
+                expected is None
+                or running_image(ctx, self.compose, service) != expected
+            ):
                 return needed
         problems, document = self._problems(ctx)
         if problems or not self._same_release(document):
@@ -165,23 +188,29 @@ class Up(Step):
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         fact: dict[str, Json] = {"stack": self.compose.entry}
         app = self.compose.app_service
-        if app is not None:
-            expected = self._expected(ctx)
+        built: dict[str, Json] = {}
+        for service in self._watched(ctx):
+            expected = self._expected(ctx, service)
             if expected is None:
                 raise StepFailed(
-                    "no-image", {"service": app, "commit": self.compose.commit}
+                    "no-image", {"service": service, "commit": self.compose.commit}
                 )
-            running = running_image(ctx, self.compose, app)
+            running = running_image(ctx, self.compose, service)
             if running != expected:
                 raise StepFailed(
                     "old-image",
                     {
-                        "service": app,
+                        "service": service,
                         "expected": expected,
                         "running": running or "none",
                     },
                 )
-            fact["image"] = expected
+            if service == app:
+                fact["image"] = expected
+            else:
+                built[service] = expected
+        if built:
+            fact["built"] = built
         problems, document = self._problems(ctx)
         if problems:
             raise StepFailed(

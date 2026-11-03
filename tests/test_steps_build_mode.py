@@ -11,12 +11,24 @@ the blank's (``compose_support.CONFIG``), its contexts in the release.
 
 import io
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 import pytest
 import yaml
-from compose_support import CONFIG, ENTRY, REF, SHA, in_release, stdout
+from compose_support import (
+    CONFIG,
+    CONTAINER,
+    ENTRY,
+    REF,
+    SHA,
+    LiveApp,
+    in_release,
+    live,
+    observe_calls,
+    stdout,
+    up_call,
+)
 from env_support import box, passport_data
 from plan_support import ListSink
 from test_probe_DM_57_check import _env, version_call
@@ -57,11 +69,16 @@ def product_data(
     service: str = "frontend",
     editions: bool = True,
     apply: str = "build",
+    port: int = 8000,
+    also: tuple[str, ...] = (),
 ) -> dict[str, object]:
-    """The blank with a skin built into ``service`` at ``public/skin``."""
+    """The blank with a skin built into ``service`` (and ``also``) at
+    ``public/skin``; its app on ``port``."""
     package: dict[str, object] = {"contract": ">=1,<2", "apply": apply}
     if apply == "build":
-        package["build"] = [{"service": service, "path": "public/skin"}]
+        package["build"] = [
+            {"service": name, "path": "public/skin"} for name in (service, *also)
+        ]
     else:
         package["validate"] = "validate-skin <dir>"
         package["mount"] = [{"service": service, "path": "/srv/skin"}]
@@ -72,7 +89,12 @@ def product_data(
         "stacks": {
             "blank": {
                 "compose": "docker-compose.yml",
-                "app": {"service": "app", "port": 8000, "health": "/h", "ready": "/r"},
+                "app": {
+                    "service": "app",
+                    "port": port,
+                    "health": "/health",
+                    "ready": "/ready",
+                },
                 "frontend": {"service": "frontend", "port": 80},
                 "migrate": "python -m alembic upgrade head",
                 "test": {"run": "pytest", "target": "test"},
@@ -593,7 +615,7 @@ def test_up_and_migrate_find_the_image_of_app_by_its_key(tmp_path: Path) -> None
     )
     with FakeRunner(image_call(cs, "app", key_of(), APP_IMAGE)) as runner:
         ctx = StepContext(runner, "install", "test", ENTRY, _drop)
-        assert up._expected(ctx) == APP_IMAGE
+        assert up._expected(ctx, "app") == APP_IMAGE
     migrate = Migrate(
         stack,
         ENTRY,
@@ -941,3 +963,186 @@ def test_check_reads_every_compose_before_it_refuses(tmp_path: Path) -> None:
     finding = ["web: packages.skin.build (no such service)"]
     for entry, step in composes(verdict).items():
         assert at(step, "reason", "found") == finding, (entry, step)
+
+
+# --- FIX: up recreates a service a package is built into ---------------------------
+
+OLD_FRONT = "sha256:" + "0" * 64
+WORKER_IMAGE = "sha256:" + "b" * 64
+FRONT_CONTAINER = "f0f0f0"
+WORKER_CONTAINER = "b0b0b0"
+
+
+def _with_worker() -> dict[str, Json]:
+    """The blank's config with a second built service, ``worker``."""
+    services = CONFIG["services"]
+    assert isinstance(services, dict)
+    worker: dict[str, Json] = {
+        "build": {"context": "/r/frontend", "dockerfile": "Dockerfile"},
+        "networks": {"default": None},
+    }
+    return {**CONFIG, "services": {**services, "worker": worker}}
+
+
+WITH_WORKER = _with_worker()
+
+
+@pytest.fixture
+def live_app() -> Iterator[LiveApp]:
+    yield from live()
+
+
+def up_step(root: Path, stack: Product, fetched: Fetched) -> Up:
+    return Up(
+        stack,
+        ENTRY,
+        release=root / "release",
+        ref=REF,
+        commit=SHA,
+        root=root,
+        fetched=fetched,
+    )
+
+
+def running(
+    cs: ComposeStack, service: str, container: str, image: str
+) -> list[FakeCall]:
+    """``running_image`` of ``service``: its container and the container's image."""
+    return [
+        FakeCall(tuple(cs.argv("ps", "-q", service)), lines=stdout(container)),
+        FakeCall(
+            ("docker", "inspect", "-f", "{{.Image}}", container), lines=stdout(image)
+        ),
+    ]
+
+
+def watched(
+    cs: ComposeStack,
+    key: Mapping[str, str],
+    front: str,
+    *,
+    document: Mapping[str, Json] = CONFIG,
+    worker: str | None = None,
+) -> list[FakeCall]:
+    """What ``up`` reads of its images: the entry's config, then app, then every
+    service with a key -- each built image and the running one."""
+    calls = [
+        config_call(cs, document),
+        image_call(cs, "app", {}, APP_IMAGE),
+        *running(cs, "app", CONTAINER, APP_IMAGE),
+        image_call(cs, "frontend", key, FRONT_IMAGE),
+        *running(cs, "frontend", FRONT_CONTAINER, front),
+    ]
+    if worker is not None:
+        calls += [
+            image_call(cs, "worker", key, WORKER_IMAGE),
+            *running(cs, "worker", WORKER_CONTAINER, worker),
+        ]
+    return calls
+
+
+def up_scenario(
+    cs: ComposeStack, key: Mapping[str, str], before: str, after: str = FRONT_IMAGE
+) -> list[FakeCall]:
+    """check (frontend on ``before``), act when it differs, verify on ``after``."""
+    calls = watched(cs, key, before)
+    if before != FRONT_IMAGE:
+        calls.append(up_call(cs))
+    else:
+        calls += observe_calls(cs)
+    return [*calls, *watched(cs, key, after), *observe_calls(cs)]
+
+
+@pytest.mark.parametrize(
+    ("version", "edition"),
+    [("1.4.3", "full"), ("1.4.2", "core")],
+    ids=["version", "edition"],
+)
+def test_up_recreates_frontend_on_a_new_image_of_its_key(
+    tmp_path: Path, live_app: LiveApp, version: str, edition: str
+) -> None:
+    """A new version of the skin, or another edition, on the same commit: app
+    keeps its image, frontend has a new one by its key -- ``up`` acts (the
+    tier 3 red of DM-61: it decided by app alone). The pair: frontend already
+    on it -- no ``up``."""
+    stack = made(product_data(port=live_app.port))
+    root, fetched = skin_box(tmp_path, version=version, edition=edition)
+    cs = compose(root, stack)
+    key = key_of(version, edition)
+    with FakeRunner(*up_scenario(cs, key, before=OLD_FRONT)) as runner:
+        outcome = run([up_step(root, stack, fetched)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    fact = outcome.steps[0].verify
+    assert fact is not None
+    assert fact["image"] == APP_IMAGE and fact["built"] == {"frontend": FRONT_IMAGE}
+    # the pair: nothing changed -- the scenario has no up
+    with FakeRunner(*up_scenario(cs, key, before=FRONT_IMAGE)) as runner:
+        outcome = run([up_step(root, stack, fetched)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+
+
+def test_up_verify_is_red_when_frontend_stays_on_the_old_image(
+    tmp_path: Path, live_app: LiveApp
+) -> None:
+    stack = made(product_data(port=live_app.port))
+    root, fetched = skin_box(tmp_path)
+    cs = compose(root, stack)
+    script = [
+        *watched(cs, key_of(), OLD_FRONT),
+        up_call(cs),
+        *watched(cs, key_of(), OLD_FRONT),
+    ]
+    with FakeRunner(*script) as runner:
+        outcome = run([up_step(root, stack, fetched)], runner)
+    assert outcome.steps[0].reason == Code(
+        "up:old-image",
+        {"service": "frontend", "expected": FRONT_IMAGE, "running": OLD_FRONT},
+    )
+
+
+def test_up_reads_every_service_with_a_key_not_the_first_alone(
+    tmp_path: Path, live_app: LiveApp
+) -> None:
+    """Two services a package is built into: frontend on its image, worker on
+    an old one -- ``up`` acts."""
+    stack = made(product_data(port=live_app.port, also=("worker",)))
+    root, fetched = skin_box(tmp_path)
+    cs = compose(root, stack)
+    script = [
+        *watched(cs, key_of(), FRONT_IMAGE, document=WITH_WORKER, worker=OLD_FRONT),
+        up_call(cs),
+        *watched(cs, key_of(), FRONT_IMAGE, document=WITH_WORKER, worker=WORKER_IMAGE),
+        *observe_calls(cs),
+    ]
+    with FakeRunner(*script) as runner:
+        outcome = run([up_step(root, stack, fetched)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    fact = outcome.steps[0].verify
+    assert fact is not None and fact["built"] == {
+        "frontend": FRONT_IMAGE,
+        "worker": WORKER_IMAGE,
+    }
+
+
+def test_up_watches_only_the_services_of_its_own_entry(tmp_path: Path) -> None:
+    """The skin is built into ``velo``'s frontend: ``up`` of ``velo-storage``
+    watches none of it; ``up`` of ``velo`` watches app and frontend (the pair)."""
+    stack = made(velo_data())
+    root, fetched = skin_box(tmp_path)
+    for entry, document, found in (
+        ("velo-storage", STORAGE, []),
+        ("velo", VELO, ["app", "frontend"]),
+    ):
+        cs = compose(root, stack, entry)
+        step = Up(
+            stack,
+            entry,
+            release=cs.release,
+            ref=REF,
+            commit=SHA,
+            root=root,
+            fetched=fetched,
+        )
+        with FakeRunner(config_call(cs, document)) as runner:
+            ctx = StepContext(runner, "install", "test", entry, _drop)
+            assert step._watched(ctx) == found, entry
