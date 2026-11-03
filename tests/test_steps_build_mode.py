@@ -23,6 +23,7 @@ from compose_support import (
     REF,
     SHA,
     LiveApp,
+    hash_calls,
     in_release,
     live,
     observe_calls,
@@ -1049,8 +1050,8 @@ def up_scenario(
     if before != FRONT_IMAGE:
         calls.append(up_call(cs))
     else:
-        calls += observe_calls(cs)
-    return [*calls, *watched(cs, key, after), *observe_calls(cs)]
+        calls += [*hash_calls(cs), *observe_calls(cs)]
+    return [*calls, *watched(cs, key, after), *hash_calls(cs), *observe_calls(cs)]
 
 
 @pytest.mark.parametrize(
@@ -1112,6 +1113,7 @@ def test_up_reads_every_service_with_a_key_not_the_first_alone(
         *watched(cs, key_of(), FRONT_IMAGE, document=WITH_WORKER, worker=OLD_FRONT),
         up_call(cs),
         *watched(cs, key_of(), FRONT_IMAGE, document=WITH_WORKER, worker=WORKER_IMAGE),
+        *hash_calls(cs),
         *observe_calls(cs),
     ]
     with FakeRunner(*script) as runner:

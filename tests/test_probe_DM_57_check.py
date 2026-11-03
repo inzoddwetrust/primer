@@ -453,3 +453,19 @@ def test_the_readme_shows_a_pinned_check_with_no_secret() -> None:
     assert (
         "secrets." not in workflow and "first tag of the machine is issued by" in block
     )
+
+
+@pytest.mark.parametrize("given", [".", "blank"])
+def test_a_relative_directory_is_checked_by_its_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, given: str
+) -> None:
+    """``pridem check .`` (DM-58): the directory is resolved first -- the
+    verdict names its first step by the directory's name, which ``.`` has
+    not, and compose reads the file by its absolute path. ``.`` from inside
+    the repository and a relative path from beside it give the verdict of
+    the absolute path."""
+    root = repo(tmp_path).resolve()
+    monkeypatch.chdir(root if given == "." else root.parent)
+    code, verdict, err = check(Path(given), green_calls(root))
+    assert (code, err) == (0, ""), err
+    assert _steps(verdict)["blank/primer_yaml"]["status"] == "ok"

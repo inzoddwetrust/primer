@@ -11,6 +11,7 @@ from compose_support import (
     CONFIG,
     CONTAINER,
     FRONT_IMAGE,
+    HASHES,
     HEAD,
     OLD_IMAGE,
     SHA,
@@ -19,6 +20,7 @@ from compose_support import (
     build_call,
     compose,
     config_call,
+    hash_calls,
     heads_call,
     health,
     image_call,
@@ -37,7 +39,7 @@ from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result
 from pridem.stacks.seams import SeamMemory
 from pridem.steps.build import Build
-from pridem.steps.compose import NETWORK, override_text
+from pridem.steps.compose import NETWORK, ComposeStack, override_text
 from pridem.steps.migrate import Migrate
 from pridem.steps.up import Up
 
@@ -70,6 +72,7 @@ def first_up(root: Path, port: int, running: str = APP_IMAGE) -> list[FakeCall]:
         image_call(cs, "app", APP_IMAGE),
         ps_call(cs, CONTAINER),
         inspect_image_call(CONTAINER, running),
+        *hash_calls(cs),
         *observe_calls(cs),
     ]
 
@@ -101,7 +104,8 @@ class Recording(FakeRunner):
 def test_probe_DM_18_container_on_old_image_id_is_red_verify(
     tmp_path: Path, app: LiveApp
 ) -> None:
-    script = first_up(tmp_path, app.port, running=OLD_IMAGE)[:-4]  # verify stops here
+    # verify stops on the image, before the configuration and conformance
+    script = first_up(tmp_path, app.port, running=OLD_IMAGE)[:6]
     with FakeRunner(*script) as runner:
         outcome, _ = run([up(tmp_path, app.port)], runner)
     assert outcome.steps[0].reason == Code(
@@ -220,6 +224,7 @@ def test_up_with_the_same_image_and_a_clean_app_needs_no_act(
         image_call(cs, "app", APP_IMAGE),
         ps_call(cs, CONTAINER),
         inspect_image_call(CONTAINER, APP_IMAGE),
+        *hash_calls(cs),
         *observe_calls(cs),
         *first_up(tmp_path, app.port)[3:],  # verify only
     ]
@@ -264,3 +269,83 @@ def test_override_names_default_when_config_lists_no_network_of_app(
         "default": None,
         NETWORK: {"aliases": ["blank-app"]},
     }
+
+
+# --- the configuration of every service (DM-58) ---------------------------------
+
+
+def _same_image_check(cs: ComposeStack, running: dict[str, str]) -> list[FakeCall]:
+    """check: app on its image, the services on ``running`` hashes."""
+    return [
+        image_call(cs, "app", APP_IMAGE),
+        ps_call(cs, CONTAINER),
+        inspect_image_call(CONTAINER, APP_IMAGE),
+        *hash_calls(cs, running=running),
+    ]
+
+
+@pytest.mark.parametrize(
+    "running",
+    [
+        {**HASHES, "app": "1" * 64},  # another environment of app, same image
+        {**HASHES, "postgres": "1" * 64},  # the last service, not the first
+        {k: v for k, v in HASHES.items() if k != "frontend"},  # no container
+    ],
+    ids=["environment", "last-service", "no-container"],
+)
+def test_up_acts_when_a_service_is_not_on_its_configuration(
+    tmp_path: Path, app: LiveApp, running: dict[str, str]
+) -> None:
+    """The same image of app and a service whose container is not on the
+    configuration ``config --hash`` gives now -- another mount of a package
+    (apply: runtime), another environment, or none running: ``up`` acts. The
+    pair -- every service on its hash -- is
+    ``test_up_with_the_same_image_and_a_clean_app_needs_no_act``."""
+    cs = compose(tmp_path, app.port)
+    script = [*_same_image_check(cs, running), *first_up(tmp_path, app.port)[2:]]
+    runner = Recording(*script)
+    with runner:
+        outcome, _ = run([up(tmp_path, app.port)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert tuple(
+        cs.argv("up", "-d", "--no-build", "--wait", "--wait-timeout", "300")
+    ) in (runner.argvs)
+
+
+def test_up_verify_is_red_when_a_service_stays_on_an_old_configuration(
+    tmp_path: Path, app: LiveApp
+) -> None:
+    """verify reads the hash on the container back: frontend still on the
+    configuration of the old package after ``up`` -- red, by its name."""
+    cs = compose(tmp_path, app.port)
+    old = {**HASHES, "frontend": "1" * 64}
+    script = [
+        *_same_image_check(cs, old),
+        up_call(cs),
+        image_call(cs, "app", APP_IMAGE),
+        ps_call(cs, CONTAINER),
+        inspect_image_call(CONTAINER, APP_IMAGE),
+        *hash_calls(cs, running=old),
+    ]
+    with FakeRunner(*script) as runner:
+        outcome, _ = run([up(tmp_path, app.port)], runner)
+    assert outcome.steps[0].reason == Code(
+        "up:old-config",
+        {"service": "frontend", "expected": HASHES["frontend"], "running": "1" * 64},
+    )
+    # no container at all: "none" names it
+    gone = {k: v for k, v in HASHES.items() if k != "postgres"}
+    script = [
+        *_same_image_check(cs, gone),
+        up_call(cs),
+        image_call(cs, "app", APP_IMAGE),
+        ps_call(cs, CONTAINER),
+        inspect_image_call(CONTAINER, APP_IMAGE),
+        *hash_calls(cs, running=gone),
+    ]
+    with FakeRunner(*script) as runner:
+        outcome, _ = run([up(tmp_path, app.port)], runner)
+    assert outcome.steps[0].reason == Code(
+        "up:old-config",
+        {"service": "postgres", "expected": HASHES["postgres"], "running": "none"},
+    )

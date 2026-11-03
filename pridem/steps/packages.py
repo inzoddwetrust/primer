@@ -20,9 +20,13 @@ done here: DM-T-0078.
 
 ``check`` refuses, before anything is run: a directory that resolves out of
 the package (a symlink of the package's repository), a package not on the box.
-``act`` runs the product's ``validate`` in a throwaway container of the
-service's new image (``image_key``) with the same mounts, ``<dir>`` replaced by
-the mount path: red -- the plan stops before ``up``, nothing is switched.
+It acts only when a service a package is mounted into is not on its
+configuration (``steps.compose.stale``: the hash ``up`` gives it now, with the
+override that names the package's release) -- another version, or no
+container yet; ``up`` recreates such a service (DM-58). ``act`` runs the
+product's ``validate`` in a throwaway container of the service's new image
+(``image_key``) with the same mounts, ``<dir>`` replaced by the mount path:
+red -- the plan stops before ``up``, nothing is switched.
 
 ``apply: build`` (the owner's decision of 02.11): ``build`` copies the build
 context of the service out of the immutable release into
@@ -54,7 +58,7 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.compose import ComposeStack, config, image_of, out
+from pridem.steps.compose import ComposeStack, config, image_of, out, stale
 from pridem.steps.passport import NO_PASSPORT, Fetched
 from pridem.steps.sources import package_dir, package_release
 
@@ -307,9 +311,18 @@ class Packages(Step):
         return mounts, known
 
     def check(self, ctx: StepContext) -> CheckResult:
+        """A package is validated when a service it is mounted into is not
+        on its configuration yet (``stale``): the override names the
+        package's release, so another version -- or no container at all --
+        is another hash. On a box whose containers already run on these
+        packages there is nothing to validate and ``doctor`` stays empty."""
         mounts, _ = self._mounts(ctx)
         if not mounts:
             return CheckResult(False)
+        behind = stale(ctx, self.compose)
+        if not any(mount.service in behind for mount in mounts):
+            return CheckResult(False)
+        # act validates every mounted package, the unchanged ones too
         slots: list[Json] = list[Json](sorted({mount.slot for mount in mounts}))
         return CheckResult(True, local_code("validate", {"slots": slots}))
 

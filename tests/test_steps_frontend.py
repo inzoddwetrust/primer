@@ -6,7 +6,16 @@ from pathlib import Path
 
 import pytest
 import yaml
-from compose_support import CONFIG, ENTRY, REF, SHA, in_release, stdout
+from compose_support import (
+    CONFIG,
+    ENTRY,
+    HASHES,
+    REF,
+    SHA,
+    hash_calls,
+    in_release,
+    stdout,
+)
 from compose_support import config_call as compose_config
 from compose_support import raw_config_call as compose_raw_config
 from edge_support import DOMAINS, Mixed, exec_call, passport, product
@@ -183,7 +192,9 @@ def test_red_validate_stops_before_anything_is_switched(tmp_path: Path) -> None:
         lines=stdout(FRONT_IMAGE),
     )
     later = config_call(root, stack)
-    with FakeRunner(later, later, image, validate) as runner:
+    with FakeRunner(
+        later, *hash_calls(cs, running={}), later, image, validate
+    ) as runner:
         outcome = run([packages(root, fetched, stack)], runner)
     assert outcome.steps[0].reason is not None
     assert outcome.steps[0].reason.code == "command-failed"
@@ -221,7 +232,7 @@ def test_an_image_named_in_compose_is_used_only_without_build(
     none = FakeCall(
         ("docker", "image", "ls", "--quiet", "--no-trunc", "--filter", *labels)
     )
-    calls = [config, config, none]
+    calls = [config, *hash_calls(cs, running={}), config, none]
     if not build:
         validate = (
             "docker",
@@ -394,7 +405,7 @@ def test_a_package_is_mounted_from_the_stack_dir_not_the_entry(tmp_path: Path) -
         tuple(cs.product_argv("config", "--format", "json")),
         lines=stdout(json.dumps(CONFIG)),
     )
-    with FakeRunner(config) as runner:
+    with FakeRunner(config, *hash_calls(cs, running={})) as runner:
         outcome = Plan(
             [StackSteps("web", [step], root=True)],
             mode="doctor",
@@ -406,3 +417,57 @@ def test_a_package_is_mounted_from_the_stack_dir_not_the_entry(tmp_path: Path) -
     assert item.reason.code == "packages:validate"
     mounts = package_mounts(stack, stack.name, fetched.passport, root)
     assert [m.source for m in mounts] == [package / "css"]
+
+
+def _doctor(step: Step, *calls: FakeCall) -> list[str]:
+    """The codes ``doctor`` would act on, ``calls`` its whole script."""
+    with FakeRunner(*calls) as runner:
+        outcome = Plan(
+            [StackSteps(ENTRY, [step], root=True)],
+            mode="doctor",
+            role="test",
+            runner=runner,
+            sink=ListSink(),
+        ).run()
+    assert outcome.code is not ExitCode.FAILED, outcome.steps
+    return [item.reason.code for item in outcome.doctor_diff]
+
+
+def test_packages_validate_only_when_a_service_they_mount_into_is_behind(
+    tmp_path: Path,
+) -> None:
+    """DM-58: the package step decides by the configuration of the services
+    it mounts into (``stale``). frontend on its hash -- nothing to validate,
+    ``doctor`` empty; frontend behind (another version: another bind, another
+    hash) or not running -- validate; only app behind -- not the packages'
+    business."""
+    stack = made(tmp_path, skin_product("css"))
+    root, fetched, _ = skin_box(tmp_path)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    step = packages(root, fetched, stack)
+    config = config_call(root, stack)
+    assert _doctor(step, config, *hash_calls(cs)) == []
+    behind = {**HASHES, "frontend": "1" * 64}
+    assert _doctor(step, config, *hash_calls(cs, running=behind)) == [
+        "packages:validate"
+    ]
+    gone = {name: value for name, value in HASHES.items() if name != "frontend"}
+    assert _doctor(step, config, *hash_calls(cs, running=gone)) == ["packages:validate"]
+    app_only = {**HASHES, "app": "1" * 64}
+    assert _doctor(step, config, *hash_calls(cs, running=app_only)) == []
+
+
+def test_a_runtime_slot_without_a_package_is_green_with_no_mount(
+    tmp_path: Path,
+) -> None:
+    """The pair of ``build:package-missing`` (DM-61, test_steps_build_mode):
+    a slot applied at run time that the passport does not fill is the
+    product's own look -- nothing mounted, nothing validated, green."""
+    stack = made(tmp_path, skin_product("css"))
+    root, fetched = box(tmp_path / "plain", passport_data())
+    assert fetched.passport is not None and not fetched.passport.packages
+    assert package_mounts(stack, ENTRY, fetched.passport, root) == []
+    with FakeRunner() as runner:  # no config, no hash, no validate
+        outcome = run([packages(root, fetched, stack)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[0].verify == {"packages": "none"}

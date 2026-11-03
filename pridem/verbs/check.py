@@ -369,9 +369,11 @@ def _given(pairs: Sequence[str]) -> dict[str, Path]:
 def _run(args: Strict, ctx: Context) -> int:
     if not isinstance(args, CheckArgs):
         raise TypeError("check takes CheckArgs")
-    root = Path(args.path)
-    if not root.is_dir():
+    if not Path(args.path).is_dir():
         raise Refused(f"check: {args.path!r} is not a directory")
+    # by its absolute path: the verdict names its first step by the
+    # directory's name, which "." and ".." do not have
+    root = Path(args.path).resolve()
     given = _given(args.packages)
     started = datetime.now(UTC).replace(microsecond=0)
     step_ctx = StepContext(ctx.runner, "deploy", "test", root.name, _drop)

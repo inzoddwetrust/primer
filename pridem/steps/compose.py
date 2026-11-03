@@ -86,6 +86,14 @@ PROXY_URL = f"http://{PROXY_ALIAS}:{PROXY_PORT}"
 COMMAND_TIMEOUT_S = 120
 BUILD_TIMEOUT_S = 3600
 UP_WAIT_S = 300
+# what compose stamps on a container it makes: the hash of its service's
+# configuration (``config --hash``) and the service's name
+CONFIG_HASH_LABEL = "com.docker.compose.config-hash"
+SERVICE_LABEL = "com.docker.compose.service"
+RUNNING_HASH_FORMAT = (
+    f'{{{{index .Config.Labels "{SERVICE_LABEL}"}}}} '
+    f'{{{{index .Config.Labels "{CONFIG_HASH_LABEL}"}}}}'
+)
 _HEAD = re.compile(r"^(\S+) \(head\)")
 _CURRENT = re.compile(r"^([0-9A-Za-z_]+)(?: \(head\))?$")
 
@@ -692,6 +700,54 @@ def running_image(ctx: StepContext, compose: ComposeStack, service: str) -> str 
         ctx, ["docker", "inspect", "-f", "{{.Image}}", found[0]], passed_on=False
     )
     return lines[0].strip() if lines else None
+
+
+def config_hashes(ctx: StepContext, compose: ComposeStack) -> dict[str, str]:
+    """The hash of each service's configuration -- the product's file with
+    the machine's override, as ``up`` reads them: ``config --hash "*"``, one
+    ``<service> <hash>`` a line."""
+    _, lines = out(ctx, compose.argv("config", "--hash", "*"), passed_on=False)
+    found: dict[str, str] = {}
+    for line in lines:
+        words = line.split()
+        if len(words) == 2:
+            found[words[0]] = words[1]
+    return found
+
+
+def running_hashes(ctx: StepContext, compose: ComposeStack) -> dict[str, str]:
+    """The configuration hash on the running container of each service
+    (``CONFIG_HASH_LABEL``); a service with no running container is absent."""
+    _, ids = out(ctx, compose.argv("ps", "-q"), passed_on=False)
+    found = sorted({line.strip() for line in ids if line.strip()})
+    if not found:
+        return {}
+    _, lines = out(
+        ctx, ["docker", "inspect", "-f", RUNNING_HASH_FORMAT, *found], passed_on=False
+    )
+    running: dict[str, str] = {}
+    for line in lines:
+        service, _, value = line.strip().partition(" ")
+        if service and value:
+            running[service] = value
+    return running
+
+
+def stale(ctx: StepContext, compose: ComposeStack) -> dict[str, tuple[str, str]]:
+    """Every service whose running container is not on its configuration --
+    another mount, environment, image name -- or that has none: ``{service:
+    (expected, running)}``, ``running`` ``"none"`` without a container. On one
+    commit only this tells that ``up`` has something to do for a service whose
+    image did not change (a package of another version, apply: runtime)."""
+    expected = config_hashes(ctx, compose)
+    if not expected:
+        return {}
+    running = running_hashes(ctx, compose)
+    return {
+        service: (value, running.get(service, "none"))
+        for service, value in sorted(expected.items())
+        if running.get(service) != value
+    }
 
 
 def heads(lines: Sequence[str]) -> list[str]:

@@ -12,7 +12,12 @@ containers.
 for this commit, and so does every service of the entry a package is built
 into, on the image of its key (``steps.packages.image_key``: edition and
 package versions) -- on one commit only those change, so ``check`` acts when
-any of them runs on another image (DM-61 FIX); the stack passes
+any of them runs on another image (DM-61 FIX); every service of the entry
+runs on its configuration -- the hash compose stamps on a container
+(``com.docker.compose.config-hash``) is the one ``config --hash`` gives the
+product's file with the override now; a package of another version (apply:
+runtime) or another environment changes it on the same image (DM-58); the
+stack passes
 conformance (DM-15: ``/health`` by its form, ``/ready`` 200, JSON logs,
 ``max_body``, no ``logging``), and ``/health`` says
 the release and the commit the build got. Then the stack's ``provides`` reach
@@ -49,6 +54,7 @@ from pridem.steps.compose import (
     image_of,
     out,
     running_image,
+    stale,
 )
 from pridem.steps.env import RenderEnv
 from pridem.steps.packages import KEY_CODES, image_key
@@ -79,6 +85,7 @@ class Up(Step):
         "up": "bring {stack} up at {commit}",
         "no-image": "no image of {service} at {commit}: build runs before up",
         "old-image": "{service} runs on {running}, not on {expected}",
+        "old-config": "{service} runs on configuration {running}, not on {expected}",
         "conformance": "{stack} does not conform: {problems}",
         "release-mismatch": (
             "/health says {release} at {commit}, not {expected_release} at "
@@ -163,6 +170,8 @@ class Up(Step):
                 or running_image(ctx, self.compose, service) != expected
             ):
                 return needed
+        if stale(ctx, self.compose):
+            return needed
         problems, document = self._problems(ctx)
         if problems or not self._same_release(document):
             return needed
@@ -211,6 +220,14 @@ class Up(Step):
                 built[service] = expected
         if built:
             fact["built"] = built
+        behind = stale(ctx, self.compose)
+        if behind:
+            service = min(behind)
+            expected, running = behind[service]
+            raise StepFailed(
+                "old-config",
+                {"service": service, "expected": expected, "running": running},
+            )
         problems, document = self._problems(ctx)
         if problems:
             raise StepFailed(

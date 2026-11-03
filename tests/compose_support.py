@@ -20,7 +20,7 @@ from pridem.plan import Plan, StackSteps
 from pridem.runner import FakeCall, Runner, Stream
 from pridem.stacks.schema import PRIMER_YAML, Product
 from pridem.steps.base import Step
-from pridem.steps.compose import ComposeStack
+from pridem.steps.compose import RUNNING_HASH_FORMAT, ComposeStack
 
 ENTRY = "blank"
 REF = "main"
@@ -243,6 +243,50 @@ def migrate_call(cs: ComposeStack, code: int = 0) -> FakeCall:
         ),
         code=code,
     )
+
+
+# the configuration hash of each service of CONFIG, as ``config --hash`` prints
+HASHES: dict[str, str] = {
+    "app": "a" * 64,
+    "frontend": "f" * 64,
+    "postgres": "0" * 64,
+}
+
+
+def hash_calls(
+    cs: ComposeStack,
+    running: Mapping[str, str] | None = None,
+    expected: Mapping[str, str] = HASHES,
+) -> list[FakeCall]:
+    """What ``stale`` runs (DM-58): ``config --hash`` of the file with the
+    override, ``ps -q`` of the project, the labels of its containers.
+    ``running`` -- the hash on each running container; ``None`` -- every
+    service runs on ``expected``; empty -- nothing runs."""
+    on = dict(expected) if running is None else dict(running)
+    calls = [
+        FakeCall(
+            tuple(cs.argv("config", "--hash", "*")),
+            lines=stdout(*(f"{name} {value}" for name, value in expected.items())),
+        ),
+        FakeCall(
+            tuple(cs.argv("ps", "-q")),
+            lines=stdout(*(f"c-{name}" for name in on)),
+        ),
+    ]
+    if on:
+        calls.append(
+            FakeCall(
+                (
+                    "docker",
+                    "inspect",
+                    "-f",
+                    RUNNING_HASH_FORMAT,
+                    *sorted(f"c-{name}" for name in on),
+                ),
+                lines=stdout(*(f"{name} {value}" for name, value in on.items())),
+            )
+        )
+    return calls
 
 
 def up_call(cs: ComposeStack, code: int = 0) -> FakeCall:

@@ -62,7 +62,18 @@ from pridem.steps.egress import SQUID_IMAGE
 
 PYTHON = "/opt/pridem/current/venv/bin/python"
 BLANK = "https://github.com/inzoddwetrust/primer-blank.git"
-BLANK_COMMIT = "0e82be562d186afc933b8779d91dddcae4278cea"
+BLANK_COMMIT = "f1649033f20854b0ee6a0370b98dd9caf1caf102"
+# the blank's published packages (DM-58): public, cloned over https by the
+# test, given to the machine as file:// mirrors; each tag's commit is pinned
+PACKAGES_OWNER = "VELO2026-app"
+PACKAGE_PINS: dict[str, dict[str, str]] = {
+    "primer-blank-skin": {
+        "v1.0.0": "f45fdc9f0b1986437391e52cdcfbfdc85e10f4af",
+        "v1.1.0": "2256ce3beaae51409838a122f64a4a27811ddbde",
+    },
+    "primer-blank-texts": {"v1.0.0": "fefb50b44d3d5fb2f92fe63e75148b156fbbd9e8"},
+    "primer-blank-brand": {"v1.0.0": "c40b5ffa2f75744d74d4359703e87c78fa273dab"},
+}
 REF = "main"
 RELEASE = f"/opt/blank/releases/{BLANK_COMMIT}"
 ENV = Path("/opt/blank/env/.env")
@@ -439,6 +450,50 @@ def _app() -> str:
     return container
 
 
+def _report_config_hashes() -> None:
+    """Diagnostic, no colour (DM-58): what ``config --hash`` of the blank's
+    file with the machine's override prints, next to the hash compose stamped
+    on each running container -- ``up`` and ``packages`` decide by their
+    equality, so the form is measured into the run's output before anything
+    asserts on it (par0 14.3)."""
+    release = Path("/opt/blank/current")
+    hashes = _stdout(
+        [
+            "docker",
+            "compose",
+            "-p",
+            "blank",
+            "--env-file",
+            str(ENV),
+            "-f",
+            str(release / "docker-compose.yml"),
+            "-f",
+            "/opt/blank/compose/blank.yml",
+            "config",
+            "--hash",
+            "*",
+        ]
+    )
+    ids = _stdout(
+        ["docker", "ps", "-q", "--filter", "label=com.docker.compose.project=blank"]
+    )
+    labels = _stdout(
+        [
+            "docker",
+            "inspect",
+            "-f",
+            '{{index .Config.Labels "com.docker.compose.service"}} '
+            '{{index .Config.Labels "com.docker.compose.config-hash"}}',
+            *ids,
+        ]
+    )
+    warnings.warn(
+        f"DM-58 diagnostic: config --hash {sorted(hashes)}; "
+        f"labels of the running containers {sorted(labels)}",
+        stacklevel=2,
+    )
+
+
 def _curl(tmp: Path, url: str, host: str) -> tuple[str, str]:
     """``(status, headers)`` of one request; ``000`` -- no answer."""
     headers = tmp / "headers.txt"
@@ -484,6 +539,7 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
 
     # the install (R1, W1)
     assert verdict.result == "green", printed
+    _report_config_hashes()
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
     # the env (R2-R8)
     assert oct(ENV.stat().st_mode & 0o777) == oct(0o600), printed
@@ -911,6 +967,19 @@ skin is checked by the build -- none, and the build fails -- and the edition
 the build got is served at ``/edition.txt``."""
 
 
+RUNTIME_SKIN = """  skin:
+    contract: ">=1,<2"
+    apply: runtime
+    validate: validate-skin <dir>
+    mount:
+      - { service: frontend, path: /srv/skin }
+"""
+BUILD_SKIN = """  skin:
+    contract: ">=1,<2"
+    apply: build
+    build:
+      - { service: frontend, path: public/skin }
+"""
 EDITIONS_LINE = 'EDITIONS: dict[str, tuple[str, ...]] = {"core": ()}\n'
 EDITIONS_FULL = 'EDITIONS: dict[str, tuple[str, ...]] = {"core": (), "full": ()}\n'
 """The blank's backend table of editions (``backend/app/editions.py``) and
@@ -1013,7 +1082,13 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     """DM-61 on the box the install left: a copy of the blank builds a skin
     into its frontend (``apply: build``); a new version of the skin rebuilds on
     the same commit; a skin its build refuses is red and the old one stays
-    served; another edition is another image."""
+    served; another edition is another image.
+
+    DM-58: the blank declares its own slots ``skin`` and ``texts`` (apply:
+    runtime) since ``BLANK_COMMIT`` f164903, so the copy turns the slot
+    ``skin`` it has into one built into frontend -- ``RUNTIME_SKIN`` replaced
+    by ``BUILD_SKIN``, once -- instead of adding a second ``packages``; the
+    passports here give no texts, so that slot mounts nothing."""
     assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
     skin = _skin_repository(tmp_path)
 
@@ -1032,10 +1107,8 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
         "  core: { services: [] }\n",
         "  core: { services: [] }\n  full: { services: [] }\n",
     )
-    text += (
-        'packages:\n  skin:\n    contract: ">=1,<2"\n    apply: build\n'
-        "    build:\n      - { service: frontend, path: public/skin }\n"
-    )
+    assert text.count(RUNTIME_SKIN) == 1
+    text = text.replace(RUNTIME_SKIN, BUILD_SKIN)
     primer.write_text(text, encoding="utf-8")
     dockerfile = copy / "frontend" / "Dockerfile"
     body = dockerfile.read_text(encoding="utf-8")
@@ -1137,6 +1210,192 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     [failed] = [x for x in out if x.startswith("FAILED ")]
     assert json.loads(diff.removeprefix("DIFF ")) == [], out
     assert json.loads(failed.removeprefix("FAILED ")) == [], out
+
+
+BLUE = "--color-brand-primary: #1a73e8;"
+GREEN = "--color-brand-primary: #0b8043;"
+MAGENTA = "--color-brand-primary: #c2185b;"
+TEXTS = {
+    "en": {
+        "title": "Primer Blank",
+        "config_error": "Settings are not available:",
+        "api_label": "Server:",
+    },
+    "ru": {"title": "Праймер — болванка"},
+}
+BRAND_TEXTS = {
+    "en": {"title": "Blank by Brand", "api_label": "Brand API:"},
+    "ru": {"title": "Болванка бренда"},
+}
+
+
+@pytest.fixture(scope="module")
+def published(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """The blank's published packages (DM-58), mirrored over https: the
+    machine fetches them from ``file://`` (it clones by ssh with a key alone,
+    DM-10). Every tag's commit is its pin; a tag that names another commit is
+    red with the one it names."""
+    where = tmp_path_factory.mktemp("published")
+    mirrors: dict[str, Path] = {}
+    for name, tags in PACKAGE_PINS.items():
+        bare = where / f"{name}.git"
+        address = f"https://github.com/{PACKAGES_OWNER}/{name}.git"
+        _run(["git", "clone", "-q", "--mirror", address, str(bare)], 300, env=GIT_ENV)
+        for tag, pin in tags.items():
+            [found] = _git("--git-dir", str(bare), "rev-parse", f"{tag}^{{commit}}")
+            assert found == pin, f"{name} {tag} names {found}, pinned {pin}"
+        mirrors[name] = bare
+    return mirrors
+
+
+def _service_image(service: str) -> str:
+    """The image ID of the running container of ``service`` of the blank."""
+    [container] = _stdout(
+        [
+            "docker",
+            "ps",
+            "-q",
+            "--filter",
+            "label=com.docker.compose.project=blank",
+            "--filter",
+            f"label=com.docker.compose.service={service}",
+        ]
+    )
+    [image] = _stdout(["docker", "inspect", "-f", "{{.Image}}", container])
+    return image
+
+
+def _texts() -> object:
+    return json.loads(_body("/texts.json", FRONTEND))
+
+
+def _doctor(checkout: Path, passport: Path, mirror: Path) -> tuple[object, object]:
+    """``(diff, failed)`` of ``doctor`` at ``BLANK_COMMIT``."""
+    out = _run(
+        [PYTHON, "-c", PLAN, str(checkout), str(passport), str(mirror)]
+        + [BLANK_COMMIT, "doctor"],
+        timeout=1800,
+    )
+    [diff] = [x for x in out if x.startswith("DIFF ")]
+    [failed] = [x for x in out if x.startswith("FAILED ")]
+    return json.loads(diff.removeprefix("DIFF ")), json.loads(
+        failed.removeprefix("FAILED ")
+    )
+
+
+def _packages_fact(verdict: Verdict) -> object:
+    [step] = [s for s in verdict.steps if (s.stack, s.name) == ("blank", "packages")]
+    return (step.verify or {}).get("packages")
+
+
+def _broken_skin(tmp: Path, skin: Path) -> Path:
+    """``v1.2.0`` of the skin, here only (a released tag is never moved): the
+    logo of ``v1.0.0`` with a script -- ``validate-skin`` refuses it."""
+    work = tmp / "broken-skin"
+    _run(["git", "clone", "-q", str(skin), str(work)], env=GIT_ENV)
+    _git("-C", str(work), "checkout", "-q", "-B", "broken", "v1.0.0")
+    logo = work / "assets" / "logo.svg"
+    logo.write_text(logo.read_text(encoding="utf-8") + "<script>x()</script>\n")
+    _git("-C", str(work), "commit", "-q", "-am", "a script in the logo")
+    _git("-C", str(work), "tag", "v1.2.0")
+    bare = tmp / "broken" / "primer-blank-skin.git"
+    _run(["git", "clone", "-q", "--bare", str(work), str(bare)], env=GIT_ENV)
+    return bare
+
+
+def test_probe_DM_58_skin_version_switch_needs_no_rebuild(
+    tmp_path: Path, mirror: Path, published: dict[str, Path]
+) -> None:
+    """DM-58 on the box the earlier tests left: the blank at ``BLANK_COMMIT``
+    with the published skin and texts (apply: runtime). ``v1.0.0`` -> ``v1.1.0``
+    -> back: the running frontend keeps its image and shows the other color;
+    ``doctor`` is empty; a skin ``validate-skin`` refuses is red and the look
+    stays. The texts by language: ``ru`` of the package gives the title alone,
+    the page takes the rest from its built-in ``ru``."""
+    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    checkout = _blank(tmp_path)
+    _run(
+        ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
+    )
+    skin, texts = published["primer-blank-skin"], published["primer-blank-texts"]
+
+    def passport(version: int, skin_repo: Path, tag: str) -> Path:
+        packages = {
+            "skin": {"repo": f"file://{skin_repo}", "version": tag},
+            "texts": {"repo": f"file://{texts}", "version": "1.0.0"},
+        }
+        return _passport(tmp_path, version=version, packages=packages)
+
+    def deploy(file: Path) -> tuple[Verdict, str]:
+        return _install(checkout, file, mirror, BLANK_COMMIT, "deploy")
+
+    first, printed = deploy(passport(10, skin, "1.0.0"))
+    assert first.result == "green", printed
+    _report_config_hashes()
+    assert _packages_fact(first) == {
+        "skin": "primer-blank-skin@1.0.0",
+        "texts": "primer-blank-texts@1.0.0",
+    }, printed
+    assert BLUE in _body("/skin.css", FRONTEND)
+    assert _texts() == TEXTS
+    image = _service_image("frontend")
+
+    # v1.1.0: the same image, the other color
+    second, printed = deploy(passport(11, skin, "1.1.0"))
+    assert second.result == "green", printed
+    assert _packages_fact(second) == {
+        "skin": "primer-blank-skin@1.1.0",
+        "texts": "primer-blank-texts@1.0.0",
+    }, printed
+    css = _body("/skin.css", FRONTEND)
+    assert GREEN in css and BLUE not in css, css
+    assert _service_image("frontend") == image
+
+    # back to v1.0.0
+    back, printed = deploy(passport(12, skin, "1.0.0"))
+    assert back.result == "green", printed
+    assert BLUE in _body("/skin.css", FRONTEND)
+    assert _service_image("frontend") == image
+    assert _doctor(checkout, passport(12, skin, "1.0.0"), mirror) == ([], [])
+
+    # a skin validate-skin refuses: red at packages, the look stays
+    broken = _broken_skin(tmp_path, skin)
+    bad, printed = deploy(passport(13, broken, "1.2.0"))
+    assert bad.result != "green", printed
+    [red] = [s for s in bad.steps if s.status == "failed"]
+    assert (red.stack, red.name) == ("blank", "packages"), bad.steps
+    css = _body("/skin.css", FRONTEND)
+    assert BLUE in css and GREEN not in css, css
+    assert _service_image("frontend") == image
+    assert _texts() == TEXTS
+
+
+def test_tier3_both_slots_from_one_brand_package_by_subpath(
+    tmp_path: Path, mirror: Path, published: dict[str, Path]
+) -> None:
+    """DM-58: both slots of the blank from ``primer-blank-brand`` at one tag,
+    each by its ``subpath`` -- the brand's color and texts."""
+    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    checkout = _blank(tmp_path)
+    _run(
+        ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
+    )
+    brand = f"file://{published['primer-blank-brand']}"
+    packages = {
+        "skin": {"repo": brand, "version": "1.0.0", "subpath": "skin"},
+        "texts": {"repo": brand, "version": "1.0.0", "subpath": "texts"},
+    }
+    file = _passport(tmp_path, version=14, packages=packages)
+    verdict, printed = _install(checkout, file, mirror, BLANK_COMMIT, "deploy")
+    assert verdict.result == "green", printed
+    assert _packages_fact(verdict) == {
+        "skin": "primer-blank-brand@1.0.0",
+        "texts": "primer-blank-brand@1.0.0",
+    }, printed
+    css = _body("/skin.css", FRONTEND)
+    assert MAGENTA in css and BLUE not in css, css
+    assert _texts() == BRAND_TEXTS
+    assert _doctor(checkout, file, mirror) == ([], [])
 
 
 def _check(directory: Path) -> tuple[int, dict[str, object]]:
