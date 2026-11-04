@@ -271,7 +271,7 @@ def _composes(checked: Checked, stack: Stack) -> None:
                 raise read.failed
             document = {} if read.document is None else read.document
             also = [*read.found, *(places if read.document is not None else [])]
-            refused = refusal(compose, document, also)
+            refused = refusal(compose, document, read.raw, also)
             if refused is not None:
                 raise StepFailed(*refused)
             return {

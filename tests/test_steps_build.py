@@ -6,6 +6,7 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
 from compose_support import (
     APP_IMAGE,
     CONFIG,
@@ -22,6 +23,7 @@ from compose_support import (
 from pridem.events import Code
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
+from pridem.steps.base import CheckResult, StepContext, StepFailed
 from pridem.steps.build import Build
 from pridem.steps.compose import override_text
 from pridem.steps.migrate import Migrate
@@ -43,8 +45,10 @@ def green_build(root: Path) -> list[FakeCall]:
     return [
         raw_config_call(cs),  # check: env_file (DM-55 FIX)
         config_call(cs),  # check: no override yet
+        raw_config_call(cs),  # act -- DM-57 FIX: act and verify read build.args
         config_call(cs),  # act
         build_call(cs),
+        raw_config_call(cs),  # verify
         config_call(cs),  # verify
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),
@@ -59,6 +63,7 @@ def test_probe_DM_18_red_build_leaves_site_untouched(tmp_path: Path) -> None:
     script = [
         raw_config_call(cs),
         config_call(cs),
+        raw_config_call(cs),  # act reads the build arguments too (DM-57 FIX)
         config_call(cs),
         build_call(cs, code=1),
     ]
@@ -109,6 +114,7 @@ def test_the_same_commit_again_needs_no_build(tmp_path: Path) -> None:
         config_call(cs),
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),
+        raw_config_call(cs),  # verify reads the build arguments too (DM-57 FIX)
         config_call(cs),
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),
@@ -168,3 +174,35 @@ def test_build_names_a_variable_that_is_loose_or_not_of_env(tmp_path: Path) -> N
         "app: $LOOSE is not ${LOOSE:?}",
         "app: LOOSE is not a key of env",
     ]
+
+
+def test_build_refuses_the_velo_form_of_build_args(tmp_path: Path) -> None:
+    """DM-57 FIX: ``args: [VITE_API_BASE_URL]`` with no such value -- ``config``
+    drops the key, ``--no-interpolate`` keeps it as ``null`` (measured) --
+    is ``instance-args`` before anything is built."""
+    cs = compose(tmp_path)
+    raw = json.loads(json.dumps(CONFIG))
+    raw["services"]["frontend"]["build"]["args"] = None
+    with FakeRunner(raw_config_call(cs, raw), config_call(cs)) as runner:
+        outcome, _ = run([steps(tmp_path)[0]], runner)
+    assert outcome.steps[0].reason == Code(
+        "build:instance-args", {"stack": "blank", "services": ["frontend"]}
+    )
+    assert not cs.override.exists()
+
+
+def test_verify_reads_the_build_arguments_as_check_does(tmp_path: Path) -> None:
+    """DM-57 FIX: ``verify`` reads ``config --no-interpolate`` too and states
+    the same fact as ``check`` -- the velo form of ``build.args``, which the
+    interpolated ``config`` drops, is ``instance-args`` there as well."""
+    cs = compose(tmp_path)
+    raw = json.loads(json.dumps(CONFIG))
+    raw["services"]["frontend"]["build"]["args"] = None
+    step = steps(tmp_path)[0]
+    with FakeRunner(raw_config_call(cs, raw), config_call(cs)) as runner:
+        ctx = StepContext(runner, "install", "test", "blank", lambda *_: None)
+        with pytest.raises(StepFailed) as raised:
+            step.verify(ctx, CheckResult(False))
+    assert raised.value.reason == Code(
+        "instance-args", {"stack": "blank", "services": ["frontend"]}
+    )

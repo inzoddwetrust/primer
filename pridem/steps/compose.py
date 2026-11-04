@@ -541,9 +541,23 @@ def variables(uninterpolated: Mapping[str, Json], env: Iterable[str]) -> list[st
     return sorted(found)
 
 
+def product_build_args(uninterpolated: Mapping[str, Json]) -> list[str]:
+    """The services whose ``build`` has ``args`` in any form, sorted: read in
+    ``config --no-interpolate`` by the key alone. Its value there is ``{}``,
+    ``null``, a mapping or a list (measured, compose 2.27 and 2.40);
+    ``config`` itself drops ``{}``, ``[]``, ``{A: null}`` and an entry of a
+    list whose variable has no value, so it would show none of them."""
+    return sorted(
+        name
+        for name, body in _mapping(uninterpolated.get("services")).items()
+        if "args" in _mapping(_mapping(body).get("build"))
+    )
+
+
 def refusal(
     compose: ComposeStack,
     document: Mapping[str, Json],
+    raw: Mapping[str, Json],
     also: Sequence[str] = (),
 ) -> tuple[str, dict[str, Json]] | None:
     """What ``build`` refuses ``document`` with, as its code and parameters,
@@ -552,21 +566,14 @@ def refusal(
     is one of the callers' ``also``). One function for the step and for
     ``pridem check`` (protocol 10.1). ``document`` is the product's ``config``
     without the machine's override: ``PRIMER_EDITION`` is the machine's own
-    build argument, given only by the override, and never read here."""
-    services = document.get("services")
-    if isinstance(services, dict):
-        given = sorted(
-            name
-            for name, body in services.items()
-            if isinstance(body, dict)
-            and isinstance(build := body.get("build"), dict)
-            and build.get("args")
-        )
-        if given:
-            return "instance-args", {
-                "stack": compose.entry,
-                "services": list[Json](given),
-            }
+    build argument, given only by the override, and never read here. The
+    build arguments of the product are read from ``raw`` -- the same file's
+    ``config --no-interpolate`` -- by ``product_build_args`` (protocol 3.4:
+    ``build.args`` in no form), never from ``document``, which loses some
+    forms; every caller reads it."""
+    given = product_build_args(raw)
+    if given:
+        return "instance-args", {"stack": compose.entry, "services": list[Json](given)}
     found = sorted([*forbidden(compose, document), *also])
     if found:
         return "compose-forbidden", {"stack": compose.entry, "found": list[Json](found)}

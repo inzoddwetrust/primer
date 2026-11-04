@@ -121,8 +121,10 @@ def test_probe_DM_55_privileged_compose_is_red_before_build(tmp_path: Path) -> N
     green = [
         raw_config_call(cs, BLANK),  # check: env_file
         config_call(cs, BLANK),  # check
+        raw_config_call(cs, BLANK),  # act: build.args (DM-57 FIX)
         config_call(cs, BLANK),  # act
         build_call(cs),
+        raw_config_call(cs, BLANK),  # verify: build.args (DM-57 FIX)
         config_call(cs, BLANK),  # verify
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),

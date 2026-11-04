@@ -192,6 +192,7 @@ def key_of(version: str = "1.4.2", edition: str | None = "full") -> dict[str, st
 
 def verify_calls(cs: ComposeStack, key: Mapping[str, str]) -> list[FakeCall]:
     return [
+        config_call(cs, raw=True),  # DM-57 FIX: verify reads build.args too
         config_call(cs),
         image_call(cs, "app", {}, APP_IMAGE),
         image_call(cs, "frontend", key, FRONT_IMAGE),
@@ -203,6 +204,7 @@ def first_build(cs: ComposeStack, key: Mapping[str, str]) -> list[FakeCall]:
     return [
         config_call(cs, raw=True),
         config_call(cs),
+        config_call(cs, raw=True),  # act reads build.args too (DM-57 FIX)
         config_call(cs),
         build_call(cs),
         *verify_calls(cs, key),
@@ -284,6 +286,7 @@ def test_probe_DM_61_build_mode_rebuilds_on_package_version_only(
     script = [
         config_call(cs2, raw=True),
         config_call(cs2),  # the override differs: build
+        config_call(cs2, raw=True),  # act reads build.args too (DM-57 FIX)
         config_call(cs2),
         build_call(cs2),
         *verify_calls(cs2, key_of("1.4.3")),
@@ -307,6 +310,7 @@ def test_probe_DM_61_build_mode_rebuilds_on_package_version_only(
     script = [
         config_call(cs3, raw=True),
         config_call(cs3),
+        config_call(cs3, raw=True),  # act reads build.args too (DM-57 FIX)
         config_call(cs3),
         build_call(cs3),
         *verify_calls(cs3, key_of(edition="core")),
@@ -331,6 +335,7 @@ def test_same_override_but_no_image_of_the_key_builds(tmp_path: Path) -> None:
         config_call(cs),
         image_call(cs, "app", {}, APP_IMAGE),
         image_call(cs, "frontend", key_of()),  # none of this key
+        config_call(cs, raw=True),  # act reads build.args too (DM-57 FIX)
         config_call(cs),
         build_call(cs),
         *verify_calls(cs, key_of()),
@@ -514,7 +519,12 @@ def test_a_failed_build_leaves_the_running_image(tmp_path: Path) -> None:
     stack = made(product_data())
     root, fetched = skin_box(tmp_path)
     cs = compose(root, stack)
-    script = [config_call(cs, raw=True), config_call(cs), config_call(cs)]
+    script = [
+        config_call(cs, raw=True),
+        config_call(cs),
+        config_call(cs, raw=True),  # act reads build.args too (DM-57 FIX)
+        config_call(cs),
+    ]
     with FakeRunner(*script, build_call(cs, code=1)) as runner:
         outcome = run([build(root, stack, fetched)], runner)
     assert outcome.code is not ExitCode.OK
@@ -527,7 +537,10 @@ def test_a_failed_build_leaves_the_running_image(tmp_path: Path) -> None:
 def test_the_product_config_is_read_without_the_override(tmp_path: Path) -> None:
     """``PRIMER_EDITION`` is the machine's build argument, in its override: the
     ``config`` refused by is the product's alone, so ``instance-args`` never
-    meets it (the strict scenario holds ``product_argv``, no second ``-f``)."""
+    meets it (the strict scenario holds ``product_argv``, no second ``-f``).
+    DM-57 FIX: ``refusal`` reads the build arguments in the product's
+    ``config --no-interpolate`` (``raw``), so the pair plants them there --
+    until then in the interpolated document, which loses some forms."""
     stack = made(product_data())
     root, fetched = skin_box(tmp_path)
     cs = compose(root, stack)
@@ -537,13 +550,14 @@ def test_the_product_config_is_read_without_the_override(tmp_path: Path) -> None
         "PRIMER_EDITION": "full"
     }
     document = in_release(CONFIG, cs.release)
-    assert refusal(cs, document) is None
+    raw = in_release(CONFIG, cs.release)
+    assert refusal(cs, document, raw) is None
     assert str(cs.override) not in cs.product_argv("config")
     # the pair: build.args in the product's own compose is still refused
-    front = at(document, "services", "frontend", "build")
+    front = at(raw, "services", "frontend", "build")
     assert isinstance(front, dict)
     front["args"] = {"PRIMER_EDITION": "full"}
-    assert refusal(cs, document) == (
+    assert refusal(cs, document, raw) == (
         "instance-args",
         {"stack": ENTRY, "services": ["frontend"]},
     )
@@ -798,9 +812,11 @@ def test_build_of_the_other_stack_reads_every_compose_and_is_green(
         config_call(storage, STORAGE, raw=True),
         config_call(storage, STORAGE),
         other,
+        config_call(storage, STORAGE, raw=True),  # act: build.args (DM-57 FIX)
         config_call(storage, STORAGE),
         other,
         build_call(storage),
+        config_call(storage, STORAGE, raw=True),  # verify: build.args
         config_call(storage, STORAGE),
         other,
     ]

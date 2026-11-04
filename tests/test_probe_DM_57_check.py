@@ -23,13 +23,21 @@ from compose_support import in_release, stdout
 from pridem.cli import run
 from pridem.events import Json
 from pridem.runner import FakeCall, FakeRunner
-from pridem.steps.compose import variables
+from pridem.stacks.schema import PRIMER_YAML, Product
+from pridem.steps.compose import ComposeStack, refusal, variables
 from pridem.verbs import VERBS
 
 FIXTURES = Path(__file__).parent / "fixtures"
 BLANK = json.loads((FIXTURES / "compose" / "blank-config.json").read_text())
 RAW = json.loads((FIXTURES / "compose" / "blank-config-raw.json").read_text())
 ENV_KEYS = ("API_BASE_URL", "EDITION", "POSTGRES_PASSWORD")
+
+
+def made_blank() -> Product:
+    data = yaml.safe_load((FIXTURES / "check" / "blank" / "primer.yaml").read_text())
+    stack = PRIMER_YAML.validate_python(data)
+    assert isinstance(stack, Product)
+    return stack
 
 
 def repo(tmp_path: Path) -> Path:
@@ -126,7 +134,9 @@ def test_probe_DM_57_check_names_every_violation_of_a_product_repo(
     tmp_path: Path,
 ) -> None:
     """Every kind of violation, planted one at a time into the blank, is red
-    with its name; the pair: the blank itself is green, exit 0."""
+    with its name; the pair: the blank itself is green, exit 0. DM-57 FIX: the
+    build arguments are planted in both outputs of ``config``, as it prints a
+    mapping -- ``refusal`` reads them in ``--no-interpolate`` since."""
     root = repo(tmp_path / "pair")
     code, verdict, _ = check(root, green_calls(root))
     assert (code, verdict["result"]) == (0, "green")
@@ -198,9 +208,11 @@ def test_probe_DM_57_check_names_every_violation_of_a_product_repo(
         code, verdict, _ = check(root, calls)
         reason = _reason(verdict, "blank/compose")
         assert (code, reason["code"], reason["found"]) == (1, wanted, found), name
-    root = planted("args")
-    document = _with(BLANK, "app", build={"context": "/r/backend", "args": {"A": "1"}})
-    code, verdict, _ = check(root, green_calls(root, document=document))
+    root = planted("args")  # in both outputs, as config prints a mapping
+    build: dict[str, Json] = {"context": "/r/backend", "args": {"A": "1"}}
+    document = _with(BLANK, "app", build=build)
+    raw = _with(RAW, "app", build=build)
+    code, verdict, _ = check(root, green_calls(root, raw=raw, document=document))
     assert _reason(verdict, "blank/compose") == {
         "code": "compose:instance-args",
         "stack": "blank",
@@ -469,3 +481,72 @@ def test_a_relative_directory_is_checked_by_its_absolute_path(
     code, verdict, err = check(Path(given), green_calls(root))
     assert (code, err) == (0, ""), err
     assert _steps(verdict)["blank/primer_yaml"]["status"] == "ok"
+
+
+# --- build.args in any form (FIX) -----------------------------------------------
+
+ARGS_FORMS: list[tuple[str, Json, Json]] = [
+    # (form in the file, its build.args in --no-interpolate, in config) --
+    # measured with compose 2.27.0 and 2.40.3; ``None`` -- no key
+    ("{}", {}, None),
+    ("[]", None, None),
+    ("{A: x}", {"A": "x"}, {"A": "x"}),
+    ("{A: ${VAR:?}}", {"A": "${VAR:?}"}, {"A": "v"}),
+    ("{A: null}", {}, None),
+    ("[A=x]", ["A=x"], {"A": "x"}),
+    ("[SET] set", None, {"SET": "s"}),
+    ("[UNSET] unset", None, None),
+]
+
+
+def _build(args: Json, key: bool) -> dict[str, Json]:
+    build: dict[str, Json] = {"context": "/r/backend"}
+    if key:
+        build["args"] = args
+    return {"services": {"app": {"image": "app:1", "build": build}}}
+
+
+@pytest.mark.parametrize(("form", "raw", "printed"), ARGS_FORMS)
+def test_build_args_in_any_form_are_refused(
+    tmp_path: Path, form: str, raw: Json, printed: Json
+) -> None:
+    """Protocol 3.4: no ``build.args`` in any form. ``refusal`` reads them in
+    ``config --no-interpolate`` by the key -- its value there is ``{}``,
+    ``null``, a mapping or a list -- where ``config`` drops some forms (no key
+    in ``printed``: the velo form ``[UNSET]`` among them). The pair: a build
+    with no ``args`` passes."""
+    cs = ComposeStack(made_blank(), "blank", tmp_path, "check", "", tmp_path)
+    document = in_release(_build(printed, printed is not None), tmp_path)
+    found = refusal(cs, document, in_release(_build(raw, True), tmp_path))
+    assert found == ("instance-args", {"stack": "blank", "services": ["app"]}), form
+    plain = in_release(_build(None, False), tmp_path)
+    assert refusal(cs, plain, plain) is None
+
+
+def test_build_args_of_every_service_are_named(tmp_path: Path) -> None:
+    cs = ComposeStack(made_blank(), "blank", tmp_path, "check", "", tmp_path)
+    raw: dict[str, Json] = {
+        "services": {
+            "web": {"build": {"context": "/r/w", "args": None}},
+            "app": {"build": {"context": "/r/a", "args": {}}},
+            "db": {"image": "postgres:16"},
+        }
+    }
+    assert refusal(cs, {}, raw) == (
+        "instance-args",
+        {"stack": "blank", "services": ["app", "web"]},
+    )
+
+
+def test_check_names_the_velo_form_of_build_args(tmp_path: Path) -> None:
+    """``args: [VITE_API_BASE_URL]`` with no such value: ``config`` drops the
+    key, ``--no-interpolate`` keeps it (``null``) -- ``pridem check`` is red."""
+    root = repo(tmp_path)
+    raw = _with(RAW, "frontend", build={"context": "/r/frontend", "args": None})
+    code, verdict, _ = check(root, green_calls(root, raw=raw))
+    assert code == 1
+    assert _reason(verdict, "blank/compose") == {
+        "code": "compose:instance-args",
+        "stack": "blank",
+        "services": ["frontend"],
+    }

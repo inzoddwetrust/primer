@@ -160,8 +160,10 @@ def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
     script = [
         raw_config_call(cs),
         config_call(cs),
+        raw_config_call(cs),  # build's act reads the build arguments (DM-57 FIX)
         config_call(cs),
         build_call(cs),
+        raw_config_call(cs),  # and its verify
         config_call(cs),
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),

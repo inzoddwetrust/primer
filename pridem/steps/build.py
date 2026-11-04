@@ -209,14 +209,18 @@ class Build(Step):
                     found[entry] = config(ctx, other)
         return found
 
-    def _rendered(self, ctx: StepContext, also: Sequence[str] = ()) -> Rendered:
-        """The built services, the override and the contexts; ``also`` --
-        findings of the caller, refused with those of ``forbidden`` and
-        ``package_places`` in one code."""
+    def _rendered(
+        self, ctx: StepContext, raw: Mapping[str, Json], also: Sequence[str] = ()
+    ) -> Rendered:
+        """The built services, the override and the contexts; ``raw`` -- the
+        product's ``config --no-interpolate``, every caller reads it (the build
+        arguments are read there, ``refusal``); ``also`` -- findings of the
+        caller, refused with those of ``forbidden`` and ``package_places`` in
+        one code."""
         compose = self.compose
         document = config(ctx, compose)
         places_found = package_places(compose.stack, self._documents(ctx, document))
-        refused = refusal(compose, document, [*places_found, *also])
+        refused = refusal(compose, document, raw, [*places_found, *also])
         if refused is not None:
             raise StepFailed(*refused)
         bodies = document.get("services")
@@ -262,7 +266,7 @@ class Build(Step):
         uninterpolated = config(ctx, self.compose, interpolate=False)
         keys = self.compose.stack.env
         found = [*env_files(uninterpolated), *variables(uninterpolated, keys)]
-        rendered = self._rendered(ctx, found)
+        rendered = self._rendered(ctx, uninterpolated, found)
         params: dict[str, Json] = {
             "stack": self.compose.entry,
             "commit": self.compose.commit,
@@ -280,7 +284,7 @@ class Build(Step):
         return CheckResult(False)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        rendered = self._rendered(ctx)
+        rendered = self._rendered(ctx, config(ctx, self.compose, interpolate=False))
         for source, target, places in rendered.contexts.values():
             write_context(source, target, places)
         write_override(self.compose, rendered.text)
@@ -291,7 +295,8 @@ class Build(Step):
         )
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        rendered = self._rendered(ctx)
+        # the same fact as check: the build arguments read where they show
+        rendered = self._rendered(ctx, config(ctx, self.compose, interpolate=False))
         images: dict[str, Json] = {}
         for service in rendered.built:
             found = image_of(ctx, self.compose, service, self._key(service))
