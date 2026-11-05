@@ -464,6 +464,15 @@
           "title": "Kind",
           "type": "string"
         },
+        "languages": {
+          "items": {
+            "pattern": "^[a-z]{2,3}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Languages",
+          "type": "array"
+        },
         "name": {
           "minLength": 1,
           "title": "Name",

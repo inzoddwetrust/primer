@@ -283,6 +283,13 @@ def test_a_moved_tag_resets_the_release_to_the_target(tmp_path: Path) -> None:
 def test_probe_DM_10_config_is_read_from_target_ref_not_worktree(
     tmp_path: Path,
 ) -> None:
+    """``primer.yaml`` is read from git at the target commit, never from the
+    worktree; the pair: a new commit's file is read.
+
+    Changed in DM-46 by the dispatcher's word: the pair's new commit changed
+    ``name``, which ``fetch_root`` now refuses (``name-mismatch``: the
+    repository is ``aivis``); it changes ``report.junit`` instead. What the
+    probe claims is as before: the field is read from the target commit."""
     remote(tmp_path, "aivis", {"primer.yaml": product(tmp_path, dependency=False)})
     root = tmp_path / "box"
     address = f"file://{tmp_path}/aivis.git"
@@ -299,16 +306,17 @@ def test_probe_DM_10_config_is_read_from_target_ref_not_worktree(
     )
     run(root, steps)
     assert resolved.product is not None and resolved.product.name == "aivis"
-    # the pair: a new commit's name is read -- from git, the target commit
-    text = product(tmp_path, dependency=False).replace(
-        "name: aivis", "name: aivis-next"
+    # the pair: a new commit's field is read -- from git, the target commit
+    text = product(tmp_path, dependency=False)
+    assert text.count("junit: true") == 1
+    commit(
+        tmp_path, "aivis", {"primer.yaml": text.replace("junit: true", "junit: false")}
     )
-    commit(tmp_path, "aivis", {"primer.yaml": text})
     resolved, steps = source_steps(
         root, stack="aivis", address=address, ref="main", tag=False
     )
     run(root, steps)
-    assert resolved.product is not None and resolved.product.name == "aivis-next"
+    assert resolved.product is not None and resolved.product.report.junit is False
 
 
 def test_probe_DM_10_release_dir_is_inert(tmp_path: Path) -> None:

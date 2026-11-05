@@ -265,7 +265,12 @@ class _SourceStep(Step):
 
 
 class FetchRoot(_SourceStep):
-    """The product: its release on the passport's ref, its config from that commit."""
+    """The product: its release on the passport's ref, its config from that commit.
+
+    The product's directory ``/opt/<stack>`` is named by its repository, its
+    env and override by the ``name`` of its ``primer.yaml``: the two are one
+    name, or the product is refused (``name-mismatch``) before its worktree is
+    made -- in ``check`` on a box that has the commit, in ``act`` once fetched."""
 
     name = "fetch_root"
     order = 2
@@ -275,6 +280,8 @@ class FetchRoot(_SourceStep):
         "missing-ref": "{ref} is not on {repo}",
         "no-primer-yaml": "{ref} has no primer.yaml",
         "not-a-product": "primer.yaml of {ref} is not a product",
+        "name-mismatch": "the repository {stack} names its product {name} in "
+        "primer.yaml",
         "invalid-config": "{file} of {ref} breaks its contract: {codes}",
         "release-off-target": "{release} is not on the target commit after the reset",
     }
@@ -346,6 +353,10 @@ class FetchRoot(_SourceStep):
             ) from None
         if not isinstance(config, Product) or isinstance(config, Service):
             raise StepFailed("not-a-product", {"ref": self.ref})
+        if config.name != self.stack:
+            raise StepFailed(
+                "name-mismatch", {"stack": self.stack, "name": config.name}
+            )
         self.resolved.product = config
         self.resolved.lock = lock
         self.resolved.releases[self.stack] = self.checkout.release_dir(target)

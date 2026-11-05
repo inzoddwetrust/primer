@@ -14,11 +14,36 @@ import json
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
 from pydantic_core import PydanticCustomError, core_schema
 
 SCHEMA_DIR = Path(__file__).resolve().parents[1] / "contract" / "schema"
+
+LANGUAGE_CODE = r"^[a-z]{2,3}$"
+"""A language as the product and the passport name it (protocol 5.2.2): the
+primary subtag alone, lower case -- ``en``, ``uk``, ``haw``; never a region
+(``en-GB``)."""
+
+
+def _once(codes: list[str]) -> list[str]:
+    twice = sorted({code for code in codes if codes.count(code) > 1})
+    if twice:
+        raise ValueError(f"a language is named once: {', '.join(twice)}")
+    return codes
+
+
+Language = Annotated[str, Field(pattern=LANGUAGE_CODE)]
+Languages = Annotated[list[Language], Field(min_length=1), AfterValidator(_once)]
+"""A list of languages: at least one, each once, in the order given -- the
+order a stack gets them in (``stacks/env.py``)."""
 
 SECRET_MIN_LENGTH = 16
 """Shortest secret, in code points, as written: the passport's values (contract 1

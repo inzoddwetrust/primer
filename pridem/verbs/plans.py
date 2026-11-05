@@ -43,7 +43,9 @@ a box installed from a file.
 
 The directory of the product on the box, ``/opt/<name>``, is named from its
 repository (``<name>.git``): ``primer.yaml`` is read from git, after the
-repository is fetched there.
+repository is fetched there -- and its ``name`` is that name, or ``fetch_root``
+refuses it (``name-mismatch``): the env and the override are under
+``/opt/<name>`` of ``primer.yaml``, and one product has one directory.
 
 The point of no return of a plan is the first ``migrate`` that acts -- a
 service's, when its head changes, before the product's tests (see the KNOWN

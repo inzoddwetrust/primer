@@ -249,6 +249,11 @@
     "cloud": {
       "$ref": "#/$defs/Cloud"
     },
+    "default_language": {
+      "pattern": "^[a-z]{2,3}$",
+      "title": "Default Language",
+      "type": "string"
+    },
     "domains": {
       "additionalProperties": {
         "type": "string"
@@ -263,6 +268,15 @@
       "minLength": 1,
       "title": "Edition",
       "type": "string"
+    },
+    "languages": {
+      "items": {
+        "pattern": "^[a-z]{2,3}$",
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Languages",
+      "type": "array"
     },
     "packages": {
       "additionalProperties": {

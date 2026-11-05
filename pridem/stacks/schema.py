@@ -27,6 +27,13 @@ either name is refused (``S.egress-env``). Whether a host is in the list agreed
 with Primer is the machine's check, not the contract's (``stacks/egress.py``).
 A service has no ``egress``: it reaches the internet itself.
 
+``languages`` of a product (protocol 5.2.2) -- every language it has, the
+codes of ``pridem.contract.Languages``: at least one, each once, lower case,
+no region. An instance's subset and its default are the passport's; that they
+are the product's is ``seams_check``'s. A service declares none: its languages
+are its product's, given through ``env`` (source ``passport``, keys
+``languages`` and ``default_language``).
+
 The form D of protocol 4.5 is a pair: a service declares the kinds of data it
 takes (``accepts: {<kind>: {validate, env}}``), a product the directory of its
 repository it gives a dependency of each kind (``dependencies.<s>.data:
@@ -63,6 +70,7 @@ from pydantic_core import PydanticCustomError
 from pridem.contract import (
     SCHEMA_DIR,
     ContractSchema,
+    Languages,
     SchemaVersion,
     Strict,
     schema_text,
@@ -466,6 +474,7 @@ class Product(_Stack):
     host: ProductHost | None = None
     verbs: dict[Name, Verb] = {}
     egress: list[EgressHost] = []
+    languages: Languages | None = None
 
 
 class Service(_Stack):

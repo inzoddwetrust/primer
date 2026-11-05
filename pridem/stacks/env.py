@@ -17,6 +17,10 @@ Both are written by ``atomic_write`` with 0600 (temp, fsync, rename, fsync of
 the directory). A file found with another mode is refused, never
 ``chmod``-ed.
 
+The source ``passport`` reads ``edition``, ``server.role``, ``domains.*``,
+``languages`` -- the instance's languages, rendered by ``languages_value`` --
+and ``default_language``.
+
 ``resolve`` answers every source but ``derived`` (a command in the stack's
 container: the step runs it) and reports the fields the passport lacks
 (``asked``, ``params``, a domain of ``host.domains``, ``edition``): those are
@@ -27,7 +31,7 @@ whose variable is one -- the provider's step put it in the run's set first.
 
 import re
 import secrets as token
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -146,6 +150,13 @@ def placeholder(value: str) -> bool:
     return not value or bool(_PLACEHOLDER.fullmatch(value)) or "${" in value
 
 
+def languages_value(codes: Sequence[str]) -> str:
+    """The languages of an instance in ``env`` (protocol 5.2.2): the codes
+    joined by commas, no spaces, in the passport's order -- ``en,ru,uk``. One
+    function for every stack; the names of the variables are each stack's."""
+    return ",".join(codes)
+
+
 @dataclass
 class Resolved:
     """What ``resolve`` found: values, secrets among them, what to ask, what
@@ -181,6 +192,16 @@ def _from_passport(
         out.values[key] = passport.edition
     elif var.key == "server.role":
         out.values[key] = passport.server.role
+    elif var.key == "languages":
+        if passport.languages is None:
+            out.missing.append("languages")
+        else:
+            out.values[key] = languages_value(passport.languages)
+    elif var.key == "default_language":
+        if passport.default_language is None:
+            out.missing.append("default_language")
+        else:
+            out.values[key] = passport.default_language
     elif var.key.startswith("domains."):
         domain = var.key.removeprefix("domains.")
         host = passport.domains.get(domain)

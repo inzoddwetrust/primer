@@ -1,8 +1,10 @@
 """The env steps (TZ 7.1, 7.3; contract 3 section 3, rules 13, 18).
 
 ``seams_check`` refuses a plan with a half seam, an edition the product does
-not declare, data a service does not accept or routes of a co-located service
-before the first ``act`` of a stack: the plan builder puts it ahead of the
+not declare, languages of the instance that are not the product's (or are
+missing where they are wanted, or a default out of them), data a service does
+not accept or routes of a co-located service before the first ``act`` of a
+stack: the plan builder puts it ahead of the
 services' ladders, once ``fetch_services`` has read their ``primer.yaml`` (the
 edition decides which services are installed).
 
@@ -59,6 +61,7 @@ from pridem.stacks.env import (
 )
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Derived, Minted, Product, Service
+from pridem.stacks.schema import Passport as FromPassport
 from pridem.stacks.seams import (
     SeamMemory,
     half_seams,
@@ -90,6 +93,8 @@ from pridem.steps.passport import (
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 DERIVE_TIMEOUT_S = 300
 DERIVE_ENV = "derive.env"
+LANGUAGE_KEYS = frozenset({"languages", "default_language"})
+"""The keys of the source ``passport`` that are the instance's languages."""
 
 
 def _passport(fetched: Fetched) -> Passport:
@@ -115,6 +120,9 @@ class SeamsCheck(Step):
         "edition-unknown": "edition {edition} is not in editions",
         "routes-on-co-located": "co-located services declare routes: {services}",
         "data-not-accepted": "data the services do not accept: {data}",
+        "languages-missing": "the passport lacks {fields}",
+        "language-outside-product": "{languages} are not languages of the product",
+        "default-language-outside": "the default {language} is not one of {languages}",
     }
 
     def __init__(
@@ -137,6 +145,7 @@ class SeamsCheck(Step):
             and edition not in self.product.editions
         ):
             raise StepFailed("edition-unknown", {"edition": edition})
+        self._languages(_passport(self.fetched), edition)
         half = half_seams(self.product, self.services, edition)
         if half:
             raise StepFailed("half-seam", {"seams": list[Json](half)})
@@ -150,6 +159,46 @@ class SeamsCheck(Step):
         if refused:
             raise StepFailed("data-not-accepted", {"data": list[Json](refused)})
         return CheckResult(False)
+
+    def _languages(self, passport: Passport, edition: str | None) -> None:
+        """The instance's languages (protocol 5.2.2): wanted when the product
+        declares ``languages`` or a stack of the box takes them from the
+        passport, or the passport names some; a subset of the product's, the
+        default one of them."""
+        stacks: list[Product | Service] = [
+            self.product,
+            *(self.services[n] for n in installed(self.product, edition)),
+        ]
+        taken = any(
+            isinstance(var, FromPassport) and var.key in LANGUAGE_KEYS
+            for stack in stacks
+            for var in stack.env.values()
+        )
+        given = passport.languages is not None or passport.default_language is not None
+        if not (self.product.languages is not None or taken or given):
+            return
+        languages, default = passport.languages, passport.default_language
+        if languages is None or default is None:
+            missing = [
+                name
+                for name, value in (
+                    ("languages", languages),
+                    ("default_language", default),
+                )
+                if value is None
+            ]
+            raise StepFailed("languages-missing", {"fields": list[Json](missing)})
+        own = self.product.languages or []
+        outside = [code for code in languages if code not in own]
+        if outside:
+            raise StepFailed(
+                "language-outside-product", {"languages": list[Json](outside)}
+            )
+        if default not in languages:
+            raise StepFailed(
+                "default-language-outside",
+                {"language": default, "languages": list[Json](languages)},
+            )
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         raise RuntimeError("seams_check never acts")

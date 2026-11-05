@@ -12,6 +12,10 @@ rule 5 (``policies.tls`` exactly when ``ssl: provided``), rule 10
 
 Rules that need other files are not here: rule 2 and the ``editions`` part of
 rule 11 are composition checks, rule 3 is ``install``, rules 6 and 7 are steps.
+So are the languages (protocol 5.2.2): ``languages`` -- the instance's subset
+of the product's, in the order its stacks get them -- and ``default_language``
+are codes of the field layer here (``pridem.contract.Languages``); that the
+list is the product's and the default one of it is ``seams_check``'s.
 
 Values of ``asked`` and ``tls`` are secrets: they are ``SecretStr`` in the
 model, no message quotes them, and ``ContractError`` is raised outside
@@ -42,6 +46,8 @@ from pridem.contract import (
     SCHEMA_DIR,
     SECRET_MIN_LENGTH,
     ContractSchema,
+    Language,
+    Languages,
     SchemaVersion,
     Strict,
     schema_text,
@@ -263,6 +269,8 @@ class Passport(Strict):
     version: Annotated[int, Field(ge=1)]
     server: Server
     edition: Name | None = None
+    languages: Languages | None = None
+    default_language: Language | None = None
     product: ProductRef
     domains: dict[Name, HostName]
     access: Access
