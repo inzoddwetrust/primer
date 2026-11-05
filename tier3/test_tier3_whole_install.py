@@ -44,7 +44,9 @@ another edition is another image. Both deploy through the same mirror, by
 is printed (the measure of DM-45) and its line of the refused sentinel is in
 the fact of ``egress``.
 
-DM-46 runs after them, on the same box: a copy of the blank as the service
+DM-46 runs after them, on the same box -- its stage B last: two instances of
+the blank with their own languages, a third with a language the product has
+not red before any act. Stage A first: a copy of the blank as the service
 ``notes`` and the blank as its product -- in ``full`` the service goes up by
 its own ladder before the product, the product's ``profile/`` copied to it and
 validated by its new image; a profile it refuses is red with both left
@@ -80,7 +82,7 @@ BLANK = "https://github.com/inzoddwetrust/primer-blank.git"
 MIRROR = Path("/srv/tier3/blank.git")
 """The blank's ``file://`` mirror the passport names: the machine fetches from
 it with no key of CI, and names the product's directory by it -- ``blank``."""
-BLANK_COMMIT = "f1649033f20854b0ee6a0370b98dd9caf1caf102"
+BLANK_COMMIT = "2e7580fc136238d7b9071de2c9c10fc3c43816c8"
 # the blank's published packages (DM-58): public, cloned over https by the
 # test, given to the machine as file:// mirrors; each tag's commit is pinned
 PACKAGES_OWNER = "VELO2026-app"
@@ -205,12 +207,18 @@ def _passport(
     version: int = 1,
     edition: str = "core",
     packages: dict[str, dict[str, str]] | None = None,
+    languages: tuple[str, ...] = ("en", "ru"),
+    default_language: str = "en",
 ) -> Path:
+    """A passport of the box; the blank declares ``languages: [en, ru]`` since
+    ``BLANK_COMMIT`` 2e7580f, and an instance names its own (DM-46)."""
     data = {
         "schema": 1,
         "version": version,
         "server": {"name": "tier3-env", "role": "test", "os": "ubuntu-24.04"},
         "edition": edition,
+        "languages": list(languages),
+        "default_language": default_language,
         "product": {"repo": f"file://{MIRROR}", "ref": REF},
         "domains": {"frontend": FRONTEND, "api": API},
         "access": {"mode": "deploy-keys"},
@@ -453,10 +461,17 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     assert oct(ENV.parent.stat().st_mode & 0o777) == oct(0o700), printed
     assert oct(MINTED.stat().st_mode & 0o777) == oct(0o600), printed
     env = _env()
-    assert sorted(env) == ["API_BASE_URL", "EDITION", "POSTGRES_PASSWORD"], printed
+    assert sorted(env) == [
+        "API_BASE_URL",
+        "DEFAULT_LANGUAGE",
+        "EDITION",
+        "LANGUAGES",
+        "POSTGRES_PASSWORD",
+    ], printed
     password = env["POSTGRES_PASSWORD"]
     assert len(password) >= 32 and set(password) <= URL_SAFE, printed
     assert (env["EDITION"], env["API_BASE_URL"]) == ("core", API), printed
+    assert (env["LANGUAGES"], env["DEFAULT_LANGUAGE"]) == ("en,ru", "en"), printed
     assert password not in printed  # neither the console nor the verdict
     # build, migrate, up (U1-U3)
     up, build = facts[("blank", "up")], facts[("blank", "build")]
@@ -503,6 +518,8 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     )
     assert config["app"]["EDITION"] == "core"
     assert config["frontend"]["API_BASE_URL"] == API
+    assert config["frontend"]["LANGUAGES"] == "en,ru"
+    assert config["frontend"]["DEFAULT_LANGUAGE"] == "en"
     assert config["postgres"]["POSTGRES_PASSWORD"] == password
 
     # labels (U5-U8)
@@ -1305,7 +1322,8 @@ def test_tier3_compose_takes_a_single_quoted_value_as_it_is(tmp_path: Path) -> N
     literal = 'a$b ${HOME} #d "e" \\f'  # no "$$": config may print "$" as "$$"
     env_file = tmp_path / "measure.env"
     env_file.write_text(
-        f"POSTGRES_PASSWORD='{literal}'\nEDITION='core'\nAPI_BASE_URL='{API}'\n",
+        f"POSTGRES_PASSWORD='{literal}'\nEDITION='core'\nAPI_BASE_URL='{API}'\n"
+        "LANGUAGES='en,ru'\nDEFAULT_LANGUAGE='en'\n",
         encoding="utf-8",
     )
     config = _config(checkout / "docker-compose.yml", env_file)
@@ -1344,6 +1362,8 @@ env:
   POSTGRES_PASSWORD: { source: minted }
   EDITION:           { source: passport, key: edition }
   API_BASE_URL:      { source: passport, key: domains.api }
+  LANGUAGES:         { source: passport, key: languages }
+  DEFAULT_LANGUAGE:  { source: passport, key: default_language }
 
 accepts:
   profile:
@@ -1496,6 +1516,80 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     assert facts[("seams", "seams_check")]["left"] == ["notes"], facts
     diff, failed, doctor = _doctor(core)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+
+def _containers_of(project: str) -> list[str]:
+    """The IDs of every container of ``project``, running or not, sorted."""
+    return sorted(
+        _stdout(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "-q",
+                "--no-trunc",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+            ]
+        )
+    )
+
+
+def test_tier3_two_instances_with_their_own_languages(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-46 stage B on the box the earlier tests left: the blank at
+    ``BLANK_COMMIT`` declares ``languages: [en, ru]``; one instance turns on
+    ``[en]`` with ``en`` by default, the next ``[en, ru]`` with ``ru`` -- the
+    frontend serves each its own ``/config.json`` from ``LANGUAGES`` and
+    ``DEFAULT_LANGUAGE``; a third passport naming ``uk`` is red in
+    ``seams_check`` before any ``act`` of a stack: the IDs of the blank's
+    containers are the same before and after, and the page still serves the
+    second instance's languages. ``doctor`` is empty on each green box."""
+    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    _run(
+        ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
+    )
+    seen: dict[str, object] = {}
+    for version, languages, default in ((30, ("en",), "en"), (31, ("en", "ru"), "ru")):
+        passport = _passport(
+            tmp_path, version=version, languages=languages, default_language=default
+        )
+        verdict, printed = _install(passport, "update")
+        assert verdict.result == "green", printed
+        env = _env()
+        assert (env["LANGUAGES"], env["DEFAULT_LANGUAGE"]) == (
+            ",".join(languages),
+            default,
+        ), printed
+        served = json.loads(_body("/config.json", FRONTEND))
+        assert served == {
+            "apiBaseUrl": f"https://{API}",
+            "languages": ",".join(languages),
+            "defaultLanguage": default,
+        }, served
+        seen[",".join(languages)] = served
+        diff, failed, doctor = _doctor(passport)
+        assert (diff, failed) == ([], []), doctor.model_dump_json()
+    assert len(seen) == 2  # two instances, two configurations of one image
+
+    # uk is not a language of the product: red before any act of a stack
+    before = _containers_of("blank")
+    assert before, "the blank runs"
+    third = _passport(
+        tmp_path, version=32, languages=("en", "uk"), default_language="en"
+    )
+    red, printed = _install(third, "update")
+    assert red.result != "green", printed
+    [failed] = [s for s in red.steps if s.status == "failed"]
+    assert (failed.stack, failed.name) == ("seams", "seams_check"), red.steps
+    assert failed.reason is not None
+    assert failed.reason.code == "seams_check:language-outside-product", failed
+    assert failed.reason.model_dump()["languages"] == ["uk"], failed.reason
+    acted = [s.name for s in red.steps if s.stack == "blank" and s.status == "ok"]
+    assert acted == [], acted
+    assert _containers_of("blank") == before
+    assert json.loads(_body("/config.json", FRONTEND))["languages"] == "en,ru"
 
 
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
