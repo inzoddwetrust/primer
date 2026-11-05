@@ -23,7 +23,7 @@ from test_probe_DM_57_check import _reason, _steps, _yaml, check, green_calls, r
 
 from pridem.events import Code, Json
 from pridem.report.codes import ExitCode
-from pridem.runner import FakeCall, FakeRunner
+from pridem.runner import FakeCall, FakeRunner, Stream
 from pridem.stacks.egress import LISTING, listed, unlisted
 from pridem.stacks.schema import (
     PRIMER_YAML,
@@ -50,6 +50,7 @@ from pridem.steps.egress import (
     OUTSIDE,
     SENTINEL,
     SQUID_IMAGE,
+    STATE_FORMAT,
     Egress,
     compose_file,
     compose_text,
@@ -376,6 +377,11 @@ def test_the_proxy_compose_puts_it_on_its_network_and_a_way_out(tmp_path: Path) 
         "default": None,
     }
     assert proxy["volumes"] == [f"{config_file(tmp_path)}:{CONTAINER_CONFIG}:ro"]
+    # DM-45 FIX: squid as the image's user from the start -- the pipe of the
+    # container's stdout is that user's, so squid opens its access log on it
+    assert proxy["user"] == "proxy"
+    assert proxy["entrypoint"] == ["/usr/sbin/squid"]
+    assert proxy["command"] == ["-N", "-d", "1", "-f", CONTAINER_CONFIG]
     assert "ports" not in proxy  # nothing of the host
     assert document["networks"] == {
         EGRESS_NETWORK: {"external": True},
@@ -472,6 +478,42 @@ LOGGED = f"{LOG_TAG} host={SENTINEL} port=443 status=403 result=TCP_DENIED"
 
 def logs(*lines: str) -> FakeCall:
     return call("docker", "logs", PROXY, lines=lines)
+
+
+CRASHED: dict[str, Json] = {
+    "status": "restarting",
+    "exit_code": 1,
+    "restarts": 7,
+    "error": "",
+}
+"""The state docker reports of a squid that stops at its start (DM-45 FIX)."""
+SQUID_SAYS = "FATAL: Cannot open '/dev/stdout' for writing."
+
+
+def diagnosis(container: str = PROXY) -> list[FakeCall]:
+    """What a refusal of the proxy reads (DM-45 FIX): its state, then the
+    end of its log -- squid's own message on stderr."""
+    return [
+        call(
+            "docker",
+            "inspect",
+            "-f",
+            STATE_FORMAT,
+            container,
+            lines=(json.dumps(CRASHED),),
+        ),
+        FakeCall(
+            ("docker", "logs", "--tail", "40", container),
+            lines=((Stream.STDERR, SQUID_SAYS),),
+        ),
+    ]
+
+
+DIAGNOSED: dict[str, Json] = {
+    "container": PROXY,
+    "state": CRASHED,
+    "logs": [f"err: {SQUID_SAYS}"],
+}
 
 
 def verify_calls(hosts: list[str]) -> list[FakeCall]:
@@ -666,13 +708,17 @@ def test_verify_reads_the_proxy_and_its_behaviour(
     elif change == "address":
         calls = [ps(PROXY), *image(), seen(hosts), address("")]
     elif change == "none-running":
-        calls = [ps()]
+        calls = [ps(), ps(PROXY, every=True)]
+    if change in ("silent", "never-answers", "none-running"):
+        calls += diagnosis()  # DM-45 FIX: the refusal carries docker's word
     with FakeRunner(up(tmp_path), *calls) as runner:
         outcome, _ = run([step(tmp_path, hosts, proxy, ready_s=3)], runner)
     reason = outcome.steps[0].reason
     assert reason is not None and reason.code == code, outcome.steps
     if change == "refuses":
         assert reason.params == {"hosts": ["api.zoom.us"]}
+    if change in ("silent", "never-answers", "none-running"):
+        assert outcome.steps[0].verify == DIAGNOSED, outcome.steps[0].verify
 
 
 def test_a_host_with_no_answer_of_its_own_is_still_allowed(tmp_path: Path) -> None:
@@ -831,7 +877,53 @@ def test_verify_waits_for_the_log_line_and_is_red_without_it(tmp_path: Path) -> 
         outcome, _ = run([step(tmp_path, hosts, Proxy(hosts))], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert outcome.steps[0].verify["log"] == LOGGED
-    never = [*read, logs(open_)]
+    never = [*read, logs(open_), *diagnosis()]
     with FakeRunner(ps(PROXY), *image(), *never) as runner:
         outcome, _ = run([step(tmp_path, hosts, Proxy(hosts), ready_s=0)], runner)
     assert outcome.steps[0].reason == Code("egress:log-missing", {"host": SENTINEL})
+    assert outcome.steps[0].verify == DIAGNOSED  # DM-45 FIX
+
+
+# --- DM-45 FIX: a proxy that does not run says why ------------------------------
+
+
+def test_a_proxy_whose_config_cannot_be_read_is_red_with_dockers_word(
+    tmp_path: Path,
+) -> None:
+    """``docker exec`` of a restarting container fails: the step is red
+    ``not-running`` -- not an error of the runner -- with the container's
+    state, the end of its log and the exit code of ``exec`` in the fact; the
+    lines reach the journal too."""
+    hosts = list(ZOOM)
+    exec_ = call("docker", "exec", PROXY, "cat", CONTAINER_CONFIG, code=1)
+    calls = [ps(PROXY), *image(), exec_, *diagnosis()]
+    with FakeRunner(up(tmp_path), *calls) as runner:
+        outcome, sink = run([step(tmp_path, hosts, Proxy(hosts))], runner)
+    record = outcome.steps[0]
+    assert record.reason == Code("egress:not-running", {"count": 0})
+    assert record.verify == {**DIAGNOSED, "exec_exit_code": 1}
+    assert any(SQUID_SAYS in line.line for line in sink.lines())
+
+
+def test_a_diagnosis_that_fails_names_its_exit_code(tmp_path: Path) -> None:
+    """A container gone between the refusal and its diagnosis: the fact names
+    the failed ``inspect`` and ``logs`` by their exit codes; the refusal is the
+    proxy's, as before."""
+    hosts = list(ZOOM)
+    proxy = Proxy(hosts)
+    proxy.silent = {SENTINEL}
+    gone = [
+        call("docker", "inspect", "-f", STATE_FORMAT, PROXY, code=1),
+        call("docker", "logs", "--tail", "40", PROXY, code=1),
+    ]
+    calls = [ps(PROXY), *image(), seen(hosts), address(), *gone]
+    with FakeRunner(up(tmp_path), *calls) as runner:
+        outcome, _ = run([step(tmp_path, hosts, proxy, ready_s=1)], runner)
+    record = outcome.steps[0]
+    assert record.reason is not None and record.reason.code == "egress:proxy-silent"
+    assert record.verify == {
+        "container": PROXY,
+        "state": {"inspect": 1},
+        "logs": [],
+        "logs_exit_code": 1,
+    }

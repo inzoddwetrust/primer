@@ -12,6 +12,15 @@ product's stacks joins it and has the address as ``HTTPS_PROXY`` and
 ``https_proxy`` -- and on its project's own ordinary network ``default``, its
 way out. Every object carries ``pridem.stack=egress``.
 
+The proxy runs as the image's user ``proxy`` from its first instruction, by
+``/usr/sbin/squid`` itself in the foreground (``entrypoint``, ``command``), its
+own messages on stderr (``-d 1``). squid opens its access log after it drops to
+``proxy``, and ``/dev/stdout`` of a container is the pipe runc gives the
+container's user: started as root, squid cannot open it and stops (``FATAL:
+Cannot open '/dev/stdout' for writing``; measured with squid 6.6 of Ubuntu
+24.04, the image's version, DM-45 FIX); started as ``proxy``, the pipe is its
+own.
+
 The config (``/opt/pridem/egress/squid.conf``, rendered by ``config_text``) lets
 through ``CONNECT`` to port 443 of a host of ``egress``, by its name exactly
 (``dstdomain -n``, no leading dot: ``zoom.us`` is not ``api.zoom.us``), and
@@ -42,6 +51,14 @@ the files. ``verify`` reads the fact back:
   answer: the list is what is read, not the host's health); and the access
   log, read from ``docker logs`` up to ``ready_s``: a line of ``SENTINEL``, port
   443, 403.
+
+A proxy that does not answer, that writes no line of ``SENTINEL``, that the
+config cannot be read from (``docker exec``) or that is not running is red with
+what docker says of it in the fact (``diagnosis``): the container's ``Status``,
+``ExitCode``, ``RestartCount`` and ``Error``, and the last ``LOG_TAIL`` lines of
+``docker logs`` -- squid's own messages among them. Those lines go to the run's
+journal too. A command of the diagnosis that fails is named in the fact by its
+exit code; it never hides the refusal it explains.
 """
 
 import json
@@ -51,7 +68,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import ClassVar
 
-from pridem.events import Json
+from pridem.events import Fact, Json
+from pridem.runner import CommandFailed, Stream
 from pridem.stacks.schema import Product
 from pridem.steps.base import (
     CheckResult,
@@ -82,6 +100,17 @@ digest; the tag is for people. Tier 3 checks on every run that this tag names
 this digest (``tier3/test_tier3_whole_install.py``)."""
 
 CONTAINER_CONFIG = "/etc/squid/squid.conf"
+SQUID_USER = "proxy"
+"""The user of squid in the image: the container runs as it (above)."""
+SQUID_COMMAND = ["-N", "-d", "1", "-f", CONTAINER_CONFIG]
+"""``/usr/sbin/squid`` in the foreground, its messages on stderr."""
+LOG_TAIL = 40
+"""Lines of ``docker logs`` a refusal of the proxy carries in its fact."""
+LINE_MAX = 400
+STATE_FORMAT = (
+    '{"status":{{json .State.Status}},"exit_code":{{.State.ExitCode}},'
+    '"restarts":{{.RestartCount}},"error":{{json .State.Error}}}'
+)
 LOG_TAG = "pridem-egress"
 LOG_FORMAT = f"{LOG_TAG} host=%>rd port=%>rP status=%>Hs result=%Ss"
 """squid 6 ``logformat`` codes: the request's domain and port, the status sent
@@ -163,6 +192,9 @@ def compose_text(root: Path) -> str:
         "services": {
             "proxy": {
                 "image": SQUID_IMAGE,
+                "user": SQUID_USER,
+                "entrypoint": ["/usr/sbin/squid"],
+                "command": list[Json](SQUID_COMMAND),
                 "restart": "unless-stopped",
                 "labels": labels,
                 "networks": {
@@ -329,20 +361,28 @@ class Egress(Step):
             raise StepFailed("drift", {"files": list[Json](drift)})
         running = self._containers(ctx, running=True)
         if len(running) != 1:
-            raise StepFailed("not-running", {"count": len(running)})
+            every = self._containers(ctx, running=False)
+            fact = self.diagnosis(ctx, every[0]) if every else {"proxy": "none"}
+            raise StepFailed("not-running", {"count": len(running)}, fact)
         container = running[0]
         image, expected = self._image(ctx, container)
         if not image or image != expected:
             raise StepFailed(
                 "image-wrong", {"running": image or "none", "expected": SQUID_IMAGE}
             )
-        _, seen = out(
-            ctx, ["docker", "exec", container, "cat", CONTAINER_CONFIG], passed_on=False
-        )
+        try:
+            _, seen = out(
+                ctx,
+                ["docker", "exec", container, "cat", CONTAINER_CONFIG],
+                passed_on=False,
+            )
+        except CommandFailed as error:  # a container that restarts runs nothing
+            fact = {**self.diagnosis(ctx, container), "exec_exit_code": error.code}
+            raise StepFailed("not-running", {"count": 0}, fact) from None
         if "\n".join(seen) + "\n" != config_text(self.hosts):
             raise StepFailed("config-not-seen")
         address = self._address(ctx, container)
-        refused = self._first_answer(ctx, address)
+        refused = self._first_answer(ctx, address, container)
         if refused != REFUSED:
             raise StepFailed("proxy-open", {"host": SENTINEL, "status": refused})
         allowed: dict[str, Json] = {}
@@ -350,7 +390,11 @@ class Egress(Step):
         for host in self.hosts:
             status = self.answer(address, self.port, host)
             if status is None:
-                raise StepFailed("proxy-silent", {"address": address, "host": host})
+                raise StepFailed(
+                    "proxy-silent",
+                    {"address": address, "host": host},
+                    self.diagnosis(ctx, container),
+                )
             if status == REFUSED:
                 denied.append(host)
             allowed[host] = status
@@ -377,7 +421,9 @@ class Egress(Step):
             if found:
                 return found[-1]
             if self.clock() >= deadline:
-                raise StepFailed("log-missing", {"host": SENTINEL})
+                raise StepFailed(
+                    "log-missing", {"host": SENTINEL}, self.diagnosis(ctx, container)
+                )
             ctx.interrupt.check()
             self.sleep(self.poll_s)
             ctx.interrupt.check()
@@ -404,13 +450,47 @@ class Egress(Step):
             raise StepFailed("no-address", {"network": OUTSIDE})
         return address
 
-    def _first_answer(self, ctx: StepContext, address: str) -> int:
+    def diagnosis(self, ctx: StepContext, container: str) -> Fact:
+        """What docker says of the proxy: its state and the end of its log,
+        both streams; each line also goes to the journal. A command here that
+        fails is named by its exit code in the fact."""
+        fact: dict[str, Json] = {"container": container}
+        lines: list[tuple[Stream, str]] = []
+
+        def keep(stream: Stream, line: str, cut: bool) -> None:
+            lines.append((stream, line))
+            ctx.on_line(stream, line, cut)
+
+        state = ["docker", "inspect", "-f", STATE_FORMAT, container]
+        result = ctx.runner.run(state, expect=(0, 1), timeout=60, on_line=keep)
+        text = "\n".join(line for stream, line in lines if stream is Stream.STDOUT)
+        try:
+            found = json.loads(text) if result.code == 0 else None
+        except json.JSONDecodeError:
+            found = None
+        fact["state"] = found if isinstance(found, dict) else {"inspect": result.code}
+        lines.clear()
+        tail = ["docker", "logs", "--tail", str(LOG_TAIL), container]
+        result = ctx.runner.run(tail, expect=(0, 1), timeout=60, on_line=keep)
+        fact["logs"] = [
+            f"{'err' if stream is Stream.STDERR else 'out'}: {line[:LINE_MAX]}"
+            for stream, line in lines
+        ]
+        if result.code != 0:
+            fact["logs_exit_code"] = result.code
+        return fact
+
+    def _first_answer(self, ctx: StepContext, address: str, container: str) -> int:
         """The answer for ``SENTINEL``, waiting up to ``ready_s`` for a
         recreated proxy to answer at all."""
         deadline = self.clock() + self.ready_s
         while (status := self.answer(address, self.port, SENTINEL)) is None:
             if self.clock() >= deadline:
-                raise StepFailed("proxy-silent", {"address": address, "host": SENTINEL})
+                raise StepFailed(
+                    "proxy-silent",
+                    {"address": address, "host": SENTINEL},
+                    self.diagnosis(ctx, container),
+                )
             ctx.interrupt.check()  # a signal ends the wait (DM-45)
             self.sleep(self.poll_s)
             ctx.interrupt.check()

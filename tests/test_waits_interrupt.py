@@ -18,7 +18,7 @@ from pridem.runner import FakeCall, FakeRunner
 from pridem.stacks.schema import PRIMER_YAML, Product
 from pridem.steps import host, keys, passport
 from pridem.steps.base import CheckResult, StepContext, StepFailed
-from pridem.steps.egress import Egress
+from pridem.steps.egress import STATE_FORMAT, Egress
 from pridem.steps.host import WaitHostQuiet
 from pridem.steps.keys import DeployKey
 from pridem.steps.passport import Fetched, FetchPassport, _NotRecipient
@@ -133,7 +133,7 @@ def _ready(tmp: Path, sleep: Callable[[float], None], mp: pytest.MonkeyPatch) ->
         clock=lambda: float(next(ticks)),
         sleep=sleep,
     )
-    return lambda ctx: step._first_answer(ctx, "172.30.0.2")
+    return lambda ctx: step._first_answer(ctx, "172.30.0.2", "c0ffee")
 
 
 WAITS = {
@@ -144,6 +144,11 @@ WAITS = {
     "proxy-ready": _ready,
 }
 LOGS = FakeCall(("docker", "logs", "c0ffee"))
+DIAGNOSIS = (
+    FakeCall(("docker", "inspect", "-f", STATE_FORMAT, "c0ffee"), code=1),
+    FakeCall(("docker", "logs", "--tail", "40", "c0ffee"), code=1),
+)
+"""What a proxy wait that reached its deadline reads for its fact (DM-45 FIX)."""
 
 
 @pytest.mark.parametrize("name", sorted(WAITS))
@@ -162,6 +167,10 @@ def test_a_signal_ends_every_wait_of_a_step(
     quiet = Interrupt()
     quiet.watch()
     wait = WAITS[name](tmp_path / "pair", lambda _: None, monkeypatch)
-    runner = FakeRunner(*([LOGS] * 4 if name == "proxy-log" else []))
+    proxy = name in ("proxy-log", "proxy-ready")
+    runner = FakeRunner(
+        *([LOGS] * 3 if name == "proxy-log" else []), *(DIAGNOSIS if proxy else ())
+    )
     with pytest.raises(StepFailed):
         wait(_ctx(runner, quiet))
+    runner.assert_consumed()  # DM-45 FIX: the diagnosis read at the deadline
