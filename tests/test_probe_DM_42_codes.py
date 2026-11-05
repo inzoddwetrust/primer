@@ -84,18 +84,18 @@ CATALOG = with_steps(ENGLISH, ((name, ScriptedStep.codes) for name in NAMES))
 NOT_WRITTEN_HERE = {"journal/quarantined"}  # written by the CLI (DM-16)
 
 
-class _InterruptOnce(ListSink):
-    """A sink interrupted while it writes the first finished step."""
+class _FullOnce(ListSink):
+    """A sink whose disk is full while it writes the first finished step."""
 
     def __init__(self) -> None:
         super().__init__()
         self.fired = False
 
     def emit(self, event: Event) -> None:
-        super().emit(event)
         if isinstance(event, StepFinished) and not self.fired:
             self.fired = True
-            raise KeyboardInterrupt
+            raise OSError(28, "No space left on device")
+        super().emit(event)
 
 
 def _root(*steps: ScriptedStep) -> list[StackSteps]:
@@ -152,31 +152,35 @@ def _plan_verdicts() -> list[Verdict]:
     left = local_code("left", {"thing": "certificate"})
     out.append(plan(_root(ScriptedStep("ssl", 1, journal, incomplete=left)))[0].run())
 
+    # DM-45: an interrupt is a flag; the run returns its outcome
     cut, _ = plan(
         _root(
-            ScriptedStep("a", 1, journal, act_raises=KeyboardInterrupt()),
+            ScriptedStep("a", 1, journal, signal_in="act"),
             ScriptedStep("c", 2, journal),
         )
     )
-    with pytest.raises(KeyboardInterrupt):
-        cut.run()
-    assert cut.outcome is not None
-    out.append(cut.outcome)
+    out.append(cut.run())
 
+    between, _ = plan(
+        _root(
+            ScriptedStep("a", 1, journal, signal_in="verify", signal_stops=False),
+            ScriptedStep("c", 2, journal),
+        )
+    )
+    out.append(between.run())
+
+    # DM-45: an interrupt no longer cuts a write; a full disk still does
     ticks = count()
-    between = Plan(
-        _root(ScriptedStep("a", 1, journal), ScriptedStep("c", 2, journal)),
+    full = Plan(
+        _root(ScriptedStep("a", 1, journal)),
         mode="deploy",
         role="test",
         runner=FakeRunner(),
-        sink=_InterruptOnce(),
+        sink=_FullOnce(),
         clock=lambda: float(next(ticks)),
         now=lambda: NOW,
     )
-    with pytest.raises(KeyboardInterrupt):
-        between.run()
-    assert between.outcome is not None
-    out.append(between.outcome)
+    out.append(full.run())
 
     verdicts = [build(outcome, catalog=CATALOG) for outcome in out]
     doctor, _ = plan(_root(ScriptedStep("env", 1, journal)), "doctor")
@@ -186,15 +190,17 @@ def _plan_verdicts() -> list[Verdict]:
 
 def _recovered_verdicts(root: Path) -> list[Verdict]:
     box = Box(root)
-    with box.lock("dying"):
+    with box.lock("dying"):  # DM-45: one hold of the lock, one journal
         box.write_state(state())
         box.open_journal(header(run_id(1)), NO_SECRETS).close()
+    with box.lock("dying 2"):
         sink = box.open_journal(header(run_id(2)), NO_SECRETS)
         at = datetime(2026, 10, 15, 10, 43, tzinfo=UTC)
         skipped = StepRecord("aivis", "tests", 1, "skipped", role_skip("prod"))
         sink.emit(StepFinished("main", skipped))
         sink.emit(StepStarted("main", "aivis", "up", 2, at))
         sink.close()
+    with box.lock("dying 3"):
         damaged = box.open_journal(header(run_id(3)), NO_SECRETS)
         damaged.emit(StepStarted("main", "aivis", "up", 2, at))
         damaged.close()

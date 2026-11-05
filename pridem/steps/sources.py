@@ -33,7 +33,7 @@ from packaging.version import Version
 
 from pridem.events import Fact, Json, strings
 from pridem.stacks.loader import ContractError
-from pridem.stacks.lock import Lock, check_lock, parse_primer_lock
+from pridem.stacks.lock import Lock, LockEntry, check_lock, parse_primer_lock
 from pridem.stacks.package import PACKAGE_FILE, parse_primer_package
 from pridem.stacks.passport import Package
 from pridem.stacks.schema import Product, Service, parse_primer_yaml
@@ -69,6 +69,9 @@ class Resolved:
     product: Product | None = None
     lock: Lock | None = None
     releases: dict[str, Path] = field(default_factory=dict)
+    tries: dict[str, str] = field(default_factory=dict)
+    """``update --try <service>=<version>``: the version a test box runs in
+    place of the lock's; ``check_lock`` puts it in ``lock``."""
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,10 @@ def package_dir(root: Path, stack: str, package: Package) -> Path:
     return root / "opt" / stack / "releases" / package_release(package)
 
 
+ADDRESS_KEY = "pridem.address"
+"""The key of a bare repository's git config that holds its address."""
+
+
 class Checkout:
     """A bare repository and its release worktrees under ``/opt/<stack>``."""
 
@@ -159,6 +166,9 @@ class Checkout:
             self.git(ctx, "remote", "add", "origin", self.repo.url())
         else:
             self.git(ctx, "remote", "set-url", "origin", self.repo.url())
+        # the address as given: the remote holds the ssh alias, not the address
+        # (``pridem/verbs/plans.py`` reads where a box's passport comes from)
+        self.git(ctx, "config", ADDRESS_KEY, self.repo.address)
         self.git(
             ctx,
             "fetch",
@@ -257,8 +267,11 @@ class FetchRoot(_SourceStep):
         stack: str,
         address: str,
         ref: str,
-        tag: bool,
+        tag: bool | None,
     ) -> None:
+        """``tag``: the ref is a tag, a branch, or -- ``None``, ``deploy <ref>``
+        on a test box -- a tag if the remote has one of that name, else a
+        branch."""
         super().__init__(resolved, root)
         self.stack = stack
         self.checkout = Checkout(root, stack, repo(address))
@@ -266,8 +279,16 @@ class FetchRoot(_SourceStep):
         self.tag = tag
         self.target: Target | None = None
 
+    def _target(self, ctx: StepContext) -> Target | None:
+        kinds = (True, False) if self.tag is None else (self.tag,)
+        for tag in kinds:
+            found = remote_target(ctx, self.root, self.checkout.repo, self.ref, tag)
+            if found is not None:
+                return found
+        return None
+
     def check(self, ctx: StepContext) -> CheckResult:
-        target = remote_target(ctx, self.root, self.checkout.repo, self.ref, self.tag)
+        target = self._target(ctx)
         if target is None:
             raise StepFailed(
                 "missing-ref", {"ref": self.ref, "repo": self.checkout.repo.address}
@@ -335,10 +356,37 @@ class CheckLock(_SourceStep):
         "lock-range": "primer.lock breaks primer.yaml: {codes}",
         "lock-commit": "{service}: tag {tag} is {found}, the lock says {commit}",
         "missing-tag": "{service}: tag {tag} is not on {repo}",
+        "try-off-test": "--try runs on a test box only; this one is {role}",
+        "try-unknown": "--try {service}: the product has no such dependency",
     }
 
     def check(self, ctx: StepContext) -> CheckResult:
         return CheckResult(False)  # it reads; it never acts
+
+    def _tried(self, ctx: StepContext, product: Product, lock: Lock) -> Lock:
+        """``lock`` with the versions of ``--try``: a tried entry's commit is
+        the tag's on the remote, the lock's commit no longer binds it."""
+        tries = self.resolved.tries
+        if not tries:
+            return lock
+        if ctx.role != "test":
+            raise StepFailed("try-off-test", {"role": ctx.role})
+        entries = dict(lock.dependencies)
+        for name, version in sorted(tries.items()):
+            dependency = product.dependencies.get(name)
+            if dependency is None:
+                raise StepFailed("try-unknown", {"service": name})
+            tag = f"v{version}"
+            target = remote_target(ctx, self.root, repo(dependency.repo), tag, True)
+            if target is None:
+                raise StepFailed(
+                    "missing-tag",
+                    {"service": name, "tag": tag, "repo": dependency.repo},
+                )
+            entries[name] = LockEntry(version=version, tag=tag, commit=target.commit)
+        tried = lock.model_copy(update={"dependencies": entries})
+        self.resolved.lock = tried
+        return tried
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         raise AssertionError("check_lock has no act")
@@ -347,9 +395,15 @@ class CheckLock(_SourceStep):
         product = _known(self.resolved.product, "primer.yaml")
         lock = self.resolved.lock
         if not product.dependencies:
+            tries = sorted(self.resolved.tries)
+            if tries and ctx.role != "test":
+                raise StepFailed("try-off-test", {"role": ctx.role})
+            if tries:  # a tried service the product does not have
+                raise StepFailed("try-unknown", {"service": tries[0]})
             return Verified({"services": []})
         if lock is None:
             raise StepFailed("lock-missing")
+        lock = self._tried(ctx, product, lock)
         problems = check_lock(product, lock)
         if problems:
             raise StepFailed(
@@ -563,11 +617,12 @@ def source_steps(
     stack: str,
     address: str,
     ref: str,
-    tag: bool,
+    tag: bool | None,
     packages: Mapping[str, Package] | None = None,
+    tries: Mapping[str, str] | None = None,
 ) -> tuple[Resolved, list[Step]]:
     """The ``sources`` ladder a plan builder puts after ``host``."""
-    resolved = Resolved()
+    resolved = Resolved(tries=dict(tries or {}))
     steps: list[Step] = [
         FetchRoot(resolved, root, stack=stack, address=address, ref=ref, tag=tag),
         CheckLock(resolved, root),

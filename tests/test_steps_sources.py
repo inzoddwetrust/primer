@@ -553,3 +553,100 @@ def test_a_40_hex_answer_is_the_target(tmp_path: Path) -> None:
 def test_every_step_that_asks_a_remote_declares_the_code() -> None:
     for step in (FetchRoot, CheckLock, FetchServices, FetchPackages):
         assert step.codes["not-a-commit"] == NOT_A_COMMIT["not-a-commit"], step
+
+
+# --- DM-45: deploy <ref> and update --try ---------------------------------
+
+
+def _tried(
+    tmp: Path, tries: dict[str, str], role: str = "test"
+) -> tuple[PlanOutcome, Path]:
+    bare = remote(tmp, "comms", {"primer.yaml": "x: 1\n"}, tags=("v3.0.0", "v3.1.0"))
+    head = git(bare, "rev-parse", "v3.0.0^{commit}")[0]
+    remote(
+        tmp,
+        "aivis",
+        {
+            "primer.yaml": product(tmp, dependency=True),
+            "primer.lock": lock(head[:7], "3.0.0"),
+        },
+    )
+    root = tmp / "box"
+    _, steps = source_steps(
+        root,
+        stack="aivis",
+        address=f"file://{tmp}/aivis.git",
+        ref="main",
+        tag=False,
+        tries=tries,
+    )
+    ticks = count()
+    outcome = Plan(
+        [StackSteps("sources", steps, root=True)],
+        mode="install",
+        role=role,  # type: ignore[arg-type]
+        runner=SubprocessRunner(),
+        sink=ListSink(),
+        clock=lambda: float(next(ticks)),
+        now=lambda: datetime(2026, 11, 5, tzinfo=UTC),
+    ).run()
+    return outcome, root
+
+
+def test_try_runs_another_version_of_a_service_on_a_test_box(tmp_path: Path) -> None:
+    """``update --try comms=3.1.0``: the service is fetched at ``v3.1.0``,
+    not at the lock's ``v3.0.0``; the pair: without it, the lock's."""
+    outcome, root = _tried(tmp_path / "a", {"comms": "3.1.0"})
+    assert outcome.code is ExitCode.OK, outcome.steps
+    by = {r.name: r for r in outcome.steps}
+    services = by["check_lock"].verify["services"]
+    assert isinstance(services, list) and len(services) == 1
+    pinned = services[0]
+    assert isinstance(pinned, dict) and pinned["tag"] == "v3.1.0"
+    assert (root / "opt" / "comms" / "releases" / "v3.1.0").is_dir()
+    outcome, root = _tried(tmp_path / "b", {})
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert (root / "opt" / "comms" / "releases" / "v3.0.0").is_dir()
+    assert not (root / "opt" / "comms" / "releases" / "v3.1.0").exists()
+
+
+@pytest.mark.parametrize(
+    ("tries", "role", "code"),
+    [
+        ({"comms": "3.1.0"}, "prod", "check_lock:try-off-test"),
+        ({"payments": "1.0.0"}, "test", "check_lock:try-unknown"),
+        ({"comms": "3.9.0"}, "test", "check_lock:missing-tag"),
+    ],
+)
+def test_try_is_refused_off_test_and_for_what_the_product_has_not(
+    tmp_path: Path, tries: dict[str, str], role: str, code: str
+) -> None:
+    outcome, root = _tried(tmp_path, tries, role)
+    by = {r.name: r for r in outcome.steps}
+    assert by["check_lock"].reason is not None
+    assert by["check_lock"].reason.code == code
+    assert not (root / "opt" / "comms").exists()
+
+
+def test_deploy_of_a_ref_takes_a_tag_else_a_branch(tmp_path: Path) -> None:
+    """``tag=None`` (``deploy <ref>`` on a test box): a tag of that name if the
+    remote has one -- its release is the tag -- else the branch, its release
+    the commit."""
+    remote(
+        tmp_path,
+        "aivis",
+        {"primer.yaml": product(tmp_path, dependency=False)},
+        tags=("v1.0.0",),
+    )
+    root = tmp_path / "box"
+    address = f"file://{tmp_path}/aivis.git"
+    for ref in ("v1.0.0", "main"):
+        resolved, steps = source_steps(
+            root, stack="aivis", address=address, ref=ref, tag=None
+        )
+        assert run(root, steps).code is ExitCode.OK
+        [fetch] = [s for s in steps if isinstance(s, FetchRoot)]
+        assert fetch.target is not None
+        assert fetch.target.tag is (ref == "v1.0.0")
+        assert resolved.releases["aivis"].name == fetch.target.release
+    assert (root / "opt" / "aivis" / "releases" / "v1.0.0").is_dir()

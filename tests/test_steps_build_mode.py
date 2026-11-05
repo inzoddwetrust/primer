@@ -27,6 +27,7 @@ from compose_support import (
     in_release,
     live,
     observe_calls,
+    placed,
     stdout,
     up_call,
 )
@@ -44,6 +45,7 @@ from pridem.steps.base import Step, StepContext
 from pridem.steps.build import Build, copied_dockerfile
 from pridem.steps.compose import (
     ComposeStack,
+    OverrideHandoff,
     forbidden,
     package_places,
     refusal,
@@ -173,7 +175,8 @@ def image_call(
 
 
 def build_call(cs: ComposeStack, code: int = 0) -> FakeCall:
-    argv = cs.argv(
+    """DM-45: the build runs on the candidate override."""
+    argv = cs.candidate().argv(
         "build",
         "--build-arg",
         f"PRIMER_RELEASE={cs.ref}",
@@ -220,6 +223,7 @@ def build(root: Path, stack: Product, fetched: Fetched, entry: str = ENTRY) -> B
         commit=SHA,
         root=root,
         fetched=fetched,
+        handoff=OverrideHandoff(),
     )
 
 
@@ -234,7 +238,9 @@ def run(steps: list[Step], runner: FakeRunner) -> PlanOutcome:
 
 
 def override(cs: ComposeStack) -> dict[str, Json]:
-    loaded = json.loads(cs.override.read_text())
+    """What build wrote: the candidate override (DM-45: ``packages`` puts it
+    in place)."""
+    loaded = json.loads(cs.candidate().override.read_text())
     assert isinstance(loaded, dict)
     return loaded
 
@@ -264,6 +270,7 @@ def test_probe_DM_61_build_mode_rebuilds_on_package_version_only(
     cs = compose(root, stack)
     with FakeRunner(*first_build(cs, key_of())) as runner:
         assert run([build(root, stack, fetched)], runner).code is ExitCode.OK
+    placed(cs)  # DM-45: the green run's packages put the override in place
 
     # the same version and edition: no build -- the scenario has none
     same = [
@@ -330,6 +337,7 @@ def test_same_override_but_no_image_of_the_key_builds(tmp_path: Path) -> None:
     cs = compose(root, stack)
     with FakeRunner(*first_build(cs, key_of())) as runner:
         run([build(root, stack, fetched)], runner)
+    placed(cs)  # DM-45: the green run's packages put the override in place
     script = [
         config_call(cs, raw=True),
         config_call(cs),

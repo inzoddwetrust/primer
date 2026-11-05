@@ -304,7 +304,9 @@ class WaitHostQuiet(_HostStep):
                 raise StepFailed(
                     "host-busy", {"services": _j(busy), "timeout_s": self.timeout_s}
                 )
+            ctx.interrupt.check()  # a signal ends the wait (DM-45)
             self.sleep(self.poll_s)
+            ctx.interrupt.check()
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         paused = _paused(self.root)

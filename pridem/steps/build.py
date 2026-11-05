@@ -18,7 +18,10 @@ that product is refused first, before any command (``egress-unlisted``;
 ``stacks/egress.py``): ``pridem check`` refuses it by the same ``unlisted``.
 Images carry ``pridem.stack``, ``pridem.release``, ``pridem.commit`` and
 ``pridem.service`` from the machine's override (``steps/compose.py``), which
-this step writes.
+this step renders. ``act`` writes it as the candidate (``<entry>.next.yml``),
+builds with it, and hands its text to ``packages`` (``OverrideHandoff``): the
+override on disk -- what ``tests``, ``migrate``, ``up`` and any later ``compose
+up`` read -- changes only after a green ``validate`` of the packages it names.
 
 A package of ``apply: build`` (contract 3 rules 10, 11, 19; the owner's
 decision of 02.11) is built into the image of its service: ``act`` writes the
@@ -66,6 +69,7 @@ from pridem.steps.compose import (
     BUILD_TIMEOUT_S,
     REFUSAL_CODES,
     ComposeStack,
+    OverrideHandoff,
     built_services,
     config,
     env_files,
@@ -150,10 +154,12 @@ class Build(Step):
         release: Path,
         ref: str,
         commit: str,
+        handoff: OverrideHandoff,
         root: Path = Path("/"),
         fetched: Fetched | None = None,
     ) -> None:
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.handoff = handoff
         self.fetched = fetched
 
     def _passport(self) -> Passport | None:
@@ -287,10 +293,12 @@ class Build(Step):
         rendered = self._rendered(ctx, config(ctx, self.compose, interpolate=False))
         for source, target, places in rendered.contexts.values():
             write_context(source, target, places)
-        write_override(self.compose, rendered.text)
+        candidate = self.compose.candidate()
+        write_override(candidate, rendered.text)
+        self.handoff.texts[self.compose.entry] = rendered.text
         out(
             ctx,
-            self.compose.argv("build", *build_args(self.compose)),
+            candidate.argv("build", *build_args(self.compose)),
             timeout=BUILD_TIMEOUT_S,
         )
 

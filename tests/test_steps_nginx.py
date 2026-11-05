@@ -12,6 +12,7 @@ from compose_support import CONFIG
 from edge_support import (
     DOMAINS,
     Mixed,
+    container_calls,
     exec_call,
     passport,
     product,
@@ -74,13 +75,15 @@ def step(
 
 
 def first_install(root: Path) -> list[FakeCall]:
-    """check (no live config: no need to ask), act (test aside, start), verify."""
+    """check (no live config: no need to ask), act (test aside, start), verify
+    -- DM-45: the container read back, its image, networks and hash."""
     return [
         nginx_t(root),
         ps_call(root, running=False),
         FakeCall(tuple(argv(root, "up", "-d", "nginx"))),
         ps_call(root, running=True),
         exec_call(root, "nginx", "-t"),
+        *container_calls(root),
     ]
 
 
@@ -184,8 +187,10 @@ def test_probe_DM_17_comment_change_in_live_config_is_not_drift(tmp_path: Path) 
     compose_file(root).write_text(compose_text(root))
     with Mixed(
         ps_call(root, running=True),
+        *container_calls(root),  # DM-45: the container is compose's of the file
         ps_call(root, running=True),
         exec_call(root, "nginx", "-t"),
+        *container_calls(root),
     ) as runner:
         outcome, _ = run([nginx], runner)  # no test, no reload, no up
     assert outcome.code is ExitCode.OK, outcome.steps
@@ -228,9 +233,11 @@ def test_probe_DM_17_nginx_t_red_prevents_reload(tmp_path: Path) -> None:
     script = [
         nginx_t(root),
         ps_call(root, running=True),
+        *container_calls(root),  # DM-45: the same compose, applied: a reload
         exec_call(root, "nginx", "-s", "reload"),
         ps_call(root, running=True),
         exec_call(root, "nginx", "-t"),
+        *container_calls(root),
     ]
     with Mixed(*script) as runner:
         outcome, _ = run([step(root, fetched)], runner)
@@ -291,6 +298,8 @@ def test_first_install_starts_nginx_with_the_compose_of_edge(tmp_path: Path) -> 
         "routes": 2,
         "mode": oct(0o600),
         "preview": False,
+        "image": NGINX_IMAGE,  # DM-45: the container read back
+        "networks": ["pridem", "pridem-edge_default"],
     }
     document = json.loads(compose_file(root).read_text())
     nginx = document["services"]["nginx"]
@@ -430,3 +439,73 @@ def test_a_path_that_reads_as_more_than_a_path_is_refused(
         "path-unsafe",
         {"route": "api", "path": path},
     )
+
+
+# --- DM-45: the edge's compose on a live box ---------------------------------------
+
+
+def _live(root: Path, fetched: object) -> None:
+    """A box where nginx runs on the rendered config."""
+    assert isinstance(fetched, Fetched) and fetched.passport is not None
+    text = render(product(), fetched.passport, None)
+    live_config(root).parent.mkdir(parents=True, exist_ok=True)
+    live_config(root).write_text(text)
+
+
+@pytest.mark.parametrize("cause", ["compose-changed", "hash-differs"])
+def test_a_new_compose_of_edge_recreates_nginx_not_reloads(
+    tmp_path: Path, cause: str
+) -> None:
+    """nginx runs; its compose file is not this machine's (another file on
+    disk), or is, but the container is not compose's of it (another hash):
+    ``up -d nginx`` -- a reload never applies a compose. The verify reads the
+    new container back. The pair (``comment_change`` above): the same compose
+    applied, nothing at all."""
+    root, fetched = passport(tmp_path)
+    _live(root, fetched)
+    stale = container_calls(root, found="0" * 64)
+    if cause == "compose-changed":
+        compose_file(root).write_text("{}\n")  # the old machine's file
+        check: list[FakeCall] = []  # no live ask: the compose already differs
+    else:
+        compose_file(root).write_text(compose_text(root))
+        check = [ps_call(root, running=True), *stale]
+    act = [nginx_t(root), ps_call(root, running=True)]
+    if cause == "hash-differs":
+        act += stale
+    script = [
+        *check,
+        *act,
+        FakeCall(tuple(argv(root, "up", "-d", "nginx"))),
+        ps_call(root, running=True),
+        exec_call(root, "nginx", "-t"),
+        *container_calls(root),
+    ]
+    with Mixed(*script) as runner:
+        outcome, _ = run([step(root, fetched)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert compose_file(root).read_text() == compose_text(root)
+    assert not any("reload" in call for call in runner.argvs)
+
+
+@pytest.mark.parametrize(
+    "seen",
+    [
+        {"image": "nginx:latest"},
+        {"networks": ("pridem",)},
+        {"found": "0" * 64},
+    ],
+    ids=["image", "network", "hash"],
+)
+def test_verify_reads_the_container_back(
+    tmp_path: Path, seen: dict[str, object]
+) -> None:
+    """After ``up``, a container on another image, without the edge's own
+    network, or not of the file on disk is red ``container``, by what was
+    read; the pair (``first_install``): the right one is green."""
+    root, fetched = passport(tmp_path)
+    script = [*first_install(root)[:-2], *container_calls(root, **seen)]
+    with Mixed(*script) as runner:
+        outcome, _ = run([step(root, fetched)], runner)
+    reason = outcome.steps[0].reason
+    assert reason is not None and reason.code == "nginx:container", outcome.steps

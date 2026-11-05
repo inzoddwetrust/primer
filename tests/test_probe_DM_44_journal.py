@@ -173,8 +173,11 @@ def test_hung_command_keeps_its_unterminated_line() -> None:
 
 
 def test_plan_docstring_says_nothing_of_signal_mechanics() -> None:
+    """DM-45: the plan's interrupt is the flag of ``pridem/interrupt.py``, no
+    longer ``KeyboardInterrupt``; the docstring names it and still says
+    nothing of signals."""
     doc = pridem.plan.__doc__ or ""
-    assert "KeyboardInterrupt" in doc
+    assert "pridem/interrupt.py" in doc and "KeyboardInterrupt" not in doc
     assert "SIGTERM" not in doc and "signal" not in doc.lower()
 
 

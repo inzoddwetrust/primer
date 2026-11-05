@@ -46,6 +46,7 @@ from pridem.steps.compose import (
     TOP_VOLUME_KEYS,
     VOLUME_KEYS,
     ComposeStack,
+    OverrideHandoff,
     env_files,
     forbidden,
     package_places,
@@ -58,7 +59,15 @@ BLANK = json.loads(
 
 def build(root: Path) -> Build:
     cs = compose(root)
-    return Build(cs.stack, cs.entry, release=cs.release, ref=REF, commit=SHA, root=root)
+    return Build(
+        cs.stack,
+        cs.entry,
+        release=cs.release,
+        ref=REF,
+        commit=SHA,
+        root=root,
+        handoff=OverrideHandoff(),
+    )
 
 
 def released(root: Path) -> ComposeStack:

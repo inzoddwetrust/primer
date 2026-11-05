@@ -739,7 +739,9 @@ class FetchPassport(Step):
                     "not-recipient",
                     {"server": self.server, "public_key": shown, "wait_s": self.wait_s},
                 )
+            ctx.interrupt.check()  # a signal ends the wait (DM-45)
             self.sleep(self.poll_s)
+            ctx.interrupt.check()
             commit = self._fetch(ctx)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:

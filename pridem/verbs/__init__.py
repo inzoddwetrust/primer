@@ -8,11 +8,29 @@ message on stderr, no verdict (contract 2 v1.9).
 
 from pridem.verbs.base import Context, Refused, Verb
 from pridem.verbs.check import CHECK
+from pridem.verbs.deploy import DEPLOY, DESTROY, DOCTOR, INSTALL, REINSTALL, UPDATE
 from pridem.verbs.gc import GC
+from pridem.verbs.report import REPORT
 from pridem.verbs.ssl import SSL
 from pridem.verbs.status import STATUS
 from pridem.verbs.version import VERSION
 
-VERBS: dict[str, Verb] = {verb.name: verb for verb in (VERSION, STATUS, GC, SSL, CHECK)}
+VERBS: dict[str, Verb] = {
+    verb.name: verb
+    for verb in (
+        VERSION,
+        STATUS,
+        GC,
+        SSL,
+        CHECK,
+        INSTALL,
+        UPDATE,
+        DEPLOY,
+        DOCTOR,
+        REINSTALL,
+        DESTROY,
+        REPORT,
+    )
+}
 
 __all__ = ["VERBS", "Context", "Refused", "Verb"]

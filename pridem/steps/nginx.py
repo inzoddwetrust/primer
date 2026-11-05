@@ -9,15 +9,25 @@ A new config is tested before it is put in place: written to a candidate
 directory and checked by ``nginx -t`` in a throwaway container of the same
 image, the candidate mounted where the live config would be. Red -- the live
 file is untouched and nothing is reloaded. Green -- the live file is replaced
-atomically, then the running nginx reloads (``exec -T nginx nginx -s reload``),
-or ``up -d nginx`` starts it. At no moment does a broken config lie where a
-restarting nginx would read it.
+atomically, then the running nginx reloads (``exec -T nginx nginx -s reload``)
+when its container is on the edge's compose as rendered, or ``up -d nginx``
+creates it anew: no container yet, another compose file (``compose_text`` of
+this machine), or a container compose did not make from the file on disk --
+its label ``com.docker.compose.config-hash`` is not ``config --hash nginx`` of
+the file (the form of DM-58). A reload never applies a compose: a new image or
+network of nginx is a new container. At no moment does a broken config lie
+where a restarting nginx would read it.
+
+``verify`` reads the container back: running, the live config the rendered
+one and green by ``nginx -t``, on the image ``NGINX_IMAGE``, on the networks
+``pridem`` and ``pridem-edge_default``, with the hash of the file on disk.
 
 On a ``preview`` box the secret of the link is minted once
 (``/opt/pridem/keys/preview-link``, 0600) and enters the run's ``Secrets``
 before anything that could carry it: the config holds it and is 0600.
 """
 
+import json
 from pathlib import Path
 from typing import ClassVar
 
@@ -36,9 +46,10 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.compose import out
+from pridem.steps.compose import NETWORK, out
 from pridem.steps.edge import (
     NGINX_IMAGE,
+    PROJECT,
     STACK_LABEL,
     argv,
     candidate_dir,
@@ -55,6 +66,13 @@ from pridem.steps.passport import NO_PASSPORT, Fetched
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 PREVIEW_SECRET = KEYS / "preview-link"
 DIFF_LINES = 60
+NETWORKS = (NETWORK, f"{PROJECT}_default")
+"""The networks the nginx container is on: the shared one and its project's."""
+HASH_LABEL = "com.docker.compose.config-hash"
+INSPECT = (
+    '{"image": {{json .Config.Image}}, "labels": {{json .Config.Labels}}, '
+    '"networks": {{json .NetworkSettings.Networks}}}'
+)
 
 
 class Nginx(Step):
@@ -75,6 +93,10 @@ class Nginx(Step):
         "secret-damaged": "{path} is not a preview secret of this machine",
         "drift": "the live config differs from the rendered one: {diff}",
         "not-running": "nginx is not running",
+        "container": (
+            "the nginx container is on {image} and {networks}, hash {hash}; "
+            "the edge wants {want_image} and {want_networks}, hash {want_hash}"
+        ),
     }
 
     def __init__(
@@ -125,9 +147,53 @@ class Nginx(Step):
         path = live_config(self.root)
         return path.read_text(encoding="utf-8") if path.exists() else None
 
-    def _running(self, ctx: StepContext) -> bool:
+    def _running(self, ctx: StepContext) -> str | None:
+        """The id of the running nginx container, if there is one."""
         _, ids = out(ctx, argv(self.root, "ps", "-q", "nginx"), passed_on=False)
-        return any(line.strip() for line in ids)
+        found = [line.strip() for line in ids if line.strip()]
+        return found[0] if found else None
+
+    def _hash(self, ctx: StepContext) -> str:
+        """``config --hash nginx`` of the edge's compose file on disk."""
+        _, lines = out(
+            ctx, argv(self.root, "config", "--hash", "nginx"), passed_on=False
+        )
+        for line in lines:
+            service, _, value = line.strip().partition(" ")
+            if service == "nginx" and value:
+                return value
+        return ""
+
+    def _seen(self, ctx: StepContext, container: str) -> tuple[str, list[str], str]:
+        """The image, networks and compose hash of the container, read back."""
+        _, lines = out(
+            ctx, ["docker", "inspect", "--format", INSPECT, container], passed_on=False
+        )
+        try:
+            raw = json.loads("".join(lines))
+        except ValueError:
+            raw = None
+        if not isinstance(raw, dict):
+            return "", [], ""
+        image = raw.get("image")
+        labels = raw.get("labels")
+        networks = raw.get("networks")
+        found = labels.get(HASH_LABEL) if isinstance(labels, dict) else None
+        return (
+            image if isinstance(image, str) else "",
+            sorted(networks) if isinstance(networks, dict) else [],
+            found if isinstance(found, str) else "",
+        )
+
+    def _applied(self, ctx: StepContext, container: str) -> bool:
+        """The container is compose's of the file on disk."""
+        return self._seen(ctx, container)[2] == self._hash(ctx)
+
+    def _same_compose(self) -> bool:
+        path = compose_file(self.root)
+        return path.exists() and path.read_text(encoding="utf-8") == compose_text(
+            self.root
+        )
 
     def _routes(self) -> int:
         host = self.product.host
@@ -141,16 +207,16 @@ class Nginx(Step):
         else:
             text = self._rendered(self._secret(mint_if_absent=False))
             diff = list[Json](drift(self._live(), text)[:DIFF_LINES])
-        same_compose = compose_file(self.root).exists() and compose_file(
-            self.root
-        ).read_text(encoding="utf-8") == compose_text(self.root)
-        if not diff and same_compose and self._running(ctx):
-            return CheckResult(False)
+        if not diff and self._same_compose():
+            container = self._running(ctx)
+            if container is not None and self._applied(ctx, container):
+                return CheckResult(False)
         params: dict[str, Json] = {"routes": self._routes(), "diff": diff}
         return CheckResult(True, local_code("render", params))
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         text = self._rendered(self._secret(mint_if_absent=True))
+        same_compose = self._same_compose()
         write_file(compose_file(self.root), compose_text(self.root).encode(), 0o644)
         candidate = candidate_dir(self.root) / live_config(self.root).name
         try:
@@ -179,11 +245,14 @@ class Nginx(Step):
             candidate.unlink(missing_ok=True)
         if code != 0:
             raise StepFailed("config-invalid", {"where": "the candidate"})
-        running = self._running(ctx)
+        container = self._running(ctx)
+        reload = (
+            same_compose and container is not None and self._applied(ctx, container)
+        )
         write_file(live_config(self.root), text.encode("utf-8"), 0o600)
-        if running:
+        if reload:
             out(ctx, argv(self.root, "exec", "-T", "nginx", "nginx", "-s", "reload"))
-        else:
+        else:  # a new container reads the new config as it starts
             out(ctx, argv(self.root, "up", "-d", "nginx"))
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
@@ -192,18 +261,35 @@ class Nginx(Step):
         if live is None or normalized(live) != normalized(text):
             diff = list[Json](drift(live, text)[:DIFF_LINES])
             raise StepFailed("drift", {"diff": diff})
-        if not self._running(ctx):
+        container = self._running(ctx)
+        if container is None:
             raise StepFailed("not-running")
         code, _ = out(
             ctx, argv(self.root, "exec", "-T", "nginx", "nginx", "-t"), expect=(0, 1)
         )
         if code != 0:
             raise StepFailed("config-invalid", {"where": "running nginx"})
+        image, networks, found = self._seen(ctx, container)
+        want = self._hash(ctx)
+        if image != NGINX_IMAGE or not set(NETWORKS) <= set(networks) or found != want:
+            raise StepFailed(
+                "container",
+                {
+                    "image": image,
+                    "networks": list[Json](networks),
+                    "hash": found,
+                    "want_image": NGINX_IMAGE,
+                    "want_networks": list[Json](NETWORKS),
+                    "want_hash": want,
+                },
+            )
         return Verified(
             {
                 "config": str(live_config(self.root)),
                 "routes": self._routes(),
                 "mode": mode_of(live_config(self.root)),
                 "preview": self._preview(),
+                "image": image,
+                "networks": list[Json](networks),
             }
         )

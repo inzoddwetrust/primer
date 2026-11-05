@@ -16,6 +16,7 @@ from compose_support import (
     compose,
     config_call,
     image_call,
+    placed,
     raw_config_call,
     run,
 )
@@ -25,7 +26,7 @@ from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
 from pridem.steps.base import CheckResult, StepContext, StepFailed
 from pridem.steps.build import Build
-from pridem.steps.compose import override_text
+from pridem.steps.compose import OverrideHandoff, override_text
 from pridem.steps.migrate import Migrate
 from pridem.steps.up import Up
 
@@ -34,7 +35,7 @@ def steps(root: Path) -> tuple[Build, Migrate, Up]:
     cs = compose(root)
     parts = {"release": cs.release, "ref": cs.ref, "commit": cs.commit, "root": root}
     return (
-        Build(cs.stack, cs.entry, **parts),  # type: ignore[arg-type]
+        Build(cs.stack, cs.entry, **parts, handoff=OverrideHandoff()),  # type: ignore[arg-type]
         Migrate(cs.stack, cs.entry, **parts),  # type: ignore[arg-type]
         Up(cs.stack, cs.entry, **parts),  # type: ignore[arg-type]
     )
@@ -109,6 +110,7 @@ def test_the_same_commit_again_needs_no_build(tmp_path: Path) -> None:
     cs = compose(tmp_path)
     with FakeRunner(*green_build(tmp_path)) as runner:
         run([steps(tmp_path)[0]], runner)
+    placed(cs)  # DM-45: the green run's packages put the override in place
     again = [
         raw_config_call(cs),
         config_call(cs),
@@ -127,12 +129,15 @@ def test_the_same_commit_again_needs_no_build(tmp_path: Path) -> None:
     with FakeRunner(*green_build(tmp_path)) as runner:
         outcome, _ = run([steps(tmp_path)[0]], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
-    assert cs.override.read_text() == override_text(cs, CONFIG)
+    # DM-45: build writes the candidate; the override on disk waits for packages
+    assert cs.candidate().override.read_text() == override_text(cs, CONFIG)
+    assert cs.override.read_text() == "{}\n"
 
 
 def test_the_override_is_written_0644_whatever_the_umask(tmp_path: Path) -> None:
     """DM-54: the machine's override is read by compose, not a secret: 0644,
-    written whole by ``atomic_write`` with no file left beside it."""
+    written whole by ``atomic_write`` with no file left beside it. DM-45:
+    build writes it as the candidate, the file ``packages`` puts in place."""
     cs = compose(tmp_path)
     old = os.umask(0o077)
     try:
@@ -141,8 +146,9 @@ def test_the_override_is_written_0644_whatever_the_umask(tmp_path: Path) -> None
     finally:
         os.umask(old)
     assert outcome.code is ExitCode.OK, outcome.steps
-    assert stat.S_IMODE(cs.override.stat().st_mode) == 0o644
-    assert [p.name for p in cs.override.parent.iterdir()] == [cs.override.name]
+    candidate = cs.candidate().override
+    assert stat.S_IMODE(candidate.stat().st_mode) == 0o644
+    assert [p.name for p in candidate.parent.iterdir()] == [candidate.name]
 
 
 def test_build_args_in_the_products_compose_are_refused(tmp_path: Path) -> None:

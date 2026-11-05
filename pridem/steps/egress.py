@@ -17,7 +17,10 @@ through ``CONNECT`` to port 443 of a host of ``egress``, by its name exactly
 (``dstdomain -n``, no leading dot: ``zoom.us`` is not ``api.zoom.us``), and
 nothing else: any other method, any other port, any address of a private range
 (a name that resolves into the box is refused) and any other host get 403. It
-keeps no cache and no access log.
+keeps no cache. Its access log goes to the container's stdout (the host's
+docker keeps it, driver ``local``): one line per request, ``LOG_TAG``, the
+host, the port, the status sent and squid's result -- ``TCP_TUNNEL`` let
+through, ``TCP_DENIED`` 403 -- and never a path, a query or a body.
 
 The step runs once per product, in its ladder after ``migrate`` -- the point of
 no return: a failed migration leaves the old code on the old list -- and before
@@ -36,7 +39,9 @@ the files. ``verify`` reads the fact back:
   behaviour: from the host, at the proxy's address on its own network,
   ``CONNECT`` to ``SENTINEL`` -- a host on no list -- is 403, and to every host
   of ``egress`` is anything but 403 (200, or a 5xx when the host itself does not
-  answer: the list is what is read, not the host's health).
+  answer: the list is what is read, not the host's health); and the access
+  log, read from ``docker logs`` up to ``ready_s``: a line of ``SENTINEL``, port
+  443, 403.
 """
 
 import json
@@ -77,6 +82,11 @@ digest; the tag is for people. Tier 3 checks on every run that this tag names
 this digest (``tier3/test_tier3_whole_install.py``)."""
 
 CONTAINER_CONFIG = "/etc/squid/squid.conf"
+LOG_TAG = "pridem-egress"
+LOG_FORMAT = f"{LOG_TAG} host=%>rd port=%>rP status=%>Hs result=%Ss"
+"""squid 6 ``logformat`` codes: the request's domain and port, the status sent
+to the client, squid's own result. No ``%ru``: a request that is not
+``CONNECT`` carries its path there."""
 SENTINEL = "refused.pridem.invalid"
 """A host on no list (``.invalid`` never resolves): the proxy must refuse it."""
 PRIVATE = (
@@ -136,7 +146,8 @@ def config_text(hosts: Sequence[str]) -> str:
         "http_access allow egress",
         "http_access deny all",
         "cache deny all",
-        "access_log none",
+        f"logformat pridem {LOG_FORMAT}",
+        "access_log stdio:/dev/stdout pridem",
         f"connect_timeout {CONNECT_TIMEOUT_S} seconds",
         "shutdown_lifetime 1 seconds",
         "pid_filename none",
@@ -196,6 +207,7 @@ class Egress(Step):
         "image-wrong": "the proxy runs on {running}, not on {expected}",
         "config-not-seen": "the proxy reads another config than the rendered one",
         "no-address": "the proxy has no address on {network}",
+        "log-missing": "the proxy's log in its stdout has no line of {host}",
         "proxy-silent": "the proxy at {address} does not answer for {host}",
         "proxy-open": "the proxy lets {host} through: {status}, not 403",
         "host-refused": "the proxy refuses {hosts} of egress",
@@ -330,7 +342,7 @@ class Egress(Step):
         if "\n".join(seen) + "\n" != config_text(self.hosts):
             raise StepFailed("config-not-seen")
         address = self._address(ctx, container)
-        refused = self._first_answer(address)
+        refused = self._first_answer(ctx, address)
         if refused != REFUSED:
             raise StepFailed("proxy-open", {"host": SENTINEL, "status": refused})
         allowed: dict[str, Json] = {}
@@ -350,8 +362,25 @@ class Egress(Step):
                 "image": SQUID_IMAGE,
                 "refused": {SENTINEL: REFUSED},
                 "allowed": allowed,
+                "log": self._logged(ctx, container),
             }
         )
+
+    def _logged(self, ctx: StepContext, container: str) -> str:
+        """The access log's line of the refused ``SENTINEL``, from the
+        container's stdout, waiting up to ``ready_s`` for squid to write it."""
+        wanted = f"{LOG_TAG} host={SENTINEL} port=443 status={REFUSED} "
+        deadline = self.clock() + self.ready_s
+        while True:
+            _, lines = out(ctx, ["docker", "logs", container], passed_on=False)
+            found = [line.strip() for line in lines if line.startswith(wanted)]
+            if found:
+                return found[-1]
+            if self.clock() >= deadline:
+                raise StepFailed("log-missing", {"host": SENTINEL})
+            ctx.interrupt.check()
+            self.sleep(self.poll_s)
+            ctx.interrupt.check()
 
     def _address(self, ctx: StepContext, container: str) -> str:
         """The proxy's address on its own network, where the host reaches it."""
@@ -375,12 +404,14 @@ class Egress(Step):
             raise StepFailed("no-address", {"network": OUTSIDE})
         return address
 
-    def _first_answer(self, address: str) -> int:
+    def _first_answer(self, ctx: StepContext, address: str) -> int:
         """The answer for ``SENTINEL``, waiting up to ``ready_s`` for a
         recreated proxy to answer at all."""
         deadline = self.clock() + self.ready_s
         while (status := self.answer(address, self.port, SENTINEL)) is None:
             if self.clock() >= deadline:
                 raise StepFailed("proxy-silent", {"address": address, "host": SENTINEL})
+            ctx.interrupt.check()  # a signal ends the wait (DM-45)
             self.sleep(self.poll_s)
+            ctx.interrupt.check()
         return status

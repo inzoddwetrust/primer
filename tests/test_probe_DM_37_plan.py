@@ -3,6 +3,7 @@ time, and an unexpected exception leaves only its type name in the verdict.
 """
 
 import io
+import signal
 from collections.abc import Sequence
 from itertools import count
 from pathlib import Path
@@ -14,6 +15,7 @@ from report_support import build
 from state_support import header
 
 from pridem.events import Code, ConsoleSink, Event, EventSink, Secrets, StepFinished
+from pridem.interrupt import Interrupt
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.report.render import render_json, render_llm, render_report
@@ -27,6 +29,7 @@ def _plan(
     *,
     restore: Sequence[StackSteps] = (),
     finally_: Sequence[StackSteps] = (),
+    interrupt: Interrupt | None = None,
 ) -> Plan:
     ticks = count()
     return Plan(
@@ -39,32 +42,22 @@ def _plan(
         finally_=finally_,
         clock=lambda: float(next(ticks)),
         now=lambda: NOW,
+        interrupt=interrupt,
     )
 
 
-class _RolesInterrupt(ScriptedStep):
-    """Its roles are read by the ladder between steps; the read is interrupted."""
+class _SignalOnce(ListSink):
+    """A sink during whose first ``StepFinished`` a signal arrives."""
 
-    @property
-    def roles(self) -> None:
-        raise KeyboardInterrupt
-
-    @roles.setter
-    def roles(self, value: object) -> None:
-        pass
-
-
-class _InterruptOnce(ListSink):
-    """A sink whose first ``StepFinished`` is cut by an interrupt."""
-
-    def __init__(self) -> None:
+    def __init__(self, interrupt: Interrupt) -> None:
         super().__init__()
+        self.interrupt = interrupt
         self.cut = False
 
     def emit(self, event: Event) -> None:
         if isinstance(event, StepFinished) and not self.cut:
             self.cut = True
-            raise KeyboardInterrupt
+            self.interrupt.receive(signal.SIGINT)
         super().emit(event)
 
 
@@ -73,17 +66,27 @@ def test_probe_DM_37_finally_runs_every_step_after_interrupt(place: str) -> None
     """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
     parameters, not phrases; the data changed form only, each assertion keeps
     its strength.
+
+    DM-45: a signal is a flag (``pridem/interrupt.py``), so the run returns
+    its outcome instead of raising; the probe still holds -- after a signal in
+    a step, between steps or while an event is written, restore and every step
+    of finally run, the rest of main does not. A signal while an event is
+    written no longer cuts the write: nothing is lost (it was
+    ``write-failed``), the event and the step's record are kept.
     """
     journal = Journal()
-    sink: ListSink = _InterruptOnce() if place == "in_emit" else ListSink()
-    build_step = ScriptedStep("build", 1, journal)
-    second: ScriptedStep
-    if place == "in_step":
-        second = ScriptedStep("up", 2, journal, act_raises=KeyboardInterrupt())
-    elif place == "between_steps":
-        second = _RolesInterrupt("up", 2, journal)
-    else:
-        second = ScriptedStep("up", 2, journal)
+    interrupt = Interrupt()
+    sink: ListSink = _SignalOnce(interrupt) if place == "in_emit" else ListSink()
+    build_step = ScriptedStep(
+        "build",
+        1,
+        journal,
+        signal_in="verify" if place == "between_steps" else None,
+        signal_stops=False,
+    )
+    second = ScriptedStep(
+        "up", 2, journal, signal_in="act" if place == "in_step" else None
+    )
     third = ScriptedStep("health", 3, journal)
     run = _plan(
         [build_step, second, third],
@@ -98,11 +101,10 @@ def test_probe_DM_37_finally_runs_every_step_after_interrupt(place: str) -> None
                 ],
             )
         ],
+        interrupt=interrupt,
     )
-    with pytest.raises(KeyboardInterrupt):
-        run.run()
-    outcome = run.outcome
-    assert outcome is not None and outcome.interrupted
+    outcome = run.run()
+    assert outcome is run.outcome and outcome.interrupted
     assert outcome.code is ExitCode.FAILED
     assert [(r.name, r.status) for r in outcome.finally_] == [
         ("gc", "failed"),
@@ -111,13 +113,9 @@ def test_probe_DM_37_finally_runs_every_step_after_interrupt(place: str) -> None
     assert "aivis/timers:verify" in journal and "aivis/old:verify" in journal
     assert "aivis/health:check" not in journal
     assert outcome.steps[-1].status == "skipped"
+    assert (outcome.steps[0].name, outcome.steps[0].status) == ("build", "ok")
     lost = [i.as_json() for i in outcome.incomplete]  # DM-42: codes (v1.6)
-    if place == "in_emit":
-        # the cut event is lost like a failed write; the step's record is kept
-        assert lost == [{"what": "journal", "code": "write-failed"}]
-        assert (outcome.steps[0].name, outcome.steps[0].status) == ("build", "ok")
-    else:
-        assert lost == []
+    assert lost == []
 
 
 class _BrokenSink(ListSink):

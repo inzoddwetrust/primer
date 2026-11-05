@@ -9,9 +9,7 @@ from plan_support import NOW, Journal, ListSink, ScriptedStep, plan, red
 
 from pridem.events import (
     Code,
-    Event,
     Incomplete,
-    LogLine,
     PlanFinished,
     Secrets,
     StepStarted,
@@ -29,7 +27,6 @@ from pridem.state import JournalSink
 from pridem.steps.base import (
     CheckResult,
     Mode,
-    Role,
     StepContext,
     StepFailed,
     Verified,
@@ -403,16 +400,18 @@ def test_finally_failure_on_green_plan_is_red() -> None:
 
 
 def test_interrupt_in_act_runs_restore_and_finally_then_raises() -> None:
+    """DM-45: a signal is a flag, not an exception -- the command of ``act``
+    is stopped (``Interrupted``), restore and finally run, and the run returns
+    its outcome instead of raising; every assertion on it is unchanged."""
     journal = Journal()
     steps = _root(
-        ScriptedStep("build", 1, journal, act_raises=KeyboardInterrupt()),
+        ScriptedStep("build", 1, journal, signal_in="act"),
         ScriptedStep("up", 2, journal),
     )
     restore = [StackSteps("aivis", [ScriptedStep("old", 1, journal)])]
     final = [StackSteps("aivis", [ScriptedStep("gc", 1, journal)])]
     run, sink = plan(steps, restore=restore, finally_=final)
-    with pytest.raises(KeyboardInterrupt):
-        run.run()
+    assert run.run() is run.outcome
     [finished] = [e for e in sink.events if isinstance(e, PlanFinished)]
     outcome = finished.outcome
     assert outcome.interrupted is True
@@ -428,22 +427,26 @@ def test_interrupt_in_act_runs_restore_and_finally_then_raises() -> None:
     assert [r.name for r in outcome.finally_] == ["gc"]
     assert outcome.code is ExitCode.FAILED
     assert sink.events[-1] is finished
+    assert "aivis/build:verify" not in journal
 
 
 def test_interrupt_in_doctor_emits_then_raises() -> None:
+    """DM-45: a signal in a check stops it and the rest of doctor is skipped;
+    the outcome is returned, not raised; the assertions are unchanged."""
     journal = Journal()
     steps = _root(
-        ScriptedStep("a", 1, journal, check_raises=KeyboardInterrupt()),
+        ScriptedStep("a", 1, journal, signal_in="check"),
         ScriptedStep("b", 2, journal),
     )
     run, sink = plan(steps, "doctor")
-    with pytest.raises(KeyboardInterrupt):
-        run.run()
+    run.run()
     [finished] = [e for e in sink.events if isinstance(e, PlanFinished)]
     assert [(r.name, r.status) for r in finished.outcome.steps] == [
         ("a", "failed"),
         ("b", "skipped"),
     ]
+    assert finished.outcome.steps[1].reason == Code("after-interrupt")
+    assert finished.outcome.interrupted and finished.outcome.code is ExitCode.FAILED
 
 
 # --- events ------------------------------------------------------------------------
@@ -536,29 +539,38 @@ def test_command_not_started_reason_is_the_runner_text() -> None:
 
 
 def test_interrupt_inside_finally_stops_the_rest_of_finally() -> None:
+    """DM-45 (gate Q4): ``finally`` is shielded -- a signal inside a clean-up
+    step no longer stops it or the rest of finally; it is a line of that step
+    in the journal. What the old test held -- the plan ends with every
+    clean-up step recorded and the run interrupted -- still holds, more of it
+    now runs."""
     journal = Journal()
-    run, _ = plan(
-        _root(ScriptedStep("up", 1, journal, act_raises=KeyboardInterrupt())),
+    run, sink = plan(
+        _root(ScriptedStep("up", 1, journal, signal_in="act")),
         finally_=[
             StackSteps(
                 "aivis",
                 [
-                    ScriptedStep("gc", 1, journal, act_raises=KeyboardInterrupt()),
+                    ScriptedStep("gc", 1, journal, signal_in="act"),
                     ScriptedStep("timers", 2, journal),
                 ],
             )
         ],
     )
-    with pytest.raises(KeyboardInterrupt):
-        run.run()
-    assert run.outcome is not None
-    assert [(r.name, r.status, r.reason) for r in run.outcome.finally_] == [
-        ("gc", "failed", Code("interrupted")),
+    outcome = run.run()
+    assert outcome.interrupted and outcome.code is ExitCode.FAILED
+    assert [(r.name, r.status) for r in outcome.finally_] == [
+        ("gc", "ok"),
+        ("timers", "ok"),
+    ]
+    assert "aivis/gc:verify" in journal and "aivis/timers:verify" in journal
+    noted = [line for line in sink.lines() if line.name == "gc"]
+    assert [(line.phase, line.stream, line.line) for line in noted] == [
         (
-            "timers",
-            "skipped",
-            Code("after-failure", {"phase": "finally", "stack": "aivis", "name": "gc"}),
-        ),
+            "finally",
+            Stream.STDERR,
+            "pridem: SIGTERM during finally; the clean-up goes on",
+        )
     ]
 
 
@@ -569,57 +581,42 @@ def test_journal_sink_never_creates_its_file(tmp_path: Path) -> None:
 
 
 def test_interrupt_while_a_log_line_is_written_stops_the_step() -> None:
-    """Ctrl-C during a command's output: the command stops, the step is interrupted."""
-
-    class CutOnLog(ListSink):
-        def emit(self, event: Event) -> None:
-            if isinstance(event, LogLine):
-                raise KeyboardInterrupt
-            super().emit(event)
-
+    """Ctrl-C during a command's output: the command stops, the step is
+    interrupted. DM-45: the runner stops the command's group on the flag and
+    raises ``Interrupted`` (scripted here); its lines up to then are kept."""
     journal = Journal()
     step = ScriptedStep("up", 1, journal, act_argv=["make", "up"])
     runner = FakeRunner(
-        FakeCall(("make", "up"), lines=((Stream.STDOUT, "a"), (Stream.STDOUT, "b")))
+        FakeCall(
+            ("make", "up"),
+            lines=((Stream.STDOUT, "a"), (Stream.STDOUT, "b")),
+            outcome="interrupted",
+        )
     )
+    sink = ListSink()
     built = Plan(
         _root(step),
         mode="deploy",
         role="test",
         runner=runner,
-        sink=CutOnLog(),
+        sink=sink,
         clock=lambda: 0.0,
         now=lambda: NOW,
     )
-    with runner, pytest.raises(KeyboardInterrupt):
+    with runner:
         built.run()
-    assert built.outcome is not None
+    assert built.outcome is not None and built.outcome.interrupted
     assert [(r.status, r.reason) for r in built.outcome.steps] == [
         ("failed", Code("interrupted"))
     ]
+    assert [line.line for line in sink.lines()] == ["a", "b"]
     assert "aivis/up:verify" not in journal
 
 
-class _RolesInterruptOnce(ScriptedStep):
-    """Its roles are read by the ladder between steps; the first read is cut."""
-
-    cut = False
-
-    @property
-    def roles(self) -> frozenset[Role] | None:
-        if not _RolesInterruptOnce.cut:
-            _RolesInterruptOnce.cut = True
-            raise KeyboardInterrupt
-        return None
-
-    @roles.setter
-    def roles(self, value: object) -> None:
-        pass
-
-
 def test_interrupt_between_finally_steps_lets_the_clean_up_finish() -> None:
-    """FIX DM-37: SIGTERM between two clean-up steps; both still run, then raise."""
-    _RolesInterruptOnce.cut = False
+    """FIX DM-37: SIGTERM between two clean-up steps; both still run. DM-45:
+    the signal arrives in a step of finally (a flag, never raised); the run
+    returns interrupted instead of raising."""
     journal = Journal()
     run, _ = plan(
         _root(ScriptedStep("up", 1, journal)),
@@ -627,17 +624,16 @@ def test_interrupt_between_finally_steps_lets_the_clean_up_finish() -> None:
             StackSteps(
                 "aivis",
                 [
-                    ScriptedStep("gc", 1, journal),
-                    _RolesInterruptOnce("timers", 2, journal),
+                    ScriptedStep("gc", 1, journal, signal_in="verify"),
+                    ScriptedStep("timers", 2, journal),
                     ScriptedStep("logs", 3, journal),
                 ],
             )
         ],
     )
-    with pytest.raises(KeyboardInterrupt):
-        run.run()
-    assert run.outcome is not None and run.outcome.interrupted
-    assert [(r.name, r.status) for r in run.outcome.finally_] == [
+    outcome = run.run()
+    assert outcome.interrupted
+    assert [(r.name, r.status) for r in outcome.finally_] == [
         ("gc", "ok"),
         ("timers", "ok"),
         ("logs", "ok"),

@@ -2,6 +2,7 @@
 ``openssl`` is real while ``docker`` and the network follow a strict script
 (DM-17)."""
 
+import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from itertools import count
@@ -15,7 +16,8 @@ from pridem.plan import Plan, StackSteps
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result, Stream, SubprocessRunner
 from pridem.stacks.schema import PRIMER_YAML, Product
 from pridem.steps.base import Step
-from pridem.steps.edge import argv
+from pridem.steps.edge import NGINX_IMAGE, argv
+from pridem.steps.nginx import HASH_LABEL, INSPECT
 from pridem.steps.passport import Fetched
 
 DOMAINS = {"frontend": "blank.example.org", "api": "api.blank.example.org"}
@@ -221,6 +223,38 @@ def ps_call(root: Path, running: bool) -> FakeCall:
         tuple(argv(root, "ps", "-q", "nginx")),
         lines=stdout(CONTAINER) if running else (),
     )
+
+
+EDGE_HASH = "e" * 64
+"""``config --hash nginx`` of the edge's compose file (scripted)."""
+
+
+def hash_call(root: Path, value: str = EDGE_HASH) -> FakeCall:
+    return FakeCall(
+        tuple(argv(root, "config", "--hash", "nginx")), lines=stdout(f"nginx {value}")
+    )
+
+
+def inspect_call(
+    image: str = NGINX_IMAGE,
+    networks: Sequence[str] = ("pridem", "pridem-edge_default"),
+    found: str = EDGE_HASH,
+) -> FakeCall:
+    """``docker inspect`` of the nginx container: image, labels, networks."""
+    document = {
+        "image": image,
+        "labels": {HASH_LABEL: found},
+        "networks": {name: {} for name in networks},
+    }
+    return FakeCall(
+        ("docker", "inspect", "--format", INSPECT, CONTAINER),
+        lines=stdout(json.dumps(document)),
+    )
+
+
+def container_calls(root: Path, **seen: object) -> list[FakeCall]:
+    """What nginx reads of its container (DM-45): inspect, then the hash."""
+    return [inspect_call(**seen), hash_call(root)]  # type: ignore[arg-type]
 
 
 def exec_call(root: Path, *command: str, code: int = 0) -> FakeCall:

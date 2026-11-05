@@ -22,7 +22,7 @@ writes are built here.
 
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Protocol, TextIO
@@ -51,7 +51,7 @@ def strings(value: Json) -> list[str]:
 
 Status = Literal["ok", "failed", "skipped"]
 Phase = Literal["main", "restore", "finally"]
-PlanMode = Literal["install", "deploy", "doctor", "reinstall", "gc", "renew"]
+PlanMode = Literal["install", "deploy", "doctor", "reinstall", "destroy", "gc", "renew"]
 RunMode = PlanMode | Literal["status", "check"]
 """What a run is: a plan's mode, or a verb that runs no plan (``status``,
 ``check``)."""
@@ -371,8 +371,13 @@ class ConsoleSink:
     """
 
     def __init__(
-        self, stream: TextIO, secrets: Secrets, catalog: Catalog = ENGLISH
+        self,
+        stream: TextIO,
+        secrets: Secrets,
+        catalog: Catalog | Callable[[], Catalog] = ENGLISH,
     ) -> None:
+        """``catalog`` may be given as a function: the texts of a plan whose
+        deferred stacks add their steps' codes while it runs."""
         self._stream = stream
         self._secrets = secrets
         self._catalog = catalog
@@ -386,7 +391,7 @@ class ConsoleSink:
         self._stream.flush()
 
     def _step(self, record: StepRecord) -> None:
-        catalog = self._catalog
+        catalog = self._catalog() if callable(self._catalog) else self._catalog
         mark = say(catalog, f"@mark.{record.status}")
         line = say(
             catalog, "@console.step", mark=mark, stack=record.stack, name=record.name

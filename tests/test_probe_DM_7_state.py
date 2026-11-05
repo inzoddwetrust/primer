@@ -105,10 +105,11 @@ def test_probe_DM_7_orphan_journal_becomes_red_verdict(tmp_path: Path) -> None:
 def test_probe_DM_7_journal_budget_evicts_oldest_first(tmp_path: Path) -> None:
     box = Box(tmp_path)
     runs = [run_id(n) for n in (1, 2, 3, 4)]
-    with box.lock("a"):
-        for run in runs:
+    for run in runs:  # DM-45: one hold of the lock, one journal
+        with box.lock(run):
             box.open_journal(header(run), SECRETS).close()
             box.write_verdict(verdict(run))
+    with box.lock("a"):
         # mtimes in reverse: the order is the run id, not the file time
         for age, run in enumerate(runs):
             path = tmp_path / "journal" / f"{run}.jsonl"

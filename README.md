@@ -3,16 +3,19 @@
 pridem is the deploy machine of the Primer project: a Python 3.12 package that is
 installed on every box of every project and brings the box to the state described
 by the stacks' `primer.yaml` files and the box passport. The repository holds the
-contracts, the parts the machine is built from and its first verbs,
-`pridem version`, `pridem status`, `pridem gc`, `pridem ssl renew` and
-`pridem check`:
+contracts, the parts the machine is built from and its verbs:
+`pridem install`, `update`, `deploy <ref>`, `doctor`, `reinstall`, `destroy`,
+`report <run_id>`, `version`, `status`, `gc`, `ssl renew` and `check`:
 
 - `pridem/stacks/` -- contract 1 (passport) and contract 3 (`primer.yaml`,
   `primer.lock`) as models, rules and loaders; the YAML loader refuses anchors,
   aliases, nesting deeper than 32 and files over 1 MiB before parsing;
 - `pridem/report/` -- contract 2 (the verdict): model, rules, codes and renders;
-- `pridem/runner.py` -- the only place a process starts, and `FakeRunner`, a
-  strict scenario for tests;
+- `pridem/runner.py` -- the only place a process starts (each command the
+  leader of its own group, killed with `pridem`, the box lock handed on), and
+  `FakeRunner`, a strict scenario for tests;
+- `pridem/interrupt.py` -- SIGINT and SIGTERM set a flag the plan and the
+  runner read; no exception lands in the plan's code;
 - `pridem/steps/base.py`, `pridem/plan.py`, `pridem/events.py` -- the step,
   the plan with restore and finally, step events and log lines;
 - `pridem/state.py` -- `state.json`, `history/` and `journal/` of a box under
@@ -25,9 +28,14 @@ contracts, the parts the machine is built from and its first verbs,
   clean-up by labels every plan also runs in `finally`; `ssl_renew` in
   `pridem/steps/ssl.py`), and the box's systemd timers run them
   (`pridem/steps/timers.py`); `check` checks a project's repository with no
-  box (`pridem/verbs/check.py`, below);
+  box (`pridem/verbs/check.py`, below); `install`, `update`, `deploy`,
+  `doctor`, `reinstall` and `destroy` run the plan the machine makes itself
+  (`pridem/verbs/plans.py`, `pridem/verbs/deploy.py`, the ladder of
+  `destroy` in `pridem/steps/destroy.py`); `report` renders a run's report
+  from `history/` and its journal;
 - `pridem/cli.py` -- the command line turned into a verb's arguments
-  (`pridem [--json] [--timer] <verb>`); an unknown verb, option or argument and
+  (`pridem [--json] [--timer] <verb> [arguments] [--option ...]`; `--json` may
+  follow the verb too); an unknown verb, option or argument and
   a busy box are refused before anything runs: exit 1, stderr, no verdict;
 - `install.sh` -- the only shell file: the bootstrap of a box in five actions
   (host check; packages, `sops` by version and sha256; the pinned clone; a venv

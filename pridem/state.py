@@ -4,8 +4,12 @@
 
 - ``lock`` -- one active command per box: ``flock(LOCK_EX | LOCK_NB)``; a second
   command is refused with ``BoxBusy`` naming the holder, it never waits. The
-  kernel drops the lock with its process, so a dead run never holds the box.
-  Every write below requires the lock; it is checked, not hoped for.
+  kernel drops the lock when the last process holding its descriptor ends:
+  the runner hands the descriptor (``lock_fd``) to every command, so the box
+  stays held while any process of the command lives, ``pridem`` dead or not.
+  Every write below requires the lock; it is checked, not hoped for. One hold
+  of the lock is one session: it opens one journal, a second is
+  ``JournalTaken`` before anything is written.
 - ``state.json`` -- composition, passport version, the ops repository commit
   the passport came from (absent for a passport given as a file), ``current``
   of each stack, last ``run_id`` per verb; replaced by ``atomic_write`` (temp +
@@ -39,7 +43,8 @@ composition before. A journal whose header is damaged cannot give a verdict (no 
 actor): it is quarantined and recovery goes on, so one bad file never blocks
 the box.
 
-``state.json`` is written only by ``Box.write_state``. ``write_verdict``
+``state.json`` is written only by ``Box.write_state`` and removed only by
+``Box.remove_state`` (``destroy``). ``write_verdict``
 records the last run of a verb in an existing ``state.json`` and never creates
 it: a red first ``install`` must not leave a composition the box does not have.
 """
@@ -107,6 +112,10 @@ class BoxBusy(Exception):
 
 class NotLocked(RuntimeError):
     """A write to the box outside the lock."""
+
+
+class JournalTaken(RuntimeError):
+    """This hold of the lock has opened its journal: one run, one journal."""
 
 
 class HistoryExists(FileExistsError):
@@ -408,6 +417,9 @@ class Box:
         self.history = root / HISTORY
         self.journals = root / JOURNAL
         self._locked = False
+        self._journal_opened = False
+        self.lock_fd: int | None = None
+        """The descriptor of the held lock, for the runner to hand on."""
         self.state_quarantined = False
         """``state.json`` was quarantined while this ``Box`` held the lock."""
 
@@ -431,12 +443,15 @@ class Box:
             os.pwrite(fd, holder.encode("utf-8"), 0)
             os.fsync(fd)
             self._locked = True
+            self._journal_opened = False
+            self.lock_fd = fd
             self.state_quarantined = False
             try:
                 self._remove_temps()
                 yield
             finally:
                 self._locked = False
+                self.lock_fd = None
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
@@ -476,6 +491,14 @@ class Box:
         """Replace ``state.json`` atomically."""
         self._require_lock()
         atomic_write(self.root / STATE, state.model_dump_json(indent=2), _FILE_MODE)
+
+    def remove_state(self) -> None:
+        """Remove ``state.json`` (``destroy``): the box has no composition left."""
+        self._require_lock()
+        path = self.root / STATE
+        if path.exists():
+            path.unlink()
+            fsync_dir(self.root)
 
     # --- history/ ---------------------------------------------------------------
 
@@ -517,8 +540,14 @@ class Box:
     # --- journal/ ---------------------------------------------------------------
 
     def open_journal(self, header: JournalHeader, secrets: Secrets) -> JournalSink:
-        """Create the journal of a run with its header line; return its sink."""
+        """Create the journal of a run with its header line; return its sink.
+
+        One per hold of the lock: a second is ``JournalTaken``, nothing written.
+        """
         self._require_lock()
+        if self._journal_opened:
+            raise JournalTaken(f"this session has its journal; not {header.run_id}")
+        self._journal_opened = True
         final = self.journals / f"{header.run_id}.jsonl"
         raw = header.model_dump(mode="json", exclude_none=True)
         raw["args"] = secrets.value(raw["args"])

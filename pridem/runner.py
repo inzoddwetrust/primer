@@ -6,10 +6,18 @@ the caller must pass ``on_line``, which receives every output line as it
 arrives; the caller must pass ``timeout``, after which the whole process group
 is stopped and ``CommandTimedOut`` is raised.
 
-``SubprocessRunner`` runs real processes. ``FakeRunner`` is a strict script for
-tests: calls must arrive in the scripted order, an unplanned call fails at the
-moment it is made, and an expectation left unconsumed fails when the script is
-closed.
+``SubprocessRunner`` runs real processes, each the leader of its own session and
+process group, under ``setpriv --pdeathsig KILL``: when ``pridem`` dies the
+leader is killed with it. What the leader started may outlive it, so the
+runner hands the box lock's descriptor (``hold``) to every command: the lock is
+not released while a process of the command lives, and no second command takes
+the box meanwhile. A signal that the command's ``Interrupt`` says stops it
+(``pridem/interrupt.py``) stops the command's group as a timeout does and
+raises ``Interrupted``.
+
+``FakeRunner`` is a strict script for tests: calls must arrive in the scripted
+order, an unplanned call fails at the moment it is made, and an expectation
+left unconsumed fails when the script is closed.
 
 Every command error names the command one way, ``shlex.join(argv)``. The text
 of ``CommandFailed`` and ``CommandTimedOut`` names the command and its exit
@@ -19,10 +27,12 @@ cannot carry the output into a reason, and a reason lives in the verdict.
 """
 
 import codecs
+import errno
 import os
 import re
 import selectors
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -32,7 +42,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Literal, Protocol, Self, cast
+from typing import IO, Literal, Protocol, Self, cast, runtime_checkable
+
+from pridem.interrupt import Interrupt, Interrupted
 
 KILL_GRACE_SECONDS = 5.0
 """Seconds between SIGTERM and SIGKILL to the process group on timeout.
@@ -58,6 +70,12 @@ cuts a UTF-8 character.
 _READ_SIZE = 65536
 _BREAK = re.compile(r"\r\n|\r|\n")
 _POLL_SECONDS = 0.05
+_LOOK_SECONDS = 0.1
+"""The longest a command runs between two looks at the interrupt."""
+
+SETPRIV = "/usr/bin/setpriv"
+"""util-linux on Ubuntu 24.04: ``--pdeathsig KILL`` -- the command's leader dies
+with ``pridem``, whatever killed ``pridem``."""
 
 
 class Stream(StrEnum):
@@ -142,6 +160,33 @@ class Runner(Protocol):
         ...
 
 
+@runtime_checkable
+class Holding(Protocol):
+    """A runner that hands a descriptor -- the box lock -- to its commands."""
+
+    def hold(self, fd: int) -> None:
+        """Hand ``fd`` to every command from now on."""
+        ...
+
+
+def _program(argv0: str, cwd: Path | None, env: Mapping[str, str] | None) -> str:
+    """The file ``argv0`` names, as ``exec`` would find it; ``OSError`` with
+    the ``errno`` of ``exec`` when there is none to run.
+
+    ``setpriv`` runs the command, so a program it cannot start would be its
+    exit code; the runner finds the program first and says ``not started``.
+    """
+    if "/" in argv0:
+        found: str | None = str((cwd or Path.cwd()) / argv0)
+    else:
+        found = shutil.which(argv0, path=os.pathsep.join(os.get_exec_path(env)))
+    if found is None or not os.path.exists(found):
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), argv0)
+    if not os.path.isfile(found) or not os.access(found, os.X_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), argv0)
+    return found
+
+
 def _validate(
     argv: Sequence[str], expect: tuple[int, ...], timeout: float
 ) -> tuple[str, ...]:
@@ -167,6 +212,14 @@ def _check(
 class SubprocessRunner:
     """Runs real processes, each in its own session and process group."""
 
+    def __init__(self, interrupt: Interrupt | None = None) -> None:
+        self._interrupt = interrupt if interrupt is not None else Interrupt()
+        self._held: tuple[int, ...] = ()
+
+    def hold(self, fd: int) -> None:
+        """Hand ``fd`` (the box lock) to every command from now on."""
+        self._held = (*self._held, fd)
+
     def run(
         self,
         argv: Sequence[str],
@@ -187,26 +240,37 @@ class SubprocessRunner:
             on_line(stream, line, continued)
 
         try:
+            program = _program(command[0], cwd, env)
             process = subprocess.Popen(
-                command,
+                [SETPRIV, "--pdeathsig", "KILL", "--", program, *command[1:]],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cwd,
                 env=None if env is None else dict(env),
                 start_new_session=True,
+                pass_fds=self._held,
             )
         except OSError as error:
             raise CommandNotStarted(command, error.strerror or str(error)) from error
 
         finished = False
         try:
-            if not _pump(process, deadline, emit):
+            ended = _pump(process, deadline, emit, self._interrupt)
+            while ended == "running":
+                try:
+                    process.wait(timeout=_LOOK_SECONDS)
+                    ended = "exited"
+                except subprocess.TimeoutExpired:
+                    if self._interrupt.stops():
+                        ended = "interrupted"
+                    elif time.monotonic() >= deadline:
+                        ended = "timeout"
+            if ended == "timeout":
                 raise CommandTimedOut(command, timeout, tuple(tail))
-            try:
-                code = process.wait(timeout=max(deadline - time.monotonic(), 0.0))
-            except subprocess.TimeoutExpired as error:
-                raise CommandTimedOut(command, timeout, tuple(tail)) from error
+            if ended == "interrupted":
+                raise Interrupted
+            code = process.wait()
             finished = True
         finally:
             if not finished:
@@ -266,10 +330,20 @@ class _Splitter:
         return out
 
 
-def _pump(process: "subprocess.Popen[bytes]", deadline: float, emit: OnLine) -> bool:
-    """Read both pipes to EOF, emitting lines; False if the deadline passed.
+Ended = Literal["running", "exited", "timeout", "interrupted"]
 
-    At the deadline the unterminated line of each stream is emitted before the
+
+def _pump(
+    process: "subprocess.Popen[bytes]",
+    deadline: float,
+    emit: OnLine,
+    interrupt: Interrupt,
+) -> Ended:
+    """Read both pipes to EOF, emitting lines: ``running`` -- both are closed
+    (the process may still run); ``timeout`` -- the deadline passed;
+    ``interrupted`` -- a signal stops the command.
+
+    When cut, the unterminated line of each stream is emitted before the
     return: output is cut, never lost.
     """
     # Popen was called with stdout=PIPE and stderr=PIPE, so both are set.
@@ -287,15 +361,20 @@ def _pump(process: "subprocess.Popen[bytes]", deadline: float, emit: OnLine) -> 
             selector.register(fd, selectors.EVENT_READ)
         while selector.get_map():
             remaining = deadline - time.monotonic()
+            cut: Ended | None = None
             if remaining <= 0:
+                cut = "timeout"
+            elif interrupt.stops():
+                cut = "interrupted"
+            if cut is not None:
                 # the cut output of a hung command is not lost: hand over what
                 # each stream holds, its last undecoded bytes included
                 for stream, splitter in splitters.items():
                     text = decoders[stream].decode(b"", final=True)
                     for line, continued in [*splitter.feed(text), *splitter.finish()]:
                         emit(stream, line, continued)
-                return False
-            for key, _ in selector.select(timeout=remaining):
+                return cut
+            for key, _ in selector.select(timeout=min(remaining, _LOOK_SECONDS)):
                 stream = pipes[key.fd]
                 chunk = os.read(key.fd, _READ_SIZE)
                 text = decoders[stream].decode(chunk, final=not chunk)
@@ -306,7 +385,7 @@ def _pump(process: "subprocess.Popen[bytes]", deadline: float, emit: OnLine) -> 
                     selector.unregister(key.fd)
                     for line, continued in splitter.finish():
                         emit(stream, line, continued)
-    return True
+    return "running"
 
 
 def _signal_group(pgid: int, sig: int) -> bool:
@@ -344,7 +423,7 @@ class FakeCall:
     lines: Tail = ()
     cwd: Path | None = None
     env: Mapping[str, str] | None = None
-    outcome: Literal["exit", "timeout", "not_started"] = "exit"
+    outcome: Literal["exit", "timeout", "not_started", "interrupted"] = "exit"
 
 
 class FakeRunner:
@@ -364,6 +443,11 @@ class FakeRunner:
         self._script: deque[FakeCall] = deque(calls)
         self._violations: list[str] = []
         self.calls: list[tuple[str, ...]] = []
+        self.held: list[int] = []
+
+    def hold(self, fd: int) -> None:
+        """Record the descriptor a real runner would hand to its commands."""
+        self.held.append(fd)
 
     def run(
         self,
@@ -398,6 +482,8 @@ class FakeRunner:
             raise CommandTimedOut(command, timeout, tuple(tail))
         if head.outcome == "not_started":
             raise CommandNotStarted(command, "scripted: not started")
+        if head.outcome == "interrupted":  # a signal stopped the command's group
+            raise Interrupted
         return _check(command, head.code, expect, tuple(tail))
 
     def assert_consumed(self) -> None:

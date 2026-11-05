@@ -13,6 +13,7 @@ import pytest
 from deadline_support import deadline
 
 from pridem import runner
+from pridem.interrupt import Interrupt, Interrupted
 from pridem.runner import (
     TAIL_LINES,
     CommandFailed,
@@ -449,3 +450,54 @@ def test_an_emptied_group_gets_no_sigkill(monkeypatch: pytest.MonkeyPatch) -> No
     with deadline(10.0), pytest.raises(CommandTimedOut):
         SubprocessRunner().run([PY, "-c", stubborn], timeout=1.5, on_line=Lines())
     assert sent[0] == signal.SIGTERM and sent[-1] == signal.SIGKILL
+
+
+# --- DM-45: the interrupt and the box lock -----------------------------------------
+
+
+def _signal_after(interrupt: Interrupt, seconds: float) -> threading.Thread:
+    def fire() -> None:
+        time.sleep(seconds)
+        interrupt.receive(signal.SIGTERM)
+
+    thread = threading.Thread(target=fire)
+    thread.start()
+    return thread
+
+
+def test_a_signal_stops_the_command_mid_way_unless_shielded() -> None:
+    """A signal while a command runs stops its group there: ``Interrupted``
+    long before the command would end; the pair: under the shield of
+    ``finally`` the command runs to its end."""
+    interrupt = Interrupt()
+    runner = SubprocessRunner(interrupt)
+    interrupt.watch()
+    thread = _signal_after(interrupt, 0.3)
+    began = time.monotonic()
+    with pytest.raises(Interrupted):
+        runner.run(["sleep", "20"], timeout=60, on_line=lambda *_: None)
+    assert time.monotonic() - began < 10
+    thread.join()
+    with interrupt.shield():
+        thread = _signal_after(interrupt, 0.1)
+        result = runner.run(["sleep", "0.6"], timeout=60, on_line=lambda *_: None)
+        thread.join()
+    assert result.code == 0
+
+
+def test_the_box_lock_is_handed_to_the_command(tmp_path: Path) -> None:
+    """``hold``: the lock's descriptor is open in the command, so the box stays
+    held while any process of it lives; the pair: without ``hold`` it is not."""
+    lock = os.open(tmp_path / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+    seen: list[str] = []
+    probe = ["sh", "-c", f"test -e /proc/self/fd/{lock} && echo held || echo free"]
+    try:
+        SubprocessRunner().run(
+            probe, timeout=30, on_line=lambda s, line, c: seen.append(line)
+        )
+        held = SubprocessRunner()
+        held.hold(lock)
+        held.run(probe, timeout=30, on_line=lambda s, line, c: seen.append(line))
+    finally:
+        os.close(lock)
+    assert seen == ["free", "held"]

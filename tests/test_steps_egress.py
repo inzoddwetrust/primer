@@ -40,11 +40,13 @@ from pridem.steps.compose import (
     PROXY_ALIAS,
     PROXY_URL,
     ComposeStack,
+    OverrideHandoff,
     override_text,
 )
 from pridem.steps.egress import (
     CONTAINER_CONFIG,
     LABEL_FILTER,
+    LOG_TAG,
     OUTSIDE,
     SENTINEL,
     SQUID_IMAGE,
@@ -187,7 +189,13 @@ def test_unlisted_names_every_host_out_of_the_products_rows() -> None:
 def test_build_refuses_an_unlisted_host_before_any_command(tmp_path: Path) -> None:
     stack = product(["zoom.us"], "blank")
     step = Build(
-        stack, ENTRY, release=tmp_path / "r", ref=REF, commit=SHA, root=tmp_path
+        stack,
+        ENTRY,
+        release=tmp_path / "r",
+        ref=REF,
+        commit=SHA,
+        root=tmp_path,
+        handoff=OverrideHandoff(),
     )
     with FakeRunner() as runner:  # nothing runs
         outcome, _ = run([step], runner)
@@ -198,7 +206,13 @@ def test_build_refuses_an_unlisted_host_before_any_command(tmp_path: Path) -> No
     # the pair: a listed host passes on to compose -- the first command it runs
     listed_ = product(["api.github.com"], "blank")
     step = Build(
-        listed_, ENTRY, release=tmp_path / "r", ref=REF, commit=SHA, root=tmp_path
+        listed_,
+        ENTRY,
+        release=tmp_path / "r",
+        ref=REF,
+        commit=SHA,
+        root=tmp_path,
+        handoff=OverrideHandoff(),
     )
     # (the strict runner names the unplanned command when the plan is over)
     with pytest.raises(AssertionError, match="'config'"), FakeRunner() as runner:
@@ -452,8 +466,17 @@ def up(root: Path, code: int = 0) -> FakeCall:
     )
 
 
+LOGGED = f"{LOG_TAG} host={SENTINEL} port=443 status=403 result=TCP_DENIED"
+"""The access log's line of the refused sentinel (DM-45)."""
+
+
+def logs(*lines: str) -> FakeCall:
+    return call("docker", "logs", PROXY, lines=lines)
+
+
 def verify_calls(hosts: list[str]) -> list[FakeCall]:
-    return [ps(PROXY), *image(), seen(hosts), address()]
+    """DM-45: verify reads the access log back last."""
+    return [ps(PROXY), *image(), seen(hosts), address(), logs(LOGGED)]
 
 
 def step(root: Path, hosts: list[str], proxy: Proxy, ready_s: float = 30) -> Egress:
@@ -499,6 +522,7 @@ def test_first_proxy_is_written_started_and_read_back(tmp_path: Path) -> None:
         "image": SQUID_IMAGE,
         "refused": {SENTINEL: 403},
         "allowed": {"api.github.com": 200},
+        "log": LOGGED,  # DM-45: the refused sentinel in the proxy's own log
     }
     assert config_file(tmp_path).read_text() == config_text(hosts)
     assert oct(config_file(tmp_path).stat().st_mode & 0o777) == oct(0o644)
@@ -626,7 +650,7 @@ def test_verify_reads_the_proxy_and_its_behaviour(
 ) -> None:
     hosts = list(ZOOM)
     proxy = Proxy(hosts)
-    calls = verify_calls(hosts)
+    calls = verify_calls(hosts)[:-1]  # red before the log is read (DM-45)
     if change == "open":
         proxy.allowed = [*hosts, SENTINEL]
     elif change == "refuses":
@@ -774,3 +798,40 @@ def test_product_reaches_only_its_egress_hosts_by_render() -> None:
     assert allow == ["acl egress dstdomain -n api.github.com"]  # the pair
     assert lines[-len(lines) :].count("http_access deny all") == 1
     assert "github.com" not in allow[0].split()[3:]
+
+
+# --- DM-45: the proxy's access log ------------------------------------------------
+
+
+def test_the_log_names_host_port_and_result_and_never_a_path() -> None:
+    """squid logs to the container's stdout, one line a request, by codes of
+    the domain and the port alone: no ``%ru`` (a request that is not CONNECT
+    carries its path there), no ``none``; the pair: the format names the
+    host, the port, the status and squid's result."""
+    text = config_text(["api.github.com"])
+    assert "access_log none" not in text
+    assert f"logformat pridem {LOG_TAG} " in text
+    assert "access_log stdio:/dev/stdout pridem" in text
+    logformat = next(line for line in text.splitlines() if line.startswith("logformat"))
+    assert "%ru" not in logformat and "%>ru" not in logformat and "%rp" not in logformat
+    assert all(code in logformat for code in ("%>rd", "%>rP", "%>Hs", "%Ss"))
+
+
+def test_verify_waits_for_the_log_line_and_is_red_without_it(tmp_path: Path) -> None:
+    """The line of the refused sentinel may come late: ``verify`` reads the
+    log again until ``ready_s``; a log that never has it is ``log-missing``,
+    a line of another host or status is not it."""
+    hosts = ["api.github.com"]
+    write(tmp_path, hosts)
+    other = f"{LOG_TAG} host=api.github.com port=443 status=200 result=TCP_TUNNEL"
+    open_ = f"{LOG_TAG} host={SENTINEL} port=443 status=200 result=TCP_TUNNEL"
+    read = [ps(PROXY), *image(), seen(hosts), address()]
+    late = [*read, logs(), logs(other), logs(LOGGED)]
+    with FakeRunner(ps(PROXY), *image(), *late) as runner:
+        outcome, _ = run([step(tmp_path, hosts, Proxy(hosts))], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[0].verify["log"] == LOGGED
+    never = [*read, logs(open_)]
+    with FakeRunner(ps(PROXY), *image(), *never) as runner:
+        outcome, _ = run([step(tmp_path, hosts, Proxy(hosts), ready_s=0)], runner)
+    assert outcome.steps[0].reason == Code("egress:log-missing", {"host": SENTINEL})

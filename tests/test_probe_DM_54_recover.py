@@ -11,22 +11,57 @@ and ``open_journal`` on the ``Box``.
 """
 
 import io
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
+from passport_support import passport_example, section, write_passport
 from state_support import header, run_id
 
 from pridem.cli import run
 from pridem.events import Secrets
 from pridem.report.catalog import ENGLISH, Catalog
 from pridem.report.schema import Verdict
-from pridem.runner import FakeRunner
+from pridem.runner import CommandNotStarted, FakeRunner, OnLine, Result
 from pridem.state import Box, JournalHeader, JournalSink, Recovery
 from pridem.verbs import VERBS
 
 NO_SECRETS = Secrets(())
-ARGV = {"status": ["status"], "gc": ["gc"], "ssl": ["ssl", "renew"]}
+PASSPORT = "<passport>"
+"""Stands for a passport file of a test box the test writes."""
+ARGV = {
+    "status": ["status"],
+    "gc": ["gc"],
+    "ssl": ["ssl", "renew"],
+    "install": ["install", "--passport", PASSPORT],
+    "update": ["update", "--passport", PASSPORT],
+    "deploy": ["deploy", "main", "--passport", PASSPORT],
+    "doctor": ["doctor", "--passport", PASSPORT],
+    "reinstall": ["reinstall", "--passport", PASSPORT],
+    "destroy": ["destroy"],
+}
 """The command line of each verb with a verdict."""
+PLANS = {"install", "update", "deploy", "doctor", "reinstall", "destroy"}
+"""DM-45: the verbs of the box's plan; their steps run commands, which a
+runner refuses here (``Refusing``): the probe is about what comes before."""
+
+
+class Refusing:
+    """A runner that starts nothing: every command is ``not started``."""
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        expect: tuple[int, ...] = (0,),
+        timeout: float,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        on_line: OnLine,
+    ) -> Result:
+        raise CommandNotStarted(tuple(argv), "refused by the test")
+
+
 WITH_VERDICT = sorted(name for name, verb in VERBS.items() if verb.verdict and verb.box)
 """The verbs of the box that end with a verdict. DM-57 added ``check``: a
 verdict of a repository with no box -- no lock, no journal, nothing to recover
@@ -38,7 +73,7 @@ def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
     """The pair of the probe: the verbs it runs are not an empty list,
     ``version`` (no verdict) is not among them, and the verbs without a box
     are exactly ``check`` -- a new verb does not leave ``recover`` by a flag."""
-    assert WITH_VERDICT == ["gc", "ssl", "status"]
+    assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS])
     assert "version" in VERBS and not VERBS["version"].verdict
     assert {name for name, verb in VERBS.items() if not verb.box} == {"check"}
 
@@ -67,8 +102,15 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
     monkeypatch.setattr(Box, "recover", recover)
     monkeypatch.setattr(Box, "open_journal", open_journal)
     out, err = io.StringIO(), io.StringIO()
-    with FakeRunner() as runner:  # no passport: the verbs' steps run nothing
-        run(ARGV[name], root=root, out=out, err=err, runner=runner, fs_root=tmp_path)
+    data = passport_example()
+    section(data, "server")["role"] = "test"
+    file = write_passport(tmp_path, data)
+    argv = [str(file) if word == PASSPORT else word for word in ARGV[name]]
+    if name in PLANS:
+        run(argv, root=root, out=out, err=err, runner=Refusing(), fs_root=tmp_path)
+    else:
+        with FakeRunner() as runner:  # no passport: the verbs' steps run nothing
+            run(argv, root=root, out=out, err=err, runner=runner, fs_root=tmp_path)
     assert err.getvalue() == ""
     verdicts = {
         path.stem: Verdict.model_validate_json(path.read_text())
@@ -78,5 +120,5 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
     assert (dead.verb, dead.result) == ("deploy", "red")
     assert dead.report.incomplete[0].code == "no-verdict"
     [own] = verdicts.values()
-    assert own.verb == " ".join(ARGV[name])
+    assert own.verb == " ".join(ARGV[name][:2] if name == "ssl" else [name])
     assert order == ["recover", f"journal {own.verb}"]

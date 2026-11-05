@@ -23,14 +23,17 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
 from pridem.events import Code, Fact, Json
+from pridem.interrupt import Interrupt
 from pridem.report.codes import LOCAL_CODE
 from pridem.runner import OnLine, Runner
 
-Mode = Literal["install", "deploy", "reinstall", "gc", "renew"]
-"""The plans a step can belong to: the three of a deploy, and the one-step
-plans of the verbs ``gc`` and ``ssl renew``."""
+Mode = Literal["install", "deploy", "reinstall", "destroy", "gc", "renew"]
+"""The plans a step can belong to: the three of a deploy, ``destroy``, and the
+one-step plans of the verbs ``gc`` and ``ssl renew``."""
 Role = Literal["test", "prod", "preview"]
-MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall", "gc", "renew"})
+MODES: frozenset[Mode] = frozenset(
+    {"install", "deploy", "reinstall", "destroy", "gc", "renew"}
+)
 
 
 def local_code(code: str, params: Mapping[str, Json] | None = None) -> Code:
@@ -78,13 +81,16 @@ class StepFailed(Exception):
 
 @dataclass(frozen=True)
 class StepContext:
-    """What a step may use: the runner and an ``on_line`` bound to this step."""
+    """What a step may use: the runner, an ``on_line`` bound to this step and
+    the command's interrupt -- a step that waits asks it (``check``,
+    ``sleep``) whether a signal stops the wait."""
 
     runner: Runner
     mode: Mode
     role: Role
     stack: str
     on_line: OnLine
+    interrupt: Interrupt = field(default_factory=Interrupt)
 
 
 class Step(ABC):

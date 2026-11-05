@@ -253,7 +253,9 @@ class DeployKey(Step):
                         "wait_s": self.wait_s,
                     },
                 )
+            ctx.interrupt.check()  # a signal ends the wait (DM-45)
             self.sleep(self.poll_s)
+            ctx.interrupt.check()
 
     def _public(self) -> str:
         path = self._key.with_name(self._key.name + ".pub")

@@ -30,7 +30,12 @@ from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import Product, load_primer_yaml
 from pridem.steps.base import Step
 from pridem.steps.build import Build
-from pridem.steps.compose import ComposeStack, override_text, package_places
+from pridem.steps.compose import (
+    ComposeStack,
+    OverrideHandoff,
+    override_text,
+    package_places,
+)
 from pridem.steps.frontend import Frontend
 from pridem.steps.packages import Packages, package_mounts, volumes
 from pridem.steps.passport import Fetched
@@ -94,6 +99,7 @@ def packages(root: Path, fetched: Fetched, stack: Product) -> Packages:
         commit=SHA,
         fetched=fetched,
         root=root,
+        handoff=OverrideHandoff(),
     )
 
 
@@ -280,6 +286,7 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
         commit=SHA,
         root=root,
         fetched=fetched,
+        handoff=OverrideHandoff(),
     )
     script = [compose_raw_config(cs, lacking), compose_config(cs, lacking)]
     with FakeRunner(*script) as runner:  # nothing is built
@@ -400,6 +407,7 @@ def test_a_package_is_mounted_from_the_stack_dir_not_the_entry(tmp_path: Path) -
         commit=SHA,
         fetched=fetched,
         root=root,
+        handoff=OverrideHandoff(),
     )
     config = FakeCall(
         tuple(cs.product_argv("config", "--format", "json")),
@@ -471,3 +479,133 @@ def test_a_runtime_slot_without_a_package_is_green_with_no_mount(
         outcome = run([packages(root, fetched, stack)], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert outcome.steps[0].verify == {"packages": "none"}
+
+
+# --- DM-45: the override goes in place after a green validate ---------------------
+
+
+def _validate(package: Path, code: int) -> FakeCall:
+    labels = (
+        "--label",
+        "pridem.stack=blank",
+        "--label",
+        "pridem.release=main",
+        "--label",
+        f"pridem.commit={SHA}",
+    )
+    return FakeCall(
+        (
+            "docker",
+            "run",
+            "--rm",
+            *labels,
+            "-v",
+            f"{package / 'css'}:/srv/skin:ro",
+            FRONT_IMAGE,
+            "validate-skin",
+            "/srv/skin",
+        ),
+        code=code,
+    )
+
+
+def _image() -> FakeCall:
+    return FakeCall(
+        (
+            "docker",
+            "image",
+            "ls",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            "label=pridem.stack=blank",
+            "--filter",
+            f"label=pridem.commit={SHA}",
+            "--filter",
+            "label=pridem.service=frontend",
+        ),
+        lines=stdout(FRONT_IMAGE),
+    )
+
+
+@pytest.mark.parametrize("green", [False, True])
+def test_the_override_of_this_run_goes_in_place_only_after_a_green_validate(
+    tmp_path: Path, green: bool
+) -> None:
+    """``build`` left its override as the candidate and handed its text over;
+    ``packages`` reads the candidate (``stale``) and puts the text in place
+    after ``validate`` -- red: the override on disk is the old one and the
+    candidate is gone; the pair, green: the new one is in place."""
+    stack = made(tmp_path, skin_product("css"))
+    root, fetched, package = skin_box(tmp_path)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    cs.override.parent.mkdir(parents=True, exist_ok=True)
+    cs.override.write_text("old\n")
+    cs.candidate().override.write_text("new\n")
+    handoff = OverrideHandoff({ENTRY: "new\n"})
+    step = Packages(
+        stack,
+        ENTRY,
+        release=root / "release",
+        ref=REF,
+        commit=SHA,
+        fetched=fetched,
+        root=root,
+        handoff=handoff,
+    )
+    later = config_call(root, stack)
+    script = [
+        later,
+        *hash_calls(cs.candidate(), running={}),
+        later,
+        _image(),
+        _validate(package, 0 if green else 3),
+    ]
+    if green:
+        script += [later]  # verify reads the mounts back
+    with FakeRunner(*script) as runner:
+        outcome = run([step], runner)
+    assert not cs.candidate().override.exists()
+    if green:
+        assert outcome.code is ExitCode.OK, outcome.steps
+        assert cs.override.read_text() == "new\n"
+        assert outcome.steps[0].verify["override"] == str(cs.override)
+    else:
+        assert outcome.steps[0].reason is not None
+        assert outcome.steps[0].reason.code == "command-failed"
+        assert cs.override.read_text() == "old\n"
+
+
+def test_a_candidate_left_by_another_run_is_never_put_in_place(tmp_path: Path) -> None:
+    """A red run left its candidate on disk; this run's ``build`` had nothing
+    to do (no text handed over): ``packages`` does not put it in place --
+    the pair: it does put this run's text in place."""
+    stack = made(tmp_path, skin_product("css"))
+    root, fetched, _ = skin_box(tmp_path)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    cs.override.parent.mkdir(parents=True, exist_ok=True)
+    cs.override.write_text("old\n")
+    cs.candidate().override.write_text("unvalidated\n")
+    step = Packages(
+        stack,
+        ENTRY,
+        release=root / "release",
+        ref=REF,
+        commit=SHA,
+        fetched=fetched,
+        root=root,
+        handoff=OverrideHandoff(),
+    )
+    later = config_call(root, stack)
+    with FakeRunner(later, *hash_calls(cs), later) as runner:  # all on it
+        outcome = run([step], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert cs.override.read_text() == "old\n"
+    # the pair: this run's text goes in place
+    step.handoff.texts[ENTRY] = "mine\n"
+    cs.candidate().override.write_text("mine\n")
+    with FakeRunner(later, *hash_calls(cs.candidate()), later) as runner:
+        outcome = run([step], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert cs.override.read_text() == "mine\n"
+    assert not cs.candidate().override.exists()

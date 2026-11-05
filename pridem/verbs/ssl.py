@@ -12,7 +12,7 @@ from pridem.steps.base import Step
 from pridem.steps.passport import Fetched
 from pridem.steps.ssl import SslRenew
 from pridem.verbs.base import Context, Verb
-from pridem.verbs.run import run_plan_verb
+from pridem.verbs.run import one_stack, run_plan_verb
 
 SSL_STACK = "edge"
 
@@ -31,7 +31,7 @@ def _run(args: Strict, ctx: Context) -> int:
         return [SslRenew(fetched=fetched, secrets=secrets, root=ctx.fs_root)]
 
     return run_plan_verb(
-        ctx, verb=f"ssl {args.action}", mode="renew", stack=SSL_STACK, steps=steps
+        ctx, verb=f"ssl {args.action}", mode="renew", make=one_stack(SSL_STACK, steps)
     )
 
 

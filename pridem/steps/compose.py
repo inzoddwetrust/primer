@@ -67,7 +67,7 @@ import json
 import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pridem.events import Json, as_list
@@ -110,10 +110,17 @@ class ComposeStack:
     ref: str
     commit: str
     root: Path = Path("/")
+    next: bool = False
+    """The candidate override (``build``'s of this run) in place of the one on
+    disk: ``override`` names ``<entry>.next.yml``."""
 
     @property
     def name(self) -> str:
         return self.stack.name
+
+    def candidate(self) -> "ComposeStack":
+        """The same entry with the candidate override."""
+        return replace(self, next=True)
 
     @property
     def project(self) -> str:
@@ -129,7 +136,8 @@ class ComposeStack:
 
     @property
     def override(self) -> Path:
-        return self.root / "opt" / self.name / "compose" / f"{self.entry}.yml"
+        suffix = ".next.yml" if self.next else ".yml"
+        return self.root / "opt" / self.name / "compose" / f"{self.entry}{suffix}"
 
     @property
     def app_service(self) -> str | None:
@@ -656,6 +664,16 @@ def override_text(
     if volumes:
         rendered["volumes"] = volumes
     return json.dumps(rendered, indent=2, sort_keys=True) + "\n"
+
+
+@dataclass
+class OverrideHandoff:
+    """The override ``build`` rendered in this run, by entry: it waits as the
+    candidate (``ComposeStack.candidate``) until ``packages`` puts it in place
+    after a green ``validate``. Kept in memory only: a candidate a red run
+    left on disk is never put in place by a later run."""
+
+    texts: dict[str, str] = field(default_factory=dict)
 
 
 def write_override(compose: ComposeStack, text: str) -> None:

@@ -1,15 +1,18 @@
-"""Tier 3 probe (DM-19, DM-50, DM-20): the whole ``install`` of ``primer-blank``.
+"""Tier 3 probe (DM-19, DM-50, DM-20, DM-45): the whole cycle of ``primer-blank``
+by the machine's CLI.
 
-One plan installs the blank on a clean runner -- the host steps, the passport
-(a file), the timers, the sources (a ``file://`` mirror of the blank at its
-pinned commit, so no key of CI is needed), the blank's ladder (``seams_check``,
-``render_env``, ``build``, ``packages``, ``tests``, ``migrate``, ``egress``,
-``up``),
-``types``, the edge (``tls_files``, ``nginx``, ``ssl``), ``frontend``, the
-final check and ``finalize``, ``gc`` in ``finally`` -- and the same plan runs a
-second time, then once as ``doctor``. The blank is built and brought up once in
-the whole tier 3: every check of it lives here (DM-50), against what that one
-install left:
+``pridem install --passport <file>`` installs the blank on a clean runner with
+the plan the machine makes itself (DM-45) -- the host steps, the passport (a
+file), the timers, the sources (a ``file://`` mirror of the blank at its pinned
+commit, ``/srv/tier3/blank.git``, so no key of CI is needed), the blank's
+ladder (``seams_check``, ``render_env``, ``build``, ``packages``, ``tests``,
+``migrate``, ``egress``, ``up``), ``types``, the edge (``tls_files``,
+``nginx``, ``ssl``), ``frontend``, the final check and ``finalize``, ``gc`` in
+``finally``; ``pridem update`` runs it a second time, ``pridem doctor`` finds
+nothing to do, and ``pridem destroy`` -- the last test of the file -- takes it
+off the box. Every command is ``--json``: the verdict on stdout, the ladder on
+stderr. The blank is built and brought up once in the whole tier 3: every
+check of it lives here (DM-50), against what that one install left:
 
 - the env: modes, keys, the minted password -- the same on the second run,
   never printed --, ``docker compose config`` byte for byte;
@@ -36,7 +39,10 @@ through the machine's proxy and no other; the release after it, without
 ``egress``, has no proxy left. DM-61: a copy of the blank builds a skin
 package of a local repository into its frontend -- a new version rebuilds on
 the same commit, a skin its build refuses is red with the old one served,
-another edition is another image. Both deploy through the same mirror.
+another edition is another image. Both deploy through the same mirror, by
+``pridem update`` of a passport of their own; the log of the machine's proxy
+is printed (the measure of DM-45) and its line of the refused sentinel is in
+the fact of ``egress``.
 
 Two short checks need no install: what a single-quoted value is to compose,
 and that the tags certbot and squid are pinned by still name the pinned
@@ -61,7 +67,13 @@ from pridem.steps.edge import CERTBOT_IMAGE
 from pridem.steps.egress import SQUID_IMAGE
 
 PYTHON = "/opt/pridem/current/venv/bin/python"
+PRIDEM = "/usr/local/bin/pridem"
+"""The machine as the owner runs it: every install, update, doctor and destroy
+here is a command of its CLI, the plan is the machine's own (DM-45)."""
 BLANK = "https://github.com/inzoddwetrust/primer-blank.git"
+MIRROR = Path("/srv/tier3/blank.git")
+"""The blank's ``file://`` mirror the passport names: the machine fetches from
+it with no key of CI, and names the product's directory by it -- ``blank``."""
 BLANK_COMMIT = "f1649033f20854b0ee6a0370b98dd9caf1caf102"
 # the blank's published packages (DM-58): public, cloned over https by the
 # test, given to the machine as file:// mirrors; each tag's commit is pinned
@@ -94,136 +106,6 @@ GIT_ENV = {
     "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_CONFIG_NOSYSTEM": "1",
 }
-PLAN = """
-import json
-import sys
-from datetime import UTC, datetime
-from pathlib import Path
-from secrets import token_hex
-from pridem import __version__
-from pridem.events import ConsoleSink, Secrets
-from pridem.plan import Plan, StackSteps
-from pridem.report.catalog import ENGLISH, with_steps
-from pridem.report.schema import build_verdict
-from pridem.runner import SubprocessRunner
-from pridem.stacks.passport import load_passport
-from pridem.stacks.schema import load_primer_yaml
-from pridem.stacks.seams import SeamMemory
-from pridem.state import Box, JournalHeader
-from pridem.steps.build import Build
-from pridem.steps.egress import Egress
-from pridem.steps.env import RenderEnv, SeamsCheck
-from pridem.steps.finalize import FinalCheck, Finalize
-from pridem.steps.frontend import Frontend
-from pridem.steps.gc import GC_STACK, gc_steps
-from pridem.steps.host import host_steps
-from pridem.steps.migrate import Migrate
-from pridem.steps.nginx import Nginx
-from pridem.steps.packages import Packages
-from pridem.steps.passport import passport_steps
-from pridem.steps.sources import source_steps
-from pridem.steps.ssl import Ssl, TlsFiles
-from pridem.steps.tests import TestReport, Tests
-from pridem.steps.timers import timer_steps
-from pridem.steps.types import Types
-from pridem.steps.up import Up
-
-root, checkout, passport, mirror, commit, mode = (
-    Path("/"), Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4],
-    sys.argv[5],
-)
-blank = load_primer_yaml(checkout / "primer.yaml")
-release = Path("/opt/blank/releases") / commit
-box, secrets = Box(Path("/opt/pridem")), Secrets(())
-memory, report = SeamMemory(), TestReport()
-host, final = host_steps(root)
-fetched, first = passport_steps(root, secrets=secrets, server=None, file=passport)
-timers = timer_steps(root, fetched=fetched)
-_, sources = source_steps(
-    root, stack="blank", address=f"file://{mirror}", ref="main", tag=False,
-    packages=load_passport(passport).packages,
-)
-render = RenderEnv(
-    blank, product=blank, fetched=fetched, secrets=secrets, memory=memory, root=root
-)
-parts = {"release": release, "ref": "main", "commit": commit, "root": root}
-ladder = [
-    SeamsCheck(blank, {}, fetched), render,
-    Build(blank, "blank", **parts, fetched=fetched),
-    Packages(blank, "blank", **parts, fetched=fetched),
-    Tests(blank, "blank", **parts, report=report, secrets=secrets, fetched=fetched),
-    Migrate(blank, "blank", **parts, fetched=fetched),
-    Egress(blank, root=root),
-    Up(blank, "blank", **parts, memory=memory, render=render, fetched=fetched),
-]
-types = [Types(blank, "blank", **parts, role="test", branch="main", run_id="tier3",
-               push_to=f"file://{mirror}", git_dir=Path("/opt/blank/git"))]
-edge = [
-    TlsFiles(blank, fetched=fetched, root=root),
-    Nginx(blank, fetched=fetched, secrets=secrets, root=root),
-    Ssl(blank, fetched=fetched, secrets=secrets, root=root),
-]
-front = [Frontend(blank, fetched=fetched, root=root)]
-tail = [
-    FinalCheck(),
-    Finalize(
-        releases={"blank": release},
-        composition={"blank": commit, "pridem": __version__},
-        box=box, fetched=fetched, root=root,
-    ),
-]
-
-class Both:
-    def __init__(self, *sinks):
-        self.sinks = sinks
-    def emit(self, event):
-        for sink in self.sinks:
-            sink.emit(event)
-
-with box.lock("tier3-install"):
-    started = datetime.now(UTC).replace(microsecond=0)
-    run_id = f"{started:%Y-%m-%dT%H:%M:%SZ}-{token_hex(2)}"
-    journal = box.open_journal(
-        JournalHeader(run_id=run_id, verb=mode, mode=mode, args={},
-                      actor={"type": "machine", "via": "local"}, started=started,
-                      composition_before={"pridem": __version__}),
-        secrets,
-    )
-    clean = gc_steps(root, box=box, run_id=run_id, fetched=fetched)
-    try:
-        outcome = Plan(
-            [StackSteps("host", host), StackSteps("passport", first),
-             StackSteps("timers", timers),
-             StackSteps("sources", sources), StackSteps("blank", ladder),
-             StackSteps("types", types), StackSteps("edge", edge),
-             StackSteps("frontend", front), StackSteps("finalize", tail, root=True)],
-            mode=mode, role="test", runner=SubprocessRunner(),
-            sink=Both(ConsoleSink(sys.stdout, secrets), journal),
-            finally_=[StackSteps("host", final), StackSteps(GC_STACK, clean)],
-        ).run()
-    finally:
-        journal.close()
-    if mode == "doctor":  # what doctor would do, and what it found red
-        print("DIFF " + json.dumps([item.reason.code for item in outcome.doctor_diff]))
-        failed = [r.reason.code for r in outcome.steps if r.reason is not None]
-        print("FAILED " + json.dumps(failed))
-        sys.exit(0)
-    every = [*host, *first, *timers, *sources, *ladder, *types, *edge, *front, *tail,
-             *final, *clean]
-    verdict = build_verdict(
-        outcome, run_id=run_id, verb="install", args={},
-        actor={"type": "machine", "via": "local"}, started=started,
-        finished=datetime.now(UTC).replace(microsecond=0),
-        passport_version=fetched.passport.version if fetched.passport else None,
-        composition_before={"pridem": __version__},
-        composition_after={"blank": commit, "pridem": __version__}, secrets=secrets,
-        catalog=with_steps(ENGLISH, [(step.name, step.codes) for step in every]),
-        failures=report.failures, junit=report.junit,
-    )
-    box.write_verdict(verdict)
-print("VERDICT " + verdict.model_dump_json())
-sys.exit(int(verdict.exit_code))
-"""
 DAEMON_JSON_DEPLOY = """
 import json
 from pathlib import Path
@@ -323,7 +205,7 @@ def _passport(
         "version": version,
         "server": {"name": "tier3-env", "role": "test", "os": "ubuntu-24.04"},
         "edition": edition,
-        "product": {"repo": BLANK, "ref": REF},
+        "product": {"repo": f"file://{MIRROR}", "ref": REF},
         "domains": {"frontend": FRONTEND, "api": API},
         "access": {"mode": "deploy-keys"},
         "asked": {},
@@ -367,33 +249,51 @@ def _journal_tail(verdict: Verdict) -> str:
     return "\n--- journal tail ---\n" + "\n".join(tail)
 
 
-def _install(
-    checkout: Path,
-    passport: Path,
-    mirror: Path,
-    commit: str = BLANK_COMMIT,
-    mode: str = "install",
-) -> tuple[Verdict, str]:
-    lines = _run(
-        [
-            PYTHON,
-            "-c",
-            PLAN,
-            str(checkout),
-            str(passport),
-            str(mirror),
-            commit,
-            mode,
-        ],
-        timeout=3600,
-        expect=(0, 1, 2),
-    )
-    printed = "\n".join(lines)
-    [line] = [x for x in lines if x.startswith("VERDICT ")]
-    verdict = Verdict.model_validate_json(line.removeprefix("VERDICT "))
+def _pridem(*args: str, timeout: float = 3600) -> tuple[int, list[str], list[str]]:
+    """A command of the machine's CLI: its exit code, stdout and stderr."""
+    out: list[str] = []
+    err: list[str] = []
+
+    def keep(stream: Stream, line: str, cut: bool) -> None:
+        (out if stream is Stream.STDOUT else err).append(line)
+
+    try:
+        result = SubprocessRunner().run(
+            [PRIDEM, *args], expect=(0, 1, 2), timeout=timeout, on_line=keep
+        )
+    except CommandTimedOut:
+        raise AssertionError("\n".join([*err, *out])) from None
+    return result.code, out, err
+
+
+def _verdict_of(*args: str) -> tuple[Verdict, str]:
+    """``pridem --json <args>``: the verdict on stdout, the ladder on stderr --
+    printed with the journal's tail when the run is not green."""
+    code, out, err = _pridem("--json", *args)
+    printed = "\n".join(err)
+    try:
+        verdict = Verdict.model_validate_json("\n".join(out))
+    except ValueError:
+        raise AssertionError(f"exit {code}\n{printed}\n" + "\n".join(out)) from None
+    assert int(verdict.exit_code) == code, printed
     if verdict.result != "green":
         printed += _journal_tail(verdict)
     return verdict, printed
+
+
+def _install(passport: Path, verb: str = "install") -> tuple[Verdict, str]:
+    """``pridem install`` or ``pridem update`` of the passport ``passport``;
+    the blank is what the mirror's ``main`` holds."""
+    return _verdict_of(verb, "--passport", str(passport))
+
+
+def _doctor(passport: Path) -> tuple[object, object, Verdict]:
+    """``(diff, failed, verdict)`` of ``pridem doctor``: the codes of what it
+    would do and of the checks that are red."""
+    verdict, printed = _verdict_of("doctor", "--passport", str(passport))
+    diff = [item.code for item in verdict.report.doctor_diff or []]
+    failed = [s.reason.code for s in verdict.steps if s.status == "failed" and s.reason]
+    return diff, failed, verdict
 
 
 def _env() -> dict[str, str]:
@@ -525,7 +425,8 @@ def _curl(tmp: Path, url: str, host: str) -> tuple[str, str]:
 def mirror(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The blank's mirror the sources fetch from: one for the whole install and
     for the deploys of DM-64, which push their own commits to it."""
-    return tmp_path_factory.mktemp("mirror") / "blank-mirror.git"
+    MIRROR.parent.mkdir(parents=True, exist_ok=True)
+    return MIRROR
 
 
 def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> None:
@@ -535,7 +436,7 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
         ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
     )
 
-    verdict, printed = _install(checkout, passport, mirror)
+    verdict, printed = _install(passport)
 
     # the install (R1, W1)
     assert verdict.result == "green", printed
@@ -573,8 +474,9 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     container = _app()
     started = _docker_started()
 
-    # the second run (R9, U4): the same password, nothing recreated, not printed
-    again, printed_again = _install(checkout, passport, mirror)
+    # the second run (R9, U4), ``update``: the same password, nothing
+    # recreated, not printed
+    again, printed_again = _install(passport, "update")
     # ... and docker not restarted: daemon.json already as drawn (DM-53)
     assert _docker_started() == started, printed_again
 
@@ -584,23 +486,8 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     assert _app() == container, printed_again
 
     # doctor on an unchanged box: nothing to do (TZ 7.1; DM-51)
-    out = _run(
-        [
-            PYTHON,
-            "-c",
-            PLAN,
-            str(checkout),
-            str(passport),
-            str(mirror),
-            BLANK_COMMIT,
-            "doctor",
-        ],
-        timeout=1800,
-    )
-    [diff] = [x for x in out if x.startswith("DIFF ")]
-    [red] = [x for x in out if x.startswith("FAILED ")]
-    assert json.loads(diff.removeprefix("DIFF ")) == [], out
-    assert json.loads(red.removeprefix("FAILED ")) == [], out
+    diff, red, doctor = _doctor(passport)
+    assert (diff, red) == ([], []), doctor.model_dump_json()
 
     # compose config byte for byte (R10)
     compose_file = Path(RELEASE) / "docker-compose.yml"
@@ -913,7 +800,7 @@ def test_probe_DM_64_product_reaches_only_its_egress_hosts(
     _git("-C", str(copy), "commit", "-q", "-am", "DM-64: egress of the blank")
     [commit] = _git("-C", str(copy), "rev-parse", "HEAD")
     _git("-C", str(copy), "push", "-q", str(mirror), "HEAD:refs/heads/main")
-    verdict, printed = _install(copy, passport, mirror, commit, "deploy")
+    verdict, printed = _install(passport, "update")
     assert verdict.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
     egress = facts[("blank", "egress")]
@@ -921,6 +808,13 @@ def test_probe_DM_64_product_reaches_only_its_egress_hosts(
     allowed = egress["allowed"]
     assert isinstance(allowed, dict) and allowed[EGRESS_HOST] != 403, egress
     assert len(_proxies()) == 1
+    # DM-45: the proxy's access log, measured -- printed, then the fact read
+    [proxy] = _proxies()
+    logged = _run(["docker", "logs", "--tail", "40", proxy])
+    warnings.warn("squid log:\n" + "\n".join(logged), stacklevel=1)
+    line = egress["log"]
+    assert isinstance(line, str) and line.startswith("pridem-egress host="), egress
+    assert "/" not in line.partition(" host=")[2], line  # no path, ever
     after = _reach()
     assert after["HTTPS_PROXY"] == after["https_proxy"] == PROXY, after
     assert after["via_allowed"] == "reached", after  # the pair
@@ -930,14 +824,8 @@ def test_probe_DM_64_product_reaches_only_its_egress_hosts(
     assert after["direct_allowed"] != "reached", after
     assert after["direct_address"] != "reached", after
     # doctor on that box: nothing to do
-    out = _run(
-        [PYTHON, "-c", PLAN, str(copy), str(passport), str(mirror), commit, "doctor"],
-        timeout=1800,
-    )
-    [diff] = [x for x in out if x.startswith("DIFF ")]
-    [red] = [x for x in out if x.startswith("FAILED ")]
-    assert json.loads(diff.removeprefix("DIFF ")) == [], out
-    assert json.loads(red.removeprefix("FAILED ")) == [], out
+    diff, red, doctor = _doctor(passport)
+    assert (diff, red) == ([], []), doctor.model_dump_json()
     # the routes still answer: nginx publishes through its own network
     api, _ = _curl(tmp_path, "https://localhost/openapi.json", API)
     assert api.startswith("200"), api
@@ -945,7 +833,7 @@ def test_probe_DM_64_product_reaches_only_its_egress_hosts(
     # the release after it, without egress: the proxy is gone, no way out still
     _run(["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", base])
     _run(["git", "-C", str(copy), "checkout", "-q", base], env=GIT_ENV)
-    back, printed = _install(copy, passport, mirror, base, "deploy")
+    back, printed = _install(passport, "update")
     assert back.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in back.steps}
     assert facts[("blank", "egress")] == {"hosts": [], "proxy": "absent"}, facts
@@ -1125,7 +1013,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     _git("-C", str(copy), "push", "-q", str(mirror), "HEAD:refs/heads/main")
 
     # version 1.0.0, edition core: built with the skin
-    first, printed = _install(copy, passport(2, "1.0.0"), mirror, commit, "deploy")
+    first, printed = _install(passport(2, "1.0.0"), "update")
     assert first.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in first.steps}
     keys = facts[("blank", "build")]["keys"]
@@ -1139,7 +1027,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     assert isinstance(images, dict)
 
     # version 1.1.0 on the same commit: frontend rebuilt, app the same image
-    second, printed = _install(copy, passport(3, "1.1.0"), mirror, commit, "deploy")
+    second, printed = _install(passport(3, "1.1.0"), "update")
     assert second.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in second.steps}
     again = facts[("blank", "build")]["images"]
@@ -1149,23 +1037,21 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     assert _body("/skin/skin.css", FRONTEND) == "two"
 
     # the same version again: no build (the step has nothing to do)
-    same, printed = _install(copy, passport(3, "1.1.0"), mirror, commit, "deploy")
+    same, printed = _install(passport(3, "1.1.0"), "update")
     assert same.result == "green", printed
     [build] = [s for s in same.steps if (s.stack, s.name) == ("blank", "build")]
     assert build.status == "ok" and build.verify is not None, build
     assert build.verify["images"] == again, (again, build.verify)
 
     # version 1.2.0 has no skin.css: the build is red, version 1.1.0 stays
-    bad, printed = _install(copy, passport(4, "1.2.0"), mirror, commit, "deploy")
+    bad, printed = _install(passport(4, "1.2.0"), "update")
     assert bad.result != "green", printed
     [red] = [s for s in bad.steps if s.status == "failed"]
     assert (red.stack, red.name) == ("blank", "build"), bad.steps
     assert _body("/skin/skin.css", FRONTEND) == "two"
 
     # edition full, version 1.1.0: an image of its own, not core's
-    full, printed = _install(
-        copy, passport(5, "1.1.0", "full"), mirror, commit, "deploy"
-    )
+    full, printed = _install(passport(5, "1.1.0", "full"), "update")
     assert full.result == "green", printed
     assert _body("/edition.txt", FRONTEND) == "full"
     # the pair on the backend: EDITION of the passport reached app
@@ -1183,7 +1069,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
 
     # back to edition core, version 1.1.0: green, core again on both sides --
     # from a living image or a build from the cache, whichever docker keeps
-    back, printed = _install(copy, passport(6, "1.1.0"), mirror, commit, "deploy")
+    back, printed = _install(passport(6, "1.1.0"), "update")
     assert back.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in back.steps}
     assert facts[("blank", "build")]["keys"] == {
@@ -1193,23 +1079,8 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     assert _body("/skin/skin.css", FRONTEND) == "two"
     assert _app_health()["edition"] == "core"
     # doctor on that box: nothing to do
-    out = _run(
-        [
-            PYTHON,
-            "-c",
-            PLAN,
-            str(copy),
-            str(passport(6, "1.1.0")),
-            str(mirror),
-            commit,
-            "doctor",
-        ],
-        timeout=1800,
-    )
-    [diff] = [x for x in out if x.startswith("DIFF ")]
-    [failed] = [x for x in out if x.startswith("FAILED ")]
-    assert json.loads(diff.removeprefix("DIFF ")) == [], out
-    assert json.loads(failed.removeprefix("FAILED ")) == [], out
+    diff, failed, doctor = _doctor(passport(6, "1.1.0"))
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
 
 
 BLUE = "--color-brand-primary: #1a73e8;"
@@ -1269,20 +1140,6 @@ def _texts() -> object:
     return json.loads(_body("/texts.json", FRONTEND))
 
 
-def _doctor(checkout: Path, passport: Path, mirror: Path) -> tuple[object, object]:
-    """``(diff, failed)`` of ``doctor`` at ``BLANK_COMMIT``."""
-    out = _run(
-        [PYTHON, "-c", PLAN, str(checkout), str(passport), str(mirror)]
-        + [BLANK_COMMIT, "doctor"],
-        timeout=1800,
-    )
-    [diff] = [x for x in out if x.startswith("DIFF ")]
-    [failed] = [x for x in out if x.startswith("FAILED ")]
-    return json.loads(diff.removeprefix("DIFF ")), json.loads(
-        failed.removeprefix("FAILED ")
-    )
-
-
 def _packages_fact(verdict: Verdict) -> object:
     [step] = [s for s in verdict.steps if (s.stack, s.name) == ("blank", "packages")]
     return (step.verify or {}).get("packages")
@@ -1313,7 +1170,6 @@ def test_probe_DM_58_skin_version_switch_needs_no_rebuild(
     stays. The texts by language: ``ru`` of the package gives the title alone,
     the page takes the rest from its built-in ``ru``."""
     assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
-    checkout = _blank(tmp_path)
     _run(
         ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
     )
@@ -1327,7 +1183,7 @@ def test_probe_DM_58_skin_version_switch_needs_no_rebuild(
         return _passport(tmp_path, version=version, packages=packages)
 
     def deploy(file: Path) -> tuple[Verdict, str]:
-        return _install(checkout, file, mirror, BLANK_COMMIT, "deploy")
+        return _install(file, "update")
 
     first, printed = deploy(passport(10, skin, "1.0.0"))
     assert first.result == "green", printed
@@ -1356,7 +1212,7 @@ def test_probe_DM_58_skin_version_switch_needs_no_rebuild(
     assert back.result == "green", printed
     assert BLUE in _body("/skin.css", FRONTEND)
     assert _service_image("frontend") == image
-    assert _doctor(checkout, passport(12, skin, "1.0.0"), mirror) == ([], [])
+    assert _doctor(passport(12, skin, "1.0.0"))[:2] == ([], [])
 
     # a skin validate-skin refuses: red at packages, the look stays
     broken = _broken_skin(tmp_path, skin)
@@ -1376,7 +1232,6 @@ def test_tier3_both_slots_from_one_brand_package_by_subpath(
     """DM-58: both slots of the blank from ``primer-blank-brand`` at one tag,
     each by its ``subpath`` -- the brand's color and texts."""
     assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
-    checkout = _blank(tmp_path)
     _run(
         ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
     )
@@ -1386,7 +1241,7 @@ def test_tier3_both_slots_from_one_brand_package_by_subpath(
         "texts": {"repo": brand, "version": "1.0.0", "subpath": "texts"},
     }
     file = _passport(tmp_path, version=14, packages=packages)
-    verdict, printed = _install(checkout, file, mirror, BLANK_COMMIT, "deploy")
+    verdict, printed = _install(file, "update")
     assert verdict.result == "green", printed
     assert _packages_fact(verdict) == {
         "skin": "primer-blank-brand@1.0.0",
@@ -1395,7 +1250,7 @@ def test_tier3_both_slots_from_one_brand_package_by_subpath(
     css = _body("/skin.css", FRONTEND)
     assert MAGENTA in css and BLUE not in css, css
     assert _texts() == BRAND_TEXTS
-    assert _doctor(checkout, file, mirror) == ([], [])
+    assert _doctor(file)[:2] == ([], [])
 
 
 def _check(directory: Path) -> tuple[int, dict[str, object]]:
@@ -1467,3 +1322,31 @@ def test_tier3_certbot_tag_has_the_pinned_digest(image: str) -> None:
         )
     )
     assert f"{repository}@{digest}" in digests, (tag, digests)
+
+
+def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
+    """The last of the cycle (DM-45): ``pridem destroy`` -- every container,
+    network, volume and image labelled ``pridem.stack`` gone (the blank has no
+    persistent entry), ``/opt/blank`` down to its ``minted.yaml``, the edge's
+    and the proxy's directories gone, the timers gone, ``state.json`` gone;
+    ``history/`` and the passport's copy stay. The pair: ``destroy`` again has
+    nothing to do and is green."""
+    assert Path("/opt/blank/current").is_symlink(), "the install runs first"
+    verdict, printed = _verdict_of("destroy")
+    assert verdict.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    assert facts[("destroy", "remove_objects")]["kept_volumes"] == [], facts
+    for kind in ("ps -aq", "network ls -q", "volume ls -q", "image ls -q"):
+        left = _stdout(["docker", *kind.split(), "--filter", "label=pridem.stack"])
+        assert left == [], (kind, left)
+    assert sorted(str(p) for p in Path("/opt/blank").rglob("*")) == [
+        "/opt/blank/env",
+        str(MINTED),
+    ]
+    for gone in ("/opt/pridem/edge", "/opt/pridem/egress", "/opt/pridem/state.json"):
+        assert not Path(gone).exists(), gone
+    assert not Path("/etc/systemd/system/pridem-gc.timer").exists()
+    assert Path("/opt/pridem/passport.yaml").is_file()
+    assert any(Path("/opt/pridem/history").glob("*.json"))
+    again, printed = _verdict_of("destroy")
+    assert again.result == "green", printed

@@ -175,9 +175,10 @@ def image_call(cs: ComposeStack, service: str, *ids: str) -> FakeCall:
 
 
 def build_call(cs: ComposeStack, code: int = 0) -> FakeCall:
+    """DM-45: the build runs on the candidate override (``<entry>.next.yml``)."""
     return FakeCall(
         tuple(
-            cs.argv(
+            cs.candidate().argv(
                 "build",
                 "--build-arg",
                 f"PRIMER_RELEASE={cs.ref}",
@@ -394,3 +395,12 @@ def run(
         restore=[StackSteps(ENTRY, restore, root=True)] if restore else (),
     ).run()
     return outcome, sink
+
+
+def placed(cs: ComposeStack) -> None:
+    """The candidate override put in place, as ``packages`` does after a green
+    ``validate`` (DM-45): for a test whose plan has ``build`` alone and runs
+    it again on a box where the run went green."""
+    candidate = cs.candidate().override
+    cs.override.write_text(candidate.read_text())
+    candidate.unlink()

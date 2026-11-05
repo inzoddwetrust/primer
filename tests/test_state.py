@@ -295,9 +295,12 @@ def test_run_dead_before_its_first_step_is_red_from_the_header(
 
 
 def test_recovery_runs_once_and_skips_runs_with_a_verdict(tmp_path: Path) -> None:
+    """DM-45: one hold of the lock is one session with one journal; each run
+    of the scene takes the lock of its own, the assertions are unchanged."""
     box = Box(tmp_path)
-    with box.lock("a"):
+    with box.lock("one"):
         box.open_journal(header(run_id(1)), SECRETS).close()
+    with box.lock("a"):
         box.open_journal(header(run_id(2)), SECRETS).close()
         box.write_verdict(verdict(run_id(2)))
         done = box.recover(SECRETS, "0.3.1")
@@ -307,9 +310,12 @@ def test_recovery_runs_once_and_skips_runs_with_a_verdict(tmp_path: Path) -> Non
 
 
 def test_journal_budget_keeps_a_current_journal_over_budget(tmp_path: Path) -> None:
+    """DM-45: one hold of the lock is one session with one journal; each run
+    of the scene takes the lock of its own, the assertions are unchanged."""
     box = Box(tmp_path)
-    with box.lock("a"):
+    with box.lock("one"):
         box.open_journal(header(run_id(1)), SECRETS).close()
+    with box.lock("a"):
         current = box.open_journal(header(run_id(2)), SECRETS)
         for n in range(50):
             current.emit(LogLine("main", "aivis", "up", Stream.STDOUT, f"line {n}"))
@@ -356,20 +362,23 @@ def test_state_model_has_no_null(tmp_path: Path) -> None:
 
 
 def _orphan(box: Box, run: str) -> Path:
-    """A run that finished one step, logged a line and died."""
-    sink = box.open_journal(header(run), SECRETS)
-    record = StepRecord("aivis", "build", 6, "ok", None, None, 1.0, {"id": "x"})
-    sink.emit(StepFinished("main", record))
-    sink.emit(LogLine("main", "aivis", "up", Stream.STDOUT, "working"))
-    sink.close()
+    """A run that finished one step, logged a line and died -- under a hold
+    of the lock of its own (DM-45: one session, one journal)."""
+    with box.lock(f"dying {run}"):
+        sink = box.open_journal(header(run), SECRETS)
+        record = StepRecord("aivis", "build", 6, "ok", None, None, 1.0, {"id": "x"})
+        sink.emit(StepFinished("main", record))
+        sink.emit(LogLine("main", "aivis", "up", Stream.STDOUT, "working"))
+        sink.close()
     return box.journals / f"{run}.jsonl"
 
 
 def test_damage_after_the_header_is_its_own_red_verdict(tmp_path: Path) -> None:
+    """DM-45: one hold of the lock is one session with one journal; each run
+    of the scene takes the lock of its own, the assertions are unchanged."""
     box = Box(tmp_path)
-    with box.lock("dying"):
-        damaged = _orphan(box, run_id(1))
-        _orphan(box, run_id(2))
+    damaged = _orphan(box, run_id(1))
+    _orphan(box, run_id(2))
     lines = damaged.read_text(encoding="utf-8").splitlines()
     damaged.write_text("\n".join([lines[0], lines[1], "{oops", lines[2]]) + "\n")
     with box.lock("next"):
@@ -391,10 +400,11 @@ def test_damage_after_the_header_is_its_own_red_verdict(tmp_path: Path) -> None:
 
 
 def test_damaged_header_is_quarantined_and_recovery_goes_on(tmp_path: Path) -> None:
+    """DM-45: one hold of the lock is one session with one journal; each run
+    of the scene takes the lock of its own, the assertions are unchanged."""
     box = Box(tmp_path)
-    with box.lock("dying"):
-        bad = _orphan(box, run_id(1))
-        _orphan(box, run_id(2))
+    bad = _orphan(box, run_id(1))
+    _orphan(box, run_id(2))
     bad.write_text("{not a header\n" + "\n".join(bad.read_text().splitlines()[1:]))
     with box.lock("next"):
         done = box.recover(SECRETS, "0.3.1")
@@ -409,11 +419,13 @@ def test_damaged_header_is_quarantined_and_recovery_goes_on(tmp_path: Path) -> N
 
 
 def test_eviction_counts_quarantine_oldest_first(tmp_path: Path) -> None:
+    """DM-45: one hold of the lock is one session with one journal; each run
+    of the scene takes the lock of its own, the assertions are unchanged."""
     box = Box(tmp_path)
+    _orphan(box, run_id(1)).rename(box.journals / f"{run_id(1)}.jsonl.damaged")
+    _orphan(box, run_id(2))
+    _orphan(box, run_id(3))
     with box.lock("a"):
-        _orphan(box, run_id(1)).rename(box.journals / f"{run_id(1)}.jsonl.damaged")
-        _orphan(box, run_id(2))
-        _orphan(box, run_id(3))
         sizes = sorted(p.stat().st_size for p in box.journals.iterdir())
         fact = box.evict_journals(sizes[0] + sizes[1], keep=run_id(3))
     assert fact["evicted"] == [run_id(1)]

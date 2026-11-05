@@ -1,11 +1,13 @@
 """Scripted steps, a recording sink and fixed clocks for plan tests (DM-6)."""
 
+import signal
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from itertools import count
 
 from pridem.events import Code, Event, Fact, LogLine, PlanMode, StepFinished
-from pridem.plan import Plan, StackSteps
+from pridem.interrupt import Interrupt
+from pridem.plan import Plan, Stack, StackSteps
 from pridem.runner import FakeRunner, Runner
 from pridem.steps.base import (
     CheckResult,
@@ -69,7 +71,13 @@ class ScriptedStep(Step):
         fact: Fact | None = None,
         verify_raises: BaseException | None = None,
         incomplete: Code | None = None,
+        signal_in: str | None = None,
+        signal_stops: bool = True,
     ) -> None:
+        """``signal_in``: the phase in which a SIGTERM arrives; with
+        ``signal_stops`` the step then asks the interrupt, as a command or a
+        wait of a real step does, and is stopped there unless it runs shielded
+        (``finally``); without, the signal lands after its last command."""
         self.name = name
         self.order = order
         self.modes = modes
@@ -83,9 +91,15 @@ class ScriptedStep(Step):
         self._fact: Fact = {"done": name} if fact is None else fact
         self._verify_raises = verify_raises
         self._incomplete = incomplete
+        self._signal_in = signal_in
+        self._signal_stops = signal_stops
 
     def _log(self, ctx: StepContext, phase: str) -> None:
         self._journal.append(f"{ctx.stack}/{self.name}:{phase}")
+        if self._signal_in == phase:
+            ctx.interrupt.receive(signal.SIGTERM)
+            if self._signal_stops:
+                ctx.interrupt.check()
 
     def check(self, ctx: StepContext) -> CheckResult:
         self._log(ctx, "check")
@@ -122,13 +136,14 @@ def red(
 
 
 def plan(
-    stacks: Sequence[StackSteps],
+    stacks: Sequence[Stack],
     mode: PlanMode = "deploy",
     *,
     role: Role = "test",
     runner: Runner | None = None,
     restore: Sequence[StackSteps] = (),
     finally_: Sequence[StackSteps] = (),
+    interrupt: Interrupt | None = None,
 ) -> tuple[Plan, ListSink]:
     sink = ListSink()
     ticks = count()
@@ -142,5 +157,6 @@ def plan(
         finally_=finally_,
         clock=lambda: float(next(ticks)),
         now=lambda: NOW,
+        interrupt=interrupt,
     )
     return built, sink

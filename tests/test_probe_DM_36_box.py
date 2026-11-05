@@ -29,13 +29,15 @@ DAMAGED_STATE = [
 
 
 def _journal(box: Box, run: str) -> Path:
-    """A run that finished a step, logged a line and died."""
-    sink = box.open_journal(header(run), SECRETS)
-    sink.emit(StepStarted("main", "aivis", "build", 6, STARTED))
-    record = StepRecord("aivis", "build", 6, "ok", None, STARTED, 1.0, {"id": "x"})
-    sink.emit(StepFinished("main", record))
-    sink.emit(LogLine("main", "aivis", "up", Stream.STDOUT, "working"))
-    sink.close()
+    """A run that finished a step, logged a line and died -- under a hold of
+    the lock of its own (DM-45: one session, one journal)."""
+    with box.lock(f"dying {run}"):
+        sink = box.open_journal(header(run), SECRETS)
+        sink.emit(StepStarted("main", "aivis", "build", 6, STARTED))
+        record = StepRecord("aivis", "build", 6, "ok", None, STARTED, 1.0, {"id": "x"})
+        sink.emit(StepFinished("main", record))
+        sink.emit(LogLine("main", "aivis", "up", Stream.STDOUT, "working"))
+        sink.close()
     return box.journals / f"{run}.jsonl"
 
 
@@ -45,8 +47,8 @@ def test_probe_DM_36_torn_utf8_never_blocks_the_box(tmp_path: Path) -> None:
     its strength.
     """
     box = Box(tmp_path)
-    with box.lock("dying"):
-        torn, middle, head = (_journal(box, run_id(n)) for n in (1, 2, 3))
+    # DM-45: each dying run held the lock of its own
+    torn, middle, head = (_journal(box, run_id(n)) for n in (1, 2, 3))
     # the writer died inside a two-byte character of its last line
     torn.write_bytes(torn.read_bytes() + b'{"event": "log", "line": "\xd0')
     lines = middle.read_bytes().split(b"\n")
@@ -78,8 +80,7 @@ def test_probe_DM_36_damaged_state_is_quarantined(
     its strength.
     """
     box = Box(tmp_path)
-    with box.lock("dying"):
-        _journal(box, run_id(1))
+    _journal(box, run_id(1))  # DM-45: the dying run holds the lock of its own
     (tmp_path / "state.json").write_bytes(content)
     with box.lock("next"):
         done = box.recover(SECRETS, "0.3.1")
