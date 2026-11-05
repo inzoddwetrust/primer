@@ -1,0 +1,518 @@
+"""The services of a product on its box (TZ 6.2 item 6, 7.1, 11; protocol 4,
+4.3-4.7; contract 3 rules 11, 13, 21).
+
+Each co-located service of the edition goes up by its own ladder before the
+product, in the order of ``installed`` (``stacks/seams.py``): ``render_env ->
+build -> data_copy -> migrate -> up``; ``up`` checks it live (conformance,
+``/health``) and only then puts its ``provides`` in the plan's memory, so
+the product's ``render_env`` -- and every step of the product after it -- waits
+for every service. A service's tests are its CI's (protocol 7.4): none here.
+
+``data_copy`` -- the form D of protocol 4.5. The product gives a service a
+directory of its release (``dependencies.<s>.data.<kind>``) or the section of a
+package (``packages.<slot>.mount`` with ``dependency: <s>``, the kind is the
+slot); the service takes the kind (``accepts.<kind>: {validate, env}``;
+``seams_check`` refuses a kind it does not take). The directory is copied to
+``/opt/<service>/data/<product>@<release>/<kind>`` -- outside the service's
+release, a worktree ``sources`` resets -- in ``<kind>.tmp`` and renamed; the
+service gets it read-only at ``/primer/data/<kind>``, the path under the
+variable ``env`` names, both by the machine's override (``build`` renders
+them). A directory that is not there is ``data-missing``; one with a symlink
+leading out of where it comes from is ``data-unsafe``, before anything is
+copied.
+
+``validate`` of the kind runs in a throwaway container of the service's new
+image, the copy mounted, with no network -- before the service's ``migrate``,
+the point of no return: red (``validate-failed``) leaves the override on disk
+as it was, so the running service stays on its old data and its old image,
+and the plan stops before the service and the product (protocol 4.5, 4.6:
+the machine joins no data). Green puts the override ``build`` rendered in
+place, as ``packages`` does for the product; ``up`` then restarts the service
+on it. A copy is validated when it is new or changed, and every copy when the
+service's application is not on its configuration (another image, another
+override): "the target image" of protocol 4.5. With nothing to copy the step
+only puts the override in place.
+
+``remote_check`` -- a ``remote`` dependency of the edition (rule 13) is on its
+own box and talks only to comms (protocol 4.3): it is neither fetched nor run
+here. What this box knows of it is checked: the lock pins its tag and commit
+(``check_lock`` read the remote for them) and the values its seams come as --
+the product's ``param`` and ``asked`` -- are named.
+
+``seams_verify`` -- after the product's ``up``: every seam is held by the live
+provider, not by a file. For a seam of the product from a service, the name is
+among ``/health.seams.provides`` of that service; for a ``requires`` of a
+service, among the product's; a stack that takes a seam says
+``requires_satisfied: true``.
+"""
+
+import hashlib
+import json
+import shlex
+import shutil
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import ClassVar
+
+from pridem.conformance.stack import observe
+from pridem.events import Json
+from pridem.runner import CommandFailed
+from pridem.stacks.passport import Passport
+from pridem.stacks.schema import Asked, Param, Product, Seam, Service
+from pridem.stacks.seams import used_remote
+from pridem.steps.base import (
+    CheckResult,
+    Mode,
+    Step,
+    StepContext,
+    StepFailed,
+    Verified,
+    local_code,
+)
+from pridem.steps.compose import (
+    ComposeStack,
+    OverrideHandoff,
+    image_of,
+    out,
+    stale,
+    write_override,
+)
+from pridem.steps.passport import NO_PASSPORT, Fetched
+from pridem.steps.sources import Resolved, package_dir
+
+ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
+CONTAINER_DATA = "/primer/data"
+"""Where a service finds the data of a kind: ``/primer/data/<kind>``."""
+VALIDATE_TIMEOUT_S = 600
+_TEMP = ".tmp"
+
+
+def data_home(root: Path, service: str) -> Path:
+    """``/opt/<service>/data``: the copies of the product's data, by release."""
+    return root / "opt" / service / "data"
+
+
+@dataclass(frozen=True)
+class DataItem:
+    """One kind of the product's data for one service."""
+
+    kind: str
+    source: Path
+    """The directory copied: in the product's release or a package's."""
+    base: Path
+    """Where ``source`` comes from: a symlink in it must not lead out of it."""
+    target: Path
+    env: str
+    validate: str
+
+    @property
+    def container(self) -> str:
+        return f"{CONTAINER_DATA}/{self.kind}"
+
+    @property
+    def volume(self) -> str:
+        return f"{self.target}:{self.container}:ro"
+
+
+def data_items(
+    product: Product,
+    service: Service,
+    *,
+    release_dir: Path,
+    release: str,
+    passport: Passport,
+    root: Path,
+) -> list[DataItem]:
+    """The data the product gives ``service``, by kind; a package the passport
+    does not give has no section to copy. A kind the service does not accept
+    is ``seams_check``'s refusal: it is not here."""
+    home = data_home(root, service.name) / f"{product.name}@{release}"
+    found: list[DataItem] = []
+    dependency = product.dependencies.get(service.name)
+    given: dict[str, tuple[Path, Path]] = {}
+    if dependency is not None:
+        for kind, path in dependency.data.items():
+            given[kind] = (release_dir / path, release_dir)
+    for slot, declared in product.packages.items():
+        package = passport.packages.get(slot)
+        if package is None:
+            continue
+        base = package_dir(root, product.name, package)
+        if package.subpath is not None:
+            base = base / package.subpath
+        for mount in declared.mount:
+            if mount.dependency == service.name:
+                given[slot] = (base / mount.from_ if mount.from_ else base, base)
+    for kind, (source, base) in sorted(given.items()):
+        accepted = service.accepts.get(kind)
+        if accepted is None:
+            continue
+        found.append(
+            DataItem(kind, source, base, home / kind, accepted.env, accepted.validate_)
+        )
+    return found
+
+
+def data_binds(
+    items: Sequence[DataItem], service: str | None
+) -> tuple[dict[str, list[str]], dict[str, dict[str, str]]]:
+    """The override's binds and variables of ``items`` on ``service`` (the
+    service's ``app``)."""
+    if service is None or not items:
+        return {}, {}
+    return (
+        {service: [item.volume for item in items]},
+        {service: {item.env: item.container for item in items}},
+    )
+
+
+def tree(path: Path) -> list[tuple[str, str, str]]:
+    """What a directory holds: every path, its kind, and its digest or link."""
+    found: list[tuple[str, str, str]] = []
+    for entry in sorted(path.rglob("*")):
+        name = str(entry.relative_to(path))
+        if entry.is_symlink():
+            found.append((name, "link", str(entry.readlink())))
+        elif entry.is_dir():
+            found.append((name, "dir", ""))
+        else:
+            digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+            found.append((name, "file", digest))
+    return found
+
+
+def _leaves(item: DataItem) -> list[str]:
+    """Paths of ``item.source`` (itself included) leading out of ``item.base``."""
+    base = item.base.resolve()
+    out_: list[str] = []
+    for entry in [item.source, *sorted(item.source.rglob("*"))]:
+        if not entry.resolve().is_relative_to(base):
+            out_.append(str(entry.relative_to(item.base)))
+    return out_
+
+
+def copy_tree(source: Path, target: Path) -> None:
+    """``target``: a copy of ``source`` written in ``<target>.tmp`` and renamed;
+    symlinks stay links (``data-unsafe`` refused those that lead out)."""
+    temp = target.with_name(target.name + _TEMP)
+    if temp.exists():  # left by a run that died
+        shutil.rmtree(temp)
+    target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    shutil.copytree(source, temp, symlinks=True)
+    if target.exists():
+        shutil.rmtree(target)
+    temp.rename(target)
+
+
+class DataCopy(Step):
+    """The product's data in one service's own directory, validated by the
+    service's new image before it restarts on it (form D)."""
+
+    name = "data_copy"
+    order = 9
+    modes = ALL_MODES
+    codes: ClassVar[dict[str, str]] = {
+        "copy": "copy {kinds} of the product to {service} and validate them",
+        "validate": "validate {kinds} of the product with the new {service}",
+        "override": "put the override of {entry} in place",
+        "override-not-placed": "the override of {entry} is not the one build rendered",
+        "data-missing": "{service}.{kind}: {path} is not in the product",
+        "data-unsafe": "{service}.{kind}: {paths} lead out of {base}",
+        "validate-failed": "{service} refuses {kind} of the product: exit code "
+        "{exit_code}",
+    }
+
+    def __init__(
+        self,
+        service: Service,
+        entry: str,
+        *,
+        release: Path,
+        ref: str,
+        commit: str,
+        items: Sequence[DataItem],
+        handoff: OverrideHandoff,
+        root: Path = Path("/"),
+    ) -> None:
+        self.compose = ComposeStack(service, entry, release, ref, commit, root)
+        self.items = list(items)
+        self.handoff = handoff
+
+    def _pending(self) -> str | None:
+        return self.handoff.texts.get(self.compose.entry)
+
+    def _params(self, item: DataItem) -> dict[str, Json]:
+        return {"service": self.compose.name, "kind": item.kind}
+
+    def _sound(self) -> None:
+        """Every source is there and stays inside where it comes from."""
+        for item in self.items:
+            if not item.source.is_dir():
+                raise StepFailed(
+                    "data-missing", {**self._params(item), "path": str(item.source)}
+                )
+            leaving = _leaves(item)
+            if leaving:
+                raise StepFailed(
+                    "data-unsafe",
+                    {
+                        **self._params(item),
+                        "paths": list[Json](leaving),
+                        "base": str(item.base),
+                    },
+                )
+
+    def _changed(self) -> list[DataItem]:
+        return [
+            item
+            for item in self.items
+            if not item.target.is_dir() or tree(item.target) != tree(item.source)
+        ]
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        self._sound()
+        pending = self._pending()
+        changed = self._changed()
+        kinds: list[Json] = list[Json](item.kind for item in self.items)
+        if changed:
+            params: dict[str, Json] = {
+                "kinds": list[Json](item.kind for item in changed),
+                "service": self.compose.name,
+            }
+            return CheckResult(True, local_code("copy", params), {"validate": True})
+        if self.items:
+            app = self.compose.app_service
+            view = self.compose if pending is None else self.compose.candidate()
+            if app is not None and app in stale(ctx, view):
+                params = {"kinds": kinds, "service": self.compose.name}
+                code = local_code("validate", params)
+                return CheckResult(True, code, {"validate": True})
+        if pending is not None:
+            code = local_code("override", {"entry": self.compose.entry})
+            return CheckResult(True, code)
+        return CheckResult(False)
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        pending = self._pending()
+        try:
+            for item in self._changed():
+                copy_tree(item.source, item.target)
+            if check.data.get("validate") is True:
+                self._validate(ctx)
+        finally:
+            if pending is not None:
+                self.compose.candidate().override.unlink(missing_ok=True)
+        if pending is not None:  # every validate green: the override in place
+            write_override(self.compose, pending)
+
+    def _validate(self, ctx: StepContext) -> None:
+        app = self.compose.app_service
+        if app is None:
+            raise RuntimeError("seams_check gives data only to a service with app")
+        images = image_of(ctx, self.compose, app)
+        if len(images) != 1:
+            raise RuntimeError("build verified one image of the app before")
+        labels = [
+            word
+            for key, value in self.compose.release_labels().items()
+            for word in ("--label", f"{key}={value}")
+        ]
+        for item in self.items:
+            command = shlex.split(item.validate.replace("<dir>", item.container))
+            try:
+                out(
+                    ctx,
+                    [
+                        "docker",
+                        "run",
+                        "--rm",
+                        "--network",
+                        "none",
+                        *labels,
+                        "-v",
+                        item.volume,
+                        "-e",
+                        f"{item.env}={item.container}",
+                        images[0],
+                        *command,
+                    ],
+                    timeout=VALIDATE_TIMEOUT_S,
+                )
+            except CommandFailed as error:
+                raise StepFailed(
+                    "validate-failed", {**self._params(item), "exit_code": error.code}
+                ) from None
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        self._sound()
+        changed = self._changed()
+        if changed:
+            first = changed[0]
+            raise StepFailed(
+                "data-missing", {**self._params(first), "path": str(first.target)}
+            )
+        found: dict[str, Json] = {item.kind: str(item.target) for item in self.items}
+        fact: dict[str, Json] = {"data": found} if found else {"data": "none"}
+        pending = self._pending()
+        if pending is not None:
+            path = self.compose.override
+            text = path.read_text(encoding="utf-8") if path.exists() else None
+            if text != pending or self.compose.candidate().override.exists():
+                raise StepFailed("override-not-placed", {"entry": self.compose.entry})
+            fact["override"] = str(path)
+        return Verified(fact)
+
+
+class RemoteCheck(Step):
+    """The remote dependencies of the edition: pinned, valued, not installed."""
+
+    name = "remote_check"
+    order = 1
+    modes = ALL_MODES
+    codes: ClassVar[dict[str, str]] = {**NO_PASSPORT}
+
+    def __init__(self, product: Product, resolved: Resolved, fetched: Fetched) -> None:
+        self.product = product
+        self.resolved = resolved
+        self.fetched = fetched
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        return CheckResult(False)  # it reads; it never acts
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        raise AssertionError("remote_check has no act")
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        passport = self.fetched.passport
+        if passport is None:
+            raise StepFailed("no-passport")
+        lock = self.resolved.lock
+        name = self.product.name
+        asked = passport.asked.get(name, {})
+        params = passport.params.get(name, {})
+        values = sorted(
+            key
+            for key, var in self.product.env.items()
+            if (isinstance(var, Param) and key in params)
+            or (isinstance(var, Asked) and key in asked)
+        )
+        checked: list[Json] = []
+        for service in used_remote(self.product, passport.edition):
+            entry = None if lock is None else lock.dependencies.get(service)
+            checked.append(
+                {
+                    "service": service,
+                    "tag": None if entry is None else entry.tag,
+                    "commit": None if entry is None else entry.commit,
+                    "installed": False,
+                    "passport": list[Json](values),
+                }
+            )
+        return Verified({"remote": checked})
+
+
+def _seams(body: bytes | None) -> tuple[list[str], bool] | None:
+    """``seams`` of a ``/health`` body: provides and requires_satisfied."""
+    if body is None:
+        return None
+    try:
+        document = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    seams = document.get("seams") if isinstance(document, dict) else None
+    if not isinstance(seams, dict):
+        return None
+    provides = seams.get("provides")
+    satisfied = seams.get("requires_satisfied")
+    if not isinstance(provides, list) or not isinstance(satisfied, bool):
+        return None
+    return [str(name) for name in provides], satisfied
+
+
+class SeamsVerify(Step):
+    """Every seam of the box is held by its live provider."""
+
+    name = "seams_verify"
+    order = 14
+    modes = ALL_MODES
+    codes: ClassVar[dict[str, str]] = {
+        "provide-not-live": "{stack} does not provide {names} live",
+        "requires-unsatisfied": "{stack} says its seams are not satisfied",
+    }
+
+    def __init__(
+        self,
+        product: Product,
+        services: Mapping[str, Service],
+        stacks: Mapping[str, ComposeStack],
+    ) -> None:
+        """``stacks`` -- the compose of the product and of each installed
+        service, by name: what is observed."""
+        self.product = product
+        self.services = dict(services)
+        self.stacks = dict(stacks)
+
+    def _edges(self) -> list[tuple[str, str, str]]:
+        """``(consumer, provider, name)`` of every seam of the box."""
+        edges: list[tuple[str, str, str]] = []
+        for key, var in self.product.env.items():
+            if isinstance(var, Seam) and var.from_ in self.services:
+                edges.append((self.product.name, var.from_, key))
+        for name, service in self.services.items():
+            for required in service.requires:
+                edges.append((name, self.product.name, required))
+        return edges
+
+    def _live(
+        self, ctx: StepContext, names: set[str]
+    ) -> dict[str, tuple[list[str], bool] | None]:
+        found: dict[str, tuple[list[str], bool] | None] = {}
+        for name in sorted(names):
+            compose = self.stacks[name]
+            seen = observe(
+                ctx,
+                compose.stack,
+                compose.entry,
+                release=compose.release,
+                project=compose.project,
+                env_file=compose.env_file,
+            )
+            found[name] = _seams(seen.health)
+        return found
+
+    def _problems(self, ctx: StepContext) -> dict[str, Json]:
+        edges = self._edges()
+        live = self._live(ctx, {stack for edge in edges for stack in edge[:2]})
+        missing: dict[str, list[str]] = {}
+        for _, provider, name in edges:
+            seen = live[provider]
+            if seen is None or name not in seen[0]:
+                missing.setdefault(provider, []).append(name)
+        if missing:
+            provider = min(missing)
+            raise StepFailed(
+                "provide-not-live",
+                {"stack": provider, "names": list[Json](sorted(missing[provider]))},
+            )
+        for consumer in sorted({edge[0] for edge in edges}):
+            seen = live[consumer]
+            if seen is None or not seen[1]:
+                raise StepFailed("requires-unsatisfied", {"stack": consumer})
+        return {
+            "seams": list[Json](
+                f"{consumer}.{name} <- {provider}" for consumer, provider, name in edges
+            )
+        }
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        self._problems(ctx)
+        return CheckResult(False)  # it reads; it never acts
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        raise AssertionError("seams_verify has no act")
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        fact = self._problems(ctx)
+        seams = fact["seams"]
+        return Verified({**fact, "count": len(seams) if isinstance(seams, list) else 0})

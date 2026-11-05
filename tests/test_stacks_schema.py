@@ -365,17 +365,23 @@ def test_route_knob_formats(tmp_path: Path, knob: str, value: str) -> None:
     ]
 
 
-def test_service_host_has_no_routes_and_takes_ports(tmp_path: Path) -> None:
+def test_service_host_takes_routes_by_rule_4_and_ports(tmp_path: Path) -> None:
+    """A service on its own box routes as a product does (protocol 4, form A;
+    DM-46): ``host.routes`` is a field of a service and rule 4 holds for it.
+    Replaces the test that a service had no ``routes`` -- false since DM-46;
+    that a co-located service has none is ``seams_check``'s."""
     data = example("service.yaml")
     node(data, "host")["ports"] = [{"proto": "udp", "port": 10000}]
+    node(data, "host")["routes"] = {"mail": {"to": "comms-app:8000"}}
     assert yaml_problems(tmp_path, data) == []
     node(data, "host")["ports"] = [{"proto": "sctp", "port": 0}]
-    node(data, "host")["routes"] = {}
+    node(data, "host")["routes"] = {"api": {"to": "comms-app:8000"}}
     assert yaml_problems(tmp_path, data) == [
         ("host.ports[0].proto", "literal_error"),
         ("host.ports[0].port", "greater_than_equal"),
-        ("host.routes", "extra_forbidden"),
     ]
+    node(data, "host")["ports"] = []
+    assert yaml_problems(tmp_path, data) == [("host.routes.api", "R4.route-domain")]
 
 
 # --- packages (rule 10) ---------------------------------------------------------

@@ -299,7 +299,10 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
     assert package_places(stack, {ENTRY: whole}) == []
 
 
-def test_a_dependency_mount_is_not_done_here(tmp_path: Path) -> None:
+def test_a_dependency_mount_is_not_a_bind_of_the_product(tmp_path: Path) -> None:
+    """The section of a package a service takes is copied by that service's
+    ``data_copy`` (form D, DM-46), not mounted into the product: replaces the
+    test that ``package_mounts`` refused it -- false since DM-46."""
     data = skin_product()
     data["dependencies"] = {
         "comms": {"repo": "git@github.com:a/comms.git", "version": ">=3,<4"}
@@ -309,7 +312,8 @@ def test_a_dependency_mount_is_not_done_here(tmp_path: Path) -> None:
             "contract": ">=1,<2",
             "validate": "v <dir>",
             "mount": [
-                {"dependency": "comms", "from": "comms", "env": "PROFILE_OVERLAY_DIR"}
+                {"dependency": "comms", "from": "comms", "env": "PROFILE_OVERLAY_DIR"},
+                {"service": "frontend", "from": "ui", "path": "/srv/texts"},
             ],
         }
     }
@@ -324,8 +328,8 @@ def test_a_dependency_mount_is_not_done_here(tmp_path: Path) -> None:
         },
     )
     assert fetched.passport is not None
-    with pytest.raises(Exception, match="dependency-mount"):
-        package_mounts(stack, ENTRY, fetched.passport, root)
+    mounts = package_mounts(stack, ENTRY, fetched.passport, root)
+    assert [(m.service, m.path) for m in mounts] == [("frontend", "/srv/texts")]
 
 
 def _curl(root: Path) -> tuple[str, ...]:

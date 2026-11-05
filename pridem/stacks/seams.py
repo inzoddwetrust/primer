@@ -15,7 +15,10 @@ A ``remote`` dependency is never a seam: the model refuses ``seam`` from it,
 its values come from the passport as ``param`` and ``asked`` of the product.
 
 ``half_seams`` lists every seam with one end missing; a plan with one is
-refused before its first ``act`` (``seams_check``).
+refused before its first ``act`` (``seams_check``), and so is one whose data
+for a service (form D, ``given_kinds``) the service does not accept
+(``unaccepted``) or whose co-located service declares routes
+(``routes_on_co_located``).
 """
 
 from collections.abc import Mapping
@@ -59,6 +62,65 @@ def installed(product: Product, edition: str | None) -> list[str]:
         name
         for name, dependency in product.dependencies.items()
         if dependency.topology == "co-located" and name in chosen
+    ]
+
+
+def used_remote(product: Product, edition: str | None) -> list[str]:
+    """The remote dependencies of the edition (all of them without
+    ``editions``): checked, never installed (rule 13)."""
+    if product.editions:
+        offer = product.editions.get(edition) if edition is not None else None
+        chosen = set(offer.services) if offer is not None else set()
+    else:
+        chosen = set(product.dependencies)
+    return [
+        name
+        for name, dependency in product.dependencies.items()
+        if dependency.topology == "remote" and name in chosen
+    ]
+
+
+def given_kinds(product: Product, service: str) -> dict[str, str | None]:
+    """The kinds of data the product gives ``service`` (form D, protocol 4.5):
+    ``dependencies.<s>.data`` (no variable of its own) and every package slot
+    with a ``mount`` of ``dependency: <s>`` (the variable its ``env`` names)."""
+    found: dict[str, str | None] = {}
+    dependency = product.dependencies.get(service)
+    if dependency is not None:
+        found.update(dict.fromkeys(dependency.data))
+    for slot, package in product.packages.items():
+        for mount in package.mount:
+            if mount.dependency == service:
+                found[slot] = mount.env
+    return found
+
+
+def unaccepted(
+    product: Product, services: Mapping[str, Service], edition: str | None
+) -> list[str]:
+    """Every kind of data the product gives an installed service that the
+    service does not ``accepts``, or under another variable than its own."""
+    out: list[str] = []
+    for name in installed(product, edition):
+        accepts = services[name].accepts
+        for kind, env in sorted(given_kinds(product, name).items()):
+            taken = accepts.get(kind)
+            if taken is None:
+                out.append(f"{name}.{kind}: not accepted")
+            elif env is not None and env != taken.env:
+                out.append(f"{name}.{kind}: {env}, the service takes {taken.env}")
+    return out
+
+
+def routes_on_co_located(
+    product: Product, services: Mapping[str, Service], edition: str | None
+) -> list[str]:
+    """Installed services with ``host.routes``: a co-located service has none
+    (protocol 4, form A)."""
+    return [
+        name
+        for name in installed(product, edition)
+        if (host := services[name].host) is not None and host.routes
     ]
 
 

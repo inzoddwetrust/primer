@@ -10,9 +10,11 @@ database is never named in any command of this step.
 
 The database service is brought up first by the same compose command as
 ``up`` -- the machine's override, its labels on the container and the volume
--- because on a first install nothing runs yet; it is the database alone, and
-compose does not recreate a running one. ``<live>_test`` is created when it
-is not there.
+-- because on a first install nothing runs yet; with it, the services
+``test.services`` names (rule 20: Redis, a queue), never the application or
+the frontend (the loader refuses those names, a name the compose does not
+have is ``test-service-unknown``); compose does not recreate a running one.
+``<live>_test`` is created when it is not there.
 
 The tests run from the build target ``test.target`` of the ``app`` service's
 Dockerfile, built here with the release's two build arguments, the machine's
@@ -172,6 +174,8 @@ class Tests(Step):
         "no-tests": "the tests ran no test",
         "failed": "{failed} of {total} tests failed",
         "no-test": "{stack} declares no test or no app",
+        "test-service-unknown": "test.services of {stack} names {services}, "
+        "not services of its compose",
     }
 
     def __init__(
@@ -194,6 +198,7 @@ class Tests(Step):
             raise ValueError(f"{entry} declares no test or no app")
         self.run = stage.test.run
         self.target = stage.test.target
+        self.services = list(stage.test.services or [])
         self.app = stage.app.service
         self.junit = stack.report.junit
         self.report = report
@@ -220,6 +225,14 @@ class Tests(Step):
         document = config(ctx, self.compose)
         found = database(document, self.app)
         self.secrets.add([SecretStr(found.test_url)])
+        services = document.get("services")
+        known = set(services) if isinstance(services, dict) else set()
+        unknown = [name for name in self.services if name not in known]
+        if unknown:
+            raise StepFailed(
+                "test-service-unknown",
+                {"stack": self.compose.entry, "services": list[Json](unknown)},
+            )
         if self.junit and junit_dir(self.run) is None:
             raise StepFailed("junit-path-unknown")
         return found, document
@@ -245,7 +258,8 @@ class Tests(Step):
 
     def _database_up(self, ctx: StepContext, found: Database) -> None:
         compose = self.compose
-        out(ctx, compose.argv("up", "-d", "--no-build", "--wait", found.service))
+        wanted = [found.service, *(s for s in self.services if s != found.service)]
+        out(ctx, compose.argv("up", "-d", "--no-build", "--wait", *wanted))
         # the name is [a-z0-9_] only: database() refuses anything else
         sql = f"SELECT 1 FROM pg_database WHERE datname = '{found.test}'"  # noqa: S608
         _, lines = out(

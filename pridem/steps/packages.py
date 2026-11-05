@@ -15,8 +15,9 @@ directory (``from`` -- a relative subdirectory: the loader refuses ``..`` and
 an absolute one, rule 10) at ``path`` in that service of the stack's compose;
 the machine's override carries it (``steps/compose.py``) and it takes effect
 on ``up``. An element
-with ``dependency`` (the form A' -- a copy into a service's release) is not
-done here: DM-T-0078.
+with ``dependency`` -- the section of a package a service takes -- is not a
+bind of the product: ``data_copy`` of that service copies it (form D,
+``steps/services.py``).
 
 The override ``build`` rendered in this run (``OverrideHandoff``) waits as
 the candidate until here: ``check`` and ``validate`` read the candidate, and
@@ -238,10 +239,6 @@ def package_mounts(
         if given.subpath is not None:
             base = base / given.subpath
         for element in declared.mount:
-            if element.dependency is not None:
-                raise StepFailed(
-                    "dependency-mount", {"slot": slot, "dependency": element.dependency}
-                )
             if element.service is None or element.path is None:
                 continue
             if services is not None and element.service not in services:
@@ -275,7 +272,6 @@ class Packages(Step):
         "override": "put the override of {entry} in place",
         "override-not-placed": "the override of {entry} is not the one build rendered",
         "path-outside": "{slot}: mount from {from} leaves the package",
-        "dependency-mount": "{slot}: a copy into {dependency} is not done here (A')",
         "missing-release": "{slot}: {path} is not on the box",
         "no-image": "{slot}: no image of {service} at {commit}",
     }

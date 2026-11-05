@@ -605,9 +605,12 @@ def override_text(
     document: Mapping[str, Json],
     mounts: Mapping[str, Sequence[str]] | None = None,
     builds: Mapping[str, Mapping[str, Json]] | None = None,
+    environment: Mapping[str, Mapping[str, str]] | None = None,
 ) -> str:
     """The machine's override for the product's compose ``document``;
-    ``mounts`` -- read-only binds of the instance's packages by service;
+    ``mounts`` -- read-only binds of the instance's packages, and of the data a
+    service takes (form D), by service; ``environment`` -- the machine's
+    variables by service beside the proxy's: the paths of that data;
     ``builds`` -- by service a package is built into (``apply: build``), what
     its ``build`` gets beside the labels: the context with the package, the
     ``Dockerfile`` in it, ``PRIMER_EDITION`` and the labels of the image's key
@@ -638,8 +641,12 @@ def override_text(
             if egress:
                 networks[EGRESS_NETWORK] = None
             part["networks"] = networks
-        if egress:
-            part["environment"] = {key: PROXY_URL for key in PROXY_VARIABLES}
+        variables: dict[str, Json] = (
+            {key: PROXY_URL for key in PROXY_VARIABLES} if egress else {}
+        )
+        variables.update((environment or {}).get(name, {}))
+        if variables:
+            part["environment"] = variables
         binds = (mounts or {}).get(name)
         if binds:
             part["volumes"] = list[Json](binds)

@@ -14,16 +14,17 @@ a worktree. A ref missing on the remote is found by ``git ls-remote`` in
 ``check``, before anything acts.
 
 The steps of one stack ``sources``, in order: the root (``fetch_root``), the
-lock against ``primer.yaml`` and against the tags (``check_lock``; a lock
-``commit`` is a prefix of 7+ characters of the tag's commit), the services by
-the lock's tags (``fetch_services``), the instance packages by the passport's
+lock against ``primer.yaml`` and against the tags of the services the box uses
+(``check_lock``; a lock ``commit`` is a prefix of 7+ characters of the tag's
+commit), the co-located services the box uses by the lock's tags, each with
+its ``primer.yaml`` (``fetch_services``), the instance packages by the passport's
 ``v<version>`` tags (``fetch_packages``) with their ``primer-package.yaml``
 contract checked against the product's range before a worktree is made. They
 share what they read through one ``Resolved``.
 """
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -68,6 +69,10 @@ class Resolved:
 
     product: Product | None = None
     lock: Lock | None = None
+    services: dict[str, Service] = field(default_factory=dict)
+    """``primer.yaml`` of each fetched service, from its lock tag's commit."""
+    commits: dict[str, str] = field(default_factory=dict)
+    """The full commit of each fetched service's tag."""
     releases: dict[str, Path] = field(default_factory=dict)
     tries: dict[str, str] = field(default_factory=dict)
     """``update --try <service>=<version>``: the version a test box runs in
@@ -236,12 +241,27 @@ def _verify_release(
     return {**fact, "head": target.commit, "release": target.release}
 
 
+Chosen = Callable[[Product], Sequence[str]]
+"""The dependencies a box uses: those of its edition (``installed`` and
+``used_remote`` of ``stacks/seams.py``)."""
+
+
 class _SourceStep(Step):
     modes = ALL_MODES
 
-    def __init__(self, resolved: Resolved, root: Path = Path("/")) -> None:
+    def __init__(
+        self, resolved: Resolved, root: Path = Path("/"), chosen: Chosen | None = None
+    ) -> None:
+        """``chosen`` -- the dependencies this box uses; ``None`` -- all of them."""
         self.resolved = resolved
         self.root = root
+        self.chosen = chosen
+
+    def _used(self, product: Product) -> list[str]:
+        """The product's dependencies this box uses, in the product's order."""
+        given = product.dependencies if self.chosen is None else self.chosen(product)
+        names = set(given)
+        return [name for name in product.dependencies if name in names]
 
 
 class FetchRoot(_SourceStep):
@@ -346,7 +366,9 @@ class FetchRoot(_SourceStep):
 
 
 class CheckLock(_SourceStep):
-    """``primer.lock@target`` against ``primer.yaml@target`` and the services' tags."""
+    """``primer.lock@target`` against ``primer.yaml@target``, and the tags of the
+    services the box uses (its edition's): the repository of a service the box
+    does not use is never asked."""
 
     name = "check_lock"
     order = 3
@@ -410,7 +432,8 @@ class CheckLock(_SourceStep):
                 "lock-range", {"codes": _j(sorted({p.code for p in problems}))}
             )
         pinned: list[Json] = []
-        for name, dependency in product.dependencies.items():
+        for name in self._used(product):
+            dependency = product.dependencies[name]
             entry = lock.dependencies[name]
             found = repo(dependency.repo)
             target = remote_target(ctx, self.root, found, entry.tag, True)
@@ -434,7 +457,13 @@ class CheckLock(_SourceStep):
 
 
 class FetchServices(_SourceStep):
-    """Every service of the product at its lock's tag, in ``/opt/<service>``."""
+    """Every co-located service the box uses at its lock's tag, in
+    ``/opt/<service>``, and its ``primer.yaml`` from that tag's commit.
+
+    A service's directory is named by its key in ``dependencies``, its env by
+    the ``name`` of its ``primer.yaml``: the two are one name, or the service
+    is refused (``name-mismatch``) before its worktree is made. A ``remote``
+    dependency is never fetched (rule 13), nor one the edition leaves out."""
 
     name = "fetch_services"
     order = 4
@@ -442,6 +471,10 @@ class FetchServices(_SourceStep):
         **NOT_A_COMMIT,
         "fetch": "fetch {services}",
         "release-off-target": "{release} is not on the target commit after the reset",
+        "no-primer-yaml": "{service}: {tag} has no primer.yaml",
+        "not-a-service": "{service}: primer.yaml of {tag} is not a service",
+        "invalid-config": "{service}: {file} of {tag} breaks its contract: {codes}",
+        "name-mismatch": "the dependency {service} names itself {name} in primer.yaml",
     }
 
     def _targets(self, ctx: StepContext) -> list[tuple[Checkout, Target]]:
@@ -449,7 +482,10 @@ class FetchServices(_SourceStep):
         if product is None or lock is None or not product.dependencies:
             return []
         out = []
-        for name, dependency in product.dependencies.items():
+        for name in self._used(product):
+            dependency = product.dependencies[name]
+            if dependency.topology != "co-located":
+                continue
             entry = lock.dependencies[name]
             found = repo(dependency.repo)
             target = _known(
@@ -459,12 +495,37 @@ class FetchServices(_SourceStep):
             out.append((Checkout(self.root, name, found), target))
         return out
 
+    def _read(self, ctx: StepContext, checkout: Checkout, target: Target) -> None:
+        """``primer.yaml`` of the service at ``target``, from git."""
+        params: dict[str, Json] = {"service": checkout.stack, "tag": target.ref}
+        text = checkout.show(ctx, target.commit, "primer.yaml")
+        if text is None:
+            raise StepFailed("no-primer-yaml", params)
+        try:
+            config = parse_primer_yaml(text, f"primer.yaml@{target.commit}")
+        except ContractError as error:
+            codes = sorted({problem.code for problem in error.problems})
+            raise StepFailed(
+                "invalid-config",
+                {**params, "file": error.file.name, "codes": _j(codes)},
+            ) from None
+        if not isinstance(config, Service):
+            raise StepFailed("not-a-service", params)
+        if config.name != checkout.stack:
+            raise StepFailed(
+                "name-mismatch", {"service": checkout.stack, "name": config.name}
+            )
+        self.resolved.services[checkout.stack] = config
+        self.resolved.commits[checkout.stack] = target.commit
+        self.resolved.releases[checkout.stack] = checkout.release_dir(target)
+
     def check(self, ctx: StepContext) -> CheckResult:
-        stale = [
-            checkout.stack
-            for checkout, target in self._targets(ctx)
-            if checkout.drift(ctx, checkout.release_dir(target), target.commit) != []
-        ]
+        stale = []
+        for checkout, target in self._targets(ctx):
+            if checkout.drift(ctx, checkout.release_dir(target), target.commit) != []:
+                stale.append(checkout.stack)
+            else:
+                self._read(ctx, checkout, target)
         if not stale:
             return CheckResult(False)
         return CheckResult(True, local_code("fetch", {"services": _j(stale)}))
@@ -472,14 +533,15 @@ class FetchServices(_SourceStep):
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         for checkout, target in self._targets(ctx):
             checkout.fetch(ctx)
+            self._read(ctx, checkout, target)  # before any worktree
             checkout.materialize(ctx, target)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         done: list[Json] = []
         for checkout, target in self._targets(ctx):
-            done.append(
-                dict(_verify_release(ctx, checkout, target, {"stack": checkout.stack}))
-            )
+            self._read(ctx, checkout, target)
+            fact = _verify_release(ctx, checkout, target, {"stack": checkout.stack})
+            done.append(dict(fact))
         return Verified({"services": done})
 
 
@@ -620,13 +682,15 @@ def source_steps(
     tag: bool | None,
     packages: Mapping[str, Package] | None = None,
     tries: Mapping[str, str] | None = None,
+    chosen: Chosen | None = None,
 ) -> tuple[Resolved, list[Step]]:
-    """The ``sources`` ladder a plan builder puts after ``host``."""
+    """The ``sources`` ladder a plan builder puts after ``host``; ``chosen`` --
+    the dependencies the box uses (``None`` -- every one)."""
     resolved = Resolved(tries=dict(tries or {}))
     steps: list[Step] = [
         FetchRoot(resolved, root, stack=stack, address=address, ref=ref, tag=tag),
-        CheckLock(resolved, root),
-        FetchServices(resolved, root),
+        CheckLock(resolved, root, chosen),
+        FetchServices(resolved, root, chosen),
         FetchPackages(resolved, root, stack=stack, packages=packages or {}),
     ]
     return resolved, steps

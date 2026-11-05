@@ -45,6 +45,11 @@ ENV = {
 }
 
 
+SERVICE = yaml.safe_dump(example("service.yaml"))
+"""``primer.yaml`` of the service ``comms``: ``fetch_services`` reads it from
+the tag's commit (DM-46), so a fixture service has a valid one."""
+
+
 def git(cwd: Path, *args: str) -> list[str]:
     out: list[str] = []
 
@@ -153,7 +158,7 @@ def run(root: Path, steps: list, mode: str = "install") -> PlanOutcome:  # type:
 def services_lock(
     tmp: Path, *, version: str = "3.0.0", prefix_len: int = 7
 ) -> tuple[str, str]:
-    bare = remote(tmp, "comms", {"primer.yaml": "x: 1\n"}, tags=(f"v{version}",))
+    bare = remote(tmp, "comms", {"primer.yaml": SERVICE}, tags=(f"v{version}",))
     head = git(bare, "rev-parse", f"v{version}^{{commit}}")[0]
     return head, lock(head[:prefix_len], version)
 
@@ -561,7 +566,7 @@ def test_every_step_that_asks_a_remote_declares_the_code() -> None:
 def _tried(
     tmp: Path, tries: dict[str, str], role: str = "test"
 ) -> tuple[PlanOutcome, Path]:
-    bare = remote(tmp, "comms", {"primer.yaml": "x: 1\n"}, tags=("v3.0.0", "v3.1.0"))
+    bare = remote(tmp, "comms", {"primer.yaml": SERVICE}, tags=("v3.0.0", "v3.1.0"))
     head = git(bare, "rev-parse", "v3.0.0^{commit}")[0]
     remote(
         tmp,

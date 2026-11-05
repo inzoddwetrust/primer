@@ -44,6 +44,12 @@ another edition is another image. Both deploy through the same mirror, by
 is printed (the measure of DM-45) and its line of the refused sentinel is in
 the fact of ``egress``.
 
+DM-46 runs after them, on the same box: a copy of the blank as the service
+``notes`` and the blank as its product -- in ``full`` the service goes up by
+its own ladder before the product, the product's ``profile/`` copied to it and
+validated by its new image; a profile it refuses is red with both left
+running; ``core`` installs nothing of it.
+
 Two short checks need no install: what a single-quoted value is to compose,
 and that the tags certbot and squid are pinned by still name the pinned
 digests. The file
@@ -1322,6 +1328,174 @@ def test_tier3_certbot_tag_has_the_pinned_digest(image: str) -> None:
         )
     )
     assert f"{repository}@{digest}" in digests, (tag, digests)
+
+
+SERVICE_YAML = """schema: 1
+name: notes
+kind: service
+
+stacks:
+  notes:
+    compose: docker-compose.yml
+    app:      { service: app, port: 8000, health: /health, ready: /ready }
+    migrate:  python -m alembic upgrade head
+
+env:
+  POSTGRES_PASSWORD: { source: minted }
+  EDITION:           { source: passport, key: edition }
+  API_BASE_URL:      { source: passport, key: domains.api }
+
+accepts:
+  profile:
+    validate: >-
+      python -c "import pathlib, sys; p = pathlib.Path(sys.argv[1]) / 'ok';
+      sys.exit(0 if p.is_file() else 3)" <dir>
+    env: PROFILE_DIR
+
+report: { health: /health, ready: /ready, logs: json, junit: true }
+"""
+"""A copy of the blank as a service (DM-46): its own name and entry, no
+frontend of its own, no editions or packages, taking a profile of the
+product; ``validate`` is green when the copy has a file ``ok``."""
+
+
+def _container(project: str, service: str) -> str:
+    [container] = _stdout(
+        [
+            "docker",
+            "ps",
+            "-q",
+            "--no-trunc",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+            "--filter",
+            f"label=com.docker.compose.service={service}",
+        ]
+    )
+    return container
+
+
+def _copy_of_blank(tmp: Path, mirror: Path, name: str) -> Path:
+    """A clone of the mirror at ``BLANK_COMMIT``, its backend knowing ``full``."""
+    copy = tmp / name
+    _run(["git", "clone", "-q", str(mirror), str(copy)], env=GIT_ENV)
+    _run(["git", "-C", str(copy), "checkout", "-q", BLANK_COMMIT], env=GIT_ENV)
+    editions = copy / "backend" / "app" / "editions.py"
+    table = editions.read_text(encoding="utf-8")
+    assert table.count(EDITIONS_LINE) == 1
+    editions.write_text(table.replace(EDITIONS_LINE, EDITIONS_FULL))
+    return copy
+
+
+def _service_repository(tmp: Path, mirror: Path) -> tuple[Path, str]:
+    """The service ``notes`` at ``v1.0.0`` in a bare repository; its commit."""
+    copy = _copy_of_blank(tmp, mirror, "notes-work")
+    (copy / "primer.yaml").write_text(SERVICE_YAML, encoding="utf-8")
+    _git("-C", str(copy), "commit", "-q", "-am", "DM-46: the blank as a service")
+    _git("-C", str(copy), "tag", "v1.0.0")
+    [commit] = _git("-C", str(copy), "rev-parse", "HEAD")
+    bare = tmp / "notes.git"
+    _run(["git", "clone", "-q", "--bare", str(copy), str(bare)], env=GIT_ENV)
+    return bare, commit
+
+
+def _product_with_service(
+    tmp: Path, mirror: Path, service: Path, commit: str, *, ok: bool, step: int
+) -> None:
+    """The blank as the product of ``notes`` -- in ``full``, not in ``core`` --
+    giving it ``profile/`` (with ``ok`` or without), pushed as ``main``."""
+    copy = _copy_of_blank(tmp, mirror, f"product-{step}")
+    primer = copy / "primer.yaml"
+    text = primer.read_text(encoding="utf-8")
+    old = "editions:\n  core: { services: [] }\n"
+    assert text.count(old) == 1
+    text = text.replace(
+        old,
+        "dependencies:\n"
+        f"  notes: {{ repo: 'file://{service}', version: '>=1,<2',\n"
+        "           data: { profile: profile } }\n\n"
+        "editions:\n  core: { services: [] }\n  full: { services: [notes] }\n",
+    )
+    primer.write_text(text, encoding="utf-8")
+    (copy / "primer.lock").write_text(
+        "schema: 1\nresolved_at: 2026-11-05T00:00:00Z\ndependencies:\n"
+        f"  notes: {{ version: '1.0.0', tag: v1.0.0, commit: '{commit[:12]}' }}\n",
+        encoding="utf-8",
+    )
+    profile = copy / "profile"
+    profile.mkdir()
+    (profile / "kinds.yaml").write_text(f"step: {step}\n", encoding="utf-8")
+    if ok:
+        (profile / "ok").write_text("ok\n", encoding="utf-8")
+    _git("-C", str(copy), "add", "-A")
+    _git("-C", str(copy), "commit", "-q", "-m", f"DM-46: notes, step {step}")
+    _git("-C", str(copy), "push", "-q", "--force", str(mirror), "HEAD:refs/heads/main")
+
+
+def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-46 on the box the install left -- the first live ladder of a service.
+    A copy of the blank as the service ``notes`` (``kind: service``), and the
+    blank as its product: in ``full`` it is installed before the product
+    (``render_env -> build -> data_copy -> migrate -> up``), its data -- the
+    product's ``profile/`` -- copied and validated by its new image; a profile
+    its ``validate`` refuses is red with ``notes`` and the product left
+    running as they were; ``core`` installs nothing of it and names it as
+    ``left``; ``doctor`` is empty on each green box."""
+    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    service, commit = _service_repository(tmp_path, mirror)
+
+    # full: notes before the product, its profile copied and validated
+    _product_with_service(tmp_path, mirror, service, commit, ok=True, step=1)
+    full = _passport(tmp_path, version=20, edition="full")
+    green, printed = _install(full, "update")
+    assert green.result == "green", printed
+    order = [(s.stack, s.name) for s in green.steps if s.phase == "main"]
+    for name in ("render_env", "build", "data_copy", "migrate", "up"):
+        assert order.index(("notes", name)) < order.index(("blank", "render_env"))
+    facts = {(s.stack, s.name): s.verify or {} for s in green.steps}
+    data = facts[("notes", "data_copy")]["data"]
+    assert isinstance(data, dict) and set(data) == {"profile"}, data
+    copied = Path(str(data["profile"]))
+    assert (copied / "ok").is_file() and copied.is_relative_to("/opt/notes/data")
+    assert facts[("notes", "up")]["release"] == "v1.0.0", facts[("notes", "up")]
+    assert Path("/opt/notes/current").resolve() == Path("/opt/notes/releases/v1.0.0")
+    state = json.loads(Path("/opt/pridem/state.json").read_text(encoding="utf-8"))
+    assert state["current"]["notes"] == "v1.0.0", state
+    running = _container("notes", "app")
+    inside = _stdout(["docker", "exec", running, "ls", "/primer/data/profile"])
+    assert "ok" in inside, inside
+    env = _stdout(["docker", "exec", running, "printenv", "PROFILE_DIR"])
+    assert env == ["/primer/data/profile"], env
+    diff, failed, doctor = _doctor(full)
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+    # a profile notes refuses: red at its validate, notes and the product as
+    # they were -- the same containers, the old copy mounted
+    product = _container("blank", "app")
+    _product_with_service(tmp_path, mirror, service, commit, ok=False, step=2)
+    bad, printed = _install(_passport(tmp_path, version=21, edition="full"), "update")
+    assert bad.result != "green", printed
+    [red] = [s for s in bad.steps if s.status == "failed"]
+    assert (red.stack, red.name) == ("notes", "data_copy"), bad.steps
+    assert red.reason is not None
+    assert red.reason.code == "data_copy:validate-failed", red.reason
+    assert _container("notes", "app") == running
+    assert _container("blank", "app") == product
+    inside = _stdout(["docker", "exec", running, "ls", "/primer/data/profile"])
+    assert "ok" in inside, inside
+
+    # core: notes is not the edition's -- not touched, named as left
+    _product_with_service(tmp_path, mirror, service, commit, ok=True, step=3)
+    core = _passport(tmp_path, version=22, edition="core")
+    back, printed = _install(core, "update")
+    assert back.result == "green", printed
+    assert not any(s.stack == "notes" for s in back.steps), back.steps
+    facts = {(s.stack, s.name): s.verify or {} for s in back.steps}
+    assert facts[("seams", "seams_check")]["left"] == ["notes"], facts
+    diff, failed, doctor = _doctor(core)
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
 
 
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:

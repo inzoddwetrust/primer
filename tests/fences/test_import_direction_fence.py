@@ -98,6 +98,7 @@ LAYERS: Layers = (
             "pridem.steps.nginx",
             "pridem.steps.packages",
             "pridem.steps.passport",
+            "pridem.steps.services",
             "pridem.steps.sources",
             "pridem.steps.ssl",
             "pridem.steps.tests",

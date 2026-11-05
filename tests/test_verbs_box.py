@@ -378,8 +378,10 @@ def test_a_deferred_stack_after_a_signal_is_not_made(signalled: bool) -> None:
 def test_the_machine_makes_the_whole_ladder_of_protocol_6(
     tmp_path: Path, mode: str
 ) -> None:
-    """The stacks in protocol 6's order -- the product's, ``types``, the edge,
-    ``frontend`` and ``finalize`` made once the target is read -- ``finally``
+    """The stacks in protocol 6's order -- the dependencies (keys, lock,
+    fetch) and the services' ladders before the product's (DM-46), ``types``,
+    the edge, ``frontend`` and ``finalize`` made once the target is read --
+    ``finally``
     the host's timers and ``gc``; ``reinstall`` destroys after the passport is
     read and before anything is installed."""
     box = Box(tmp_path / "opt" / "pridem")
@@ -395,6 +397,8 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
         *middle,
         "timers",
         "sources",
+        "dependencies",
+        "services",
         "product",
         "types",
         "edge",
@@ -404,4 +408,13 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
     assert [s.name for s in planned.stacks if s.root] == ["finalize"]
     assert [stack.name for stack in planned.finally_] == ["host", "box"]
     deferred = {s.name for s in planned.stacks if isinstance(s, Deferred)}
-    assert deferred == {"sources", "product", "types", "edge", "frontend", "finalize"}
+    assert deferred == {
+        "sources",
+        "dependencies",
+        "services",
+        "product",
+        "types",
+        "edge",
+        "frontend",
+        "finalize",
+    }

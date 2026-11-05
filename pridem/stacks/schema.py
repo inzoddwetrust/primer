@@ -27,6 +27,18 @@ either name is refused (``S.egress-env``). Whether a host is in the list agreed
 with Primer is the machine's check, not the contract's (``stacks/egress.py``).
 A service has no ``egress``: it reaches the internet itself.
 
+The form D of protocol 4.5 is a pair: a service declares the kinds of data it
+takes (``accepts: {<kind>: {validate, env}}``), a product the directory of its
+repository it gives a dependency of each kind (``dependencies.<s>.data:
+{<kind>: <path>}``). The path the data is at in the service's container is the
+machine's, given under ``env``: a key of the service's ``env`` with that name is
+refused (``S.accepts-env``); a remote dependency takes no data
+(``R13.remote-data``). Whether a pair matches needs both files -- the plan's
+``seams_check``. An entry of ``stacks`` named as a dependency is refused
+(``S.entry-dependency``): ``-p <entry>`` and the alias ``<entry>-<service>``
+would be the service's. ``host.routes`` of a service follow rule 4 as a
+product's; that a co-located service has none is the plan's check too.
+
 ``python -m pridem.stacks.schema --export`` writes the JSON Schema of
 ``primer.yaml`` to ``contract/schema/``; ``pridem.stacks.lock`` exports its own.
 """
@@ -96,13 +108,28 @@ RULES = {
     "R11.edition-services": (11, "the services of an edition are its dependencies"),
     "R11.edition-enum": (11, "enum: editions needs editions declared"),
     "R13.remote-seam": (13, "a remote dependency provides through the passport"),
+    "R13.remote-data": (
+        13,
+        "a remote dependency is on another box: no data of the product is copied to it",
+    ),
     "R17.seed-form": (17, "a seed profile is {run, when}, when is install or command"),
     "R20.test-form": (
         20,
-        "tests are {run, target}: run in the image built from target",
+        "tests are {run, target, services?}: run in the image built from target, "
+        "with the services named -- neither the app nor the frontend -- up first",
     ),
     "S.seam-from": (0, "a seam names a stack this stack can be wired to"),
     "S.mount-dependency": (0, "a package mount names a declared dependency"),
+    "S.entry-dependency": (
+        0,
+        "an entry of stacks is not named as a dependency: both would be one compose "
+        "project and one alias on the network pridem",
+    ),
+    "S.accepts-env": (
+        0,
+        "protocol 4.5: the path of accepted data is the machine's variable, not a "
+        "key of env",
+    ),
     "S.egress-host": (
         0,
         "protocol 4.2: an egress host is a name -- lowercase labels, no pattern, "
@@ -211,10 +238,13 @@ class Seed(Strict):
     when: Literal["install", "command"]
 
 
-# Tests of a stack (rule 20): ``run`` in a container of build target ``target``.
+# Tests of a stack (rule 20): ``run`` in a container of build target ``target``;
+# ``services`` -- the services of the stack's compose the tests need, brought up
+# before them without the application and the frontend.
 class StackTest(Strict):
     run: Command
     target: Name
+    services: Annotated[list[Name], Field(min_length=1)] | None = None
 
 
 class Types(Strict):
@@ -296,9 +326,13 @@ EnvVar = Annotated[
 
 
 class Dependency(Strict):
+    """``data`` -- the form D of protocol 4.5: a directory of the product's
+    repository, by kind, copied to the service, which ``accepts`` that kind."""
+
     repo: Name
     version: Range
     topology: Literal["co-located", "remote"] = "co-located"
+    data: dict[Name, RepoPath] = {}
 
 
 def _no_branch(value: object) -> object:
@@ -374,7 +408,11 @@ class HostPort(Strict):
 
 
 class ServiceHost(Strict):
+    """``routes`` -- of a service on its own box (protocol 4, form A); a
+    co-located service has none (``seams_check``)."""
+
     domains: list[Name] = []
+    routes: dict[Name, Route] = {}
     ports: list[HostPort] = []
 
 
@@ -392,6 +430,15 @@ class UpdateWindow(Strict):
     before: list[Command] = []
     after: list[Command] = []
     drops: list[Name] = []
+
+
+class Accepted(Strict):
+    """A kind of the product's data a service takes (protocol 4.5, 4.7):
+    ``validate`` -- its command, ``<dir>`` the data's path in the container;
+    ``env`` -- the variable the machine gives that path under."""
+
+    validate_: Command = Field(alias="validate")
+    env: Name
 
 
 class Report(Strict):
@@ -427,6 +474,7 @@ class Service(_Stack):
     requires: list[Name] = []
     update_window: UpdateWindow | None = None
     host: ServiceHost | None = None
+    accepts: dict[Name, Accepted] = {}
 
 
 PrimerYaml = Annotated[Product | Service, Field(discriminator="kind")]
@@ -464,8 +512,26 @@ def _r3_single_point(stack: Product | Service) -> list[Problem]:
     return out
 
 
+def _r20_test_services(stack: Product | Service) -> list[Problem]:
+    """``test.services`` names neither the application nor the frontend: the
+    tests run without them (rule 20); each one once."""
+    out: list[Problem] = []
+    for entry, stage in stack.stacks.items():
+        if stage.test is None or stage.test.services is None:
+            continue
+        own = {part.service for part in (stage.app, stage.frontend) if part}
+        for index, name in enumerate(stage.test.services):
+            path = ("stacks", entry, "test", "services", index)
+            if name in own:
+                detail = f"{name!r} is the app or the frontend"
+                out.append(problem_at(path, "R20.test-form", detail))
+            elif name in stage.test.services[:index]:
+                out.append(problem_at(path, "R20.test-form", f"{name!r} twice"))
+    return out
+
+
 def _r4_route_domains(stack: Product | Service) -> list[Problem]:
-    if not isinstance(stack, Product) or stack.host is None:
+    if stack.host is None:
         return []
     return [
         problem_at(
@@ -620,7 +686,15 @@ def _r11_editions(stack: Product | Service) -> list[Problem]:
     if isinstance(stack, Product):
         for edition, spec in stack.editions.items():
             for index, service in enumerate(spec.services):
-                if service not in stack.dependencies:
+                if service in spec.services[:index]:
+                    out.append(
+                        problem_at(
+                            ("editions", edition, "services", index),
+                            "R11.edition-services",
+                            f"{service!r} is named twice",
+                        )
+                    )
+                elif service not in stack.dependencies:
                     out.append(
                         problem_at(
                             ("editions", edition, "services", index),
@@ -689,6 +763,42 @@ def _s_egress(stack: Product | Service) -> list[Problem]:
     return out
 
 
+def _s_entries(stack: Product | Service) -> list[Problem]:
+    """An entry of ``stacks`` named as a dependency; a remote dependency with
+    ``data``; a service's ``accepts`` variable among its ``env`` keys."""
+    out: list[Problem] = []
+    if isinstance(stack, Product):
+        for entry in stack.stacks:
+            if entry in stack.dependencies:
+                out.append(
+                    problem_at(
+                        ("stacks", entry),
+                        "S.entry-dependency",
+                        f"{entry!r} is a dependency",
+                    )
+                )
+        for name, dependency in stack.dependencies.items():
+            if dependency.topology == "remote" and dependency.data:
+                out.append(
+                    problem_at(
+                        ("dependencies", name, "data"),
+                        "R13.remote-data",
+                        f"{name!r} is remote",
+                    )
+                )
+    else:
+        for kind, accepted in stack.accepts.items():
+            if accepted.env in stack.env:
+                out.append(
+                    problem_at(
+                        ("accepts", kind, "env"),
+                        "S.accepts-env",
+                        f"{accepted.env!r} is a key of env",
+                    )
+                )
+    return out
+
+
 RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r3_single_point,
     _r4_route_domains,
@@ -698,6 +808,8 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r11_editions,
     _r13_seams,
     _s_egress,
+    _s_entries,
+    _r20_test_services,
 )
 
 

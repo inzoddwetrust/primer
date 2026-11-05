@@ -1,5 +1,27 @@
 {
   "$defs": {
+    "Accepted": {
+      "additionalProperties": false,
+      "description": "A kind of the product's data a service takes (protocol 4.5, 4.7):\n``validate`` -- its command, ``<dir>`` the data's path in the container;\n``env`` -- the variable the machine gives that path under.",
+      "properties": {
+        "env": {
+          "minLength": 1,
+          "title": "Env",
+          "type": "string"
+        },
+        "validate": {
+          "minLength": 1,
+          "title": "Validate",
+          "type": "string"
+        }
+      },
+      "required": [
+        "validate",
+        "env"
+      ],
+      "title": "Accepted",
+      "type": "object"
+    },
     "Address": {
       "additionalProperties": false,
       "properties": {
@@ -87,7 +109,19 @@
     },
     "Dependency": {
       "additionalProperties": false,
+      "description": "``data`` -- the form D of protocol 4.5: a directory of the product's\nrepository, by kind, copied to the service, which ``accepts`` that kind.",
       "properties": {
+        "data": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Data",
+          "type": "object"
+        },
         "repo": {
           "minLength": 1,
           "title": "Repo",
@@ -688,6 +722,17 @@
     "Service": {
       "additionalProperties": false,
       "properties": {
+        "accepts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Accepted"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Accepts",
+          "type": "object"
+        },
         "env": {
           "additionalProperties": {
             "discriminator": {
@@ -799,6 +844,7 @@
     },
     "ServiceHost": {
       "additionalProperties": false,
+      "description": "``routes`` -- of a service on its own box (protocol 4, form A); a\nco-located service has none (``seams_check``).",
       "properties": {
         "domains": {
           "default": [],
@@ -816,6 +862,17 @@
           },
           "title": "Ports",
           "type": "array"
+        },
+        "routes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Route"
+          },
+          "default": {},
+          "propertyNames": {
+            "minLength": 1
+          },
+          "title": "Routes",
+          "type": "object"
         }
       },
       "title": "ServiceHost",
@@ -880,6 +937,15 @@
           "minLength": 1,
           "title": "Run",
           "type": "string"
+        },
+        "services": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Services",
+          "type": "array"
         },
         "target": {
           "minLength": 1,

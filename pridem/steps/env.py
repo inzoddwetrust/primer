@@ -1,7 +1,9 @@
 """The env steps (TZ 7.1, 7.3; contract 3 section 3, rules 13, 18).
 
-``seams_check`` refuses a plan with a half seam before its first ``act``: the
-plan builder puts it first in the ladder, after ``fetch_passport`` (the
+``seams_check`` refuses a plan with a half seam, an edition the product does
+not declare, data a service does not accept or routes of a co-located service
+before the first ``act`` of a stack: the plan builder puts it ahead of the
+services' ladders, once ``fetch_services`` has read their ``primer.yaml`` (the
 edition decides which services are installed).
 
 ``render_env`` renders a stack's ``.env`` from its schema and reads it back.
@@ -60,8 +62,11 @@ from pridem.stacks.schema import Derived, Minted, Product, Service
 from pridem.stacks.seams import (
     SeamMemory,
     half_seams,
+    installed,
     outside_edition,
     provider_order,
+    routes_on_co_located,
+    unaccepted,
 )
 from pridem.steps.base import (
     CheckResult,
@@ -94,7 +99,11 @@ def _passport(fetched: Fetched) -> Passport:
 
 
 class SeamsCheck(Step):
-    """Every seam of the box has both ends, inside the edition."""
+    """Every seam of the box has both ends, inside the edition; the edition is
+    one of the product's; the data the product gives a service is a kind the
+    service accepts; a co-located service has no routes. A co-located service
+    the edition leaves out and the box still has (``/opt/<s>/current``) is not
+    removed: the fact names it (``left``)."""
 
     name = "seams_check"
     order = 1
@@ -103,23 +112,43 @@ class SeamsCheck(Step):
         **NO_PASSPORT,
         "half-seam": "half seams: {seams}",
         "seam-outside-edition": "seams from services outside the edition: {seams}",
+        "edition-unknown": "edition {edition} is not in editions",
+        "routes-on-co-located": "co-located services declare routes: {services}",
+        "data-not-accepted": "data the services do not accept: {data}",
     }
 
     def __init__(
-        self, product: Product, services: Mapping[str, Service], fetched: Fetched
+        self,
+        product: Product,
+        services: Mapping[str, Service],
+        fetched: Fetched,
+        root: Path = Path("/"),
     ) -> None:
         self.product = product
         self.services = dict(services)
         self.fetched = fetched
+        self.root = root
 
     def check(self, ctx: StepContext) -> CheckResult:
         edition = _passport(self.fetched).edition
+        if (
+            self.product.editions
+            and edition is not None
+            and edition not in self.product.editions
+        ):
+            raise StepFailed("edition-unknown", {"edition": edition})
         half = half_seams(self.product, self.services, edition)
         if half:
             raise StepFailed("half-seam", {"seams": list[Json](half)})
         outside = outside_edition(self.product, edition)
         if outside:
             raise StepFailed("seam-outside-edition", {"seams": list[Json](outside)})
+        routed = routes_on_co_located(self.product, self.services, edition)
+        if routed:
+            raise StepFailed("routes-on-co-located", {"services": list[Json](routed)})
+        refused = unaccepted(self.product, self.services, edition)
+        if refused:
+            raise StepFailed("data-not-accepted", {"data": list[Json](refused)})
         return CheckResult(False)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
@@ -128,7 +157,15 @@ class SeamsCheck(Step):
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         edition = _passport(self.fetched).edition
         order = provider_order(self.product, edition)
-        return Verified({"order": list[Json](order)})
+        here = set(installed(self.product, edition))
+        left = [
+            name
+            for name, dependency in self.product.dependencies.items()
+            if dependency.topology == "co-located"
+            and name not in here
+            and (self.root / "opt" / name / "current").is_symlink()
+        ]
+        return Verified({"order": list[Json](order), "left": list[Json](left)})
 
 
 def _put(data: dict[str, object], path: Sequence[str], value: object) -> None:

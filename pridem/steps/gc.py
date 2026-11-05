@@ -25,6 +25,10 @@ and the size of ``journal/`` -- and decides what ``act`` removes:
   ``fetch_packages`` and ``packages`` use) or the composition of the current or
   the previous release names it.
   ``<name>.tmp`` belongs to ``sources``;
+- the product's data a service took (form D, ``steps/services.py``):
+  ``/opt/<service>/data/<product>@<release>`` stays while a container mounts it
+  or it is of the current or the previous release of the product, then the
+  newest by mtime up to ``keep_releases``; the rest is removed whole;
 - journals: ``Box.evict_journals`` down to ``policies.gc.journal_budget``; the
   journal of the current run is never evicted;
 - volumes: never. ``gc`` runs no volume command, and fewer volumes after than
@@ -60,6 +64,7 @@ nor a container needs, so a restore never misses it.
 import json
 import os
 import re
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -482,6 +487,11 @@ class Gc(Step):
             )
         removed: list[Json] = []
         kept: dict[str, Json] = {}
+        copies: list[Json] = [
+            str(path)
+            for stack in stacks
+            for path in self._data_gone(stack, policy, known, mounts)
+        ]
         for stack in stacks:
             held = [*mounts, *packages]  # mounted, or a package of the passport
             gone, stay = self._choose(ctx, stack, policy, known, held)
@@ -497,6 +507,7 @@ class Gc(Step):
             "before": {**df, "journal": {"bytes": journal}},
             "images": images,
             "releases": removed,
+            "data": copies,
             "prune": prune,
             "evict": evict,
             "kept_releases": kept,
@@ -504,10 +515,14 @@ class Gc(Step):
             "in_use": list[Json](sorted(_short(i) for i in in_use)),
             "history_damaged": known.damaged,
         }
-        if not (images or removed or prune or evict):
+        if not (images or removed or copies or prune or evict):
             return CheckResult(False, data=data)
         names: list[Json] = [
             f"{r['stack']}/{Path(str(r['path'])).name}" for r in _dicts(removed)
+        ]
+        names += [
+            f"{Path(str(p)).parent.parent.name}/data/{Path(str(p)).name}"
+            for p in copies
         ]
         would = local_code(
             "clean",
@@ -562,6 +577,32 @@ class Gc(Step):
         names = sorted(r.path.name for r in stay)
         return gone, names
 
+    def _data_gone(
+        self, stack: str, policy: GcPolicy, known: _Known, mounts: Sequence[Path]
+    ) -> list[Path]:
+        """The copies of the product's data under ``/opt/<stack>/data`` to
+        remove: neither mounted nor of the product's current or previous
+        release, beyond the newest ``keep_releases``."""
+        home = self.root / "opt" / stack / "data"
+        if not home.is_dir():
+            return []
+        stay: list[Path] = []
+        others: list[Path] = []
+        for path in sorted(home.iterdir()):
+            if not path.is_dir() or path.name.endswith(_TEMP):
+                continue
+            product, _, release = path.name.rpartition("@")
+            current = known.current.get(product)
+            held = release in {
+                None if current is None else current.name,
+                known.previous.get(product),
+            }
+            mounted = any(m.is_relative_to(path) for m in mounts)
+            (stay if held or mounted else others).append(path)
+        others.sort(key=lambda p: (-p.stat().st_mtime, p.name))
+        room = max(policy.keep_releases - len(stay), 0)
+        return others[room:]
+
     def _journal_files(self) -> list[Path]:
         return [
             *self.box.journals.glob("*.jsonl"),
@@ -587,6 +628,8 @@ class Gc(Step):
             bares.add(bare)
         for bare in sorted(bares):
             run_git(ctx, self.root, ["-C", bare, "worktree", "prune"])
+        for copy in _strings(check.data.get("data")):
+            shutil.rmtree(copy)
         if check.data.get("prune"):
             out(
                 ctx,
@@ -631,7 +674,10 @@ class Gc(Step):
             "after": {**after, "journal": {"bytes": journal}},
             "removed": {
                 "images": [_short(str(i["id"])) for i in images],
-                "releases": [str(r["path"]) for r in releases],
+                "releases": [
+                    *(str(r["path"]) for r in releases),
+                    *_strings(data.get("data")),
+                ],
             },
             "kept": {
                 "commits": data.get("kept_commits"),
@@ -654,6 +700,7 @@ class Gc(Step):
             )
         still: list[str] = [_short(str(i["id"])) for i in images if i["id"] in listed]
         still += [str(r["path"]) for r in releases if Path(str(r["path"])).exists()]
+        still += [p for p in _strings(data.get("data")) if Path(p).exists()]
         cache = (
             _number(before, "build_cache", "bytes"),
             _number(after, "build_cache", "bytes"),

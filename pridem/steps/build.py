@@ -44,6 +44,11 @@ build only makes images. ``check`` needs no ``act`` when every built service
 has its image of this commit (and key) and the override is the rendered one.
 The fact names every image and the ``app`` image, which ``render_env`` gets for
 ``derive``.
+
+On a service's entry the override also carries the product's data the service
+takes (form D, ``steps/services.py``): a read-only bind of its copy and the
+variable with its path in the container, on the service's ``app``; it goes in
+place only after the service's ``validate`` of it (``data_copy``).
 """
 
 import os
@@ -93,6 +98,7 @@ from pridem.steps.packages import (
     write_context,
 )
 from pridem.steps.passport import NO_PASSPORT, Fetched
+from pridem.steps.services import DataItem, data_binds
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
@@ -157,10 +163,14 @@ class Build(Step):
         handoff: OverrideHandoff,
         root: Path = Path("/"),
         fetched: Fetched | None = None,
+        data: Sequence[DataItem] = (),
     ) -> None:
+        """``data`` -- what the product gives this entry of a service (form D):
+        its binds and variables go into the override (``data_copy``)."""
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
         self.handoff = handoff
         self.fetched = fetched
+        self.data = list(data)
 
     def _passport(self) -> Passport | None:
         return None if self.fetched is None else self.fetched.passport
@@ -257,7 +267,11 @@ class Build(Step):
             builds[service] = extra
             mine = [place for place in places if place.service == service]
             contexts[service] = (source, target, mine)
-        text = override_text(compose, document, volumes(mounts), builds)
+        binds = volumes(mounts)
+        data_mounts, data_env = data_binds(self.data, compose.app_service)
+        for service, more in data_mounts.items():
+            binds[service] = [*binds.get(service, []), *more]
+        text = override_text(compose, document, binds, builds, data_env)
         return Rendered(built_services(document), text, contexts)
 
     def _key(self, service: str) -> dict[str, str]:
