@@ -11,6 +11,8 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
+from itertools import count
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -23,7 +25,9 @@ from env_support import (
     STDOUT,
     box,
     context,
+    derive,
     env_of,
+    load,
     minted_of,
     passport_data,
     printed,
@@ -31,22 +35,31 @@ from env_support import (
     read_env,
     render,
     run,
+    running_calls,
     service,
+    service_data,
 )
+from plan_support import ListSink
 
 from pridem.events import Json, Secrets
+from pridem.plan import Plan, StackSteps
 from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.codes import ExitCode
 from pridem.report.schema import build_verdict
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result
-from pridem.stacks.env import env_text, parse_env, write_private
+from pridem.stacks.env import DERIVED_PLACEHOLDER, env_text, parse_env, write_private
+from pridem.stacks.schema import Product, Service
 from pridem.stacks.seams import SeamMemory
 from pridem.state import JournalSink
 from pridem.steps.base import CheckResult, StepFailed
-from pridem.steps.passport import PASSPORT_COPY
+from pridem.steps.env import DeriveEnv, RenderEnv
+from pridem.steps.finalize import FinalCheck
+from pridem.steps.passport import PASSPORT_COPY, Fetched
 
 ASKED = "invented-telegram-token-0001"
 DERIVED = "https://t.me/invented_bot_000000005"
+DERIVED_NEW = "https://t.me/invented_bot_000000006"
+OLD_IMAGE = "sha256:" + "1" * 64
 URL_SAFE = re.compile(r"[A-Za-z0-9_-]{32,}")
 DERIVE_ARGV = (
     "docker",
@@ -112,6 +125,19 @@ class Reading(FakeRunner):
         return super().run(
             argv, expect=expect, timeout=timeout, cwd=cwd, env=env, on_line=on_line
         )
+
+
+def passes(
+    comms: Service,
+    root: Path,
+    fetched: Fetched,
+    made: Product,
+    *,
+    secrets: Secrets | None = None,
+) -> tuple[RenderEnv, DeriveEnv]:
+    """The two passes of comms' env: ``render_env`` and ``derive_env``."""
+    first = render(comms, root, fetched, product=made, secrets=secrets)
+    return first, derive(first, root)
 
 
 def comms_box(tmp: Path, **change: object):  # type: ignore[no-untyped-def]
@@ -205,13 +231,13 @@ def test_probe_DM_14_missing_asked_is_red_before_act(tmp_path: Path) -> None:
 def test_probe_DM_14_derived_runs_in_container_and_fails_on_nonzero(
     tmp_path: Path,
 ) -> None:
+    """Changed by DM-67: ``derive`` runs in the run's image after ``build``, in
+    the step ``derive_env``; its codes are ``derive_env``'s."""
     made, comms, root, fetched = comms_box(tmp_path, derived=True)
     env_file = root / "opt" / "comms" / "env" / "derive.env"
 
     with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)], runner
-        )
+        outcome, _ = run(passes(comms, root, fetched, made), runner)
 
     assert outcome.code is ExitCode.OK, outcome.steps
     assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED
@@ -222,17 +248,16 @@ def test_probe_DM_14_derived_runs_in_container_and_fails_on_nonzero(
         env_file, code=3, lines=[(STDOUT, "half-a-value"), (STDERR, "no token")]
     )
     with Reading(call) as runner:
-        outcome, sink = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)], runner
-        )
-    [step] = outcome.steps
+        outcome, sink = run(passes(comms, root, fetched, made), runner)
+    [_, step] = outcome.steps
     assert step.reason is not None
     assert (step.reason.code, step.reason.params) == (
-        "render_env:derive-failed",
+        "derive_env:derive-failed",
         {"key": "TELEGRAM_BOT_URL", "exit_code": 3},
     )
     assert "half-a-value" not in printed(sink) and "no token" in printed(sink)
-    assert not env_of(root, "comms").exists()
+    # the env stays as render_env wrote it: the placeholder, never half a value
+    assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED_PLACEHOLDER
 
 
 @pytest.mark.parametrize("ends", ["exit-3", "timeout"])
@@ -248,13 +273,11 @@ def test_the_env_file_of_derive_goes_when_the_command_fails(
     if ends == "timeout":
         call = replace(call, code=0, outcome="timeout")
     with Reading(call) as runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)], runner
-        )
-    [step] = outcome.steps
+        outcome, _ = run(passes(comms, root, fetched, made), runner)
+    [_, step] = outcome.steps
     assert step.status == "failed" and step.reason is not None
     assert step.reason.code == (
-        "render_env:derive-failed" if ends == "exit-3" else "command-timed-out"
+        "derive_env:derive-failed" if ends == "exit-3" else "command-timed-out"
     )
     assert len(runner.files) == 2 and runner.files[1] == oct(0o600)
     assert f"TELEGRAM_BOT_TOKEN={ASKED}\n" in runner.files[0]
@@ -339,9 +362,7 @@ def test_probe_DM_14_secret_never_in_argv(tmp_path: Path) -> None:
     runner = Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)]))
 
     with runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)], runner
-        )
+        outcome, _ = run(passes(comms, root, fetched, made), runner)
 
     assert outcome.code is ExitCode.OK, outcome.steps
     minted = yaml.safe_load(minted_of(root, "comms").read_text())["SECRET_KEY"]
@@ -365,9 +386,9 @@ def test_derived_value_is_cleaned_from_journal_and_verdict(tmp_path: Path) -> No
     journal.touch()
     sink = JournalSink(journal, secrets)
     call = derive_call(env_file, lines=[(STDOUT, DERIVED), (STDERR, f"made {DERIVED}")])
-    step = render(comms, root, fetched, product=made, image=IMAGE, secrets=secrets)
+    steps = passes(comms, root, fetched, made, secrets=secrets)
     with Reading(call) as runner:
-        outcome, seen = run([step], runner, sink=sink)
+        outcome, seen = run(steps, runner, sink=sink)
     sink.close()
     assert outcome.code is ExitCode.OK, outcome.steps
     text = journal.read_text()
@@ -384,7 +405,7 @@ def test_derived_value_is_cleaned_from_journal_and_verdict(tmp_path: Path) -> No
         composition_before={"pridem": "0.0.0"},
         composition_after={"pridem": "0.0.0"},
         secrets=secrets,
-        catalog=with_steps(ENGLISH, [(step.name, step.codes)]),
+        catalog=with_steps(ENGLISH, [(step.name, step.codes) for step in steps]),
     )
     assert DERIVED not in verdict.model_dump_json()
     assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED  # it is rendered
@@ -404,18 +425,43 @@ def test_derive_must_print_one_value(
     made, comms, root, fetched = comms_box(tmp_path, derived=True)
     env_file = root / "opt" / "comms" / "env" / "derive.env"
     with Reading(derive_call(env_file, lines=lines)) as runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)], runner
-        )
-    assert outcome.steps[0].reason is not None
-    assert outcome.steps[0].reason.code == f"render_env:{code}"
+        outcome, _ = run(passes(comms, root, fetched, made), runner)
+    assert outcome.steps[1].reason is not None
+    assert outcome.steps[1].reason.code == f"derive_env:{code}"
+    assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED_PLACEHOLDER
 
 
-def test_derive_without_an_image_is_red(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("image", "built"), [(None, True), (IMAGE, False)], ids=["no-image", "not-built"]
+)
+def test_derive_without_an_image_is_red(
+    tmp_path: Path, image: str | None, built: bool
+) -> None:
+    """Twin LACK: ``build`` found no ``app`` image, or the entry does not build
+    ``app`` (``image:`` alone) -- red, no container run."""
     made, comms, root, fetched = comms_box(tmp_path, derived=True)
+    first = render(comms, root, fetched, product=made)
+    steps = [first, derive(first, root, image=image, built=built)]
+    outcome, _ = run(steps, FakeRunner())
+    assert outcome.steps[0].reason is None
+    assert outcome.steps[1].reason is not None
+    assert outcome.steps[1].reason.code == "derive_env:derive-no-image"
+
+
+def test_a_stack_with_derived_and_no_app_is_red_before_act(tmp_path: Path) -> None:
+    """Twin LACK: no ``app`` in the own entry -- no image to derive in;
+    ``render_env`` refuses in ``check``: nothing of the stack is written."""
+    made = product(tmp_path, {}, dependencies={"comms": COMMS_REPO})
+    data = service_data(comms_env(derived=True))
+    stacks = data["stacks"]
+    assert isinstance(stacks, dict)
+    del stacks["comms"]["app"]
+    comms = load(tmp_path, data)
+    root, fetched = box(tmp_path, comms_passport())
     outcome, _ = run([render(comms, root, fetched, product=made)], FakeRunner())
     assert outcome.steps[0].reason is not None
     assert outcome.steps[0].reason.code == "render_env:derive-no-image"
+    assert not (root / "opt" / "comms").exists()
 
 
 def test_passport_sources(tmp_path: Path) -> None:
@@ -565,41 +611,41 @@ def test_write_private_is_0600_whatever_the_umask(tmp_path: Path) -> None:
 # --- DM-53: check reads, it never runs derive ----------------------------------
 
 
-@pytest.mark.parametrize("held", ["missing", "short"])
+def _green(tmp: Path) -> tuple[Path, Fetched, Product, Service, Path]:
+    """A box where ``render_env`` and ``derive_env`` of comms went green."""
+    made, comms, root, fetched = comms_box(tmp, derived=True)
+    env_file = root / "opt" / "comms" / "env" / "derive.env"
+    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+        outcome, _ = run(passes(comms, root, fetched, made), runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    return root, fetched, made, comms, env_file
+
+
+@pytest.mark.parametrize("held", ["missing", "short", "placeholder"])
 def test_a_derived_value_the_file_lacks_or_holds_short_is_derived_again(
     tmp_path: Path, held: str
 ) -> None:
-    """DM-55 FIX: ``check`` takes a derived value from ``.env`` only when it
-    is there and could be one -- a file without the key, or with a value
-    shorter than ``SECRET_MIN_LENGTH``, needs ``act`` (``doctor`` names it,
-    runs nothing, raises nothing: no ``KeyError``, no ``ShortSecret``), and
-    ``act`` derives it again."""
-    made, comms, root, fetched = comms_box(tmp_path, derived=True)
-    env_file = root / "opt" / "comms" / "env" / "derive.env"
-    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)], runner
-        )
-    assert outcome.code is ExitCode.OK, outcome.steps
+    """DM-55 FIX, DM-67: a derived value in ``.env`` is taken only when it
+    could be one -- a file without the key, with a value shorter than
+    ``SECRET_MIN_LENGTH`` or with ``<derived>`` needs ``act`` (``doctor``
+    names it and asks docker nothing), and ``derive_env`` derives it again."""
+    root, fetched, made, comms, env_file = _green(tmp_path)
     env = env_of(root, "comms")
     values = parse_env(env.read_text())
     if held == "missing":
         del values["TELEGRAM_BOT_URL"]
     else:
-        values["TELEGRAM_BOT_URL"] = "short"
+        values["TELEGRAM_BOT_URL"] = "short" if held == "short" else "<derived>"
     write_private(env, env_text(values))
     with Reading() as runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)],
-            runner,
-            mode="doctor",
-        )
-    [item] = outcome.doctor_diff
-    assert item.reason.code == "render_env:render" and runner.argvs == []
+        outcome, _ = run(passes(comms, root, fetched, made), runner, mode="doctor")
+    codes = [item.reason.code for item in outcome.doctor_diff]
+    expected = ["derive_env:derive"]
+    if held != "placeholder":  # render_env writes the placeholder in its place
+        expected.insert(0, "render_env:render")
+    assert codes == expected and runner.argvs == []
     with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)], runner
-        )
+        outcome, _ = run(passes(comms, root, fetched, made), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED
 
@@ -607,36 +653,146 @@ def test_a_derived_value_the_file_lacks_or_holds_short_is_derived_again(
 def test_check_takes_derived_values_from_the_file_and_runs_no_container(
     tmp_path: Path,
 ) -> None:
-    made, comms, root, fetched = comms_box(tmp_path, derived=True)
-    env_file = root / "opt" / "comms" / "env" / "derive.env"
-    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)], runner
-        )
-    assert outcome.code is ExitCode.OK, outcome.steps
-    # the same env again: no docker at all, in a run and in doctor
+    """Twin REPEAT: the same env and ``app`` on this run's image -- ``derive``
+    does not run, in a run and in doctor; docker is only asked which image
+    ``app`` runs on. The pair: a key gone -- ``act`` derives again."""
+    root, fetched, made, comms, env_file = _green(tmp_path)
     secrets = Secrets(())
-    step = render(comms, root, fetched, product=made, image=IMAGE, secrets=secrets)
-    with Reading() as runner:
-        outcome, _ = run([step], runner)
+    steps = passes(comms, root, fetched, made, secrets=secrets)
+    with Reading(*running_calls(steps[1], IMAGE)) as runner:
+        outcome, _ = run(steps, runner)
     assert outcome.code is ExitCode.OK, outcome.steps
-    assert outcome.steps[0].reason is None and runner.argvs == []
+    assert all(step.reason is None for step in outcome.steps)
+    assert ("docker", "run") not in [a[:2] for a in runner.argvs]
     assert secrets.text(DERIVED) == "[redacted]"  # read from the file, cleaned
-    with Reading() as runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)],
-            runner,
-            mode="doctor",
-        )
-    assert outcome.doctor_diff == () and runner.argvs == []
+    steps = passes(comms, root, fetched, made)
+    with Reading(*running_calls(steps[1], IMAGE)) as runner:
+        outcome, _ = run(steps, runner, mode="doctor")
+    assert outcome.doctor_diff == ()
     # the pair: another value of the stack changed -- act derives again
     env = env_of(root, "comms")
     lines = env.read_text().splitlines(keepends=True)
     write_private(env, "".join(lines[1:]))  # a key gone: the file is not current
     with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
-        outcome, _ = run(
-            [render(comms, root, fetched, product=made, image=IMAGE)], runner
-        )
+        outcome, _ = run(passes(comms, root, fetched, made), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert [a[:2] for a in runner.argvs] == [("docker", "run")]
     assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED
+
+
+@pytest.mark.parametrize("running", [OLD_IMAGE, None], ids=["old-image", "none"])
+def test_app_on_another_image_derives_again(
+    tmp_path: Path, running: str | None
+) -> None:
+    """Р4, the image: the same env, but ``app`` runs on another image than
+    ``build`` gives (a new commit) or does not run -- ``derive`` again, on the
+    run's image."""
+    root, fetched, made, comms, env_file = _green(tmp_path)
+    steps = passes(comms, root, fetched, made)
+    calls = [
+        *running_calls(steps[1], running),
+        derive_call(env_file, lines=[(STDOUT, DERIVED_NEW)]),
+    ]
+    with Reading(*calls) as runner:
+        outcome, _ = run(steps, runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED_NEW
+    assert outcome.steps[1].verify["image"] == IMAGE
+
+
+def test_another_input_of_derive_derives_again(tmp_path: Path) -> None:
+    """Р4, the inputs: the passport gives another token on the same image --
+    ``render_env`` rewrites the others and keeps the old derived value until
+    ``derive_env`` derives it from the new token."""
+    root, _, made, comms, env_file = _green(tmp_path)
+    other = "invented-telegram-token-0002"
+    _, fetched = box(
+        tmp_path, comms_passport(asked={"comms": {"TELEGRAM_BOT_TOKEN": other}})
+    )
+    steps = passes(comms, root, fetched, made)
+    seen: list[str] = []
+
+    class Watching(Reading):
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            seen.append(read_env(root, "comms")["TELEGRAM_BOT_URL"])
+            return super().run(argv, **kwargs)
+
+    with Watching(derive_call(env_file, lines=[(STDOUT, DERIVED_NEW)])) as runner:
+        outcome, _ = run(steps, runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert seen == [DERIVED]  # before derive: the old value, not the placeholder
+    assert f"TELEGRAM_BOT_TOKEN={other}\n" in runner.files[0]
+    assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED_NEW
+
+
+# --- DM-67: the two passes ------------------------------------------------------
+
+
+def test_two_derived_keys_one_red_leaves_the_env_as_render_env_wrote_it(
+    tmp_path: Path,
+) -> None:
+    """Twin REPEAT and LACK: two ``derived`` keys, the second ``derive`` red --
+    ``.env`` is written once, after every key, so it still holds the
+    placeholders; ``derive.env`` is gone; the first key's value is a secret
+    of the run all the same."""
+    made = product(tmp_path, {}, dependencies={"comms": COMMS_REPO})
+    env = comms_env(derived=True)
+    env["TELEGRAM_BOT_NAME"] = {"source": "derived", "run": "comms derive bot-name"}
+    comms = service(tmp_path, env)
+    root, fetched = box(tmp_path, comms_passport())
+    env_file = root / "opt" / "comms" / "env" / "derive.env"
+    second = replace(
+        derive_call(env_file, code=3),
+        argv=(*DERIVE_ARGV, str(env_file), IMAGE, "comms", "derive", "bot-name"),
+    )
+    secrets = Secrets(())
+    steps = passes(comms, root, fetched, made, secrets=secrets)
+    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)]), second) as runner:
+        outcome, _ = run(steps, runner)
+    assert outcome.steps[1].reason is not None
+    assert outcome.steps[1].reason.params == {
+        "key": "TELEGRAM_BOT_NAME",
+        "exit_code": 3,
+    }
+    held = read_env(root, "comms")
+    assert held["TELEGRAM_BOT_URL"] == held["TELEGRAM_BOT_NAME"] == DERIVED_PLACEHOLDER
+    assert not env_file.exists()
+    assert DERIVED not in runner.files[2]  # the second derive got no derived value
+    assert secrets.text(DERIVED) == "[redacted]"
+
+
+def test_the_final_check_reads_both_passes_green(tmp_path: Path) -> None:
+    """``final_check`` verifies ``render_env`` again after ``derive_env``: the
+    real value is there, and the provides are the derived ones."""
+    made, comms, root, fetched = comms_box(tmp_path, derived=True)
+    env_file = root / "opt" / "comms" / "env" / "derive.env"
+    steps = passes(comms, root, fetched, made)
+    ticks = count()
+    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+        outcome = Plan(
+            [StackSteps("comms", steps), StackSteps("end", [FinalCheck()], root=True)],
+            mode="install",
+            role="test",
+            runner=runner,
+            sink=ListSink(),
+            clock=lambda: float(next(ticks)),
+            now=lambda: datetime(2026, 11, 5, tzinfo=UTC),
+        ).run()
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[-1].verify == {"verified": 2}
+    assert steps[0].rendered["TELEGRAM_BOT_URL"] == DERIVED
+
+
+def test_derive_env_gives_the_provides_their_derived_value(tmp_path: Path) -> None:
+    """D7: ``render_env``'s read back holds ``<derived>``; ``derive_env``'s
+    holds the value -- what ``up`` hands the plan's memory after health."""
+    made, _, root, fetched = comms_box(tmp_path)
+    comms = service(tmp_path, comms_env(derived=True), provides=["TELEGRAM_BOT_URL"])
+    env_file = root / "opt" / "comms" / "env" / "derive.env"
+    first, second = passes(comms, root, fetched, made)
+    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+        outcome, _ = run([first], runner)
+        assert first.provided() == {"TELEGRAM_BOT_URL": DERIVED_PLACEHOLDER}
+        outcome, _ = run([second], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert first.provided() == {"TELEGRAM_BOT_URL": DERIVED}

@@ -1,6 +1,7 @@
 """``build`` (DM-18): two build arguments, images with labels, a red build
 touches no container, the machine's override."""
 
+import copy
 import json
 import os
 import stat
@@ -20,14 +21,18 @@ from compose_support import (
     raw_config_call,
     run,
 )
+from env_support import context
 
-from pridem.events import Code
+from pridem.events import Code, Json
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
 from pridem.steps.base import CheckResult, StepContext, StepFailed
 from pridem.steps.build import Build
 from pridem.steps.compose import OverrideHandoff, override_text
+from pridem.steps.env import DeriveEnv, RenderEnv
 from pridem.steps.migrate import Migrate
+from pridem.steps.packages import Packages
+from pridem.steps.services import DataCopy
 from pridem.steps.up import Up
 
 
@@ -212,3 +217,84 @@ def test_verify_reads_the_build_arguments_as_check_does(tmp_path: Path) -> None:
     assert raised.value.reason == Code(
         "instance-args", {"stack": "blank", "services": ["frontend"]}
     )
+
+
+# --- DM-67: the app image for derive_env ------------------------------------------
+
+
+def _with_env(value: str) -> dict[str, Json]:
+    """``CONFIG`` with a ``derived`` variable of ``app`` interpolated to
+    ``value``: what ``config`` prints with the ``.env`` of that run."""
+    document = copy.deepcopy(CONFIG)
+    services = document["services"]
+    assert isinstance(services, dict)
+    app = services["app"]
+    assert isinstance(app, dict)
+    app["environment"] = {"TELEGRAM_BOT_URL": value}
+    return document
+
+
+def test_build_does_not_depend_on_the_values_of_env(tmp_path: Path) -> None:
+    """Condition 1 of the gate: ``install`` builds with ``<derived>`` in the
+    env, the next ``update`` reads the real value -- ``check`` needs no
+    build, and finds the app image there for ``derive_env``."""
+    cs = compose(tmp_path)
+    placeholder, real = _with_env("<derived>"), _with_env("https://t.me/b" * 3)
+    first = [
+        raw_config_call(cs, placeholder),
+        config_call(cs, placeholder),
+        raw_config_call(cs, placeholder),
+        config_call(cs, placeholder),
+        build_call(cs),
+        raw_config_call(cs, placeholder),
+        config_call(cs, placeholder),
+        image_call(cs, "app", APP_IMAGE),
+        image_call(cs, "frontend", FRONT_IMAGE),
+    ]
+    with FakeRunner(*first) as runner:
+        outcome, _ = run([steps(tmp_path)[0]], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    placed(cs)
+    build = steps(tmp_path)[0]
+    again = [
+        raw_config_call(cs, real),
+        config_call(cs, real),
+        image_call(cs, "app", APP_IMAGE),
+        image_call(cs, "frontend", FRONT_IMAGE),
+    ]
+    with FakeRunner(*again) as runner:  # no build in the script
+        found = build.check(context(runner))
+    assert not found.needed
+    assert (build.app_image, build.app_built) == (APP_IMAGE, True)
+
+
+def test_check_with_something_to_build_knows_no_app_image(tmp_path: Path) -> None:
+    """The pair: ``check`` that needs a build has no image of this commit to
+    give -- ``app_image`` stays ``None`` until ``verify``."""
+    cs = compose(tmp_path)
+    build = steps(tmp_path)[0]
+    with FakeRunner(raw_config_call(cs), config_call(cs)) as runner:
+        found = build.check(context(runner))  # no override on disk: a build
+    assert found.needed and build.app_image is None and build.app_built is True
+    with FakeRunner(*green_build(tmp_path)) as runner:
+        outcome, _ = run([build], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert build.app_image == APP_IMAGE
+
+
+def test_an_app_without_build_has_no_image_for_derive(tmp_path: Path) -> None:
+    """Twin LACK: ``app`` runs a ready image (``image:``), nothing builds it."""
+    cs = compose(tmp_path)
+    document = copy.deepcopy(CONFIG)
+    services = document["services"]
+    assert isinstance(services, dict)
+    services["app"] = {"image": "app@sha256:x", "networks": {"default": None}}
+    build = steps(tmp_path)[0]
+    with FakeRunner(raw_config_call(cs, document), config_call(cs, document)) as r:
+        build.check(context(r))
+    assert build.app_built is False and build.app_image is None
+
+
+def test_build_comes_before_derive_env_in_a_stack() -> None:
+    assert Build.order < DeriveEnv.order < min(Packages.order, DataCopy.order)
+    assert RenderEnv.order < Build.order

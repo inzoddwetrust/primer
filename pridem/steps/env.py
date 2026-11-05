@@ -8,23 +8,33 @@ stack: the plan builder puts it ahead of the
 services' ladders, once ``fetch_services`` has read their ``primer.yaml`` (the
 edition decides which services are installed).
 
-``render_env`` renders a stack's ``.env`` from its schema and reads it back.
+``render_env`` renders a stack's ``.env`` from its schema and reads it back,
+in two passes around ``build`` (DM-67). Before it (``render_env``), every
+source but ``derived``; a ``derived`` key holds its value on disk when it
+could be one -- the running release's -- else ``<derived>``, which satisfies
+compose's ``${VAR:?}`` for the build and is no value of anything. After it
+(``derive_env``, on the stack's own entry), ``derive`` runs in the ``app``
+image of this run, ``.env`` is written once with every key and read back with
+no placeholder left -- before ``packages``, ``data_copy``, ``tests``,
+``migrate`` and ``up`` start a container of the stack, and before its
+``provides`` reach the plan's memory after health. A stack with ``derived``
+and no ``app`` in its own entry is refused by ``render_env``'s ``check``,
+before the stack's first ``act``.
+
 Every secret enters the run's ``Secrets`` -- the one growing set the sinks and
 the verdict hold -- before any line that could carry it: the passport's and
 the minted ones in ``check``, an answer of ``install`` once it is written, a
-``derived`` value as soon as its command ends. A secret never goes to an argv:
-``derive`` gets the stack's other values through an env file (0600) that
-``docker run`` reads, and its output is kept by the step -- stdout is the
-value, nothing of it reaches the console or the journal; on a non-zero exit
-only stderr is passed on.
+``derived`` value as soon as its command ends or is read from the file. A
+secret never goes to an argv: ``derive`` gets the stack's other values through
+an env file (0600) that ``docker run`` reads, and its output is kept by the
+step -- stdout is the value, nothing of it reaches the console or the journal;
+on a non-zero exit only stderr is passed on.
 
-``derive`` runs only in ``act``: ``check`` takes a ``derived`` value from the
-``.env`` on disk and compares the rest. It runs ``docker run --rm --env-file
-<file> <image> <run>`` in a throwaway container of the stack's image, not
-``docker compose run``: compose
-interpolates the whole file, and ``${VAR:?}`` of a variable not rendered yet
--- the derived one itself -- stops it. The image is an input: the build step
-gives it (DM-18).
+``derive`` runs only in ``act``: ``check`` of either pass reads files and
+asks docker which image ``app`` runs on, and runs no container. It runs
+``docker run --rm --env-file <file> <image> <run>`` in a throwaway container
+of the stack's image, not ``docker compose run``: compose interpolates the
+whole file.
 
 A missing ``asked``, ``params``, domain or ``edition`` is asked through
 ``ask`` (contract 1 rule 3, owner's decision of 27.10); with nobody to ask it
@@ -35,7 +45,7 @@ passport's model and goes to the local copy; the version does not change.
 import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from pydantic import SecretStr
 
@@ -43,6 +53,7 @@ from pridem.contract import SECRET_MIN_LENGTH
 from pridem.events import Json, Secrets
 from pridem.runner import CommandFailed, Stream
 from pridem.stacks.env import (
+    DERIVED_PLACEHOLDER,
     ENV_FILE,
     MINTED_FILE,
     Resolved,
@@ -51,6 +62,7 @@ from pridem.stacks.env import (
     mint,
     minted_text,
     mode_of,
+    own_entry,
     parse_env,
     placeholder,
     private_mode,
@@ -80,6 +92,7 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
+from pridem.steps.compose import ComposeStack, running_image
 from pridem.steps.passport import (
     NO_PASSPORT,
     Ask,
@@ -91,6 +104,14 @@ from pridem.steps.passport import (
 )
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
+NO_IMAGE = "{key} is derived, and no image of the stack is given"
+READ_BACK_CODES: dict[str, str] = {
+    "env-mode": "{path} is {mode}, not 0o600; it is left as it is",
+    "env-unsafe": "the value of {key} has a quote or a line break",
+    "env-unreadable": "line {line} of the env file is not KEY='value'",
+    "env-keys": "the env file lacks {missing} and has {extra} beyond the schema",
+    "placeholder": "the env file holds placeholders for {keys}",
+}
 DERIVE_TIMEOUT_S = 300
 DERIVE_ENV = "derive.env"
 LANGUAGE_KEYS = frozenset({"languages", "default_language"})
@@ -228,32 +249,27 @@ def _put(data: dict[str, object], path: Sequence[str], value: object) -> None:
 
 
 class RenderEnv(Step):
-    """``/opt/<name>/env/.env`` of one stack, rendered and read back."""
+    """``/opt/<n>/env/.env`` of one stack, rendered and read back: every source
+    but ``derived``, whose keys hold the value on disk or ``<derived>`` until
+    ``derive_env`` (below) puts the value of this run's image there."""
 
     name = "render_env"
     order = 2
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
         **NO_PASSPORT,
+        **READ_BACK_CODES,
         "render": "render the env of {stack}",
         "missing": "the passport lacks {fields} and nobody can be asked",
         "no-answer": "no answer for {field}",
         "invalid": "the answer is rejected: {problems}",
         "minted-mode": "{path} is {mode}, not 0o600; it is left as it is",
         "minted-damaged": "{path} is not a minted file of this machine",
-        "env-mode": "{path} is {mode}, not 0o600; it is left as it is",
-        "env-unsafe": "the value of {key} has a quote or a line break",
-        "env-unreadable": "line {line} of the env file is not KEY='value'",
-        "env-keys": "the env file lacks {missing} and has {extra} beyond the schema",
-        "placeholder": "the env file holds placeholders for {keys}",
         "edition-unknown": "{key}: edition {edition} is not in editions",
         "passport-key": "{key}: the passport has no source {passport_key}",
         "address-no-app": "{stack} has no app of its own to give an address of",
         "seam-before-health": "{names} of {from} are asked before its health",
-        "derive-no-image": "{key} is derived, and no image of the stack is given",
-        "derive-failed": "deriving {key} failed — exit code {exit_code}",
-        "derive-empty": "deriving {key} printed {lines} lines, not one value",
-        "derive-short": "the derived {key} is shorter than 16 characters",
+        "derive-no-image": NO_IMAGE,
     }
 
     def __init__(
@@ -266,7 +282,6 @@ class RenderEnv(Step):
         memory: SeamMemory,
         root: Path = Path("/"),
         ask: Ask | None = None,
-        image: str | None = None,
     ) -> None:
         self.stack = stack
         self.product = product
@@ -275,9 +290,10 @@ class RenderEnv(Step):
         self.memory = memory
         self.root = root
         self.ask = ask
-        self.image = image
         self.rendered: dict[str, str] = {}
-        self._derived: dict[str, str] = {}
+        self.changed = True
+        """Whether ``check`` found the file behind the schema, the passport,
+        the minted values or the seams -- the inputs of ``derive``."""
 
     # --- places -----------------------------------------------------------------
 
@@ -296,6 +312,9 @@ class RenderEnv(Step):
     def _minted_keys(self) -> list[str]:
         return [k for k, v in self.stack.env.items() if isinstance(v, Minted)]
 
+    def _derivable(self) -> list[str]:
+        return [k for k, v in self.stack.env.items() if isinstance(v, Derived)]
+
     # --- sources ----------------------------------------------------------------
 
     def _known(self) -> tuple[dict[str, str], Resolved]:
@@ -310,16 +329,241 @@ class RenderEnv(Step):
             self.stack, self.product, passport, {**minted, **unminted}, self.memory
         )
 
-    def _derive(self, ctx: StepContext, values: Mapping[str, str], key: str) -> str:
+    def _on_disk(self) -> dict[str, str] | None:
+        """The values of ``.env`` as they are; ``None`` when there is no file
+        or it is not of the machine's form."""
+        if not self._env.exists():
+            return None
+        try:
+            return parse_env(self._env.read_text(encoding="utf-8"))
+        except StepFailed:  # a file of another form is rendered again
+            return None
+
+    def _held(self, on_disk: Mapping[str, str] | None) -> dict[str, str]:
+        """What a ``derived`` key holds before ``derive_env``: its value on disk
+        when it could be one -- the running release's -- else the placeholder.
+        Held values are secrets."""
+        held: dict[str, str] = {}
+        for key in self._derivable():
+            value = (on_disk or {}).get(key, "")
+            held[key] = value if usable(value) else DERIVED_PLACEHOLDER
+        self.secrets.add(SecretStr(v) for v in held.values() if usable(v))
+        return held
+
+    def _app_for_derive(self) -> None:
+        """A stack with ``derived`` has an ``app`` in its own entry: ``derive``
+        runs in that image. Refused here, before the stack's first ``act``."""
+        derivable = self._derivable()
+        if derivable and self.stack.stacks[own_entry(self.stack)].app is None:
+            raise StepFailed("derive-no-image", {"key": derivable[0]})
+
+    # --- the step ---------------------------------------------------------------
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        result = self._check()
+        self.changed = result.needed
+        return result
+
+    def _check(self) -> CheckResult:
+        needed = CheckResult(True, local_code("render", {"stack": self.stack.name}))
+        self._app_for_derive()
+        if self._env.exists():
+            private_mode(self._env, "env-mode")
+        minted, resolved = self._known()
+        if resolved.missing:
+            if self.ask is None:
+                raise StepFailed("missing", {"fields": list[Json](resolved.missing)})
+            return needed
+        if any(key not in minted for key in self._minted_keys()):
+            return needed
+        on_disk = self._on_disk()
+        if on_disk is None:
+            return needed
+        # ``check`` reads and runs nothing; ``derived`` keys are compared as
+        # ``act`` writes them -- the value on disk or the placeholder
+        present = self._env.read_text(encoding="utf-8")
+        if env_text({**resolved.values, **self._held(on_disk)}) != present:
+            return needed
+        return CheckResult(False)
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        minted, resolved = self._known()
+        new = {key: mint() for key in self._minted_keys() if key not in minted}
+        if resolved.missing:
+            self._answer(resolved.missing)
+        if new:
+            self.secrets.add(SecretStr(value) for value in new.values())
+            write_private(self._minted, minted_text({**minted, **new}))
+        minted, resolved = self._known()
+        if resolved.missing:
+            raise StepFailed("missing", {"fields": list[Json](resolved.missing)})
+        held = self._held(self._on_disk())
+        write_private(self._env, env_text({**resolved.values, **held}))
+
+    def _answer(self, fields: list[str]) -> None:
+        """Ask each missing field; the answers go to the local copy at once."""
+        if self.ask is None:
+            raise StepFailed("missing", {"fields": list[Json](fields)})
+        data = copy_data(self.root)
+        for field in fields:
+            path = tuple(field.split("."))
+            answer = self.ask(field, schema_at(path))
+            if not answer:
+                raise StepFailed("no-answer", {"field": field})
+            _put(data, path, answer)
+        passport = rewrite_copy(self.root, data)  # the model checks every answer
+        self.secrets.add(passport_secrets(passport))
+        self.fetched.passport = passport
+
+    def read_back(self, *, waiting: Sequence[str]) -> Verified:
+        """``.env`` read back: 0600, exactly the schema's keys, no placeholder
+        but ``<derived>`` on the keys of ``waiting``; the values become
+        ``rendered``."""
+        if not self._env.exists():
+            raise StepFailed(
+                "env-keys", {"missing": list[Json](self.stack.env), "extra": []}
+            )
+        private_mode(self._env, "env-mode")
+        if self._minted.exists():
+            private_mode(self._minted, "minted-mode")
+        values = parse_env(self._env.read_text(encoding="utf-8"))
+        missing = [key for key in self.stack.env if key not in values]
+        extra = [key for key in values if key not in self.stack.env]
+        if missing or extra:
+            raise StepFailed(
+                "env-keys", {"missing": list[Json](missing), "extra": list[Json](extra)}
+            )
+        held = [
+            key
+            for key, value in values.items()
+            if placeholder(value)
+            and not (key in waiting and value == DERIVED_PLACEHOLDER)
+        ]
+        if held:
+            raise StepFailed("placeholder", {"keys": list[Json](held)})
+        self.rendered = values
+        return Verified(
+            {
+                "path": str(self._env),
+                "keys": len(values),
+                "mode": mode_of(self._env),
+                "dir_mode": mode_of(self._dir),
+            }
+        )
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        return self.read_back(waiting=self._derivable())
+
+    def provided(self) -> dict[str, str]:
+        """The stack's ``provides`` as read back, for ``SeamMemory.healthy``."""
+        names = self.stack.provides if isinstance(self.stack, Service) else []
+        return {name: self.rendered[name] for name in names}
+
+
+class AppImage(Protocol):
+    """What ``derive_env`` takes from ``build`` of the stack's own entry."""
+
+    @property
+    def compose(self) -> ComposeStack: ...
+
+    @property
+    def app_image(self) -> str | None:
+        """The ``app`` image of this commit, once ``build`` found exactly one
+        -- in its ``check`` with nothing to build, or in its ``verify``."""
+        ...
+
+    @property
+    def app_built(self) -> bool | None:
+        """Whether the entry builds ``app``; ``None`` before ``build`` read
+        its ``config``."""
+        ...
+
+
+class DeriveEnv(Step):
+    """The ``derived`` values of one stack, computed in this run's image and
+    written to ``.env``, which is read back with no placeholder left.
+
+    ``check`` needs ``act`` when a ``derived`` value on disk could not be one
+    (none, ``<derived>``, short), when ``render_env`` found the other values
+    behind -- they are ``derive``'s input -- or when ``app`` runs on another
+    image than ``build`` gives (a new commit, or a run that stopped after
+    deriving and before ``up``). It reads ``.env`` and asks docker which image
+    ``app`` runs on; it runs no container.
+    """
+
+    name = "derive_env"
+    order = 8  # after build (7), before packages, data_copy (9) and the rest
+    modes = ALL_MODES
+    codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
+        **READ_BACK_CODES,
+        "derive": "derive {keys} of {stack}",
+        "missing": "the passport lacks {fields} and nobody can be asked",
+        "address-no-app": "{stack} has no app of its own to give an address of",
+        "seam-before-health": "{names} of {from} are asked before its health",
+        "derive-no-image": NO_IMAGE,
+        "derive-failed": "deriving {key} failed — exit code {exit_code}",
+        "derive-empty": "deriving {key} printed {lines} lines, not one value",
+        "derive-short": "the derived {key} is shorter than 16 characters",
+    }
+
+    def __init__(self, render: RenderEnv, build: AppImage) -> None:
+        self.render = render
+        self.build = build
+        self._image: str | None = None
+
+    def _image_of_build(self) -> str:
+        image = self.build.app_image
+        if image is None or self.build.app_built is False:
+            raise StepFailed("derive-no-image", {"key": self.render._derivable()[0]})
+        return image
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        render = self.render
+        keys = render._derivable()
+        params: dict[str, Json] = {"keys": list[Json](keys), "stack": render.stack.name}
+        needed = CheckResult(True, local_code("derive", params))
+        if self.build.app_built is False:
+            raise StepFailed("derive-no-image", {"key": keys[0]})
+        on_disk = render._on_disk() or {}
+        values = {key: on_disk.get(key, "") for key in keys}
+        if not all(usable(value) for value in values.values()):
+            return needed
+        render.secrets.add(SecretStr(value) for value in values.values())
+        if render.changed:
+            return needed
+        image = self.build.app_image
+        app = self.build.compose.app_service
+        if image is None or app is None:
+            return needed  # doctor before a build: the image is not known yet
+        if running_image(ctx, self.build.compose, app) != image:
+            return needed
+        self._image = image
+        return CheckResult(False)
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        render = self.render
+        image = self._image_of_build()
+        _, resolved = render._known()
+        if resolved.missing:
+            raise StepFailed("missing", {"fields": list[Json](resolved.missing)})
+        values = dict(resolved.values)
+        known = {k: v for k, v in values.items() if k not in resolved.derived}
+        for key in resolved.derived:
+            values[key] = self._derive(ctx, known, key, image)
+        write_private(render._env, env_text(values))  # one write, every key
+        self._image = image
+
+    def _derive(
+        self, ctx: StepContext, known: Mapping[str, str], key: str, image: str
+    ) -> str:
         """The value printed by ``run`` of ``key`` in the stack's container."""
-        if self.image is None:
-            raise StepFailed("derive-no-image", {"key": key})
-        var = self.stack.env[key]
+        render = self.render
+        var = render.stack.env[key]
         if not isinstance(var, Derived):
             raise TypeError(f"{key} is not derived")
         command = shlex.split(var.run)
-        known = {k: v for k, v in values.items() if k not in self._derivable()}
-        env_file = self._dir / DERIVE_ENV
+        env_file = render._dir / DERIVE_ENV
         lines: list[tuple[Stream, str, bool]] = []
 
         def keep(stream: Stream, line: str, cut: bool) -> None:
@@ -334,10 +578,10 @@ class RenderEnv(Step):
                     "run",
                     "--rm",
                     "--label",
-                    f"pridem.stack={self.stack.name}",
+                    f"pridem.stack={render.stack.name}",
                     "--env-file",
                     str(env_file),
-                    self.image,
+                    image,
                     *command,
                 ],
                 timeout=DERIVE_TIMEOUT_S,
@@ -360,115 +604,24 @@ class RenderEnv(Step):
         value = out[0]
         if len(value) < SECRET_MIN_LENGTH:
             raise StepFailed("derive-short", {"key": key})
-        self.secrets.add([SecretStr(value)])
+        render.secrets.add([SecretStr(value)])
         for stream, line, cut in lines:
             if stream is Stream.STDERR:  # cleaned of the value from here on
                 ctx.on_line(stream, line, cut)
         safe(key, value)
         return value
 
-    def _derivable(self) -> set[str]:
-        return {k for k, v in self.stack.env.items() if isinstance(v, Derived)}
-
-    def _values(self, ctx: StepContext, resolved: Resolved) -> dict[str, str]:
-        values = dict(resolved.values)
-        for key in resolved.derived:
-            if key not in self._derived:
-                self._derived[key] = self._derive(ctx, values, key)
-            values[key] = self._derived[key]
-        return values
-
-    # --- the step ---------------------------------------------------------------
-
-    def check(self, ctx: StepContext) -> CheckResult:
-        needed = CheckResult(True, local_code("render", {"stack": self.stack.name}))
-        if self._env.exists():
-            private_mode(self._env, "env-mode")
-        minted, resolved = self._known()
-        if resolved.missing:
-            if self.ask is None:
-                raise StepFailed("missing", {"fields": list[Json](resolved.missing)})
-            return needed
-        if any(key not in minted for key in self._minted_keys()):
-            return needed
-        if not self._env.exists():
-            return needed
-        # ``check`` reads and runs nothing: ``derived`` values are taken from
-        # the file as they are -- ``derive`` is a function of the stack's other
-        # values, so the file is current when every other value matches -- and
-        # recomputed only by ``act``
-        present = self._env.read_text(encoding="utf-8")
-        try:
-            on_disk = parse_env(present)
-        except StepFailed:  # a file of another form is rendered again
-            return needed
-        if any(key not in on_disk for key in resolved.derived):
-            return needed
-        held = {key: on_disk[key] for key in resolved.derived}
-        if any(len(value) < SECRET_MIN_LENGTH for value in held.values()):
-            return needed  # too short to be what derive gives: act derives it again
-        self.secrets.add(SecretStr(value) for value in held.values())
-        if env_text({**resolved.values, **held}) != present:
-            return needed
-        return CheckResult(False)
-
-    def act(self, ctx: StepContext, check: CheckResult) -> None:
-        minted, resolved = self._known()
-        new = {key: mint() for key in self._minted_keys() if key not in minted}
-        if resolved.missing:
-            self._answer(resolved.missing)
-        if new:
-            self.secrets.add(SecretStr(value) for value in new.values())
-            write_private(self._minted, minted_text({**minted, **new}))
-        minted, resolved = self._known()
-        if resolved.missing:
-            raise StepFailed("missing", {"fields": list[Json](resolved.missing)})
-        write_private(self._env, env_text(self._values(ctx, resolved)))
-
-    def _answer(self, fields: list[str]) -> None:
-        """Ask each missing field; the answers go to the local copy at once."""
-        if self.ask is None:
-            raise StepFailed("missing", {"fields": list[Json](fields)})
-        data = copy_data(self.root)
-        for field in fields:
-            path = tuple(field.split("."))
-            answer = self.ask(field, schema_at(path))
-            if not answer:
-                raise StepFailed("no-answer", {"field": field})
-            _put(data, path, answer)
-        passport = rewrite_copy(self.root, data)  # the model checks every answer
-        self.secrets.add(passport_secrets(passport))
-        self.fetched.passport = passport
-
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        if not self._env.exists():
-            raise StepFailed(
-                "env-keys", {"missing": list[Json](self.stack.env), "extra": []}
-            )
-        private_mode(self._env, "env-mode")
-        if self._minted.exists():
-            private_mode(self._minted, "minted-mode")
-        values = parse_env(self._env.read_text(encoding="utf-8"))
-        missing = [key for key in self.stack.env if key not in values]
-        extra = [key for key in values if key not in self.stack.env]
-        if missing or extra:
-            raise StepFailed(
-                "env-keys", {"missing": list[Json](missing), "extra": list[Json](extra)}
-            )
-        held = [key for key, value in values.items() if placeholder(value)]
-        if held:
-            raise StepFailed("placeholder", {"keys": list[Json](held)})
-        self.rendered = values
-        return Verified(
-            {
-                "path": str(self._env),
-                "keys": len(values),
-                "mode": mode_of(self._env),
-                "dir_mode": mode_of(self._dir),
-            }
-        )
+        verified = self.render.read_back(waiting=())
+        fact: dict[str, Json] = {
+            **verified.fact,
+            "derived": list[Json](self.render._derivable()),
+        }
+        if self._image is not None:
+            fact["image"] = self._image
+        return Verified(fact)
 
-    def provided(self) -> dict[str, str]:
-        """The stack's ``provides`` as read back, for ``SeamMemory.healthy``."""
-        names = self.stack.provides if isinstance(self.stack, Service) else []
-        return {name: self.rendered[name] for name in names}
+
+def usable(value: str) -> bool:
+    """A value ``derive`` could have printed: no placeholder, not short."""
+    return not placeholder(value) and len(value) >= SECRET_MIN_LENGTH

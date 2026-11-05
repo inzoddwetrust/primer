@@ -6,6 +6,7 @@ local copy and loaded from it, as ``fetch_passport`` leaves it.
 """
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
@@ -17,12 +18,14 @@ from plan_support import ListSink
 
 from pridem.events import Event, PlanOutcome, Secrets
 from pridem.plan import Plan, StackSteps
-from pridem.runner import Runner, Stream
+from pridem.runner import FakeCall, Runner, Stream
+from pridem.stacks.env import own_entry
 from pridem.stacks.passport import load_passport
 from pridem.stacks.schema import Product, Service, load_primer_yaml
 from pridem.stacks.seams import SeamMemory
 from pridem.steps.base import Step, StepContext
-from pridem.steps.env import RenderEnv
+from pridem.steps.compose import ComposeStack
+from pridem.steps.env import DeriveEnv, RenderEnv
 from pridem.steps.passport import PASSPORT_COPY, Ask, Fetched
 
 Data = dict[str, object]
@@ -153,7 +156,6 @@ def render(
     secrets: Secrets | None = None,
     memory: SeamMemory | None = None,
     ask: Ask | None = None,
-    image: str | None = None,
 ) -> RenderEnv:
     owner = product if product is not None else stack
     assert isinstance(owner, Product)
@@ -165,8 +167,53 @@ def render(
         memory=SeamMemory() if memory is None else memory,
         root=root,
         ask=ask,
-        image=image,
     )
+
+
+@dataclass
+class Built:
+    """What ``derive_env`` takes from ``build``: a stand-in with the image."""
+
+    compose: ComposeStack
+    app_image: str | None = IMAGE
+    app_built: bool | None = True
+
+
+RELEASE_SHA = "0" * 40
+
+
+def derive(
+    render: RenderEnv,
+    root: Path,
+    *,
+    image: str | None = IMAGE,
+    built: bool | None = True,
+) -> DeriveEnv:
+    """``derive_env`` of ``render``'s stack, ``build`` giving ``image``."""
+    stack = render.stack
+    compose = ComposeStack(
+        stack, own_entry(stack), root / "release", "v1.0.0", RELEASE_SHA, root
+    )
+    return DeriveEnv(render, Built(compose, image, built))
+
+
+def running_calls(step: DeriveEnv, image: str | None) -> list[FakeCall]:
+    """What ``derive_env``'s ``check`` asks docker: the container of ``app``
+    (none when ``image`` is ``None``) and the image it runs on."""
+    compose = step.build.compose
+    app = compose.app_service
+    assert app is not None
+    ps = FakeCall(
+        tuple(compose.argv("ps", "-q", app)),
+        lines=() if image is None else ((Stream.STDOUT, "c-app"),),
+    )
+    if image is None:
+        return [ps]
+    inspect = FakeCall(
+        ("docker", "inspect", "-f", "{{.Image}}", "c-app"),
+        lines=((Stream.STDOUT, image),),
+    )
+    return [ps, inspect]
 
 
 def run(

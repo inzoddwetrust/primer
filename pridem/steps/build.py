@@ -42,8 +42,10 @@ package goes is checked against the compose of every entry of the product
 A red build stops the plan: nothing has touched a running container -- the
 build only makes images. ``check`` needs no ``act`` when every built service
 has its image of this commit (and key) and the override is the rendered one.
-The fact names every image and the ``app`` image, which ``render_env`` gets for
-``derive``.
+The fact names every image and the ``app`` image. ``derive_env`` takes that
+image for ``derive`` from the step itself (``app_image``): from ``verify``,
+or from ``check`` when it found every image and nothing to build -- the one
+lookup of ``image_of``, so ``doctor`` knows it too.
 
 On a service's entry the override also carries the product's data the service
 takes (form D, ``steps/services.py``): a read-only bind of its copy and the
@@ -139,7 +141,7 @@ class Build(Step):
     package versions for a service a package is built into."""
 
     name = "build"
-    order = 8
+    order = 7
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
         **NO_PASSPORT,
@@ -171,6 +173,10 @@ class Build(Step):
         self.handoff = handoff
         self.fetched = fetched
         self.data = list(data)
+        self.app_image: str | None = None
+        """The ``app`` image of this commit, once one was found (see above)."""
+        self.app_built: bool | None = None
+        """Whether the entry builds ``app``; known once ``config`` is read."""
 
     def _passport(self) -> Passport | None:
         return None if self.fetched is None else self.fetched.passport
@@ -287,6 +293,9 @@ class Build(Step):
         keys = self.compose.stack.env
         found = [*env_files(uninterpolated), *variables(uninterpolated, keys)]
         rendered = self._rendered(ctx, uninterpolated, found)
+        app = self.compose.app_service
+        self.app_image = None
+        self.app_built = app is not None and app in rendered.built
         params: dict[str, Json] = {
             "stack": self.compose.entry,
             "commit": self.compose.commit,
@@ -296,11 +305,15 @@ class Build(Step):
         path = self.compose.override
         if not path.exists() or path.read_text(encoding="utf-8") != rendered.text:
             return needed
-        if any(
-            not image_of(ctx, self.compose, service, self._key(service))
-            for service in rendered.built
-        ):
-            return needed
+        app_ids: list[str] = []
+        for service in rendered.built:
+            ids = image_of(ctx, self.compose, service, self._key(service))
+            if not ids:
+                return needed
+            if service == app:
+                app_ids = ids
+        if len(app_ids) == 1:
+            self.app_image = app_ids[0]
         return CheckResult(False)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
@@ -345,6 +358,9 @@ class Build(Step):
         if keys:
             fact["keys"] = {name: dict[str, Json](key) for name, key in keys.items()}
         app = self.compose.app_service
+        self.app_built = app is not None and app in rendered.built
+        self.app_image = None
         if app is not None and app in images:
+            self.app_image = str(images[app])
             fact["app_image"] = images[app]
         return Verified(fact)

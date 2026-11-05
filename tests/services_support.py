@@ -117,14 +117,21 @@ def payments_data() -> dict[str, object]:
     return data
 
 
-def product_data(tmp: Path) -> dict[str, object]:
-    """``aivis`` of contract 3 with its services on ``file://``."""
+def product_data(
+    tmp: Path,
+    *,
+    comms_data: bool = True,
+    extra_env: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """``aivis`` of contract 3 with its services on ``file://``; without
+    ``comms_data`` it gives comms no data (a comms that accepts none)."""
+    more_env = dict(extra_env or {})
     data = example("product.yaml")
     data["dependencies"] = {
         "comms": {
             "repo": f"file://{tmp}/comms.git",
             "version": ">=1.0,<2",
-            "data": {"profile": "comms-profile"},
+            **({"data": {"profile": "comms-profile"}} if comms_data else {}),
         },
         "payments": {"repo": f"file://{tmp}/payments.git", "version": ">=1.0,<2"},
         "meet": {
@@ -141,14 +148,21 @@ def product_data(tmp: Path) -> dict[str, object]:
     assert isinstance(env, dict)
     env.pop("PAYMENTS_API_URL")  # payments is outside core: no seam from it
     env["MEET_URL"] = {"source": "param"}
+    env.update(more_env)
     data.pop("packages")
     return data
 
 
-def remotes(tmp: Path) -> None:
-    """The three services and the product, the lock pinning ``v1.0.0``."""
+def remotes(
+    tmp: Path,
+    comms: dict[str, object] | None = None,
+    product_env: dict[str, object] | None = None,
+) -> None:
+    """The three services and the product, the lock pinning ``v1.0.0``;
+    ``comms`` -- another ``primer.yaml`` of comms, taking no data."""
+    given = comms_data() if comms is None else comms
     heads = {
-        "comms": remote(tmp, "comms", {"primer.yaml": yaml.safe_dump(comms_data())}),
+        "comms": remote(tmp, "comms", {"primer.yaml": yaml.safe_dump(given)}),
         "payments": remote(
             tmp, "payments", {"primer.yaml": yaml.safe_dump(payments_data())}
         ),
@@ -166,7 +180,9 @@ def remotes(tmp: Path) -> None:
         tmp,
         "aivis",
         {
-            "primer.yaml": yaml.safe_dump(product_data(tmp)),
+            "primer.yaml": yaml.safe_dump(
+                product_data(tmp, comms_data=comms is None, extra_env=product_env)
+            ),
             "primer.lock": yaml.safe_dump(lock),
             "comms-profile/kinds.yaml": "kinds: []\n",
         },
@@ -174,8 +190,12 @@ def remotes(tmp: Path) -> None:
     )
 
 
-def passport_file(tmp: Path, edition: str) -> Path:
+def passport_file(
+    tmp: Path, edition: str, asked: dict[str, dict[str, str]] | None = None
+) -> Path:
     data = passport_example()
+    if asked is not None:
+        data["asked"] = asked
     data["edition"] = edition
     data["packages"] = {}
     section(data, "product").update({"repo": f"file://{tmp}/aivis.git", "ref": "main"})
@@ -209,16 +229,22 @@ def deferred(planned: Planned, name: str) -> list[StackSteps]:
 
 
 def planned(
-    tmp: Path, edition: str, *, gone: Sequence[str] = ()
+    tmp: Path,
+    edition: str,
+    *,
+    gone: Sequence[str] = (),
+    comms: dict[str, object] | None = None,
+    asked: dict[str, dict[str, str]] | None = None,
+    product_env: dict[str, object] | None = None,
 ) -> tuple[Planned, Path]:
     """The plan of ``install`` on a box at ``tmp/box``, its sources and
     dependencies run -- the services' ladders and the product's then known;
     ``gone`` -- remotes removed first: a command that asks one fails."""
-    remotes(tmp)
+    remotes(tmp, comms, product_env)
     for name in gone:
         shutil.rmtree(tmp / f"{name}.git")
     root = tmp / "box"
-    file = passport_file(tmp, edition)
+    file = passport_file(tmp, edition, asked)
     box = Box(root / "opt" / "pridem")
     made = deploy_plan(
         Session(box, "r1", Fetched(), NO_SECRETS),

@@ -72,7 +72,19 @@ _LINE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)='([^'\n\r]*)'")
 _UNSAFE = ("'", "\n", "\r")
 _PLACEHOLDER = re.compile(r"<.*>")
 
+DERIVED_PLACEHOLDER = "<derived>"
+"""What ``render_env`` writes for a ``derived`` key with no value of its own
+yet: compose's ``${VAR:?}`` is satisfied for the build, ``placeholder`` knows
+it, and ``derive_env`` replaces it before anything runs a container of the
+stack."""
+
 Stack = Product | Service
+
+
+def own_entry(stack: Stack) -> str:
+    """A stack's own entry: the one named as the stack, else the first -- the
+    entry that renders the stack's env and whose ``app`` image derives it."""
+    return stack.name if stack.name in stack.stacks else next(iter(stack.stacks))
 
 
 def env_dir(root: Path, name: str) -> Path:

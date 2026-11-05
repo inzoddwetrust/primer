@@ -796,16 +796,45 @@ def test_gc_keeps_mounted_current_previous_copies_then_the_newest(
 def test_a_services_ladder_validates_its_data_before_the_point_of_no_return(
     tmp_path: Path,
 ) -> None:
-    """``render_env -> build -> data_copy -> migrate -> up``: a red ``validate``
-    stops the ladder before ``migrate``; no tests on the product's box
-    (protocol 7.4)."""
+    """``render_env -> build -> [derive_env] -> data_copy -> migrate -> up``: a
+    red ``validate`` stops the ladder before ``migrate``; no tests on the
+    product's box (protocol 7.4).
+
+    Changed by DM-67: comms has a ``derived`` value, so ``derive_env`` follows
+    its ``build``; payments has none and no such step."""
     made, _ = planned(tmp_path, "full")
     ladders = {
         s.name: [step.name for step in s.steps] for s in deferred(made, "services")
     }
-    assert ladders["comms"] == ["render_env", "build", "data_copy", "migrate", "up"]
+    assert ladders["comms"] == [
+        "render_env",
+        "build",
+        "derive_env",
+        "data_copy",
+        "migrate",
+        "up",
+    ]
     assert ladders["payments"] == ["render_env", "build", "data_copy", "migrate", "up"]
     assert list(ladders)[:3] == ["seams", "comms", "payments"]
+
+
+def test_a_product_with_derived_gets_derive_env_after_its_build(
+    tmp_path: Path,
+) -> None:
+    """DM-67: the product's own entry with a ``derived`` value -- ``derive_env``
+    right after its ``build``, holding that very ``build``; the pair: without
+    one, the product's ladder has no such step."""
+    env: dict[str, object] = {
+        "API_SIGNING_KEY": {"source": "derived", "run": "python -m app derive key"}
+    }
+    made, _ = planned(tmp_path / "with", "core", product_env=env)
+    [own, *_] = deferred(made, "product")
+    names = [step.name for step in own.steps]
+    assert names[:3] == ["render_env", "build", "derive_env"]
+    assert own.steps[2].build is own.steps[1]  # type: ignore[attr-defined]
+    made, _ = planned(tmp_path / "without", "core")
+    [own, *_] = deferred(made, "product")
+    assert "derive_env" not in [step.name for step in own.steps]
 
 
 @pytest.mark.parametrize(

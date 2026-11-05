@@ -25,14 +25,18 @@ What a stack needs and when it is known:
 - ``services`` -- deferred on ``fetch_services``, which read their
   ``primer.yaml``: ``seams_check`` first, before any ``act`` of a stack; then
   each co-located service of the edition in the order of ``installed``, one
-  stack per entry, the ladder ``render_env -> build -> data_copy -> migrate ->
-  up`` (``steps/services.py``); then ``remote_check`` when the edition has a
-  ``remote`` dependency;
+  stack per entry, the ladder ``render_env -> build -> [derive_env] ->
+  data_copy -> migrate -> up`` (``steps/services.py``); then ``remote_check``
+  when the edition has a ``remote`` dependency;
 - the product -- deferred: its ``primer.yaml@target``, read by ``fetch_root``.
   One stack per entry of ``stacks``: the entry named as the product first, with
   ``render_env`` at its head and ``egress`` before its ``up``; then the other
   entries; ``tests`` and ``migrate`` where the entry declares them; then
   ``seams_verify``, every seam read from the live providers;
+- ``derive_env`` -- on the own entry of a stack (service or product) with a
+  ``derived`` value, right after its ``build``: ``derive`` runs in the ``app``
+  image ``build`` found or made in this run, before anything starts a
+  container of the stack (``steps/env.py``);
 - ``types``, ``edge``, ``frontend``, ``finalize`` -- deferred on the product.
 
 Where the passport comes from (contract 1 section 3): ``--passport <file>``,
@@ -59,8 +63,9 @@ from pathlib import Path
 
 from pridem import __version__
 from pridem.plan import Deferred, Stack, StackSteps
+from pridem.stacks.env import own_entry
 from pridem.stacks.passport import Passport
-from pridem.stacks.schema import Product, Service
+from pridem.stacks.schema import Derived, Product, Service
 from pridem.stacks.seams import SeamMemory, installed, used_remote
 from pridem.steps.base import Step
 from pridem.steps.build import Build
@@ -68,7 +73,7 @@ from pridem.steps.compose import ComposeStack, OverrideHandoff
 from pridem.steps.destroy import STACK as DESTROY_STACK
 from pridem.steps.destroy import destroy_steps
 from pridem.steps.egress import Egress
-from pridem.steps.env import RenderEnv, SeamsCheck
+from pridem.steps.env import DeriveEnv, RenderEnv, SeamsCheck
 from pridem.steps.finalize import FinalCheck, Finalize
 from pridem.steps.frontend import Frontend
 from pridem.steps.gc import GC_STACK, gc_steps
@@ -192,9 +197,9 @@ class Wanted:
     new_secrets: bool = False
 
 
-def _first(stack: Product | Service) -> str:
-    """A stack's own entry: the one named as the stack, else the first."""
-    return stack.name if stack.name in stack.stacks else next(iter(stack.stacks))
+def _derives(stack: Product | Service) -> bool:
+    """The stack has a ``derived`` value: its own entry gets ``derive_env``."""
+    return any(isinstance(var, Derived) for var in stack.env.values())
 
 
 def _passport(fetched: Fetched) -> Passport | None:
@@ -302,10 +307,10 @@ def deploy_plan(
         # KNOWN CEILING (DM-46): a service migrates before the product's tests.
         # 1. Mechanism: the product's render_env takes the seams of the live
         #    services, and its build reads that env; so each service runs
-        #    render_env -> build -> data_copy -> migrate -> up before the
-        #    product's build and tests (TZ 6.2, protocol 4.5). Red tests of the
-        #    product after a service's migrate that acted are past the point of
-        #    no return: "restore needed".
+        #    render_env -> build -> [derive_env] -> data_copy -> migrate -> up
+        #    before the product's build and tests (TZ 6.2, protocol 4.5). Red
+        #    tests of the product after a service's migrate that acted are
+        #    past the point of no return: "restore needed".
         # 2. Status: acknowledged by design.
         # 3. Task: none -- tests run on the role test only, where a restore is
         #    cheap; no card yet.
@@ -357,25 +362,28 @@ def deploy_plan(
             memory=known.memory,
             root=root,
         )
-        first = _first(service)
+        first = own_entry(service)
         names = [first, *(n for n in service.stacks if n != first)]
         made: list[StackSteps] = []
         for index, entry in enumerate(names):
             stage = service.stacks[entry]
             mine = items if index == 0 else ()
+            build = Build(
+                service,
+                entry,
+                release=release,
+                ref=tag,
+                commit=commit,
+                root=root,
+                handoff=known.handoff,
+                fetched=fetched,
+                data=mine,
+            )
             steps: list[Step] = [render] if index == 0 else []
+            steps.append(build)
+            if index == 0 and _derives(service):
+                steps.append(DeriveEnv(render, build))
             steps += [
-                Build(
-                    service,
-                    entry,
-                    release=release,
-                    ref=tag,
-                    commit=commit,
-                    root=root,
-                    handoff=known.handoff,
-                    fetched=fetched,
-                    data=mine,
-                ),
                 DataCopy(
                     service,
                     entry,
@@ -441,24 +449,28 @@ def deploy_plan(
             memory=known.memory,
             root=root,
         )
-        names = [_first(product), *(n for n in product.stacks if n != _first(product))]
+        first = own_entry(product)
+        names = [first, *(n for n in product.stacks if n != first)]
         made: list[StackSteps] = []
         for index, entry in enumerate(names):
             stage = product.stacks[entry]
+            build = Build(
+                product,
+                entry,
+                release=release,
+                ref=ref,
+                commit=commit,
+                root=root,
+                handoff=known.handoff,
+                fetched=fetched,
+            )
             steps: list[Step] = []
             if index == 0:
                 steps.append(render)
+            steps.append(build)
+            if index == 0 and _derives(product):
+                steps.append(DeriveEnv(render, build))
             steps += [
-                Build(
-                    product,
-                    entry,
-                    release=release,
-                    ref=ref,
-                    commit=commit,
-                    root=root,
-                    handoff=known.handoff,
-                    fetched=fetched,
-                ),
                 Packages(
                     product,
                     entry,
@@ -524,7 +536,7 @@ def deploy_plan(
         edition = None if passport is None else passport.edition
         stacks = {
             product.name: ComposeStack(
-                product, _first(product), release, ref, commit, root
+                product, own_entry(product), release, ref, commit, root
             )
         }
         services: dict[str, Service] = {}
@@ -534,7 +546,7 @@ def deploy_plan(
                 service = services[name] = resolved.services[name]
                 stacks[name] = ComposeStack(
                     service,
-                    _first(service),
+                    own_entry(service),
                     resolved.releases[name],
                     lock.dependencies[name].tag if lock else "",
                     resolved.commits[name],
@@ -549,7 +561,7 @@ def deploy_plan(
             return None
         product, release, ref, commit = found
         declared = [name for name, stage in product.stacks.items() if stage.types]
-        entry = declared[0] if declared else _first(product)
+        entry = declared[0] if declared else own_entry(product)
         made: list[Step] = [
             Types(
                 product,
