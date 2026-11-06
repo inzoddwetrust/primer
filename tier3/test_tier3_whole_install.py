@@ -4,7 +4,8 @@ by the machine's CLI.
 ``pridem install --passport <file>`` installs the blank on a clean runner with
 the plan the machine makes itself (DM-45) -- the host steps, the passport (a
 file), the timers, the sources (a ``file://`` mirror of the blank at its pinned
-commit, ``/srv/tier3/blank.git``, so no key of CI is needed), the blank's
+commit, ``/srv/tier3/primer-blank.git`` -- named as the repository, as
+``fetch_root`` takes it on a real box (DM-70) -- so no key of CI is needed), the blank's
 ladder (``seams_check``, ``render_env``, ``build``, ``packages``, ``tests``,
 ``migrate``, ``egress``, ``up``), ``types``, the edge (``tls_files``,
 ``nginx``, ``ssl``), ``frontend``, the final check and ``finalize``, ``gc`` in
@@ -86,10 +87,16 @@ PRIDEM = "/usr/local/bin/pridem"
 """The machine as the owner runs it: every install, update, doctor and destroy
 here is a command of its CLI, the plan is the machine's own (DM-45)."""
 BLANK = "https://github.com/inzoddwetrust/primer-blank.git"
-MIRROR = Path("/srv/tier3/blank.git")
+# the blank's stack is named by its repository (contract 3 rule 32, DM-70): every
+# name of it on the box -- /opt/<stack>, the compose project, labels, keys of
+# state.json and of the verdict -- is this one, and the mirror is named as the
+# repository, so fetch_root takes it with no detour
+STACK = "primer-blank"
+OPT = Path(f"/opt/{STACK}")
+MIRROR = Path(f"/srv/tier3/{STACK}.git")
 """The blank's ``file://`` mirror the passport names: the machine fetches from
-it with no key of CI, and names the product's directory by it -- ``blank``."""
-BLANK_COMMIT = "81502d0989d48f818ba76050a094bec2669d6f18"
+it with no key of CI, and names the product's directory by it -- ``primer-blank``."""
+BLANK_COMMIT = "7bbc05b9337abe0505c003ca513c68f0cc2e1e8a"
 # the blank's service (DM-59): its file:// mirror is made by tier3/conftest.py
 # before the first test of the session -- every plan of the blank reads its lock
 SERVICE = "primer-blank-service"
@@ -107,9 +114,9 @@ PACKAGE_PINS: dict[str, dict[str, str]] = {
     "primer-blank-brand": {"v1.0.0": "c40b5ffa2f75744d74d4359703e87c78fa273dab"},
 }
 REF = "main"
-RELEASE = f"/opt/blank/releases/{BLANK_COMMIT}"
-ENV = Path("/opt/blank/env/.env")
-MINTED = Path("/opt/blank/env/minted.yaml")
+RELEASE = f"{OPT}/releases/{BLANK_COMMIT}"
+ENV = OPT / "env" / ".env"
+MINTED = OPT / "env" / "minted.yaml"
 FRONTEND = "tier3-env.test"
 API = "api.tier3-env.test"
 JOURNAL_TAIL = 120
@@ -156,13 +163,15 @@ from pridem.steps.base import StepContext
 release, env_file, planted = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 stack = load_primer_yaml(release / "primer.yaml")
 ctx = StepContext(
-    runner=SubprocessRunner(), mode="install", role="test", stack="blank",
+    runner=SubprocessRunner(), mode="install", role="test", stack=stack.name,
     on_line=lambda stream, line, cut: None,
 )
-seen = observe(ctx, stack, "blank", release=release, project="blank", env_file=env_file)
-print("PROBLEMS " + json.dumps(problems_param(check_stack(stack, "blank", seen))))
+seen = observe(
+    ctx, stack, stack.name, release=release, project=stack.name, env_file=env_file
+)
+print("PROBLEMS " + json.dumps(problems_param(check_stack(stack, stack.name, seen))))
 other = load_primer_yaml(planted)
-print("PLANTED " + json.dumps(problems_param(check_stack(other, "blank", seen))))
+print("PLANTED " + json.dumps(problems_param(check_stack(other, stack.name, seen))))
 """
 
 
@@ -339,7 +348,7 @@ def _config(compose_file: Path, env_file: Path) -> dict[str, dict[str, str]]:
                 "docker",
                 "compose",
                 "-p",
-                "blank",
+                STACK,
                 "--env-file",
                 str(env_file),
                 "-f",
@@ -368,7 +377,7 @@ def _app() -> str:
             "ps",
             "-q",
             "--filter",
-            "label=com.docker.compose.project=blank",
+            f"label=com.docker.compose.project={STACK}",
             "--filter",
             "label=com.docker.compose.service=app",
         ]
@@ -382,26 +391,26 @@ def _report_config_hashes() -> None:
     on each running container -- ``up`` and ``packages`` decide by their
     equality, so the form is measured into the run's output before anything
     asserts on it (par0 14.3)."""
-    release = Path("/opt/blank/current")
+    release = OPT / "current"
     hashes = _stdout(
         [
             "docker",
             "compose",
             "-p",
-            "blank",
+            STACK,
             "--env-file",
             str(ENV),
             "-f",
             str(release / "docker-compose.yml"),
             "-f",
-            "/opt/blank/compose/blank.yml",
+            f"{OPT}/compose/{STACK}.yml",
             "config",
             "--hash",
             "*",
         ]
     )
     ids = _stdout(
-        ["docker", "ps", "-q", "--filter", "label=com.docker.compose.project=blank"]
+        ["docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={STACK}"]
     )
     labels = _stdout(
         [
@@ -490,12 +499,12 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     assert (env["LANGUAGES"], env["DEFAULT_LANGUAGE"]) == ("en,ru", "en"), printed
     assert password not in printed  # neither the console nor the verdict
     # build, migrate, up (U1-U3)
-    up, build = facts[("blank", "up")], facts[("blank", "build")]
+    up, build = facts[(STACK, "up")], facts[(STACK, "build")]
     assert (up["release"], up["commit"]) == (REF, BLANK_COMMIT), printed
     assert up["image"] == build["app_image"], printed
-    assert facts[("blank", "migrate")].get("alembic_head") == "0001", printed
+    assert facts[(STACK, "migrate")].get("alembic_head") == "0001", printed
     # the tests, the final check, current, state.json (DM-19)
-    tests = facts[("blank", "tests")]
+    tests = facts[(STACK, "tests")]
     assert tests["test_db"] == "blank_test" and tests["target"] == "test", printed
     junit = tests["junit"]
     assert isinstance(junit, dict), printed
@@ -504,11 +513,15 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     assert verdict.junit is not None and verdict.junit.total == total, printed
     verified = facts[("finalize", "final_check")]["verified"]
     assert isinstance(verified, int) and verified > 10, printed
-    assert str(Path("/opt/blank/current").readlink()) == RELEASE, printed
+    assert str((OPT / "current").readlink()) == RELEASE, printed
     state = json.loads(Path("/opt/pridem/state.json").read_text())
+    # the name (DM-70): the stack is the repository's, fetch_root took the
+    # blank's primer.yaml with no detour, and nothing went under the old name
+    assert facts[("sources", "fetch_root")]["config"] == STACK, printed
+    assert OPT.is_dir() and not Path("/opt/blank").exists(), printed
     # the service of every edition (DM-59): by its tag, the lock's
-    assert state["current"] == {"blank": BLANK_COMMIT, SERVICE: "v1.0.0"}, state
-    assert state["composition"]["blank"] == BLANK_COMMIT, state
+    assert state["current"] == {STACK: BLANK_COMMIT, SERVICE: "v1.0.0"}, state
+    assert state["composition"][STACK] == BLANK_COMMIT, state
     assert state["composition"][SERVICE] == "v1.0.0", state
     container = _app()
     started = _docker_started()
@@ -542,11 +555,11 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
 
     # labels (U5-U8)
     release = {
-        "pridem.stack": "blank",
+        "pridem.stack": STACK,
         "pridem.release": REF,
         "pridem.commit": BLANK_COMMIT,
     }
-    project = "label=com.docker.compose.project=blank"
+    project = f"label=com.docker.compose.project={STACK}"
     containers = _stdout(["docker", "ps", "-a", "-q", "--filter", project])
     assert len(containers) == 3  # app, frontend, postgres; throwaways are gone
     for name in containers:
@@ -557,9 +570,9 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     assert volumes
     for name in volumes:
         labels = _labels("volume", name)
-        assert labels.get("pridem.stack") == "blank" and "pridem.release" not in labels
-    network = _labels("network", "blank_default")
-    assert network.get("pridem.stack") == "blank" and "pridem.release" not in network
+        assert labels.get("pridem.stack") == STACK and "pridem.release" not in labels
+    network = _labels("network", f"{STACK}_default")
+    assert network.get("pridem.stack") == STACK and "pridem.release" not in network
     by_service: dict[str, list[str]] = {}
     images = sorted(
         set(
@@ -571,7 +584,7 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
                     "-q",
                     "--no-trunc",
                     "--filter",
-                    "label=pridem.stack=blank",
+                    f"label=pridem.stack={STACK}",
                 ]
             )
         )
@@ -625,7 +638,7 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
         "docker",
         "compose",
         "-p",
-        "blank",
+        STACK,
         "--env-file",
         str(ENV),
         "-f",
@@ -775,11 +788,16 @@ def test_tier3_the_new_health_of_the_blank_and_its_service() -> None:
     """DM-59 on the box the install left: the machine's conformance takes the
     ``/health`` of DM-66 -- ``details``, ``ctx`` in the log, and ``degraded``
     with the last revision measured when the database falls -- from the blank
-    and from its service, which has no database (``alembic_head`` null)."""
-    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    and from its service, which has no database (``alembic_head`` null).
+
+    Changed by DM-70: the blank's ``/health`` and its log say the stack's own
+    name, ``primer-blank`` -- conformance checks only that it is not empty."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
     blank, service = _app(), _container(SERVICE, "app")
     body = _health_of(blank)
     assert body["status"] == "ok" and body["details"] == {"script_head": "0001"}, body
+    # the stack's own name (DM-70): conformance does not compare it, this does
+    assert body["service"] == STACK, body
     assert body["seams"] == {
         "provides": ["PRODUCT_WEBHOOK_URL"],
         "requires_satisfied": True,
@@ -793,13 +811,14 @@ def test_tier3_the_new_health_of_the_blank_and_its_service() -> None:
     # ctx: the start of each names what it started with -- names, no values
     started, lines = _started_line(blank)
     assert started["ctx"] == {"edition": "core", "script_head": "0001"}, started
+    assert started["service"] == STACK, started
     assert check_logs(lines) == [], lines[-5:]
     started, lines = _started_line(service)
     assert started["ctx"] == {"edition": "core", "provides": list(SEAMS)}, started
     assert check_logs(lines) == [], lines[-5:]
     # degraded: the blank's database stopped -- /health still 200, db error,
     # the revision measured before; conformance names it degraded, nothing else
-    postgres = _container("blank", "postgres")
+    postgres = _container(STACK, "postgres")
     _run(["docker", "stop", postgres], 120)
     try:
         down = _health_of(blank)
@@ -885,10 +904,10 @@ def test_probe_DM_64_product_reaches_only_its_egress_hosts(
     through the machine's proxy and not ``github.com``, and still nothing
     directly; the release after it, without ``egress``, has no proxy left
     (protocol 4.1, 4.2). The pair: the host of ``egress`` is reached."""
-    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
     passport = _passport(tmp_path)
     # the blank without egress: every network internal, no proxy, no way out
-    for network in ("pridem", "pridem-egress", "blank_default"):
+    for network in ("pridem", "pridem-egress", f"{STACK}_default"):
         assert _internal(network) == "true", network
     assert _proxies() == []
     before = _reach()
@@ -910,7 +929,7 @@ def test_probe_DM_64_product_reaches_only_its_egress_hosts(
     verdict, printed = _install(passport, "update")
     assert verdict.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
-    egress = facts[("blank", "egress")]
+    egress = facts[(STACK, "egress")]
     assert egress["hosts"] == [EGRESS_HOST], egress
     allowed = egress["allowed"]
     assert isinstance(allowed, dict) and allowed[EGRESS_HOST] != 403, egress
@@ -943,7 +962,7 @@ def test_probe_DM_64_product_reaches_only_its_egress_hosts(
     back, printed = _install(passport, "update")
     assert back.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in back.steps}
-    assert facts[("blank", "egress")] == {"hosts": [], "proxy": "absent"}, facts
+    assert facts[(STACK, "egress")] == {"hosts": [], "proxy": "absent"}, facts
     assert _proxies() == []
     assert not Path("/opt/pridem/egress/squid.conf").exists()
     last = _reach()
@@ -1078,7 +1097,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     ``skin`` it has into one built into frontend -- ``RUNTIME_SKIN`` replaced
     by ``BUILD_SKIN``, once -- instead of adding a second ``packages``; the
     passports here give no texts, so that slot mounts nothing."""
-    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
     skin = _skin_repository(tmp_path)
 
     def passport(version: int, tag: str, edition: str = "core") -> Path:
@@ -1117,21 +1136,21 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     first, printed = _install(passport(2, "1.0.0"), "update")
     assert first.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in first.steps}
-    keys = facts[("blank", "build")]["keys"]
+    keys = facts[(STACK, "build")]["keys"]
     assert keys == {
         "frontend": {"pridem.edition": "core", "pridem.package.skin": "skin@1.0.0"}
     }, keys
     assert _body("/skin/skin.css", FRONTEND) == "one"
     assert _body("/edition.txt", FRONTEND) == "core"
     assert _app_health()["edition"] == "core"
-    images = facts[("blank", "build")]["images"]
+    images = facts[(STACK, "build")]["images"]
     assert isinstance(images, dict)
 
     # version 1.1.0 on the same commit: frontend rebuilt, app the same image
     second, printed = _install(passport(3, "1.1.0"), "update")
     assert second.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in second.steps}
-    again = facts[("blank", "build")]["images"]
+    again = facts[(STACK, "build")]["images"]
     assert isinstance(again, dict)
     assert again["frontend"] != images["frontend"], (images, again)
     assert again["app"] == images["app"], (images, again)
@@ -1140,7 +1159,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     # the same version again: no build (the step has nothing to do)
     same, printed = _install(passport(3, "1.1.0"), "update")
     assert same.result == "green", printed
-    [build] = [s for s in same.steps if (s.stack, s.name) == ("blank", "build")]
+    [build] = [s for s in same.steps if (s.stack, s.name) == (STACK, "build")]
     assert build.status == "ok" and build.verify is not None, build
     assert build.verify["images"] == again, (again, build.verify)
 
@@ -1148,7 +1167,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     bad, printed = _install(passport(4, "1.2.0"), "update")
     assert bad.result != "green", printed
     [red] = [s for s in bad.steps if s.status == "failed"]
-    assert (red.stack, red.name) == ("blank", "build"), bad.steps
+    assert (red.stack, red.name) == (STACK, "build"), bad.steps
     assert _body("/skin/skin.css", FRONTEND) == "two"
 
     # edition full, version 1.1.0: an image of its own, not core's
@@ -1158,7 +1177,7 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     # the pair on the backend: EDITION of the passport reached app
     assert _app_health()["edition"] == "full"
     facts = {(s.stack, s.name): s.verify or {} for s in full.steps}
-    built = facts[("blank", "build")]["images"]
+    built = facts[(STACK, "build")]["images"]
     assert isinstance(built, dict)
     assert built["frontend"] != again["frontend"], (again, built)
     labels = _image_labels(str(built["frontend"]))
@@ -1173,9 +1192,9 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     back, printed = _install(passport(6, "1.1.0"), "update")
     assert back.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in back.steps}
-    assert facts[("blank", "build")]["keys"] == {
+    assert facts[(STACK, "build")]["keys"] == {
         "frontend": {"pridem.edition": "core", "pridem.package.skin": "skin@1.1.0"}
-    }, facts[("blank", "build")]
+    }, facts[(STACK, "build")]
     assert _body("/edition.txt", FRONTEND) == "core"
     assert _body("/skin/skin.css", FRONTEND) == "two"
     assert _app_health()["edition"] == "core"
@@ -1228,7 +1247,7 @@ def _service_image(service: str) -> str:
             "ps",
             "-q",
             "--filter",
-            "label=com.docker.compose.project=blank",
+            f"label=com.docker.compose.project={STACK}",
             "--filter",
             f"label=com.docker.compose.service={service}",
         ]
@@ -1242,7 +1261,7 @@ def _texts() -> object:
 
 
 def _packages_fact(verdict: Verdict) -> object:
-    [step] = [s for s in verdict.steps if (s.stack, s.name) == ("blank", "packages")]
+    [step] = [s for s in verdict.steps if (s.stack, s.name) == (STACK, "packages")]
     return (step.verify or {}).get("packages")
 
 
@@ -1270,7 +1289,7 @@ def test_probe_DM_58_skin_version_switch_needs_no_rebuild(
     ``doctor`` is empty; a skin ``validate-skin`` refuses is red and the look
     stays. The texts by language: ``ru`` of the package gives the title alone,
     the page takes the rest from its built-in ``ru``."""
-    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
     _run(
         ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
     )
@@ -1320,7 +1339,7 @@ def test_probe_DM_58_skin_version_switch_needs_no_rebuild(
     bad, printed = deploy(passport(13, broken, "1.2.0"))
     assert bad.result != "green", printed
     [red] = [s for s in bad.steps if s.status == "failed"]
-    assert (red.stack, red.name) == ("blank", "packages"), bad.steps
+    assert (red.stack, red.name) == (STACK, "packages"), bad.steps
     css = _body("/skin.css", FRONTEND)
     assert BLUE in css and GREEN not in css, css
     assert _service_image("frontend") == image
@@ -1332,7 +1351,7 @@ def test_tier3_both_slots_from_one_brand_package_by_subpath(
 ) -> None:
     """DM-58: both slots of the blank from ``primer-blank-brand`` at one tag,
     each by its ``subpath`` -- the brand's color and texts."""
-    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
     _run(
         ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
     )
@@ -1518,7 +1537,7 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     Changed by DM-59: the service was a copy of the blank as ``notes``; it is
     the blank's published service now, which the blank depends on in every
     edition -- the same assertions, on it."""
-    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
 
     # the blank at its pin: the service before the product, its profile
     _at_blank_commit(mirror)
@@ -1527,7 +1546,7 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     assert green.result == "green", printed
     order = [(s.stack, s.name) for s in green.steps if s.phase == "main"]
     for name in ("render_env", "build", "derive_env", "data_copy", "up"):
-        assert order.index((SERVICE, name)) < order.index(("blank", "render_env"))
+        assert order.index((SERVICE, name)) < order.index((STACK, "render_env"))
     facts = {(s.stack, s.name): s.verify or {} for s in green.steps}
     data = facts[(SERVICE, "data_copy")]["data"]
     assert isinstance(data, dict) and set(data) == {"profile"}, data
@@ -1547,7 +1566,7 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
 
     # a profile the service refuses: red at its validate, the service and the
     # product as they were -- the same containers, the old copy mounted
-    product = _container("blank", "app")
+    product = _container(STACK, "app")
     _blank_with_a_refused_profile(tmp_path, mirror, step=2)
     bad, printed = _install(_passport(tmp_path, version=21), "update")
     assert bad.result != "green", printed
@@ -1556,7 +1575,7 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     assert red.reason is not None
     assert red.reason.code == "data_copy:validate-failed", red.reason
     assert _container(SERVICE, "app") == running
-    assert _container("blank", "app") == product
+    assert _container(STACK, "app") == product
     inside = _stdout(["docker", "exec", running, "ls", "/primer/data/profile"])
     assert "ok" in inside, inside
 
@@ -1601,7 +1620,7 @@ def test_tier3_two_instances_with_their_own_languages(
     ``seams_check`` before any ``act`` of a stack: the IDs of the blank's
     containers are the same before and after, and the page still serves the
     second instance's languages. ``doctor`` is empty on each green box."""
-    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
     _run(
         ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
     )
@@ -1629,7 +1648,7 @@ def test_tier3_two_instances_with_their_own_languages(
     assert len(seen) == 2  # two instances, two configurations of one image
 
     # uk is not a language of the product: red before any act of a stack
-    before = _containers_of("blank")
+    before = _containers_of(STACK)
     assert before, "the blank runs"
     third = _passport(
         tmp_path, version=32, languages=("en", "uk"), default_language="en"
@@ -1641,20 +1660,20 @@ def test_tier3_two_instances_with_their_own_languages(
     assert failed.reason is not None
     assert failed.reason.code == "seams_check:language-outside-product", failed
     assert failed.reason.model_dump()["languages"] == ["uk"], failed.reason
-    acted = [s.name for s in red.steps if s.stack == "blank" and s.status == "ok"]
+    acted = [s.name for s in red.steps if s.stack == STACK and s.status == "ok"]
     assert acted == [], acted
-    assert _containers_of("blank") == before
+    assert _containers_of(STACK) == before
     assert json.loads(_body("/config.json", FRONTEND))["languages"] == "en,ru"
 
 
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     """The last of the cycle (DM-45): ``pridem destroy`` -- every container,
     network, volume and image labelled ``pridem.stack`` gone (the blank has no
-    persistent entry), ``/opt/blank`` down to its ``minted.yaml``, the edge's
+    persistent entry), ``/opt/primer-blank`` down to its ``minted.yaml``, the edge's
     and the proxy's directories gone, the timers gone, ``state.json`` gone;
     ``history/`` and the passport's copy stay. The pair: ``destroy`` again has
     nothing to do and is green."""
-    assert Path("/opt/blank/current").is_symlink(), "the install runs first"
+    assert (OPT / "current").is_symlink(), "the install runs first"
     verdict, printed = _verdict_of("destroy")
     assert verdict.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
@@ -1662,10 +1681,7 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     for kind in ("ps -aq", "network ls -q", "volume ls -q", "image ls -q"):
         left = _stdout(["docker", *kind.split(), "--filter", "label=pridem.stack"])
         assert left == [], (kind, left)
-    assert sorted(str(p) for p in Path("/opt/blank").rglob("*")) == [
-        "/opt/blank/env",
-        str(MINTED),
-    ]
+    assert sorted(str(p) for p in OPT.rglob("*")) == [str(OPT / "env"), str(MINTED)]
     for gone in ("/opt/pridem/edge", "/opt/pridem/egress", "/opt/pridem/state.json"):
         assert not Path(gone).exists(), gone
     assert not Path("/etc/systemd/system/pridem-gc.timer").exists()
@@ -1687,7 +1703,7 @@ def test_probe_DM_59_product_gets_the_seams_of_its_service_after_health(
     ``derive`` computed in the service's own image -- equal to what the
     service's env holds; ``seams_verify`` reads both ends live. The time of
     both installs goes to the run's output (par0 14.3)."""
-    assert not Path("/opt/blank/current").exists(), "destroy runs first"
+    assert not (OPT / "current").exists(), "destroy runs first"
 
     _blank_without_service(tmp_path, mirror, step=10)
     started = time.monotonic()
@@ -1710,7 +1726,7 @@ def test_probe_DM_59_product_gets_the_seams_of_its_service_after_health(
     )
     assert green.result == "green", printed
     order = [(s.stack, s.name) for s in green.steps if s.phase == "main"]
-    assert order.index((SERVICE, "up")) < order.index(("blank", "render_env")), order
+    assert order.index((SERVICE, "up")) < order.index((STACK, "render_env")), order
     assert order.index((SERVICE, "derive_env")) < order.index((SERVICE, "up")), order
     facts = {(s.stack, s.name): s.verify or {} for s in green.steps}
     assert (
@@ -1729,8 +1745,8 @@ def test_probe_DM_59_product_gets_the_seams_of_its_service_after_health(
     edges = facts[("seams", "seams_verify")]["seams"]
     assert isinstance(edges, list), edges
     for key in SEAMS:
-        assert f"blank.{key} <- {SERVICE}" in edges, edges
-    assert f"{SERVICE}.PRODUCT_WEBHOOK_URL <- blank" in edges, edges
+        assert f"{STACK}.{key} <- {SERVICE}" in edges, edges
+    assert f"{SERVICE}.PRODUCT_WEBHOOK_URL <- {STACK}" in edges, edges
     assert _health_of(_container(SERVICE, "app"))["seams"] == {
         "provides": list(SEAMS),
         "requires_satisfied": True,

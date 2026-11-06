@@ -42,12 +42,14 @@ from pridem.plan import Plan, StackSteps
 from pridem.report.schema import build_verdict
 from pridem.runner import SubprocessRunner
 from pridem.state import Box
+from pridem.steps.git import repo
 from pridem.steps.keys import DeployKey
 from pridem.steps.sources import source_steps
 
 root, address = Path("/"), sys.argv[1]
 mode = sys.argv[2] if len(sys.argv) > 2 else "install"
-_, steps = source_steps(root, stack="blank", address=address, ref="main", tag=False)
+stack = repo(address).name  # the stack is the repository's, as the machine names it
+_, steps = source_steps(root, stack=stack, address=address, ref="main", tag=False)
 box, secrets = Box(Path("/opt/pridem")), Secrets(())
 key_step = DeployKey(address, root, wait_s=30)
 with box.lock("tier3-sources"):
@@ -124,6 +126,10 @@ def _plan(mode: str = "install") -> tuple[Verdict, list[str]]:
 
 
 def test_probe_DM_10_blank_is_fetched_by_ref_over_ssh() -> None:
+    """Changed by DM-70 (by the dispatcher's word): the stack is the name of the
+    repository, as the machine takes it (``verbs/plans.py``); the blank is
+    ``name: primer-blank`` (contract 3 rule 32, DM-70). The probe names no stack
+    by hand any more, so the next rename does not touch it."""
     source = Path(os.environ["PRIMER_DEPLOY_KEY_FILE"])
     assert source.stat().st_size > 0, "the CI secret PRIMER_BLANK_DEPLOY_KEY is empty"
     keys = Path("/") / KEYS
@@ -140,10 +146,11 @@ def test_probe_DM_10_blank_is_fetched_by_ref_over_ssh() -> None:
     assert verdict.result == "green", (public, lines)
     by = {step.name: step for step in verdict.steps}
     fetched = by["fetch_root"].verify or {}
-    assert fetched["config"] == "blank" and fetched["release"] == fetched["head"]
-    release = Path("/opt/blank/releases") / str(fetched["head"])
+    stack = repo(ADDRESS).name
+    assert fetched["config"] == stack and fetched["release"] == fetched["head"]
+    release = Path("/opt") / stack / "releases" / str(fetched["head"])
     assert (release / "primer.yaml").exists()
-    assert not Path("/opt/blank/current").exists()  # releases/ is inert
+    assert not (Path("/opt") / stack / "current").exists()  # releases/ is inert
     assert "MARKER" not in "".join(lines) and "PRIVATE KEY" not in "".join(lines)
     # the second run acts on nothing: the release is clean and on target
     again, _ = _plan()
