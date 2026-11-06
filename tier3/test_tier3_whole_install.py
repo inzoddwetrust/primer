@@ -46,11 +46,16 @@ the fact of ``egress``.
 
 DM-46 runs after them, on the same box -- its stage B last: two instances of
 the blank with their own languages, a third with a language the product has
-not red before any act. Stage A first: a copy of the blank as the service
-``notes`` and the blank as its product -- in ``full`` the service goes up by
-its own ladder before the product, the product's ``profile/`` copied to it and
-validated by its new image; a profile it refuses is red with both left
-running; ``core`` installs nothing of it.
+not red before any act. Stage A first, on the blank's own service
+``primer-blank-service`` (DM-59), which every edition of the blank installs
+from its ``file://`` mirror at the pinned tag: the service goes up by its own
+ladder before the product, the product's ``profile/`` copied to it and
+validated by its image; a profile it refuses is red with both left running;
+an edition that leaves it out installs nothing of it. Right after the whole
+install, the machine's conformance takes the ``/health`` of both (DM-66:
+``details``, ``ctx``, ``degraded``). After ``destroy``, the probe of DM-59:
+the blank without its service on a clean box, then with it -- the product
+holds the values of the service's seams.
 
 Two short checks need no install: what a single-quoted value is to compose,
 and that the tags certbot and squid are pinned by still name the pinned
@@ -62,12 +67,14 @@ name): docker is on the runner only after the host steps.
 import json
 import os
 import shutil
+import time
 import warnings
 from pathlib import Path
 
 import pytest
 import yaml
 
+from pridem.conformance.stack import check_health, check_logs
 from pridem.report.schema import Verdict
 from pridem.runner import CommandTimedOut, Stream, SubprocessRunner
 from pridem.steps.compose import PROXY_URL as PROXY
@@ -82,7 +89,16 @@ BLANK = "https://github.com/inzoddwetrust/primer-blank.git"
 MIRROR = Path("/srv/tier3/blank.git")
 """The blank's ``file://`` mirror the passport names: the machine fetches from
 it with no key of CI, and names the product's directory by it -- ``blank``."""
-BLANK_COMMIT = "2e7580fc136238d7b9071de2c9c10fc3c43816c8"
+BLANK_COMMIT = "81502d0989d48f818ba76050a094bec2669d6f18"
+# the blank's service (DM-59): public, cloned over https by the test, given to
+# the machine as the file:// mirror the blank's primer.yaml names; its tag's
+# commit is pinned, as the blank's primer.lock pins it
+SERVICE = "primer-blank-service"
+SERVICE_REPO = f"https://github.com/inzoddwetrust/{SERVICE}.git"
+SERVICE_PINS = {"v1.0.0": "883e3ce4568a5f379737af13c6e2ee21d2810421"}
+SERVICE_MIRROR = Path(f"/srv/tier3/{SERVICE}.git")
+SERVICE_ENV = Path(f"/opt/{SERVICE}/env/.env")
+SEAMS = ("SERVICE_API_URL", "SERVICE_TOKEN", "SERVICE_KEY")
 # the blank's published packages (DM-58): public, cloned over https by the
 # test, given to the machine as file:// mirrors; each tag's commit is pinned
 PACKAGES_OWNER = "VELO2026-app"
@@ -310,9 +326,9 @@ def _doctor(passport: Path) -> tuple[object, object, Verdict]:
     return diff, failed, verdict
 
 
-def _env() -> dict[str, str]:
+def _env(path: Path = ENV) -> dict[str, str]:
     out: dict[str, str] = {}
-    for line in ENV.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         key, _, quoted = line.partition("=")
         assert quoted.startswith("'") and quoted.endswith("'"), key
         out[key] = quoted[1:-1]
@@ -438,8 +454,18 @@ def _curl(tmp: Path, url: str, host: str) -> tuple[str, str]:
 @pytest.fixture(scope="module")
 def mirror(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The blank's mirror the sources fetch from: one for the whole install and
-    for the deploys of DM-64, which push their own commits to it."""
+    for the deploys of DM-64, which push their own commits to it. Beside it
+    the mirror of the blank's service (DM-59), which every edition of the
+    blank installs: cloned over https, each pinned tag's commit checked."""
     MIRROR.parent.mkdir(parents=True, exist_ok=True)
+    if SERVICE_MIRROR.exists():
+        shutil.rmtree(SERVICE_MIRROR)
+    _run(["git", "clone", "-q", "--mirror", SERVICE_REPO, str(SERVICE_MIRROR)], 300)
+    for tag, pin in SERVICE_PINS.items():
+        found = _git(
+            "--git-dir", str(SERVICE_MIRROR), "rev-parse", f"{tag}^{{commit}}"
+        )[0]
+        assert found == pin, f"{SERVICE} {tag} names {found}, pinned {pin}"
     return MIRROR
 
 
@@ -467,6 +493,9 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
         "EDITION",
         "LANGUAGES",
         "POSTGRES_PASSWORD",
+        "SERVICE_API_URL",
+        "SERVICE_KEY",
+        "SERVICE_TOKEN",
     ], printed
     password = env["POSTGRES_PASSWORD"]
     assert len(password) >= 32 and set(password) <= URL_SAFE, printed
@@ -490,8 +519,10 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     assert isinstance(verified, int) and verified > 10, printed
     assert str(Path("/opt/blank/current").readlink()) == RELEASE, printed
     state = json.loads(Path("/opt/pridem/state.json").read_text())
-    assert state["current"] == {"blank": BLANK_COMMIT}, state
+    # the service of every edition (DM-59): by its tag, the lock's
+    assert state["current"] == {"blank": BLANK_COMMIT, SERVICE: "v1.0.0"}, state
     assert state["composition"]["blank"] == BLANK_COMMIT, state
+    assert state["composition"][SERVICE] == "v1.0.0", state
     container = _app()
     started = _docker_started()
 
@@ -733,6 +764,72 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     assert _stdout([*loaded, "pridem-gc.timer"]) == ["RandomizedDelayUSec=0"]
 
 
+def _health_of(container: str) -> dict[str, object]:
+    """``/health`` of an app, read inside its container: nginx closes it on
+    the public routes (protocol 9.3)."""
+    read = "import urllib.request; print(urllib.request.urlopen("
+    read += "'http://127.0.0.1:8000/health', timeout=5).read().decode())"
+    [line] = _stdout(["docker", "exec", container, "python", "-c", read])
+    found = json.loads(line)
+    assert isinstance(found, dict)
+    return found
+
+
+def _started_line(container: str) -> tuple[dict[str, object], list[str]]:
+    """The ``app.started`` line of a container's log and every line of it --
+    uvicorn's own lines are JSON too: the log config is the app's."""
+    lines = _stdout(["docker", "logs", container])
+    started = [json.loads(x) for x in lines if '"app.started"' in x]
+    assert started, lines[-20:]
+    return started[-1], lines
+
+
+def test_tier3_the_new_health_of_the_blank_and_its_service() -> None:
+    """DM-59 on the box the install left: the machine's conformance takes the
+    ``/health`` of DM-66 -- ``details``, ``ctx`` in the log, and ``degraded``
+    with the last revision measured when the database falls -- from the blank
+    and from its service, which has no database (``alembic_head`` null)."""
+    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+    blank, service = _app(), _container(SERVICE, "app")
+    body = _health_of(blank)
+    assert body["status"] == "ok" and body["details"] == {"script_head": "0001"}, body
+    assert body["seams"] == {
+        "provides": ["PRODUCT_WEBHOOK_URL"],
+        "requires_satisfied": True,
+    }, body
+    assert check_health(json.dumps(body).encode(), migrate=True) == [], body
+    theirs = _health_of(service)
+    assert (theirs["alembic_head"], theirs["status"]) == (None, "ok"), theirs
+    assert theirs["details"] == {"provides": 3, "profile": True}, theirs
+    assert theirs["seams"] == {"provides": list(SEAMS), "requires_satisfied": True}
+    assert check_health(json.dumps(theirs).encode(), migrate=False) == [], theirs
+    # ctx: the start of each names what it started with -- names, no values
+    started, lines = _started_line(blank)
+    assert started["ctx"] == {"edition": "core", "script_head": "0001"}, started
+    assert check_logs(lines) == [], lines[-5:]
+    started, lines = _started_line(service)
+    assert started["ctx"] == {"edition": "core", "provides": list(SEAMS)}, started
+    assert check_logs(lines) == [], lines[-5:]
+    # degraded: the blank's database stopped -- /health still 200, db error,
+    # the revision measured before; conformance names it degraded, nothing else
+    postgres = _container("blank", "postgres")
+    _run(["docker", "stop", postgres], 120)
+    try:
+        down = _health_of(blank)
+        assert down["status"] == "degraded", down
+        assert down["checks"] == {"db": "error", "schema": "error"}, down
+        assert down["alembic_head"] == "0001", down
+        found = check_health(json.dumps(down).encode(), migrate=True)
+        assert [p.code for p in found] == ["health-degraded"], found
+    finally:
+        _run(["docker", "start", postgres], 120)
+    for _ in range(60):
+        if _health_of(blank)["status"] == "ok":
+            break
+        time.sleep(1)
+    assert _health_of(blank)["status"] == "ok"
+
+
 REACH = """
 import json, os, socket, sys, urllib.error, urllib.request
 allowed, other, address = sys.argv[1:4]
@@ -898,14 +995,8 @@ the one of the DM-61 copy, which declares ``full`` in ``primer.yaml`` too."""
 
 
 def _app_health() -> dict[str, object]:
-    """``/health`` of the blank's app, read inside its container: nginx closes
-    it on the public routes (protocol 9.3)."""
-    read = "import urllib.request; print(urllib.request.urlopen("
-    read += "'http://127.0.0.1:8000/health', timeout=5).read().decode())"
-    [line] = _stdout(["docker", "exec", _app(), "python", "-c", read])
-    found = json.loads(line)
-    assert isinstance(found, dict)
-    return found
+    """``/health`` of the blank's app."""
+    return _health_of(_app())
 
 
 def _skin_repository(tmp: Path) -> Path:
@@ -1014,10 +1105,10 @@ def test_tier3_build_mode_of_the_blank(tmp_path: Path, mirror: Path) -> None:
     _run(["git", "-C", str(copy), "checkout", "-q", base], env=GIT_ENV)
     primer = copy / "primer.yaml"
     text = primer.read_text(encoding="utf-8")
-    text = text.replace(
-        "  core: { services: [] }\n",
-        "  core: { services: [] }\n  full: { services: [] }\n",
-    )
+    # the blank's service is in every edition (DM-59, contract 3 rule 41)
+    core = "  core: { services: [primer-blank-service] }\n"
+    assert text.count(core) == 1
+    text = text.replace(core, core + "  full: { services: [primer-blank-service] }\n")
     assert text.count(RUNTIME_SKIN) == 1
     text = text.replace(RUNTIME_SKIN, BUILD_SKIN)
     primer.write_text(text, encoding="utf-8")
@@ -1348,37 +1439,6 @@ def test_tier3_certbot_tag_has_the_pinned_digest(image: str) -> None:
     assert f"{repository}@{digest}" in digests, (tag, digests)
 
 
-SERVICE_YAML = """schema: 1
-name: notes
-kind: service
-
-stacks:
-  notes:
-    compose: docker-compose.yml
-    app:      { service: app, port: 8000, health: /health, ready: /ready }
-    migrate:  python -m alembic upgrade head
-
-env:
-  POSTGRES_PASSWORD: { source: minted }
-  EDITION:           { source: passport, key: edition }
-  API_BASE_URL:      { source: passport, key: domains.api }
-  LANGUAGES:         { source: passport, key: languages }
-  DEFAULT_LANGUAGE:  { source: passport, key: default_language }
-
-accepts:
-  profile:
-    validate: >-
-      python -c "import pathlib, sys; p = pathlib.Path(sys.argv[1]) / 'ok';
-      sys.exit(0 if p.is_file() else 3)" <dir>
-    env: PROFILE_DIR
-
-report: { health: /health, ready: /ready, logs: json, junit: true }
-"""
-"""A copy of the blank as a service (DM-46): its own name and entry, no
-frontend of its own, no editions or packages, taking a profile of the
-product; ``validate`` is green when the copy has a file ``ok``."""
-
-
 def _container(project: str, service: str) -> str:
     [container] = _stdout(
         [
@@ -1396,125 +1456,129 @@ def _container(project: str, service: str) -> str:
 
 
 def _copy_of_blank(tmp: Path, mirror: Path, name: str) -> Path:
-    """A clone of the mirror at ``BLANK_COMMIT``, its backend knowing ``full``."""
+    """A clone of the mirror at ``BLANK_COMMIT``."""
     copy = tmp / name
     _run(["git", "clone", "-q", str(mirror), str(copy)], env=GIT_ENV)
     _run(["git", "-C", str(copy), "checkout", "-q", BLANK_COMMIT], env=GIT_ENV)
-    editions = copy / "backend" / "app" / "editions.py"
-    table = editions.read_text(encoding="utf-8")
-    assert table.count(EDITIONS_LINE) == 1
-    editions.write_text(table.replace(EDITIONS_LINE, EDITIONS_FULL))
     return copy
 
 
-def _service_repository(tmp: Path, mirror: Path) -> tuple[Path, str]:
-    """The service ``notes`` at ``v1.0.0`` in a bare repository; its commit."""
-    copy = _copy_of_blank(tmp, mirror, "notes-work")
-    (copy / "primer.yaml").write_text(SERVICE_YAML, encoding="utf-8")
-    _git("-C", str(copy), "commit", "-q", "-am", "DM-46: the blank as a service")
-    _git("-C", str(copy), "tag", "v1.0.0")
-    [commit] = _git("-C", str(copy), "rev-parse", "HEAD")
-    bare = tmp / "notes.git"
-    _run(["git", "clone", "-q", "--bare", str(copy), str(bare)], env=GIT_ENV)
-    return bare, commit
+def _replace_once(file: Path, old: str, new: str) -> None:
+    """``old`` -> ``new`` in ``file``, exactly once (par0 14.3)."""
+    text = file.read_text(encoding="utf-8")
+    assert text.count(old) == 1, (file, old)
+    file.write_text(text.replace(old, new), encoding="utf-8")
 
 
-def _product_with_service(
-    tmp: Path, mirror: Path, service: Path, commit: str, *, ok: bool, step: int
-) -> None:
-    """The blank as the product of ``notes`` -- in ``full``, not in ``core`` --
-    giving it ``profile/`` (with ``ok`` or without), pushed as ``main``."""
-    copy = _copy_of_blank(tmp, mirror, f"product-{step}")
-    primer = copy / "primer.yaml"
-    text = primer.read_text(encoding="utf-8")
-    old = "editions:\n  core: { services: [] }\n"
-    assert text.count(old) == 1
-    text = text.replace(
-        old,
-        "dependencies:\n"
-        f"  notes: {{ repo: 'file://{service}', version: '>=1,<2',\n"
-        "           data: { profile: profile } }\n\n"
-        "editions:\n  core: { services: [] }\n  full: { services: [notes] }\n",
-    )
-    primer.write_text(text, encoding="utf-8")
-    (copy / "primer.lock").write_text(
-        "schema: 1\nresolved_at: 2026-11-05T00:00:00Z\ndependencies:\n"
-        f"  notes: {{ version: '1.0.0', tag: v1.0.0, commit: '{commit[:12]}' }}\n",
-        encoding="utf-8",
-    )
-    profile = copy / "profile"
-    profile.mkdir()
-    (profile / "kinds.yaml").write_text(f"step: {step}\n", encoding="utf-8")
-    if ok:
-        (profile / "ok").write_text("ok\n", encoding="utf-8")
+def _push(copy: Path, mirror: Path, message: str) -> None:
     _git("-C", str(copy), "add", "-A")
-    _git("-C", str(copy), "commit", "-q", "-m", f"DM-46: notes, step {step}")
+    _git("-C", str(copy), "commit", "-q", "-m", message)
     _git("-C", str(copy), "push", "-q", "--force", str(mirror), "HEAD:refs/heads/main")
+
+
+def _blank_without_service(tmp: Path, mirror: Path, step: int) -> None:
+    """The blank with an edition that leaves its service out, consistent as a
+    whole (par0 14.3): not in the edition, its seams not in ``env``, their
+    variables not in compose; the dependency and its lock stay."""
+    copy = _copy_of_blank(tmp, mirror, f"alone-{step}")
+    primer = copy / "primer.yaml"
+    _replace_once(
+        primer,
+        "  core: { services: [primer-blank-service] }",
+        "  core: { services: [] }",
+    )
+    compose = copy / "docker-compose.yml"
+    for key in SEAMS:
+        text = primer.read_text(encoding="utf-8").splitlines(keepends=True)
+        lines = [line for line in text if line.startswith(f"  {key}:")]
+        assert len(lines) == 1, (key, lines)
+        _replace_once(primer, lines[0], "")
+        _replace_once(compose, f"      {key}: ${{{key}:?}}\n", "")
+    _push(copy, mirror, f"DM-59: the blank without its service, step {step}")
+
+
+def _blank_with_a_refused_profile(tmp: Path, mirror: Path, step: int) -> None:
+    """The blank whose ``profile/`` the service's ``validate`` refuses: no
+    ``ok`` in it, a file of its own so the directory stays."""
+    copy = _copy_of_blank(tmp, mirror, f"refused-{step}")
+    (copy / "profile" / "ok").unlink()
+    (copy / "profile" / "kinds.yaml").write_text(f"step: {step}\n", encoding="utf-8")
+    _push(copy, mirror, f"DM-59: a profile the service refuses, step {step}")
+
+
+def _at_blank_commit(mirror: Path) -> None:
+    _run(
+        ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
+    )
 
 
 def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     tmp_path: Path, mirror: Path
 ) -> None:
-    """DM-46 on the box the install left -- the first live ladder of a service.
-    A copy of the blank as the service ``notes`` (``kind: service``), and the
-    blank as its product: in ``full`` it is installed before the product
-    (``render_env -> build -> data_copy -> migrate -> up``), its data -- the
-    product's ``profile/`` -- copied and validated by its new image; a profile
-    its ``validate`` refuses is red with ``notes`` and the product left
-    running as they were; ``core`` installs nothing of it and names it as
-    ``left``; ``doctor`` is empty on each green box."""
-    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
-    service, commit = _service_repository(tmp_path, mirror)
+    """DM-46 stage A on the blank's own service (DM-59), on the box the
+    earlier tests left. ``primer-blank-service`` is in every edition of the
+    blank: it goes up by its own ladder (``render_env -> build -> derive_env
+    -> data_copy -> up``) before the product, the product's ``profile/``
+    copied to it and validated by its image; a profile its ``validate``
+    refuses is red with the service and the product left running as they
+    were; an edition that leaves it out installs nothing of it and names it
+    as ``left``; ``doctor`` is empty on each green box.
 
-    # full: notes before the product, its profile copied and validated
-    _product_with_service(tmp_path, mirror, service, commit, ok=True, step=1)
-    full = _passport(tmp_path, version=20, edition="full")
-    green, printed = _install(full, "update")
+    Changed by DM-59: the service was a copy of the blank as ``notes``; it is
+    the blank's published service now, which the blank depends on in every
+    edition -- the same assertions, on it."""
+    assert Path("/opt/blank/current").is_symlink(), "the whole install runs first"
+
+    # the blank at its pin: the service before the product, its profile
+    _at_blank_commit(mirror)
+    core = _passport(tmp_path, version=20)
+    green, printed = _install(core, "update")
     assert green.result == "green", printed
     order = [(s.stack, s.name) for s in green.steps if s.phase == "main"]
-    for name in ("render_env", "build", "data_copy", "migrate", "up"):
-        assert order.index(("notes", name)) < order.index(("blank", "render_env"))
+    for name in ("render_env", "build", "derive_env", "data_copy", "up"):
+        assert order.index((SERVICE, name)) < order.index(("blank", "render_env"))
     facts = {(s.stack, s.name): s.verify or {} for s in green.steps}
-    data = facts[("notes", "data_copy")]["data"]
+    data = facts[(SERVICE, "data_copy")]["data"]
     assert isinstance(data, dict) and set(data) == {"profile"}, data
     copied = Path(str(data["profile"]))
-    assert (copied / "ok").is_file() and copied.is_relative_to("/opt/notes/data")
-    assert facts[("notes", "up")]["release"] == "v1.0.0", facts[("notes", "up")]
-    assert Path("/opt/notes/current").resolve() == Path("/opt/notes/releases/v1.0.0")
-    state = json.loads(Path("/opt/pridem/state.json").read_text(encoding="utf-8"))
-    assert state["current"]["notes"] == "v1.0.0", state
-    running = _container("notes", "app")
+    assert (copied / "ok").is_file() and copied.is_relative_to(f"/opt/{SERVICE}/data")
+    assert facts[(SERVICE, "up")]["release"] == "v1.0.0", facts[(SERVICE, "up")]
+    assert Path(f"/opt/{SERVICE}/current").resolve() == Path(
+        f"/opt/{SERVICE}/releases/v1.0.0"
+    )
+    running = _container(SERVICE, "app")
     inside = _stdout(["docker", "exec", running, "ls", "/primer/data/profile"])
     assert "ok" in inside, inside
     env = _stdout(["docker", "exec", running, "printenv", "PROFILE_DIR"])
     assert env == ["/primer/data/profile"], env
-    diff, failed, doctor = _doctor(full)
+    diff, failed, doctor = _doctor(core)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
-    # a profile notes refuses: red at its validate, notes and the product as
-    # they were -- the same containers, the old copy mounted
+    # a profile the service refuses: red at its validate, the service and the
+    # product as they were -- the same containers, the old copy mounted
     product = _container("blank", "app")
-    _product_with_service(tmp_path, mirror, service, commit, ok=False, step=2)
-    bad, printed = _install(_passport(tmp_path, version=21, edition="full"), "update")
+    _blank_with_a_refused_profile(tmp_path, mirror, step=2)
+    bad, printed = _install(_passport(tmp_path, version=21), "update")
     assert bad.result != "green", printed
     [red] = [s for s in bad.steps if s.status == "failed"]
-    assert (red.stack, red.name) == ("notes", "data_copy"), bad.steps
+    assert (red.stack, red.name) == (SERVICE, "data_copy"), bad.steps
     assert red.reason is not None
     assert red.reason.code == "data_copy:validate-failed", red.reason
-    assert _container("notes", "app") == running
+    assert _container(SERVICE, "app") == running
     assert _container("blank", "app") == product
     inside = _stdout(["docker", "exec", running, "ls", "/primer/data/profile"])
     assert "ok" in inside, inside
 
-    # core: notes is not the edition's -- not touched, named as left
-    _product_with_service(tmp_path, mirror, service, commit, ok=True, step=3)
-    core = _passport(tmp_path, version=22, edition="core")
-    back, printed = _install(core, "update")
+    # an edition without it: not touched, named as left
+    _blank_without_service(tmp_path, mirror, step=3)
+    alone = _passport(tmp_path, version=22)
+    back, printed = _install(alone, "update")
     assert back.result == "green", printed
-    assert not any(s.stack == "notes" for s in back.steps), back.steps
+    assert not any(s.stack == SERVICE for s in back.steps), back.steps
     facts = {(s.stack, s.name): s.verify or {} for s in back.steps}
-    assert facts[("seams", "seams_check")]["left"] == ["notes"], facts
-    diff, failed, doctor = _doctor(core)
+    assert facts[("seams", "seams_check")]["left"] == [SERVICE], facts
+    assert _container(SERVICE, "app") == running
+    diff, failed, doctor = _doctor(alone)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
 
@@ -1618,3 +1682,67 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     assert any(Path("/opt/pridem/history").glob("*.json"))
     again, printed = _verdict_of("destroy")
     assert again.result == "green", printed
+
+
+def test_probe_DM_59_product_gets_the_seams_of_its_service_after_health(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-59 on the box ``destroy`` left -- clean of every stack. The pair
+    first: the blank in an edition without its service installs nothing of
+    it -- no release, no container, none of its seams in the product's env.
+    Then the blank at its pin: the service goes up, healthy, before the
+    product renders its env; the product's container holds the values of the
+    service's three seams -- its address, its minted token and the key its
+    ``derive`` computed in the service's own image -- equal to what the
+    service's env holds; ``seams_verify`` reads both ends live. The time of
+    both installs goes to the run's output (par0 14.3)."""
+    assert not Path("/opt/blank/current").exists(), "destroy runs first"
+
+    _blank_without_service(tmp_path, mirror, step=10)
+    started = time.monotonic()
+    alone, printed = _install(_passport(tmp_path, version=40))
+    without = time.monotonic() - started
+    assert alone.result == "green", printed
+    assert not any(s.stack == SERVICE for s in alone.steps), alone.steps
+    assert not Path(f"/opt/{SERVICE}/current").exists()
+    assert _containers_of(SERVICE) == []
+    assert not set(SEAMS) & set(_env()), sorted(_env())
+
+    _at_blank_commit(mirror)
+    started = time.monotonic()
+    green, printed = _install(_passport(tmp_path, version=41), "update")
+    with_service = time.monotonic() - started
+    warnings.warn(
+        f"DM-59 timing: install without the service {without:.0f} s, "
+        f"update with it {with_service:.0f} s",
+        stacklevel=1,
+    )
+    assert green.result == "green", printed
+    order = [(s.stack, s.name) for s in green.steps if s.phase == "main"]
+    assert order.index((SERVICE, "up")) < order.index(("blank", "render_env")), order
+    assert order.index((SERVICE, "derive_env")) < order.index((SERVICE, "up")), order
+    facts = {(s.stack, s.name): s.verify or {} for s in green.steps}
+    assert (
+        facts[(SERVICE, "derive_env")]["image"]
+        == facts[(SERVICE, "build")]["app_image"]
+    ), facts[(SERVICE, "derive_env")]
+    theirs, ours = _env(SERVICE_ENV), _env()
+    assert theirs["SERVICE_API_URL"] == f"http://{SERVICE}-app:8000", theirs.keys()
+    assert theirs["SERVICE_KEY"].startswith("sk_") and len(theirs["SERVICE_KEY"]) == 43
+    assert theirs["PRODUCT_WEBHOOK_URL"] == f"https://{API}/internal/service/webhook"
+    product = _app()
+    for key in SEAMS:
+        assert ours[key] == theirs[key], key  # values, not names
+        held = _stdout(["docker", "exec", product, "printenv", key])
+        assert held == [theirs[key]], key
+    edges = facts[("blank", "seams_verify")]["seams"]
+    assert isinstance(edges, list), edges
+    for key in SEAMS:
+        assert f"blank.{key} <- {SERVICE}" in edges, edges
+    assert f"{SERVICE}.PRODUCT_WEBHOOK_URL <- blank" in edges, edges
+    assert _health_of(_container(SERVICE, "app"))["seams"] == {
+        "provides": list(SEAMS),
+        "requires_satisfied": True,
+    }
+    for key in SEAMS:  # the values never reach the console or the verdict
+        assert theirs[key] not in printed, key
