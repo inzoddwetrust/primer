@@ -36,10 +36,11 @@ LISTING: tuple[Listed, ...] = (
     Listed("oauth.telegram.org", "velo", "sign-in in a browser (OIDC)", "comms v4.x"),
     Listed("claude.ai", "velo", "MCP: CIMD", "comms v4.x"),
     Listed("chatgpt.com", "velo", "MCP: CIMD", "comms v4.x"),
-    Listed("api.github.com", "blank", "tier 3 probe of the proxy", "permanent"),
+    Listed("api.github.com", "primer-blank", "tier 3 probe of the proxy", "permanent"),
 )
 """First edition, 03.11, the owner's word (card DM-64); the hosts of velo were
-taken by velo from its own code."""
+taken by velo from its own code. The blank's row under its own name,
+``primer-blank`` (contract 3 rule 32), 06.11, the owner's word (card DM-70)."""
 
 
 UNLISTED = "{hosts} of egress are not in the list agreed with Primer for {product}"

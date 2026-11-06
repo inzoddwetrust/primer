@@ -159,8 +159,10 @@ def test_a_service_has_no_egress() -> None:
 
 
 def test_the_list_is_the_cards_first_edition() -> None:
+    """Changed by DM-70: the blank's row is under its own name, ``primer-blank``
+    (contract 3 rule 32)."""
     assert sorted((row.product, row.host) for row in LISTING) == [
-        ("blank", "api.github.com"),
+        ("primer-blank", "api.github.com"),
         ("velo", "api.zoom.us"),
         ("velo", "chatgpt.com"),
         ("velo", "claude.ai"),
@@ -188,6 +190,8 @@ def test_unlisted_names_every_host_out_of_the_products_rows() -> None:
 
 
 def test_build_refuses_an_unlisted_host_before_any_command(tmp_path: Path) -> None:
+    """Changed by DM-70: the pair's listed host is admitted to the product named
+    as its row, ``primer-blank`` (contract 3 rule 32)."""
     stack = product(["zoom.us"], "blank")
     step = Build(
         stack,
@@ -204,8 +208,9 @@ def test_build_refuses_an_unlisted_host_before_any_command(tmp_path: Path) -> No
         "build:egress-unlisted", {"product": "blank", "hosts": ["zoom.us"]}
     )
     assert not (tmp_path / "opt").exists()
-    # the pair: a listed host passes on to compose -- the first command it runs
-    listed_ = product(["api.github.com"], "blank")
+    # the pair: a listed host passes on to compose -- the first command it runs;
+    # the row is the blank's under its own name, primer-blank (DM-70)
+    listed_ = product(["api.github.com"], "primer-blank")
     step = Build(
         listed_,
         ENTRY,
@@ -221,20 +226,26 @@ def test_build_refuses_an_unlisted_host_before_any_command(tmp_path: Path) -> No
 
 
 def test_check_names_an_unlisted_host_by_the_same_function(tmp_path: Path) -> None:
+    """Changed by DM-70: the product is named as the blank's row,
+    ``primer-blank`` (contract 3 rule 32), so ``api.github.com`` is admitted."""
     root = repo(tmp_path)
-    _yaml(root, {"egress": ["api.github.com", "github.com", "pypi.org"]})
+    # the blank under its own name, primer-blank, whose row admits api.github.com
+    # (DM-70): the hosts out of the row are named, the listed one is not
+    egress = ["api.github.com", "github.com", "pypi.org"]
+    _yaml(root, {"name": "primer-blank", "egress": egress})
     code, verdict, _ = check(root, green_calls(root))
     assert code == 1
     assert _reason(verdict, "blank/primer_yaml") == {
         "code": "primer_yaml:egress-unlisted",
-        "product": "blank",
+        "product": "primer-blank",
         "hosts": ["github.com", "pypi.org"],
     }
     # the checks after it still ran: the compose was read and found clean
     assert _steps(verdict)["blank/compose"]["status"] == "ok"
-    # the pair: a listed host is green, and the fact names it
+    # the pair: a listed host is green, and the fact names it -- the row is the
+    # blank's under its own name, primer-blank (DM-70)
     root = repo(tmp_path / "again")
-    _yaml(root, {"egress": ["api.github.com"]})
+    _yaml(root, {"name": "primer-blank", "egress": ["api.github.com"]})
     code, verdict, _ = check(root, green_calls(root))
     assert code == 0
     fact = _steps(verdict)["blank/primer_yaml"]["verify"]
