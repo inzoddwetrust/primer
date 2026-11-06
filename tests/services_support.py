@@ -236,11 +236,13 @@ def planned(
     comms: dict[str, object] | None = None,
     asked: dict[str, dict[str, str]] | None = None,
     product_env: dict[str, object] | None = None,
+    again: bool = False,
 ) -> tuple[Planned, Path]:
     """The plan of ``install`` on a box at ``tmp/box``, its sources and
     dependencies run -- the services' ladders and the product's then known;
     ``gone`` -- remotes removed first: a command that asks one fails."""
-    remotes(tmp, comms, product_env)
+    if not again:  # ``again``: a second plan on the same box and remotes
+        remotes(tmp, comms, product_env)
     for name in gone:
         shutil.rmtree(tmp / f"{name}.git")
     root = tmp / "box"

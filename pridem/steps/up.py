@@ -175,7 +175,23 @@ class Up(Step):
         problems, document = self._problems(ctx)
         if problems or not self._same_release(document):
             return needed
+        self._provide()
         return CheckResult(False)
+
+    def _provide(self) -> None:
+        """The stack's ``provides`` to the plan's memory, read from its
+        ``.env`` as ``render_env`` reads it back.
+
+        ``check`` calls it only where it found nothing to do: the stack runs on
+        this commit's image and configuration, and its live ``/health`` passed
+        conformance -- the health rule 21 asks for. ``doctor`` runs ``check``
+        alone, and a product's seam from this stack is resolved from the
+        memory; without this its ``render_env`` is ``seam-before-health`` on
+        every box (DM-59 FIX). In a run, ``verify`` puts the same values again.
+        """
+        if self.memory is not None and self.render is not None:
+            self.render.read_back(waiting=())
+            self.memory.healthy(self.compose.stack.name, self.render.provided())
 
     def _same_release(self, document: dict[str, Json]) -> bool:
         if self.compose.app_service is None:

@@ -90,13 +90,9 @@ MIRROR = Path("/srv/tier3/blank.git")
 """The blank's ``file://`` mirror the passport names: the machine fetches from
 it with no key of CI, and names the product's directory by it -- ``blank``."""
 BLANK_COMMIT = "81502d0989d48f818ba76050a094bec2669d6f18"
-# the blank's service (DM-59): public, cloned over https by the test, given to
-# the machine as the file:// mirror the blank's primer.yaml names; its tag's
-# commit is pinned, as the blank's primer.lock pins it
+# the blank's service (DM-59): its file:// mirror is made by tier3/conftest.py
+# before the first test of the session -- every plan of the blank reads its lock
 SERVICE = "primer-blank-service"
-SERVICE_REPO = f"https://github.com/inzoddwetrust/{SERVICE}.git"
-SERVICE_PINS = {"v1.0.0": "883e3ce4568a5f379737af13c6e2ee21d2810421"}
-SERVICE_MIRROR = Path(f"/srv/tier3/{SERVICE}.git")
 SERVICE_ENV = Path(f"/opt/{SERVICE}/env/.env")
 SEAMS = ("SERVICE_API_URL", "SERVICE_TOKEN", "SERVICE_KEY")
 # the blank's published packages (DM-58): public, cloned over https by the
@@ -454,18 +450,9 @@ def _curl(tmp: Path, url: str, host: str) -> tuple[str, str]:
 @pytest.fixture(scope="module")
 def mirror(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The blank's mirror the sources fetch from: one for the whole install and
-    for the deploys of DM-64, which push their own commits to it. Beside it
-    the mirror of the blank's service (DM-59), which every edition of the
-    blank installs: cloned over https, each pinned tag's commit checked."""
+    for the deploys of DM-64, which push their own commits to it. The mirror of
+    the blank's service is the session's (``tier3/conftest.py``)."""
     MIRROR.parent.mkdir(parents=True, exist_ok=True)
-    if SERVICE_MIRROR.exists():
-        shutil.rmtree(SERVICE_MIRROR)
-    _run(["git", "clone", "-q", "--mirror", SERVICE_REPO, str(SERVICE_MIRROR)], 300)
-    for tag, pin in SERVICE_PINS.items():
-        found = _git(
-            "--git-dir", str(SERVICE_MIRROR), "rev-parse", f"{tag}^{{commit}}"
-        )[0]
-        assert found == pin, f"{SERVICE} {tag} names {found}, pinned {pin}"
     return MIRROR
 
 
@@ -1414,7 +1401,11 @@ def test_tier3_compose_takes_a_single_quoted_value_as_it_is(tmp_path: Path) -> N
     env_file = tmp_path / "measure.env"
     env_file.write_text(
         f"POSTGRES_PASSWORD='{literal}'\nEDITION='core'\nAPI_BASE_URL='{API}'\n"
-        "LANGUAGES='en,ru'\nDEFAULT_LANGUAGE='en'\n",
+        "LANGUAGES='en,ru'\nDEFAULT_LANGUAGE='en'\n"
+        # the blank's seams from its service (DM-59): compose needs every one
+        "SERVICE_API_URL='http://primer-blank-service-app:8000'\n"
+        "SERVICE_TOKEN='measure-service-token-00000000000001'\n"
+        "SERVICE_KEY='sk_measure-service-key-0000000000001'\n",
         encoding="utf-8",
     )
     config = _config(checkout / "docker-compose.yml", env_file)
@@ -1735,7 +1726,7 @@ def test_probe_DM_59_product_gets_the_seams_of_its_service_after_health(
         assert ours[key] == theirs[key], key  # values, not names
         held = _stdout(["docker", "exec", product, "printenv", key])
         assert held == [theirs[key]], key
-    edges = facts[("blank", "seams_verify")]["seams"]
+    edges = facts[("seams", "seams_verify")]["seams"]
     assert isinstance(edges, list), edges
     for key in SEAMS:
         assert f"blank.{key} <- {SERVICE}" in edges, edges
