@@ -278,6 +278,13 @@
       "title": "Languages",
       "type": "array"
     },
+    "options": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Options",
+      "type": "array"
+    },
     "packages": {
       "additionalProperties": {
         "$ref": "#/$defs/Package"

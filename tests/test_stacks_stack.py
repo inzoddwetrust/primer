@@ -17,7 +17,6 @@ def _example_stacks() -> list[Stack]:
     assert isinstance(product, Product) and isinstance(service, Service)
     return [
         Stack.service(service, lock.dependencies["comms"]),
-        Stack.remote_service("meet", lock.dependencies["meet"]),
         Stack.product(product, "9a1c4e2"),
     ]
 
@@ -29,25 +28,11 @@ def test_composition_of_the_contract_examples() -> None:
     )
     assert built == {
         "comms": "3.0.0",
-        "meet": "1.0.0",
         "aivis": "9a1c4e2",
         "pridem": "0.3.1",
         "skin": "velo-look@1.4.2",
         "texts": "velo-look@1.4.2",
     }
-
-
-def test_remote_dependency_carries_the_lock_version() -> None:
-    lock = load_primer_lock(FIXTURES / "primer.lock")
-    meet = Stack.remote_service("meet", lock.dependencies["meet"])
-    assert (meet.name, meet.kind, meet.version, meet.remote) == (
-        "meet",
-        "service",
-        "1.0.0",
-        True,
-    )
-    built = composition([meet], machine_version="0.3.1", packages={})
-    assert built == {"meet": "1.0.0", "pridem": "0.3.1"}
 
 
 @pytest.mark.parametrize(

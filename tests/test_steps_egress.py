@@ -19,18 +19,21 @@ from pathlib import Path
 
 import pytest
 from compose_support import CONFIG, ENTRY, REF, SHA, blank, run, stdout
+from passport_support import passport_example
 from test_probe_DM_57_check import _reason, _steps, _yaml, check, green_calls, repo
 
 from pridem.events import Code, Json
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, Stream
 from pridem.stacks.egress import LISTING, listed, unlisted
+from pridem.stacks.passport import PASSPORT
 from pridem.stacks.schema import (
     PRIMER_YAML,
     PROXY_VARIABLES,
     Product,
     Service,
     _check,
+    egress_hosts,
 )
 from pridem.steps.base import CheckResult, StepContext
 from pridem.steps.build import Build
@@ -59,6 +62,7 @@ from pridem.steps.egress import (
     connect_status,
 )
 from pridem.steps.host import NETWORKS
+from pridem.steps.passport import Fetched
 
 PROXY = "c0ffee"
 SQUID_ID = "sha256:" + "5" * 64
@@ -259,7 +263,8 @@ def rendered(
     stack: Product | Service, document: Mapping[str, Json] = CONFIG
 ) -> dict[str, Json]:
     cs = ComposeStack(stack, ENTRY, Path("/release"), REF, SHA, Path("/"))
-    loaded = json.loads(override_text(cs, document))
+    proxy = isinstance(stack, Product) and bool(stack.egress)  # every host open
+    loaded = json.loads(override_text(cs, document, proxy=proxy))
     assert isinstance(loaded, dict)
     return loaded
 
@@ -532,10 +537,16 @@ def verify_calls(hosts: list[str]) -> list[FakeCall]:
     return [ps(PROXY), *image(), seen(hosts), address(), logs(LOGGED)]
 
 
+FETCHED = Fetched(passport=PASSPORT.validate_python(passport_example()))
+"""A passport with no option on: every host of these products is a plain
+name, open whatever the options."""
+
+
 def step(root: Path, hosts: list[str], proxy: Proxy, ready_s: float = 30) -> Egress:
     ticks = count()
     return Egress(
         product(hosts),
+        fetched=FETCHED,
         root=root,
         answer=proxy,
         ready_s=ready_s,
@@ -763,7 +774,7 @@ def test_drift_of_the_files_is_red_in_verify(tmp_path: Path) -> None:
             super().act(ctx, check)
             config_file(self.root).write_text("http_access allow all\n")
 
-    egress = Spoils(product(ZOOM), root=tmp_path, answer=Proxy(ZOOM))
+    egress = Spoils(product(ZOOM), fetched=FETCHED, root=tmp_path, answer=Proxy(ZOOM))
     with FakeRunner(up(tmp_path)) as runner:
         outcome, _ = run([egress], runner)
     assert outcome.steps[0].reason == Code(
@@ -850,7 +861,7 @@ def test_product_reaches_only_its_egress_hosts_by_render() -> None:
             else:
                 assert entry.get("internal") is True, (name, network)
         assert at(body, "environment", "HTTPS_PROXY") == PROXY_URL
-    lines = config_text(stack.egress).splitlines()
+    lines = config_text(egress_hosts(stack)).splitlines()
     allow = [line for line in lines if line.startswith("acl egress ")]
     assert allow == ["acl egress dstdomain -n api.github.com"]  # the pair
     assert lines[-len(lines) :].count("http_access deny all") == 1

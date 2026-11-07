@@ -70,6 +70,7 @@ import os
 import shutil
 import time
 import warnings
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -230,6 +231,8 @@ def _passport(
     packages: dict[str, dict[str, str]] | None = None,
     languages: tuple[str, ...] = ("en", "ru"),
     default_language: str = "en",
+    options: list[str] | None = None,
+    params: dict[str, dict[str, str]] | None = None,
 ) -> Path:
     """A passport of the box; the blank declares ``languages: [en, ru]`` since
     ``BLANK_COMMIT`` 2e7580f, and an instance names its own (DM-46)."""
@@ -244,7 +247,8 @@ def _passport(
         "domains": {"frontend": FRONTEND, "api": API},
         "access": {"mode": "deploy-keys"},
         "asked": {},
-        "params": {},
+        "params": params or {},
+        **({"options": options} if options is not None else {}),
         "policies": {
             "ssl": "self-signed",
             "gc": {
@@ -463,6 +467,26 @@ def mirror(tmp_path_factory: pytest.TempPathFactory) -> Path:
     the blank's service is the session's (``tier3/conftest.py``)."""
     MIRROR.parent.mkdir(parents=True, exist_ok=True)
     return MIRROR
+
+
+@pytest.fixture(autouse=True)
+def _mirror_back_at_the_pin() -> Iterator[None]:
+    """After every test, ``main`` of the blank's mirror is ``BLANK_COMMIT``
+    again, whatever the test pushed and wherever it stopped (DM-69, item 8):
+    a test red before its own return leaves its neighbour the pin, not its
+    copy (the stand of DM-70: one cause, two red tests)."""
+    yield
+    if (MIRROR / "HEAD").is_file():
+        _run(
+            [
+                "git",
+                "--git-dir",
+                str(MIRROR),
+                "update-ref",
+                "refs/heads/main",
+                BLANK_COMMIT,
+            ]
+        )
 
 
 def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> None:
@@ -1664,6 +1688,72 @@ def test_tier3_two_instances_with_their_own_languages(
     assert acted == [], acted
     assert _containers_of(STACK) == before
     assert json.loads(_body("/config.json", FRONTEND))["languages"] == "en,ru"
+
+
+def _blank_with_an_option(tmp: Path, mirror: Path) -> None:
+    """The blank with an option of its own, consistent as a whole (par0 14.3):
+    ``options: [probe]``, a variable ``PROBE_URL`` under ``when: probe`` in
+    ``env`` and in the compose of ``app``, and the host of ``egress`` agreed
+    for the blank -- ``api.github.com`` -- under the same option."""
+    copy = _copy_of_blank(tmp, mirror, "options")
+    primer = copy / "primer.yaml"
+    _replace_once(
+        primer,
+        "  SERVICE_API_URL:",
+        "  PROBE_URL:         { source: param, when: probe }\n  SERVICE_API_URL:",
+    )
+    text = primer.read_text(encoding="utf-8")
+    primer.write_text(
+        text
+        + "options: [probe]\negress:\n  - { host: api.github.com, when: [probe] }\n",
+        encoding="utf-8",
+    )
+    _replace_once(
+        copy / "docker-compose.yml",
+        "      SERVICE_API_URL: ${SERVICE_API_URL:?}\n",
+        "      SERVICE_API_URL: ${SERVICE_API_URL:?}\n"
+        "      PROBE_URL: ${PROBE_URL:?}\n",
+    )
+    _push(copy, mirror, "DM-69: the blank with an option")
+
+
+def test_tier3_an_option_off_is_the_literal_and_its_host_closed(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-69 on the box the earlier tests left: a copy of the blank with the
+    option ``probe``. The passport without it -- ``PROBE_URL`` is the literal
+    in ``.env`` and in the app's container, no proxy, no ``HTTPS_PROXY``; with
+    it -- the value, the proxy lets ``api.github.com`` through. ``doctor`` is
+    empty on each green box."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    _blank_with_an_option(tmp_path, mirror)
+    off = _passport(tmp_path, version=50)
+    verdict, printed = _install(off, "update")
+    assert verdict.result == "green", printed
+    assert _env()["PROBE_URL"] == "primer-switched-off", printed
+    held = _stdout(["docker", "exec", _app(), "printenv", "PROBE_URL"])
+    assert held == ["primer-switched-off"]
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    assert facts[(STACK, "egress")] == {"hosts": [], "proxy": "absent"}, facts
+    assert _proxies() == []
+    assert _reach()["HTTPS_PROXY"] is None
+    diff, failed, doctor = _doctor(off)
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+    # the pair: the option on
+    value = "https://probe.example.org/x"
+    on = _passport(
+        tmp_path, version=51, options=["probe"], params={STACK: {"PROBE_URL": value}}
+    )
+    verdict, printed = _install(on, "update")
+    assert verdict.result == "green", printed
+    assert _env()["PROBE_URL"] == value
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    assert facts[(STACK, "egress")]["hosts"] == ["api.github.com"], facts
+    assert len(_proxies()) == 1
+    assert _reach()["via_allowed"] == "reached"
+    diff, failed, doctor = _doctor(on)
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
 
 
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:

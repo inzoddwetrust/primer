@@ -33,12 +33,6 @@ service's application is not on its configuration (another image, another
 override): "the target image" of protocol 4.5. With nothing to copy the step
 only puts the override in place.
 
-``remote_check`` -- a ``remote`` dependency of the edition (rule 13) is on its
-own box and talks only to comms (protocol 4.3): it is neither fetched nor run
-here. What this box knows of it is checked: the lock pins its tag and commit
-(``check_lock`` read the remote for them) and the values its seams come as --
-the product's ``param`` and ``asked`` -- are named.
-
 ``seams_verify`` -- after the product's ``up``: every seam is held by the live
 provider, not by a file. For a seam of the product from a service, the name is
 among ``/health.seams.provides`` of that service; for a ``requires`` of a
@@ -59,8 +53,7 @@ from pridem.conformance.stack import observe
 from pridem.events import Json
 from pridem.runner import CommandFailed
 from pridem.stacks.passport import Passport
-from pridem.stacks.schema import Asked, Param, Product, Seam, Service
-from pridem.stacks.seams import used_remote
+from pridem.stacks.schema import Product, Seam, Service
 from pridem.steps.base import (
     CheckResult,
     Mode,
@@ -78,8 +71,7 @@ from pridem.steps.compose import (
     stale,
     write_override,
 )
-from pridem.steps.passport import NO_PASSPORT, Fetched
-from pridem.steps.sources import Resolved, package_dir
+from pridem.steps.sources import package_dir
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 CONTAINER_DATA = "/primer/data"
@@ -362,54 +354,6 @@ class DataCopy(Step):
                 raise StepFailed("override-not-placed", {"entry": self.compose.entry})
             fact["override"] = str(path)
         return Verified(fact)
-
-
-class RemoteCheck(Step):
-    """The remote dependencies of the edition: pinned, valued, not installed."""
-
-    name = "remote_check"
-    order = 1
-    modes = ALL_MODES
-    codes: ClassVar[dict[str, str]] = {**NO_PASSPORT}
-
-    def __init__(self, product: Product, resolved: Resolved, fetched: Fetched) -> None:
-        self.product = product
-        self.resolved = resolved
-        self.fetched = fetched
-
-    def check(self, ctx: StepContext) -> CheckResult:
-        return CheckResult(False)  # it reads; it never acts
-
-    def act(self, ctx: StepContext, check: CheckResult) -> None:
-        raise AssertionError("remote_check has no act")
-
-    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        passport = self.fetched.passport
-        if passport is None:
-            raise StepFailed("no-passport")
-        lock = self.resolved.lock
-        name = self.product.name
-        asked = passport.asked.get(name, {})
-        params = passport.params.get(name, {})
-        values = sorted(
-            key
-            for key, var in self.product.env.items()
-            if (isinstance(var, Param) and key in params)
-            or (isinstance(var, Asked) and key in asked)
-        )
-        checked: list[Json] = []
-        for service in used_remote(self.product, passport.edition):
-            entry = None if lock is None else lock.dependencies.get(service)
-            checked.append(
-                {
-                    "service": service,
-                    "tag": None if entry is None else entry.tag,
-                    "commit": None if entry is None else entry.commit,
-                    "installed": False,
-                    "passport": list[Json](values),
-                }
-            )
-        return Verified({"remote": checked})
 
 
 def _seams(body: bytes | None) -> tuple[list[str], bool] | None:

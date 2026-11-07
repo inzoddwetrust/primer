@@ -107,7 +107,7 @@ def test_probe_DM_14_half_seam_refuses_before_act(
     assert not env_of(root, "aivis").exists()
     # the pair: the whole seam passes
     whole, comms = pair(tmp_path)
-    assert half_seams(whole, {"comms": comms}, "full") == []
+    assert half_seams(whole, {"comms": comms}, "full", on=frozenset()) == []
 
 
 def test_probe_DM_14_seam_before_provider_health_refuses_plan(tmp_path: Path) -> None:
@@ -162,16 +162,21 @@ def test_provider_order_is_the_edition_then_the_product(tmp_path: Path) -> None:
         "meet": {
             "repo": "git@github.com:acme/meet.git",
             "version": ">=1,<2",
-            "topology": "remote",
+            "when": "meet",
         },
     }
     editions = {
         "core": {"services": ["comms"]},
         "full": {"services": ["comms", "payments"]},
     }
-    made = product(tmp_path, {}, dependencies=deps, editions=editions)
-    assert provider_order(made, "full") == ["comms", "payments", "aivis"]
-    assert provider_order(made, "core") == ["comms", "aivis"]
+    made = product(tmp_path, {}, dependencies=deps, editions=editions, options=["meet"])
+    full = ["comms", "payments", "aivis"]
+    assert provider_order(made, "full", on=frozenset()) == full
+    assert provider_order(made, "core", on=frozenset()) == ["comms", "aivis"]
+    # DM-69: a dependency under an option is installed when the option is on,
+    # whatever the edition (contract 3 rule 38)
+    on = frozenset({"meet"})
+    assert provider_order(made, "core", on=on) == ["comms", "meet", "aivis"]
 
 
 def test_seam_from_a_service_outside_the_edition_is_refused(tmp_path: Path) -> None:
@@ -185,8 +190,10 @@ def test_seam_from_a_service_outside_the_edition_is_refused(tmp_path: Path) -> N
     }
     env = {"PAYMENTS_API_URL": {"source": "seam", "from": "payments"}}
     made = product(tmp_path, env, dependencies=deps, editions=editions)
-    assert outside_edition(made, "core") == ["aivis.PAYMENTS_API_URL: payments"]
-    assert outside_edition(made, "full") == []
+    assert outside_edition(made, "core", on=frozenset()) == [
+        "aivis.PAYMENTS_API_URL: payments"
+    ]
+    assert outside_edition(made, "full", on=frozenset()) == []
     root, fetched = box(tmp_path, passport_data(edition="core"))
     comms = service(tmp_path, {})
     outcome, _ = run([SeamsCheck(made, {"comms": comms}, fetched)], FakeRunner())

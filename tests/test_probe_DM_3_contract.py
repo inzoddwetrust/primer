@@ -86,16 +86,6 @@ def test_probe_DM_3_edition_services_subset_of_dependencies(tmp_path: Path) -> N
     assert node(pair, "editions")
 
 
-def test_probe_DM_3_remote_dependency_has_no_local_seam(tmp_path: Path) -> None:
-    data = example("product.yaml")
-    node(data, "env")["MEET_URL"] = {"source": "seam", "from": "meet"}
-    assert yaml_problems(tmp_path, data) == [("env.MEET_URL.from", "R13.remote-seam")]
-
-    pair = example("product.yaml")
-    assert yaml_problems(tmp_path, pair) == []
-    assert node(pair, "dependencies", "meet")["topology"] == "remote"
-
-
 def test_probe_DM_3_schema_export_matches_model() -> None:
     """Both contract 3 schema files equal the export of the module that owns them.
 

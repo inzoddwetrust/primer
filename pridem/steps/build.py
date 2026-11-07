@@ -61,6 +61,7 @@ from typing import ClassVar
 
 from pridem.events import Json
 from pridem.stacks.egress import UNLISTED, unlisted
+from pridem.stacks.options import open_hosts, switched_on
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
@@ -181,6 +182,15 @@ class Build(Step):
     def _passport(self) -> Passport | None:
         return None if self.fetched is None else self.fetched.passport
 
+    def _proxied(self) -> bool:
+        """The product has a host of ``egress`` open on this instance."""
+        stack, passport = self.compose.stack, self._passport()
+        if not isinstance(stack, Product) or not stack.egress:
+            return False
+        if passport is None:
+            raise StepFailed("no-passport")
+        return bool(open_hosts(stack, switched_on(passport)))
+
     def _mounts(self, services: set[str]) -> list[PackageMount]:
         """The packages' binds of this entry's services (DM-19, DM-61)."""
         stack = self.compose.stack
@@ -277,7 +287,9 @@ class Build(Step):
         data_mounts, data_env = data_binds(self.data, compose.app_service)
         for service, more in data_mounts.items():
             binds[service] = [*binds.get(service, []), *more]
-        text = override_text(compose, document, binds, builds, data_env)
+        text = override_text(
+            compose, document, binds, builds, data_env, proxy=self._proxied()
+        )
         return Rendered(built_services(document), text, contexts)
 
     def _key(self, service: str) -> dict[str, str]:

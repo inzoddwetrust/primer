@@ -40,6 +40,7 @@ import yaml
 from pridem.events import Json
 from pridem.files import atomic_write
 from pridem.stacks.loader import ContractError, load_yaml_mapping
+from pridem.stacks.options import FLAG, LITERAL, flag, off_keys, switched_on
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import (
     Address,
@@ -158,8 +159,15 @@ def parse_env(text: str) -> dict[str, str]:
 
 
 def placeholder(value: str) -> bool:
-    """Empty, ``<…>`` whole, or an unresolved ``${…}``."""
-    return not value or bool(_PLACEHOLDER.fullmatch(value)) or "${" in value
+    """Empty, ``<…>`` whole, an unresolved ``${…}``, or the literal of an
+    option that is off -- a value only on a key of such an option (contract 3
+    rule 39; ``read_back`` admits it there)."""
+    return (
+        not value
+        or bool(_PLACEHOLDER.fullmatch(value))
+        or "${" in value
+        or value == LITERAL
+    )
 
 
 def languages_value(codes: Sequence[str]) -> str:
@@ -178,6 +186,9 @@ class Resolved:
     secrets: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     derived: dict[str, str] = field(default_factory=dict)
+    switched_off: list[str] = field(default_factory=list)
+    """Fields of the passport (``asked.<stack>.<key>``, ``params.…``) of an
+    option that is off and absent: ``install`` writes the literal there."""
 
 
 def address(stack: Stack) -> str:
@@ -189,7 +200,12 @@ def address(stack: Stack) -> str:
 
 
 def _from_passport(
-    stack: Stack, key: str, var: FromPassport, passport: Passport, out: Resolved
+    stack: Stack,
+    product: Product,
+    key: str,
+    var: FromPassport,
+    passport: Passport,
+    out: Resolved,
 ) -> None:
     if var.key == "edition":
         if passport.edition is None:
@@ -214,6 +230,8 @@ def _from_passport(
             out.missing.append("default_language")
         else:
             out.values[key] = passport.default_language
+    elif var.key.startswith(FLAG):
+        out.values[key] = flag(var.key, switched_on(passport))
     elif var.key.startswith("domains."):
         domain = var.key.removeprefix("domains.")
         host = passport.domains.get(domain)
@@ -232,14 +250,36 @@ def resolve(
     minted: Mapping[str, str],
     memory: SeamMemory,
 ) -> Resolved:
-    """Every source of ``stack`` but ``derived``, in schema order."""
+    """Every source of ``stack`` but ``derived``, in schema order.
+
+    A key under an option that is off is the literal, its source unread
+    (contract 3 rules 38-39): what the passport gives for it must be the
+    literal (``option-value``), and absent, it is to be written there; the
+    literal on any other key is refused (``option-literal``)."""
     out = Resolved()
     name = stack.name
     asked = passport.asked.get(name, {})
     params = passport.params.get(name, {})
+    on = switched_on(passport)
+    switched = set(off_keys(stack, on))
+    given = {k: v.get_secret_value() for k, v in asked.items()}
+    for kind, values in (("asked", given), ("params", params)):
+        for key, value in values.items():
+            if key in switched and value != LITERAL:
+                raise StepFailed("option-value", {"key": f"{kind}.{name}.{key}"})
+            if key not in switched and value == LITERAL:
+                raise StepFailed("option-literal", {"key": f"{kind}.{name}.{key}"})
     seams: dict[str, list[str]] = {}
     for key, var in stack.env.items():
-        if isinstance(var, Minted):
+        if key in switched:
+            out.values[key] = LITERAL
+            if isinstance(var, Asked):
+                out.secrets.append(LITERAL)  # as any value of asked
+                if key not in asked:
+                    out.switched_off.append(f"asked.{name}.{key}")
+            elif isinstance(var, Param) and key not in params:
+                out.switched_off.append(f"params.{name}.{key}")
+        elif isinstance(var, Minted):
             out.values[key] = minted[key]
             out.secrets.append(minted[key])
         elif isinstance(var, Asked):
@@ -255,7 +295,7 @@ def resolve(
             else:
                 out.missing.append(f"params.{name}.{key}")
         elif isinstance(var, FromPassport):
-            _from_passport(stack, key, var, passport, out)
+            _from_passport(stack, product, key, var, passport, out)
         elif isinstance(var, Address):
             out.values[key] = address(stack)
         elif isinstance(var, Derived):

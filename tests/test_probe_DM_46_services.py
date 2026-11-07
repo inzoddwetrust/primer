@@ -10,7 +10,7 @@ from compose_support import SHA, image_call, stdout
 from env_support import context
 from env_support import service as service_stack
 from plan_support import Journal, ListSink, ScriptedStep
-from services_support import deferred, planned, run_stacks
+from services_support import deferred, planned
 
 from pridem.events import Json
 from pridem.plan import Plan, StackSteps
@@ -33,7 +33,7 @@ def test_probe_DM_46_edition_installs_only_its_services(tmp_path: Path) -> None:
     made, root = planned(tmp_path / "core", "core", gone=["payments"])
     keys = [s.name for s in deferred(made, "dependencies")]
     ladders = _ladder(deferred(made, "services"))
-    assert keys == ["comms", "meet", "dependencies"]
+    assert keys == ["comms", "dependencies"]
     assert ("comms", "up") in ladders
     assert not any(stack == "payments" for stack, _ in ladders)
     assert not (root / "opt" / "payments").exists()
@@ -42,36 +42,12 @@ def test_probe_DM_46_edition_installs_only_its_services(tmp_path: Path) -> None:
     made, root = planned(tmp_path / "full", "full")
     assert [s.name for s in deferred(made, "dependencies")] == [
         "comms",
-        "meet",
         "payments",
         "dependencies",
     ]
     ladders = _ladder(deferred(made, "services"))
     assert ("payments", "up") in ladders
     assert (root / "opt" / "payments" / "releases" / "v1.0.0").is_dir()
-
-
-def test_probe_DM_46_remote_service_is_checked_not_installed(tmp_path: Path) -> None:
-    """``meet`` is remote: never fetched, no ladder; ``remote_check`` runs and
-    names it with the lock's tag and the passport's values."""
-    made, root = planned(tmp_path, "core")
-    services = deferred(made, "services")
-    assert not (root / "opt" / "meet").exists()
-    assert not any(stack == "meet" for stack, _ in _ladder(services))
-    [remote] = [s for s in services if s.name == "remote"]
-    outcome = run_stacks([remote])
-    assert outcome.code is ExitCode.OK, outcome.steps
-    [record] = [r for r in outcome.steps if r.name == "remote_check"]
-    checked = record.verify["remote"]
-    assert isinstance(checked, list) and len(checked) == 1
-    entry = checked[0]
-    assert isinstance(entry, dict)
-    assert (entry["service"], entry["tag"], entry["installed"]) == (
-        "meet",
-        "v1.0.0",
-        False,
-    )
-    assert entry["passport"] == ["MEET_URL", "SUPPORT_LANGUAGE"]
 
 
 def test_probe_DM_46_product_waits_for_all_provides(tmp_path: Path) -> None:

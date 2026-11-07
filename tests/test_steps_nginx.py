@@ -167,7 +167,7 @@ def test_probe_DM_17_route_targets_the_stack_alias_on_the_shared_network(
         cs = ComposeStack(made, entry, tmp_path, "main", "0" * 40, tmp_path)
         document = json.loads(json.dumps(CONFIG))
         document["services"] = {service: {"networks": {"default": None}}}
-        rendered = json.loads(override_text(cs, document))
+        rendered = json.loads(override_text(cs, document, proxy=False))
         assert rendered["services"][service]["networks"]["pridem"] == {
             "aliases": [f"{entry}-{service}"]
         }, (entry, port)

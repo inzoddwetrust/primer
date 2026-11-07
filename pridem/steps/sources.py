@@ -242,8 +242,8 @@ def _verify_release(
 
 
 Chosen = Callable[[Product], Sequence[str]]
-"""The dependencies a box uses: those of its edition (``installed`` and
-``used_remote`` of ``stacks/seams.py``)."""
+"""The dependencies a box uses: those of its edition (``installed`` of
+``stacks/seams.py``)."""
 
 
 class _SourceStep(Step):
@@ -495,8 +495,6 @@ class FetchServices(_SourceStep):
         out = []
         for name in self._used(product):
             dependency = product.dependencies[name]
-            if dependency.topology != "co-located":
-                continue
             entry = lock.dependencies[name]
             found = repo(dependency.repo)
             target = _known(

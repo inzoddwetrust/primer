@@ -11,9 +11,6 @@ from the passport (``ProvideUrl``: ``https://<domain><path>``) or a verb
 providers is the services of the edition, then the product, and no cycle can
 be written; there is no cycle to look for.
 
-A ``remote`` dependency is never a seam: the model refuses ``seam`` from it,
-its values come from the passport as ``param`` and ``asked`` of the product.
-
 ``half_seams`` lists every seam with one end missing; a plan with one is
 refused before its first ``act`` (``seams_check``), and so is one whose data
 for a service (form D, ``given_kinds``) the service does not accept
@@ -21,8 +18,9 @@ for a service (form D, ``given_kinds``) the service does not accept
 (``routes_on_co_located``).
 """
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
+from pridem.stacks.options import off
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Product, ProvideUrl, ProvideVerb, Seam, Service
 
@@ -47,11 +45,16 @@ class DomainMissing(Exception):
         super().__init__(f"domains.{name} is not in the passport")
 
 
-def installed(product: Product, edition: str | None) -> list[str]:
-    """The co-located dependencies the box installs, in the product's order.
+def installed(
+    product: Product, edition: str | None, *, on: Collection[str]
+) -> list[str]:
+    """The dependencies the box installs, in the product's order.
 
-    With ``editions`` declared, only the services of the passport's edition
-    (contract 3 rule 11); a ``remote`` dependency is never installed (rule 13).
+    A dependency under ``when: <option>`` -- when that option is ``on``
+    (contract 3 rule 38); any other -- with ``editions`` declared, when it is a
+    service of the passport's edition (rule 11), else always. Every dependency
+    is on the product's box (rule 13); a service is chosen by an edition or by
+    an option, never both (rule 41).
     """
     if product.editions:
         offer = product.editions.get(edition) if edition is not None else None
@@ -61,22 +64,7 @@ def installed(product: Product, edition: str | None) -> list[str]:
     return [
         name
         for name, dependency in product.dependencies.items()
-        if dependency.topology == "co-located" and name in chosen
-    ]
-
-
-def used_remote(product: Product, edition: str | None) -> list[str]:
-    """The remote dependencies of the edition (all of them without
-    ``editions``): checked, never installed (rule 13)."""
-    if product.editions:
-        offer = product.editions.get(edition) if edition is not None else None
-        chosen = set(offer.services) if offer is not None else set()
-    else:
-        chosen = set(product.dependencies)
-    return [
-        name
-        for name, dependency in product.dependencies.items()
-        if dependency.topology == "remote" and name in chosen
+        if (dependency.when in on if dependency.when is not None else name in chosen)
     ]
 
 
@@ -96,12 +84,16 @@ def given_kinds(product: Product, service: str) -> dict[str, str | None]:
 
 
 def unaccepted(
-    product: Product, services: Mapping[str, Service], edition: str | None
+    product: Product,
+    services: Mapping[str, Service],
+    edition: str | None,
+    *,
+    on: Collection[str],
 ) -> list[str]:
     """Every kind of data the product gives an installed service that the
     service does not ``accepts``, or under another variable than its own."""
     out: list[str] = []
-    for name in installed(product, edition):
+    for name in installed(product, edition, on=on):
         accepts = services[name].accepts
         for kind, env in sorted(given_kinds(product, name).items()):
             taken = accepts.get(kind)
@@ -113,30 +105,42 @@ def unaccepted(
 
 
 def routes_on_co_located(
-    product: Product, services: Mapping[str, Service], edition: str | None
+    product: Product,
+    services: Mapping[str, Service],
+    edition: str | None,
+    *,
+    on: Collection[str],
 ) -> list[str]:
     """Installed services with ``host.routes``: a co-located service has none
     (protocol 4, form A)."""
     return [
         name
-        for name in installed(product, edition)
+        for name in installed(product, edition, on=on)
         if (host := services[name].host) is not None and host.routes
     ]
 
 
-def provider_order(product: Product, edition: str | None) -> list[str]:
+def provider_order(
+    product: Product, edition: str | None, *, on: Collection[str]
+) -> list[str]:
     """Stacks in the order their seams are ready: services, then the product."""
-    return [*installed(product, edition), product.name]
+    return [*installed(product, edition, on=on), product.name]
 
 
 def half_seams(
-    product: Product, services: Mapping[str, Service], edition: str | None
+    product: Product,
+    services: Mapping[str, Service],
+    edition: str | None,
+    *,
+    on: Collection[str],
 ) -> list[str]:
-    """Every seam of the box with one end missing, as ``<stack>.<NAME>: why``."""
+    """Every seam of the box with one end missing, as ``<stack>.<NAME>: why``.
+    A seam under an option that is off has no provider to miss: its value is
+    the literal."""
     out: list[str] = []
-    here = installed(product, edition)
+    here = installed(product, edition, on=on)
     for key, var in product.env.items():
-        if not isinstance(var, Seam) or var.from_ not in here:
+        if not isinstance(var, Seam) or var.from_ not in here or off(var.when, on):
             continue  # outside the edition: ``outside_edition``
         provider = services[var.from_]
         if key not in provider.provides:
@@ -160,16 +164,43 @@ def half_seams(
     return out
 
 
-def outside_edition(product: Product, edition: str | None) -> list[str]:
-    """Seams of the product from a co-located service the edition leaves out."""
-    here = set(installed(product, edition))
+def outside_edition(
+    product: Product, edition: str | None, *, on: Collection[str]
+) -> list[str]:
+    """Seams of the product from a co-located service the edition leaves out;
+    a service under an option is chosen by it, not by the edition (rule 41)."""
+    here = set(installed(product, edition, on=on))
     return [
         f"{product.name}.{key}: {var.from_}"
         for key, var in product.env.items()
         if isinstance(var, Seam)
-        and product.dependencies[var.from_].topology == "co-located"
         and var.from_ not in here
+        and product.dependencies[var.from_].when is None
     ]
+
+
+def seams_under_option(
+    product: Product,
+    services: Mapping[str, Service],
+    edition: str | None,
+    *,
+    on: Collection[str],
+) -> list[str]:
+    """Seams of the product from a variable of its provider under ``when: o``
+    that the product takes neither under ``when: o`` nor with ``o`` in
+    ``options_required`` (contract 3 rule 38): off, the provider holds the
+    literal, and the product would take it as a value."""
+    out: list[str] = []
+    here = installed(product, edition, on=on)
+    for key, var in product.env.items():
+        if not isinstance(var, Seam) or var.from_ not in here:
+            continue
+        given = services[var.from_].env.get(key)
+        option = None if given is None else given.when
+        if option is not None and option != var.when:
+            if option not in product.options_required:
+                out.append(f"{product.name}.{key}: {var.from_} under when: {option}")
+    return out
 
 
 def product_value(product: Product, passport: Passport, name: str) -> str:

@@ -39,8 +39,7 @@ takes (``accepts: {<kind>: {validate, env}}``), a product the directory of its
 repository it gives a dependency of each kind (``dependencies.<s>.data:
 {<kind>: <path>}``). The path the data is at in the service's container is the
 machine's, given under ``env``: a key of the service's ``env`` with that name is
-refused (``S.accepts-env``); a remote dependency takes no data
-(``R13.remote-data``). Whether a pair matches needs both files -- the plan's
+refused (``S.accepts-env``). Whether a pair matches needs both files -- the plan's
 ``seams_check``. An entry of ``stacks`` named as a dependency is refused
 (``S.entry-dependency``): ``-p <entry>`` and the alias ``<entry>-<service>``
 would be the service's. ``host.routes`` of a service follow rule 4 as a
@@ -61,7 +60,9 @@ from packaging.specifiers import InvalidSpecifier, Specifier, SpecifierSet
 from pydantic import (
     AfterValidator,
     BeforeValidator,
+    Discriminator,
     Field,
+    Tag,
     TypeAdapter,
     ValidationError,
 )
@@ -114,12 +115,24 @@ RULES = {
         "dependency with env; from is a relative subdirectory without ..",
     ),
     "R11.edition-services": (11, "the services of an edition are its dependencies"),
-    "R11.edition-enum": (11, "enum: editions needs editions declared"),
-    "R13.remote-seam": (13, "a remote dependency provides through the passport"),
-    "R13.remote-data": (
-        13,
-        "a remote dependency is on another box: no data of the product is copied to it",
+    "R36.when-outside": (
+        36,
+        "when: names an option of the stack's own options",
     ),
+    "R37.required-outside": (37, "options_required is a subset of options"),
+    "R38.seam-when": (
+        38,
+        "a seam from a dependency under when: o is itself under when: o",
+    ),
+    "R38.flag-outside": (
+        38,
+        "a flag options.<o> of the passport names an option of the stack's options",
+    ),
+    "R41.edition-and-option": (
+        41,
+        "a service is chosen by an edition or by an option, not by both",
+    ),
+    "R11.edition-enum": (11, "enum: editions needs editions declared"),
     "R17.seed-form": (17, "a seed profile is {run, when}, when is install or command"),
     "R20.test-form": (
         20,
@@ -144,6 +157,8 @@ RULES = {
         "port, path, scheme or address",
     ),
     "S.egress-duplicate": (0, "protocol 4.2: an egress host is named once"),
+    "S.option-name": (0, "an option is named ^[a-z][a-z0-9_]*$"),
+    "S.option-duplicate": (0, "an option is named once"),
     "S.egress-env": (
         0,
         "protocol 4.2: the proxy's variables are the machine's, not keys of env",
@@ -190,6 +205,9 @@ def _relative_path(value: str) -> str:
 _HOST_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 
 
+_OPTION = re.compile(r"[a-z][a-z0-9_]*")
+
+
 def _egress_host(value: str) -> str:
     """A host name, nothing more (protocol 4.2): ``*.zoom.us``, ``zoom.us:443``,
     ``zoom.us/x``, ``https://zoom.us``, ``1.2.3.4``, ``::1``, ``Zoom.us``,
@@ -205,8 +223,16 @@ def _egress_host(value: str) -> str:
     return value
 
 
+def _option(value: str) -> str:
+    """An option of an instance (contract 3 rule 36): ``^[a-z][a-z0-9_]*$``."""
+    if not _OPTION.fullmatch(value):
+        raise _rule_error("S.option-name", f"{value!r}")
+    return value
+
+
 Name = Annotated[str, Field(min_length=1)]
 EgressHost = Annotated[str, AfterValidator(_egress_host)]
+Option = Annotated[str, AfterValidator(_option)]
 Command = Annotated[str, Field(min_length=1)]
 UrlPath = Annotated[str, Field(pattern=r"^/[A-Za-z0-9._~/-]*$")]
 """A path of an app: a plain one -- it goes into the nginx config of the box as
@@ -277,38 +303,46 @@ class Stack(Strict):
     persistent: bool = False
 
 
-class Minted(Strict):
+class _Var(Strict):
+    """A variable of ``env``. ``when: <option>`` -- needed only when that option
+    of the instance is on; off, its value is the literal ``primer-switched-off``
+    (contract 3 rules 38-39)."""
+
+    when: Option | None = None
+
+
+class Minted(_Var):
     source: Literal["minted"]
 
 
-class Asked(Strict):
+class Asked(_Var):
     source: Literal["asked"]
 
 
-class Derived(Strict):
+class Derived(_Var):
     source: Literal["derived"]
     run: Command
 
 
 # A non-secret instance parameter: params.<stack>.<variable> of the passport.
-class Param(Strict):
+class Param(_Var):
     source: Literal["param"]
 
 
-class Passport(Strict):
+class Passport(_Var):
     source: Literal["passport"]
     key: Name
     enum: Literal["editions"] | None = None
 
 
-class Seam(Strict):
+class Seam(_Var):
     source: Literal["seam"]
     from_: Name = Field(alias="from")
 
 
 # The stack's own application on the network ``pridem``:
 # ``http://<stack>-<app.service>:<app.port>`` (TZ 7.3); not a secret.
-class Address(Strict):
+class Address(_Var):
     source: Literal["address"]
 
 
@@ -339,8 +373,9 @@ class Dependency(Strict):
 
     repo: Name
     version: Range
-    topology: Literal["co-located", "remote"] = "co-located"
     data: dict[Name, RepoPath] = {}
+    when: Option | None = None
+    """Installed only when this option of the instance is on (rule 38)."""
 
 
 def _no_branch(value: object) -> object:
@@ -456,12 +491,33 @@ class Report(Strict):
     junit: bool
 
 
+class EgressWhen(Strict):
+    """A host of ``egress`` open when one of its options is on (rule 40)."""
+
+    host: EgressHost
+    when: Annotated[list[Option], Field(min_length=1)]
+
+
+def _egress_form(value: object) -> str:
+    """A mapping is the form ``{host, when}``; anything else is a host name --
+    so a bad name is reported as a name, not as both forms."""
+    return "when" if isinstance(value, dict) else "host"
+
+
+EgressEntry = Annotated[
+    Annotated[EgressHost, Tag("host")] | Annotated[EgressWhen, Tag("when")],
+    Discriminator(_egress_form),
+]
+
+
 class _Stack(Strict):
     schema_: SchemaVersion = Field(alias="schema")
     name: Name
     stacks: Annotated[dict[Name, Stack], Field(min_length=1)]
     env: dict[Name, EnvVar] = {}
     report: Report
+    options: list[Option] = []
+    """The options of an instance the stack knows (rule 36)."""
 
 
 class Product(_Stack):
@@ -473,8 +529,10 @@ class Product(_Stack):
     packages: dict[Name, Package] = {}
     host: ProductHost | None = None
     verbs: dict[Name, Verb] = {}
-    egress: list[EgressHost] = []
+    egress: list[EgressEntry] = []
     languages: Languages | None = None
+    options_required: list[Option] = []
+    """The options an instance of the product does not work without (rule 37)."""
 
 
 class Service(_Stack):
@@ -678,15 +736,6 @@ def _s_mount_dependency(stack: Product | Service) -> list[Problem]:
                         f"{mount.dependency!r} is not in dependencies",
                     )
                 )
-            elif dependency.topology == "remote":
-                out.append(
-                    problem_at(
-                        path,
-                        "R13.remote-seam",
-                        f"{mount.dependency!r} is remote; "
-                        "a package cannot be copied to another box",
-                    )
-                )
     return out
 
 
@@ -722,7 +771,7 @@ def _r11_editions(stack: Product | Service) -> list[Problem]:
     return out
 
 
-def _r13_seams(stack: Product | Service) -> list[Problem]:
+def _s_seam_from(stack: Product | Service) -> list[Problem]:
     out: list[Problem] = []
     for key, var in stack.env.items():
         if not isinstance(var, Seam):
@@ -743,15 +792,6 @@ def _r13_seams(stack: Product | Service) -> list[Problem]:
             out.append(
                 problem_at(path, "S.seam-from", f"{var.from_!r} is not in dependencies")
             )
-        elif dependency.topology == "remote":
-            out.append(
-                problem_at(
-                    path,
-                    "R13.remote-seam",
-                    f"{var.from_!r} is remote; "
-                    "its provides come as asked in the passport",
-                )
-            )
     return out
 
 
@@ -760,7 +800,7 @@ def _s_egress(stack: Product | Service) -> list[Problem]:
         return []
     out: list[Problem] = []
     seen: set[str] = set()
-    for index, host in enumerate(stack.egress):
+    for index, host in enumerate(egress_hosts(stack)):
         if host in seen:
             out.append(problem_at(("egress", index), "S.egress-duplicate", f"{host!r}"))
         seen.add(host)
@@ -772,9 +812,73 @@ def _s_egress(stack: Product | Service) -> list[Problem]:
     return out
 
 
+def egress_hosts(product: Product) -> list[str]:
+    """Every host ``egress`` declares, in its order, whatever its options."""
+    return [e if isinstance(e, str) else e.host for e in product.egress]
+
+
+def _duplicates(names: Sequence[str], path: tuple[str, ...]) -> list[Problem]:
+    out: list[Problem] = []
+    for index, name in enumerate(names):
+        if name in names[:index]:
+            out.append(problem_at((*path, index), "S.option-duplicate", f"{name!r}"))
+    return out
+
+
+def _options(stack: Product | Service) -> list[Problem]:
+    """Rules 36-38 and 41 within one file: options named once, ``when:`` and
+    a flag ``options.<o>`` only of the stack's own options, ``options_required``
+    within ``options``, a seam from a dependency under ``when: o`` itself
+    under ``when: o``, a service chosen by an edition or by an option."""
+    own = set(stack.options)
+    out = _duplicates(stack.options, ("options",))
+
+    def outside(path: tuple[str | int, ...], option: str | None) -> None:
+        if option is not None and option not in own:
+            out.append(problem_at(path, "R36.when-outside", f"{option!r}"))
+
+    for key, var in stack.env.items():
+        outside(("env", key, "when"), var.when)
+        if isinstance(var, Passport) and var.key.startswith("options."):
+            flag = var.key.removeprefix("options.")
+            if flag not in own:
+                out.append(
+                    problem_at(("env", key, "key"), "R38.flag-outside", repr(flag))
+                )
+    if isinstance(stack, Product):
+        out += _duplicates(stack.options_required, ("options_required",))
+        for index, option in enumerate(stack.options_required):
+            if option not in own:
+                where = ("options_required", index)
+                out.append(problem_at(where, "R37.required-outside", f"{option!r}"))
+        for name, dependency in stack.dependencies.items():
+            outside(("dependencies", name, "when"), dependency.when)
+            if dependency.when is not None and any(
+                name in spec.services for spec in stack.editions.values()
+            ):
+                at = ("dependencies", name, "when")
+                out.append(problem_at(at, "R41.edition-and-option", f"{name!r}"))
+        for index, entry in enumerate(stack.egress):
+            for option in [] if isinstance(entry, str) else entry.when:
+                outside(("egress", index, "when"), option)
+        for key, var in stack.env.items():
+            if not isinstance(var, Seam):
+                continue
+            provider = stack.dependencies.get(var.from_)
+            if provider is not None and provider.when not in (None, var.when):
+                out.append(
+                    problem_at(
+                        ("env", key, "when"),
+                        "R38.seam-when",
+                        f"{var.from_!r} is under when: {provider.when}",
+                    )
+                )
+    return out
+
+
 def _s_entries(stack: Product | Service) -> list[Problem]:
-    """An entry of ``stacks`` named as a dependency; a remote dependency with
-    ``data``; a service's ``accepts`` variable among its ``env`` keys."""
+    """An entry of ``stacks`` named as a dependency; a service's ``accepts``
+    variable among its ``env`` keys."""
     out: list[Problem] = []
     if isinstance(stack, Product):
         for entry in stack.stacks:
@@ -784,15 +888,6 @@ def _s_entries(stack: Product | Service) -> list[Problem]:
                         ("stacks", entry),
                         "S.entry-dependency",
                         f"{entry!r} is a dependency",
-                    )
-                )
-        for name, dependency in stack.dependencies.items():
-            if dependency.topology == "remote" and dependency.data:
-                out.append(
-                    problem_at(
-                        ("dependencies", name, "data"),
-                        "R13.remote-data",
-                        f"{name!r} is remote",
                     )
                 )
     else:
@@ -815,8 +910,9 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r10_apply,
     _s_mount_dependency,
     _r11_editions,
-    _r13_seams,
+    _s_seam_from,
     _s_egress,
+    _options,
     _s_entries,
     _r20_test_services,
 )

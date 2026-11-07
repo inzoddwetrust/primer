@@ -26,8 +26,7 @@ What a stack needs and when it is known:
   ``primer.yaml``: ``seams_check`` first, before any ``act`` of a stack; then
   each co-located service of the edition in the order of ``installed``, one
   stack per entry, the ladder ``render_env -> build -> [derive_env] ->
-  data_copy -> migrate -> up`` (``steps/services.py``); then ``remote_check``
-  when the edition has a ``remote`` dependency;
+  data_copy -> migrate -> up`` (``steps/services.py``);
 - the product -- deferred: its ``primer.yaml@target``, read by ``fetch_root``.
   One stack per entry of ``stacks``: the entry named as the product first, with
   ``render_env`` at its head and ``egress`` before its ``up``; then the other
@@ -64,9 +63,10 @@ from pathlib import Path
 from pridem import __version__
 from pridem.plan import Deferred, Stack, StackSteps
 from pridem.stacks.env import own_entry
+from pridem.stacks.options import switched_on
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Derived, Product, Service
-from pridem.stacks.seams import SeamMemory, installed, used_remote
+from pridem.stacks.seams import SeamMemory, installed
 from pridem.steps.base import Step
 from pridem.steps.build import Build
 from pridem.steps.compose import ComposeStack, OverrideHandoff
@@ -93,7 +93,6 @@ from pridem.steps.passport import (
 from pridem.steps.services import (
     DataCopy,
     DataItem,
-    RemoteCheck,
     SeamsVerify,
     data_items,
 )
@@ -243,7 +242,7 @@ def deploy_plan(
         edition = passport.edition
 
         def chosen(product: Product) -> list[str]:
-            return [*installed(product, edition), *used_remote(product, edition)]
+            return installed(product, edition, on=switched_on(passport))
 
         resolved, steps = source_steps(
             root,
@@ -271,7 +270,7 @@ def deploy_plan(
         if product is None or passport is None or not known.dependencies:
             return None
         edition = passport.edition
-        used = [*installed(product, edition), *used_remote(product, edition)]
+        used = installed(product, edition, on=switched_on(passport))
         addresses = [
             passport.product.repo,
             *(d.repo for d in product.dependencies.values()),
@@ -285,14 +284,14 @@ def deploy_plan(
         return made
 
     def services() -> Sequence[StackSteps] | None:
-        """``seams_check``, the ladder of each service, ``remote_check``."""
+        """``seams_check`` and the ladder of each service."""
         found = target()
         passport = _passport(fetched)
         resolved = known.resolved
         if found is None or passport is None or resolved is None:
             return None
         product, release, _, _ = found
-        here = installed(product, passport.edition)
+        here = installed(product, passport.edition, on=switched_on(passport))
         if any(name not in resolved.services for name in here):
             return None
         fetch = known.fetch_root
@@ -340,8 +339,6 @@ def deploy_plan(
                 ),
                 product=product,
             )
-        if used_remote(product, passport.edition):
-            made.append(StackSteps("remote", [RemoteCheck(product, resolved, fetched)]))
         return made
 
     def _service_stacks(
@@ -509,7 +506,7 @@ def deploy_plan(
                     )
                 )
             if index == 0:
-                steps.append(Egress(product, root=root))
+                steps.append(Egress(product, fetched=fetched, root=root))
             steps.append(
                 Up(
                     product,
@@ -534,6 +531,7 @@ def deploy_plan(
         resolved = known.resolved
         passport = _passport(fetched)
         edition = None if passport is None else passport.edition
+        on = frozenset[str]() if passport is None else switched_on(passport)
         stacks = {
             product.name: ComposeStack(
                 product, own_entry(product), release, ref, commit, root
@@ -542,7 +540,7 @@ def deploy_plan(
         services: dict[str, Service] = {}
         if resolved is not None:
             lock = resolved.lock
-            for name in installed(product, edition):
+            for name in installed(product, edition, on=on):
                 service = services[name] = resolved.services[name]
                 stacks[name] = ComposeStack(
                     service,
@@ -610,9 +608,10 @@ def deploy_plan(
         product, release, _, _ = found
         resolved, passport = known.resolved, _passport(fetched)
         edition = None if passport is None else passport.edition
+        on = frozenset[str]() if passport is None else switched_on(passport)
         releases = {known.fetch_root.stack: release}
         composition = {known.fetch_root.stack: known.fetch_root.target.release}
-        for name in installed(product, edition):
+        for name in installed(product, edition, on=on):
             if resolved is not None and name in resolved.releases:
                 releases[name] = resolved.releases[name]
                 composition[name] = resolved.releases[name].name

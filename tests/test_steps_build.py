@@ -135,7 +135,7 @@ def test_the_same_commit_again_needs_no_build(tmp_path: Path) -> None:
         outcome, _ = run([steps(tmp_path)[0]], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     # DM-45: build writes the candidate; the override on disk waits for packages
-    assert cs.candidate().override.read_text() == override_text(cs, CONFIG)
+    assert cs.candidate().override.read_text() == override_text(cs, CONFIG, proxy=False)
     assert cs.override.read_text() == "{}\n"
 
 

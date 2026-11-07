@@ -6,8 +6,6 @@ kind: product
 dependencies:                         # сервисы; точные версии -- в primer.lock
   comms:    { repo: git@github.com:aivis-one/comms.git,    version: ">=3.0,<4" }
   payments: { repo: git@github.com:aivis-one/payments.git, version: ">=1.0,<2" }
-  meet:     { repo: git@github.com:VELO2026-app/velo-meet.git, version: ">=1.0,<2",
-              topology: remote }        # общий сервис на своём боксе; шов -- через паспорт [Р 22.10]
 
 editions:                             # проверенные наборы модулей; какие сервисы нужны каждому [Р 22.10]
   core:            { services: [comms] }

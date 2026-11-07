@@ -18,7 +18,7 @@ def test_examples_load_and_are_not_empty() -> None:
     assert isinstance(product, Product)
     assert isinstance(service, Service)
     assert len(product.env) == 9  # contract 3 v1.13 adds SUPPORT_LANGUAGE (param)
-    assert set(product.dependencies) == {"comms", "payments", "meet"}
+    assert set(product.dependencies) == {"comms", "payments"}
     assert len(product.packages["texts"].mount) == 2
     assert product.stacks["storage"].persistent is True
     assert product.stacks["storage"].app is None
@@ -192,14 +192,14 @@ def test_dependency_range_must_parse(tmp_path: Path, version: str) -> None:
 
 
 def test_dependency_topology_and_branch(tmp_path: Path) -> None:
+    """Changed by DM-69: ``topology`` is no field any more (contract 3 v1.22
+    rule 13) -- any value of it is an extra field, ``co-located`` too."""
     data = example("product.yaml")
-    node(data, "dependencies", "comms")["topology"] = "local"
+    node(data, "dependencies", "comms")["topology"] = "co-located"
     node(data, "dependencies", "payments")["branch"] = "main"
-    node(data, "dependencies", "meet")["ref"] = "main"
     assert yaml_problems(tmp_path, data) == [
-        ("dependencies.comms.topology", "literal_error"),
+        ("dependencies.comms.topology", "extra_forbidden"),
         ("dependencies.payments", "R9.branch"),
-        ("dependencies.meet.ref", "extra_forbidden"),
     ]
 
 
@@ -246,10 +246,10 @@ def test_dependency_pin_is_rule_3(tmp_path: Path, version: str, pins: str) -> No
 def test_dependency_pins_are_reported_per_dependency(tmp_path: Path) -> None:
     data = example("product.yaml")
     node(data, "dependencies", "comms")["version"] = "==3.0.0"
-    node(data, "dependencies", "meet")["version"] = "===1.0.0"
+    node(data, "dependencies", "payments")["version"] = "===1.0.0"
     assert yaml_problems(tmp_path, data) == [
         ("dependencies.comms.version", "R3.single-point"),
-        ("dependencies.meet.version", "R3.single-point"),
+        ("dependencies.payments.version", "R3.single-point"),
     ]
 
 
@@ -294,11 +294,11 @@ def test_package_contract_without_pin_passes(tmp_path: Path, declared: str) -> N
 def test_range_pins_accumulate_across_fields(tmp_path: Path) -> None:
     """Every pinned field is reported, dependencies before packages."""
     data = example("product.yaml")
-    node(data, "dependencies", "meet")["version"] = "<=1.0"
+    node(data, "dependencies", "payments")["version"] = "<=1.0"
     node(data, "packages", "skin")["contract"] = "<=1.0"
     node(data, "packages", "texts")["contract"] = "==1.0"
     assert yaml_problems(tmp_path, data) == [
-        ("dependencies.meet.version", "R3.single-point"),
+        ("dependencies.payments.version", "R3.single-point"),
         ("packages.skin.contract", "R3.single-point"),
         ("packages.texts.contract", "R3.single-point"),
     ]
@@ -461,13 +461,22 @@ def test_mount_dependency_must_be_declared(tmp_path: Path) -> None:
     )
 
 
-def test_mount_dependency_on_remote_is_rule_13(tmp_path: Path) -> None:
+def test_empty_mount_dependency_stops_at_field_layer(tmp_path: Path) -> None:
     data = example("product.yaml")
-    node(data, "packages", "texts", "mount", 1)["dependency"] = "meet"
+    node(data, "packages", "texts", "mount", 1)["dependency"] = ""
     assert yaml_problems(tmp_path, data) == [
-        ("packages.texts.mount[1].dependency", "R13.remote-seam")
+        ("packages.texts.mount[1].dependency", "string_too_short")
     ]
-    assert yaml_messages(tmp_path, data)[0].startswith("contract rule 13:")
+
+
+def test_mount_dependency_reference_adds_to_rule_10(tmp_path: Path) -> None:
+    """A malformed mount to an unknown dependency gets both problems."""
+    data = example("product.yaml")
+    node(data, "packages", "skin")["mount"] = [{"dependency": "billing"}]
+    assert yaml_problems(tmp_path, data) == [
+        ("packages.skin.mount[0]", "R10.mount"),
+        ("packages.skin.mount[0].dependency", "S.mount-dependency"),
+    ]
 
 
 def test_mount_dependency_without_dependencies_at_all(tmp_path: Path) -> None:
@@ -483,36 +492,13 @@ def test_mount_dependency_without_dependencies_at_all(tmp_path: Path) -> None:
     ]
 
 
-def test_mount_dependency_reference_adds_to_rule_10(tmp_path: Path) -> None:
-    """A malformed mount to an unknown dependency gets both problems."""
-    data = example("product.yaml")
-    node(data, "packages", "skin")["mount"] = [{"dependency": "billing"}]
-    assert yaml_problems(tmp_path, data) == [
-        ("packages.skin.mount[0]", "R10.mount"),
-        ("packages.skin.mount[0].dependency", "S.mount-dependency"),
-    ]
-
-
-def test_empty_mount_dependency_stops_at_field_layer(tmp_path: Path) -> None:
-    data = example("product.yaml")
-    node(data, "packages", "texts", "mount", 1)["dependency"] = ""
-    assert yaml_problems(tmp_path, data) == [
-        ("packages.texts.mount[1].dependency", "string_too_short")
-    ]
-
-
-# --- seams (rule 13 and references) ----------------------------------------------
-
-
 def test_product_seam_references(tmp_path: Path) -> None:
     data = example("product.yaml")
     node(data, "env")["A"] = {"source": "seam", "from": "billing"}
     node(data, "env")["B"] = {"source": "seam", "from": "product"}
-    node(data, "env")["C"] = {"source": "seam", "from": "meet"}
     assert yaml_problems(tmp_path, data) == [
         ("env.A.from", "S.seam-from"),
         ("env.B.from", "S.seam-from"),
-        ("env.C.from", "R13.remote-seam"),
     ]
 
 
@@ -557,11 +543,11 @@ def test_every_rule_violation_at_once(tmp_path: Path) -> None:
     data = example("product.yaml")
     node(data, "host", "routes")["admin"] = {"to": "app:8000"}
     node(data, "editions")["full"] = {"services": ["billing"]}
-    node(data, "env")["C"] = {"source": "seam", "from": "meet"}
+    node(data, "env")["C"] = {"source": "asked", "when": "absent"}
     assert yaml_problems(tmp_path, data) == [
         ("host.routes.admin", "R4.route-domain"),
         ("editions.full.services[0]", "R11.edition-services"),
-        ("env.C.from", "R13.remote-seam"),
+        ("env.C.when", "R36.when-outside"),
     ]
 
 

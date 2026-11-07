@@ -191,7 +191,7 @@ def test_probe_DM_18_every_created_object_has_labels(tmp_path: Path) -> None:
     so its rendered entry holds ``internal: true`` next to the label; the label
     stays the stack's alone."""
     cs = compose(tmp_path)
-    rendered = json.loads(override_text(cs, CONFIG))
+    rendered = json.loads(override_text(cs, CONFIG, proxy=False))
     release = {"pridem.stack": "blank", "pridem.release": "main", "pridem.commit": SHA}
     for name in ("app", "frontend", "postgres"):  # every container
         assert rendered["services"][name]["labels"] == release, name
@@ -266,7 +266,7 @@ def test_override_names_default_when_config_lists_no_network_of_app(
     cs = compose(tmp_path)
     document = json.loads(json.dumps(CONFIG))
     del document["services"]["app"]["networks"]
-    rendered = json.loads(override_text(cs, document))
+    rendered = json.loads(override_text(cs, document, proxy=False))
     assert rendered["services"]["app"]["networks"] == {
         "default": None,
         NETWORK: {"aliases": ["blank-app"]},

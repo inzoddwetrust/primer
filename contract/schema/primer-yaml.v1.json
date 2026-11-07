@@ -29,6 +29,10 @@
           "const": "address",
           "title": "Source",
           "type": "string"
+        },
+        "when": {
+          "title": "When",
+          "type": "string"
         }
       },
       "required": [
@@ -77,6 +81,10 @@
         "source": {
           "const": "asked",
           "title": "Source",
+          "type": "string"
+        },
+        "when": {
+          "title": "When",
           "type": "string"
         }
       },
@@ -127,17 +135,12 @@
           "title": "Repo",
           "type": "string"
         },
-        "topology": {
-          "default": "co-located",
-          "enum": [
-            "co-located",
-            "remote"
-          ],
-          "title": "Topology",
-          "type": "string"
-        },
         "version": {
           "title": "Version",
+          "type": "string"
+        },
+        "when": {
+          "title": "When",
           "type": "string"
         }
       },
@@ -159,6 +162,10 @@
         "source": {
           "const": "derived",
           "title": "Source",
+          "type": "string"
+        },
+        "when": {
+          "title": "When",
           "type": "string"
         }
       },
@@ -185,6 +192,30 @@
         "services"
       ],
       "title": "Edition",
+      "type": "object"
+    },
+    "EgressWhen": {
+      "additionalProperties": false,
+      "description": "A host of ``egress`` open when one of its options is on (rule 40).",
+      "properties": {
+        "host": {
+          "title": "Host",
+          "type": "string"
+        },
+        "when": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "When",
+          "type": "array"
+        }
+      },
+      "required": [
+        "host",
+        "when"
+      ],
+      "title": "EgressWhen",
       "type": "object"
     },
     "Frontend": {
@@ -252,6 +283,10 @@
         "source": {
           "const": "minted",
           "title": "Source",
+          "type": "string"
+        },
+        "when": {
+          "title": "When",
           "type": "string"
         }
       },
@@ -344,6 +379,10 @@
           "const": "param",
           "title": "Source",
           "type": "string"
+        },
+        "when": {
+          "title": "When",
+          "type": "string"
         }
       },
       "required": [
@@ -368,6 +407,10 @@
         "source": {
           "const": "passport",
           "title": "Source",
+          "type": "string"
+        },
+        "when": {
+          "title": "When",
           "type": "string"
         }
       },
@@ -406,7 +449,14 @@
         "egress": {
           "default": [],
           "items": {
-            "type": "string"
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/EgressWhen"
+              }
+            ]
           },
           "title": "Egress",
           "type": "array"
@@ -477,6 +527,22 @@
           "minLength": 1,
           "title": "Name",
           "type": "string"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "options_required": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Options Required",
+          "type": "array"
         },
         "packages": {
           "additionalProperties": {
@@ -695,6 +761,10 @@
           "const": "seam",
           "title": "Source",
           "type": "string"
+        },
+        "when": {
+          "title": "When",
+          "type": "string"
         }
       },
       "required": [
@@ -799,6 +869,14 @@
           "minLength": 1,
           "title": "Name",
           "type": "string"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Options",
+          "type": "array"
         },
         "provides": {
           "default": [],

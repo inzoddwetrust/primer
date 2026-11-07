@@ -67,7 +67,7 @@ from pridem.stacks.egress import UNLISTED, unlisted
 from pridem.stacks.loader import ContractError
 from pridem.stacks.lock import check_lock, load_primer_lock
 from pridem.stacks.package import PACKAGE_FILE
-from pridem.stacks.schema import Product, Service, load_primer_yaml
+from pridem.stacks.schema import Product, Service, egress_hosts, load_primer_yaml
 from pridem.steps.base import StepContext, StepFailed
 from pridem.steps.compose import (
     REFUSAL_CODES,
@@ -174,7 +174,7 @@ def _primer_yaml(checked: Checked) -> None:
             "stacks": list[Json](stack.stacks),
         }
         if isinstance(stack, Product):
-            fact["egress"] = list[Json](stack.egress)
+            fact["egress"] = list[Json](egress_hosts(stack))
         return fact
 
     checked.steps.append(_record(checked.root.name, "primer_yaml", 1, run))

@@ -606,6 +606,8 @@ def override_text(
     mounts: Mapping[str, Sequence[str]] | None = None,
     builds: Mapping[str, Mapping[str, Json]] | None = None,
     environment: Mapping[str, Mapping[str, str]] | None = None,
+    *,
+    proxy: bool,
 ) -> str:
     """The machine's override for the product's compose ``document``;
     ``mounts`` -- read-only binds of the instance's packages, and of the data a
@@ -614,12 +616,13 @@ def override_text(
     ``builds`` -- by service a package is built into (``apply: build``), what
     its ``build`` gets beside the labels: the context with the package, the
     ``Dockerfile`` in it, ``PRIMER_EDITION`` and the labels of the image's key
-    (``steps/packages.py``)."""
+    (``steps/packages.py``); ``proxy`` -- the product has a host of ``egress``
+    open (``open_hosts``): every service gets the proxy's variables."""
     services: dict[str, Json] = {}
     app = compose.app_service
     aliased = {app} if app is not None else set()
     product = isinstance(compose.stack, Product)
-    egress = isinstance(compose.stack, Product) and bool(compose.stack.egress)
+    egress = proxy
     if isinstance(compose.stack, Product):
         aliased |= set(routed_services(compose.stack, compose.entry))
     for name, body in sorted(_mapping(document.get("services")).items()):

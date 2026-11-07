@@ -74,6 +74,7 @@ LAYERS: Layers = (
             "pridem.stacks.env",
             "pridem.stacks.loader",
             "pridem.stacks.lock",
+            "pridem.stacks.options",
             "pridem.stacks.package",
             "pridem.stacks.passport",
             "pridem.stacks.routes",

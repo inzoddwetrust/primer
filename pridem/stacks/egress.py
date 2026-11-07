@@ -16,7 +16,7 @@ another.
 
 from dataclasses import dataclass
 
-from pridem.stacks.schema import Product
+from pridem.stacks.schema import Product, egress_hosts
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,8 @@ def listed(product: str) -> frozenset[str]:
 
 def unlisted(product: Product) -> list[str]:
     """The hosts of ``product.egress`` that are not rows of ``LISTING`` for this
-    product, in the order of ``egress``; empty -- every host is agreed."""
+    product, in the order of ``egress``; empty -- every host is agreed. Every
+    host declared, whatever its options: the list is checked statically, the
+    proxy of a box opens the hosts of the options on (``stacks/options.py``)."""
     allowed = listed(product.name)
-    return [host for host in product.egress if host not in allowed]
+    return [host for host in egress_hosts(product) if host not in allowed]

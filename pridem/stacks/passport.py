@@ -86,6 +86,8 @@ RULES = {
         15,
         "a domain is written in lowercase: some clients compare hosts by case",
     ),
+    "R17.option-name": (17, "an option of the instance is named ^[a-z][a-z0-9_]*$"),
+    "R17.option-duplicate": (17, "an option of the instance is named once"),
     "R12.secret-length": (
         12,
         f"a secret of the passport (asked, policies.tls) is at least "
@@ -136,6 +138,24 @@ def _host_name(value: str) -> str:
 def _not_empty_secret(value: SecretStr) -> SecretStr:
     if not value.get_secret_value():
         raise ValueError("an asked value is empty; omit the key and install asks it")
+    return value
+
+
+_OPTION = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def _options(value: list[str]) -> list[str]:
+    """The options on (contract 1, additions 1.13): named by the form, once."""
+    for index, name in enumerate(value):
+        code = None
+        if not _OPTION.fullmatch(name):
+            code = "R17.option-name"
+        elif name in value[:index]:
+            code = "R17.option-duplicate"
+        if code is not None:
+            raise PydanticCustomError(
+                code, "{message}", {"message": rule_message(code, repr(name))}
+            )
     return value
 
 
@@ -271,6 +291,8 @@ class Passport(Strict):
     edition: Name | None = None
     languages: Languages | None = None
     default_language: Language | None = None
+    options: Annotated[list[str], AfterValidator(_options)] | None = None
+    """The options on; none -- no option is on (contract 3 rule 36)."""
     product: ProductRef
     domains: dict[Name, HostName]
     access: Access

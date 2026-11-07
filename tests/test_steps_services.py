@@ -41,7 +41,7 @@ from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
 from pridem.stacks.passport import Gc as GcPolicy
 from pridem.stacks.schema import Product, Service
-from pridem.stacks.seams import given_kinds, unaccepted, used_remote
+from pridem.stacks.seams import given_kinds, unaccepted
 from pridem.state import Box
 from pridem.steps.base import StepFailed
 from pridem.steps.build import Build
@@ -120,22 +120,6 @@ def test_the_path_variable_of_accepted_data_is_the_machines(tmp_path: Path) -> N
     assert yaml_problems(tmp_path, data) == [("accepts.profile.env", "S.accepts-env")]
 
 
-def test_a_remote_dependency_takes_no_data(tmp_path: Path) -> None:
-    data = example("product.yaml")
-    deps = data["dependencies"]
-    assert isinstance(deps, dict)
-    deps["comms"]["data"] = {"profile": "comms-profile"}
-    assert yaml_problems(tmp_path, data) == []
-    deps["meet"]["data"] = {"profile": "p"}
-    assert yaml_problems(tmp_path, data) == [
-        ("dependencies.meet.data", "R13.remote-data")
-    ]
-    deps["meet"]["data"] = {"profile": "../p"}
-    assert ("dependencies.meet.data.profile", "value_error") in yaml_problems(
-        tmp_path, data
-    )
-
-
 @pytest.mark.parametrize(
     ("services", "found"),
     [
@@ -201,7 +185,7 @@ def test_seams_check_refuses_data_a_service_does_not_accept(
         tmp_path, dependencies={"comms": {**COMMS_REPO, "data": {"profile": "p"}}}
     )
     comms = _service(tmp_path, accepts=accepts)
-    assert unaccepted(made, {"comms": comms}, None) == found
+    assert unaccepted(made, {"comms": comms}, None, on=frozenset()) == found
     root, fetched = box(tmp_path, passport_data(edition=None))
     outcome, _ = run([SeamsCheck(made, {"comms": comms}, fetched, root)], FakeRunner())
     [step] = outcome.steps
@@ -226,11 +210,11 @@ def test_a_package_section_goes_under_the_services_own_variable(
     made = _product(tmp_path, packages=packages)
     taken = {"texts": {"validate": "c <dir>", "env": "OTHER"}}
     comms = _service(tmp_path, accepts=taken)
-    assert unaccepted(made, {"comms": comms}, None) == [
+    assert unaccepted(made, {"comms": comms}, None, on=frozenset()) == [
         "comms.texts: OV, the service takes OTHER"
     ]
     comms = _service(tmp_path, accepts={"texts": {"validate": "c <dir>", "env": "OV"}})
-    assert unaccepted(made, {"comms": comms}, None) == []
+    assert unaccepted(made, {"comms": comms}, None, on=frozenset()) == []
 
 
 def test_seams_check_refuses_routes_of_a_co_located_service(tmp_path: Path) -> None:
@@ -287,17 +271,6 @@ def test_a_service_the_edition_leaves_out_is_named_not_removed(tmp_path: Path) -
     (home / "current").unlink()
     outcome, _ = run([SeamsCheck(made, {"comms": comms}, fetched, root)], FakeRunner())
     assert outcome.steps[0].verify["left"] == []
-
-
-def test_used_remote_is_the_editions(tmp_path: Path) -> None:
-    deps = {
-        "comms": COMMS_REPO,
-        "meet": {**COMMS_REPO, "topology": "remote"},
-    }
-    editions = {"core": {"services": ["comms"]}, "full": {"services": list(deps)}}
-    made = _product(tmp_path, dependencies=deps, editions=editions)
-    assert used_remote(made, "core") == []
-    assert used_remote(made, "full") == ["meet"]
 
 
 # --- fetch_services ---------------------------------------------------------------
@@ -397,7 +370,9 @@ def test_the_override_carries_a_services_data_on_its_app(tmp_path: Path) -> None
     document: dict[str, Json] = {
         "services": {"comms-app": {"image": "x"}, "comms-redis": {"image": "r"}}
     }
-    rendered = json.loads(override_text(compose, document, mounts, None, env))
+    rendered = json.loads(
+        override_text(compose, document, mounts, None, env, proxy=False)
+    )
     app = rendered["services"]["comms-app"]
     assert app["volumes"] == mounts["comms-app"]
     assert app["environment"] == {"PROFILE_DIR": "/primer/data/profile"}
@@ -908,9 +883,9 @@ def test_build_puts_a_services_data_into_the_override(tmp_path: Path) -> None:
     assert outcome.code is ExitCode.OK, outcome.steps
     mounts, env = data_binds([item], "app")
     assert cs.candidate().override.read_text() == override_text(
-        cs, CONFIG, mounts, None, env
+        cs, CONFIG, mounts, None, env, proxy=False
     )
-    assert cs.candidate().override.read_text() != override_text(cs, CONFIG)
+    assert cs.candidate().override.read_text() != override_text(cs, CONFIG, proxy=False)
 
 
 def test_finalize_makes_the_services_current_with_the_product(tmp_path: Path) -> None:
@@ -922,7 +897,6 @@ def test_finalize_makes_the_services_current_with_the_product(tmp_path: Path) ->
     releases = root / "opt"
     assert final.releases["comms"] == releases / "comms" / "releases" / "v1.0.0"
     assert final.releases["payments"] == releases / "payments" / "releases" / "v1.0.0"
-    assert "meet" not in final.releases
     assert {k: v for k, v in final.composition.items() if k != "pridem"} == {
         "aivis": final.releases["aivis"].name,
         "comms": "v1.0.0",

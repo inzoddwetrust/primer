@@ -71,6 +71,7 @@ from pridem.stacks.env import (
     safe,
     write_private,
 )
+from pridem.stacks.options import LITERAL, off_keys, switched_on
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Derived, Minted, Product, Service
 from pridem.stacks.schema import Passport as FromPassport
@@ -81,6 +82,7 @@ from pridem.stacks.seams import (
     outside_edition,
     provider_order,
     routes_on_co_located,
+    seams_under_option,
     unaccepted,
 )
 from pridem.steps.base import (
@@ -105,6 +107,10 @@ from pridem.steps.passport import (
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 NO_IMAGE = "{key} is derived, and no image of the stack is given"
+OPTION_CODES: dict[str, str] = {
+    "option-value": f"{{key}} is of an option that is off: its value is {LITERAL!r}",
+    "option-literal": f"{{key}} is {LITERAL!r}, and its option is on or it has none",
+}
 READ_BACK_CODES: dict[str, str] = {
     "env-mode": "{path} is {mode}, not 0o600; it is left as it is",
     "env-unsafe": "the value of {key} has a quote or a line break",
@@ -144,6 +150,10 @@ class SeamsCheck(Step):
         "languages-missing": "the passport lacks {fields}",
         "language-outside-product": "{languages} are not languages of the product",
         "default-language-outside": "the default {language} is not one of {languages}",
+        "option-outside-product": "{options} are not options of the product",
+        "option-required-off": "the product needs {options}, the passport has them off",
+        "seam-option": "seams of a variable under an option the product takes "
+        "without it: {seams}",
     }
 
     def __init__(
@@ -167,19 +177,35 @@ class SeamsCheck(Step):
         ):
             raise StepFailed("edition-unknown", {"edition": edition})
         self._languages(_passport(self.fetched), edition)
-        half = half_seams(self.product, self.services, edition)
+        on = self._options(_passport(self.fetched))
+        half = half_seams(self.product, self.services, edition, on=on)
         if half:
             raise StepFailed("half-seam", {"seams": list[Json](half)})
-        outside = outside_edition(self.product, edition)
+        under = seams_under_option(self.product, self.services, edition, on=on)
+        if under:
+            raise StepFailed("seam-option", {"seams": list[Json](under)})
+        outside = outside_edition(self.product, edition, on=on)
         if outside:
             raise StepFailed("seam-outside-edition", {"seams": list[Json](outside)})
-        routed = routes_on_co_located(self.product, self.services, edition)
+        routed = routes_on_co_located(self.product, self.services, edition, on=on)
         if routed:
             raise StepFailed("routes-on-co-located", {"services": list[Json](routed)})
-        refused = unaccepted(self.product, self.services, edition)
+        refused = unaccepted(self.product, self.services, edition, on=on)
         if refused:
             raise StepFailed("data-not-accepted", {"data": list[Json](refused)})
         return CheckResult(False)
+
+    def _options(self, passport: Passport) -> frozenset[str]:
+        """The options of the instance (contract 3 rules 36-37): each one of
+        the product's, each one the product needs on; the options on."""
+        given = passport.options or []
+        outside = [option for option in given if option not in self.product.options]
+        if outside:
+            raise StepFailed("option-outside-product", {"options": list[Json](outside)})
+        missing = [o for o in self.product.options_required if o not in given]
+        if missing:
+            raise StepFailed("option-required-off", {"options": list[Json](missing)})
+        return switched_on(passport)
 
     def _languages(self, passport: Passport, edition: str | None) -> None:
         """The instance's languages (protocol 5.2.2): wanted when the product
@@ -188,7 +214,10 @@ class SeamsCheck(Step):
         default one of them."""
         stacks: list[Product | Service] = [
             self.product,
-            *(self.services[n] for n in installed(self.product, edition)),
+            *(
+                self.services[n]
+                for n in installed(self.product, edition, on=switched_on(passport))
+            ),
         ]
         taken = any(
             isinstance(var, FromPassport) and var.key in LANGUAGE_KEYS
@@ -225,15 +254,14 @@ class SeamsCheck(Step):
         raise RuntimeError("seams_check never acts")
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        edition = _passport(self.fetched).edition
-        order = provider_order(self.product, edition)
-        here = set(installed(self.product, edition))
+        passport = _passport(self.fetched)
+        edition, on = passport.edition, switched_on(passport)
+        order = provider_order(self.product, edition, on=on)
+        here = set(installed(self.product, edition, on=on))
         left = [
             name
-            for name, dependency in self.product.dependencies.items()
-            if dependency.topology == "co-located"
-            and name not in here
-            and (self.root / "opt" / name / "current").is_symlink()
+            for name in self.product.dependencies
+            if name not in here and (self.root / "opt" / name / "current").is_symlink()
         ]
         return Verified({"order": list[Json](order), "left": list[Json](left)})
 
@@ -270,6 +298,7 @@ class RenderEnv(Step):
         "address-no-app": "{stack} has no app of its own to give an address of",
         "seam-before-health": "{names} of {from} are asked before its health",
         "derive-no-image": NO_IMAGE,
+        **OPTION_CODES,
     }
 
     def __init__(
@@ -309,11 +338,26 @@ class RenderEnv(Step):
     def _minted(self) -> Path:
         return self._dir / MINTED_FILE
 
+    def _switched(self) -> list[str]:
+        """The keys of an option that is off: the literal, nothing minted,
+        derived or asked for them (contract 3 rules 38-39)."""
+        return off_keys(self.stack, switched_on(_passport(self.fetched)))
+
     def _minted_keys(self) -> list[str]:
-        return [k for k, v in self.stack.env.items() if isinstance(v, Minted)]
+        off = set(self._switched())
+        return [
+            k
+            for k, v in self.stack.env.items()
+            if isinstance(v, Minted) and k not in off
+        ]
 
     def _derivable(self) -> list[str]:
-        return [k for k, v in self.stack.env.items() if isinstance(v, Derived)]
+        off = set(self._switched())
+        return [
+            k
+            for k, v in self.stack.env.items()
+            if isinstance(v, Derived) and k not in off
+        ]
 
     # --- sources ----------------------------------------------------------------
 
@@ -391,6 +435,8 @@ class RenderEnv(Step):
         new = {key: mint() for key in self._minted_keys() if key not in minted}
         if resolved.missing:
             self._answer(resolved.missing)
+        if resolved.switched_off and self.ask is not None:
+            self._switch_off(resolved.switched_off)
         if new:
             self.secrets.add(SecretStr(value) for value in new.values())
             write_private(self._minted, minted_text({**minted, **new}))
@@ -399,6 +445,16 @@ class RenderEnv(Step):
             raise StepFailed("missing", {"fields": list[Json](resolved.missing)})
         held = self._held(self._on_disk())
         write_private(self._env, env_text({**resolved.values, **held}))
+
+    def _switch_off(self, fields: list[str]) -> None:
+        """``install`` writes the literal for each field of an option that is
+        off, asking nothing (contract 1, additions 1.13)."""
+        data = copy_data(self.root)
+        for field in fields:
+            _put(data, tuple(field.split(".")), LITERAL)
+        passport = rewrite_copy(self.root, data)
+        self.secrets.add(passport_secrets(passport))
+        self.fetched.passport = passport
 
     def _answer(self, fields: list[str]) -> None:
         """Ask each missing field; the answers go to the local copy at once."""
@@ -433,11 +489,16 @@ class RenderEnv(Step):
             raise StepFailed(
                 "env-keys", {"missing": list[Json](missing), "extra": list[Json](extra)}
             )
+        switched = set(self._switched())
+        astray = [key for key in switched if values[key] != LITERAL]
+        if astray:
+            raise StepFailed("option-value", {"key": astray[0]})
         held = [
             key
             for key, value in values.items()
             if placeholder(value)
             and not (key in waiting and value == DERIVED_PLACEHOLDER)
+            and not (key in switched and value == LITERAL)
         ]
         if held:
             raise StepFailed("placeholder", {"keys": list[Json](held)})
@@ -505,6 +566,7 @@ class DeriveEnv(Step):
         "derive-failed": "deriving {key} failed — exit code {exit_code}",
         "derive-empty": "deriving {key} printed {lines} lines, not one value",
         "derive-short": "the derived {key} is shorter than 16 characters",
+        **OPTION_CODES,
     }
 
     def __init__(self, render: RenderEnv, build: AppImage) -> None:

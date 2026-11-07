@@ -47,6 +47,8 @@ def product_data(
     provides: Mapping[str, object] | None = None,
     editions: Mapping[str, object] | None = None,
     domains: Sequence[str] = (),
+    options: Sequence[str] = (),
+    options_required: Sequence[str] = (),
 ) -> Data:
     data: Data = {
         "schema": 1,
@@ -54,6 +56,8 @@ def product_data(
         "kind": "product",
         "dependencies": dict(dependencies or {}),
         "editions": dict(editions or {}),
+        **({"options": list(options)} if options else {}),
+        **({"options_required": list(options_required)} if options_required else {}),
         "stacks": {
             "aivis": {
                 "compose": "docker-compose.yml",
@@ -74,8 +78,10 @@ def service_data(
     *,
     provides: Sequence[str] = (),
     requires: Sequence[str] = (),
+    options: Sequence[str] = (),
 ) -> Data:
     return {
+        **({"options": list(options)} if options else {}),
         "schema": 1,
         "name": "comms",
         "kind": "service",
@@ -122,8 +128,11 @@ def passport_data(
     params: Mapping[str, Mapping[str, str]] | None = None,
     domains: Mapping[str, str] | None = None,
     edition: str | None = "full",
+    options: Sequence[str] | None = None,
 ) -> Data:
     data = passport_example()
+    if options is not None:
+        data["options"] = list(options)
     data["asked"] = {k: dict(v) for k, v in (asked or {}).items()}
     data["params"] = {k: dict(v) for k, v in (params or {}).items()}
     data["domains"] = dict(

@@ -2,7 +2,7 @@
 of it, for the tests of DM-46.
 
 The product ``aivis`` has two co-located services -- ``comms`` in every
-edition, ``payments`` in ``full`` only -- and a remote one, ``meet``. Each is a
+edition, ``payments`` in ``full`` only. Each is a
 bare repository with one commit tagged ``v1.0.0`` and a valid ``primer.yaml``;
 the product's lock pins them. ``stacks_of`` runs the plan's deferred stacks
 ``sources`` and ``dependencies`` with real git and makes ``services`` and the
@@ -11,7 +11,7 @@ product's, as ``deploy_plan`` does on a box.
 
 import os
 import shutil
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
@@ -134,15 +134,10 @@ def product_data(
             **({"data": {"profile": "comms-profile"}} if comms_data else {}),
         },
         "payments": {"repo": f"file://{tmp}/payments.git", "version": ">=1.0,<2"},
-        "meet": {
-            "repo": f"file://{tmp}/meet.git",
-            "version": ">=1.0,<2",
-            "topology": "remote",
-        },
     }
     data["editions"] = {
-        "core": {"services": ["comms", "meet"]},
-        "full": {"services": ["comms", "payments", "meet"]},
+        "core": {"services": ["comms"]},
+        "full": {"services": ["comms", "payments"]},
     }
     env = data["env"]
     assert isinstance(env, dict)
@@ -157,16 +152,19 @@ def remotes(
     tmp: Path,
     comms: dict[str, object] | None = None,
     product_env: dict[str, object] | None = None,
+    product_patch: Callable[[dict[str, object]], None] | None = None,
 ) -> None:
     """The three services and the product, the lock pinning ``v1.0.0``;
     ``comms`` -- another ``primer.yaml`` of comms, taking no data."""
     given = comms_data() if comms is None else comms
+    patched = product_data(tmp, comms_data=comms is None, extra_env=product_env)
+    if product_patch is not None:
+        product_patch(patched)
     heads = {
         "comms": remote(tmp, "comms", {"primer.yaml": yaml.safe_dump(given)}),
         "payments": remote(
             tmp, "payments", {"primer.yaml": yaml.safe_dump(payments_data())}
         ),
-        "meet": remote(tmp, "meet", {"README": "meet\n"}),
     }
     lock = {
         "schema": 1,
@@ -180,9 +178,7 @@ def remotes(
         tmp,
         "aivis",
         {
-            "primer.yaml": yaml.safe_dump(
-                product_data(tmp, comms_data=comms is None, extra_env=product_env)
-            ),
+            "primer.yaml": yaml.safe_dump(patched),
             "primer.lock": yaml.safe_dump(lock),
             "comms-profile/kinds.yaml": "kinds: []\n",
         },
@@ -191,11 +187,16 @@ def remotes(
 
 
 def passport_file(
-    tmp: Path, edition: str, asked: dict[str, dict[str, str]] | None = None
+    tmp: Path,
+    edition: str,
+    asked: dict[str, dict[str, str]] | None = None,
+    options: Sequence[str] | None = None,
 ) -> Path:
     data = passport_example()
     if asked is not None:
         data["asked"] = asked
+    if options is not None:
+        data["options"] = list(options)
     data["edition"] = edition
     data["packages"] = {}
     section(data, "product").update({"repo": f"file://{tmp}/aivis.git", "ref": "main"})
@@ -237,16 +238,18 @@ def planned(
     asked: dict[str, dict[str, str]] | None = None,
     product_env: dict[str, object] | None = None,
     again: bool = False,
+    product_patch: Callable[[dict[str, object]], None] | None = None,
+    options: Sequence[str] | None = None,
 ) -> tuple[Planned, Path]:
     """The plan of ``install`` on a box at ``tmp/box``, its sources and
     dependencies run -- the services' ladders and the product's then known;
     ``gone`` -- remotes removed first: a command that asks one fails."""
     if not again:  # ``again``: a second plan on the same box and remotes
-        remotes(tmp, comms, product_env)
+        remotes(tmp, comms, product_env, product_patch)
     for name in gone:
         shutil.rmtree(tmp / f"{name}.git")
     root = tmp / "box"
-    file = passport_file(tmp, edition, asked)
+    file = passport_file(tmp, edition, asked, options)
     box = Box(root / "opt" / "pridem")
     made = deploy_plan(
         Session(box, "r1", Fetched(), NO_SECRETS),

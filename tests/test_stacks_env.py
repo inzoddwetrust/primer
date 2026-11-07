@@ -49,7 +49,6 @@ from pridem.report.schema import build_verdict
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result
 from pridem.stacks.env import DERIVED_PLACEHOLDER, env_text, parse_env, write_private
 from pridem.stacks.schema import Product, Service
-from pridem.stacks.seams import SeamMemory
 from pridem.state import JournalSink
 from pridem.steps.base import CheckResult, StepFailed
 from pridem.steps.env import DeriveEnv, RenderEnv
@@ -316,44 +315,6 @@ def test_probe_DM_14_verify_reads_env_back(tmp_path: Path) -> None:
     assert verify_with(good, 0o644)[0] == "env-mode"
     assert verify_with(good + "EXTRA='x'\n")[0] == "env-keys"
     assert verify_with(good + "EXTRA=x\n")[0] == "env-unreadable"
-
-
-def test_probe_DM_14_remote_seam_comes_from_passport_not_plan(tmp_path: Path) -> None:
-    meet = {
-        "repo": "git@github.com:acme/meet.git",
-        "version": ">=1,<2",
-        "topology": "remote",
-    }
-    env = {"MEET_URL": {"source": "param"}, "MEET_JWT_SECRET": {"source": "asked"}}
-    made = product(tmp_path, env, dependencies={"meet": meet})
-    jwt = "invented-meet-jwt-secret-0001"
-    root, fetched = box(
-        tmp_path,
-        passport_data(
-            asked={"aivis": {"MEET_JWT_SECRET": jwt}},
-            params={"aivis": {"MEET_URL": "https://meet.example.org"}},
-        ),
-    )
-    memory = SeamMemory()  # meet never reports health here
-
-    outcome, _ = run([render(made, root, fetched, memory=memory)], FakeRunner())
-
-    assert outcome.code is ExitCode.OK, outcome.steps
-    assert read_env(root, "aivis") == {
-        "MEET_URL": "https://meet.example.org",
-        "MEET_JWT_SECRET": jwt,
-    }
-    with pytest.raises(Exception, match="not healthy"):
-        memory.values("meet", ["MEET_URL"])  # the plan's memory holds nothing of it
-    # the pair: a co-located seam does wait for health
-    local = product(
-        tmp_path,
-        {"COMMS_API_URL": {"source": "seam", "from": "comms"}},
-        dependencies={"comms": COMMS_REPO},
-    )
-    outcome, _ = run([render(local, root, fetched, memory=memory)], FakeRunner())
-    assert outcome.steps[0].reason is not None
-    assert outcome.steps[0].reason.code == "render_env:seam-before-health"
 
 
 def test_probe_DM_14_secret_never_in_argv(tmp_path: Path) -> None:

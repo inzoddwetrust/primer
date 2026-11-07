@@ -3,10 +3,7 @@
 A stack is a unit described by its own ``primer.yaml`` -- a product or a
 service; one class holds both, the kind is a field. Its name in a composition
 is the ``name`` of its ``primer.yaml``; its value is the commit of a product or
-the release version of a service from ``primer.lock``. A ``remote`` dependency
-is not installed on the box, but the product works against it, so it enters
-the composition under its dependency name with the version the lock pins
-(contract 3 rule 13, section 5).
+the release version of a service from ``primer.lock``.
 
 A composition (contract 2, ``Composition``) is every stack, ``pridem`` with the
 machine's version, and every package of the passport under its slot with
@@ -47,7 +44,6 @@ class Stack:
     name: str
     kind: Literal["product", "service"]
     version: str
-    remote: bool = False
 
     @classmethod
     def product(cls, yaml: Product, commit: str) -> "Stack":
@@ -58,11 +54,6 @@ class Stack:
     def service(cls, yaml: Service, pin: LockEntry) -> "Stack":
         """A co-located service at the release the lock pins."""
         return cls(yaml.name, "service", pin.version)
-
-    @classmethod
-    def remote_service(cls, dependency: str, pin: LockEntry) -> "Stack":
-        """A remote dependency: not installed here, pinned by the lock."""
-        return cls(dependency, "service", pin.version, remote=True)
 
 
 def repo_name(repo: str) -> str:

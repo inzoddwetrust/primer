@@ -6,10 +6,11 @@ import pytest
 from contract_support import example, lock_problems, node
 
 
-def test_example_pair_is_green_and_pins_the_remote(tmp_path: Path) -> None:
+def test_example_pair_is_green(tmp_path: Path) -> None:
+    """Changed by DM-69: no ``remote`` dependency pinned any more."""
     lock = example("primer.lock")
     assert lock_problems(tmp_path, example("product.yaml"), lock) == []
-    assert set(node(lock, "dependencies")) == {"comms", "payments", "meet"}
+    assert set(node(lock, "dependencies")) == {"comms", "payments"}
 
 
 def test_missing_and_extra_dependencies(tmp_path: Path) -> None:
@@ -31,7 +32,7 @@ def test_empty_lock_for_a_product_with_dependencies(tmp_path: Path) -> None:
     lock["dependencies"] = {}
     assert [
         code for _, code in lock_problems(tmp_path, example("product.yaml"), lock)
-    ] == ["R3.lock-set"] * 3
+    ] == ["R3.lock-set"] * 2
 
 
 @pytest.mark.parametrize("tag", ["3.0.0", "v3.0", "v3.0.1", "V3.0.0"])
@@ -86,8 +87,8 @@ def test_resolved_at_is_a_yaml_timestamp_not_a_string(tmp_path: Path) -> None:
 def test_lock_rules_report_every_entry(tmp_path: Path) -> None:
     lock = example("primer.lock")
     node(lock, "dependencies", "comms")["tag"] = "v9.9.9"
-    node(lock, "dependencies", "meet")["commit"] = "XYZ"
+    node(lock, "dependencies", "payments")["commit"] = "XYZ"
     assert lock_problems(tmp_path, example("product.yaml"), lock) == [
         ("dependencies.comms.tag", "R3.lock-tag"),
-        ("dependencies.meet.commit", "R3.lock-commit"),
+        ("dependencies.payments.commit", "R3.lock-commit"),
     ]

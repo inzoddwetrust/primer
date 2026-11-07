@@ -70,6 +70,7 @@ from typing import ClassVar
 
 from pridem.events import Fact, Json
 from pridem.runner import CommandFailed, Stream
+from pridem.stacks.options import open_hosts, switched_on
 from pridem.stacks.schema import Product
 from pridem.steps.base import (
     CheckResult,
@@ -82,6 +83,7 @@ from pridem.steps.base import (
 )
 from pridem.steps.compose import EGRESS_NETWORK, PROXY_ALIAS, PROXY_PORT, out
 from pridem.steps.edge import write_file
+from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 PROJECT = "pridem-egress"
@@ -232,8 +234,9 @@ class Egress(Step):
     order = 12
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **NO_PASSPORT,
         "render": "run the proxy for {hosts}",
-        "remove": "remove the proxy: egress is empty ({found})",
+        "remove": "remove the proxy: no host of egress is open ({found})",
         "drift": "{files} are not the rendered ones",
         "not-running": "{count} proxy containers run, not one",
         "image-wrong": "the proxy runs on {running}, not on {expected}",
@@ -250,6 +253,7 @@ class Egress(Step):
         self,
         product: Product,
         *,
+        fetched: Fetched,
         root: Path = Path("/"),
         answer: Answer = connect_status,
         port: int = PROXY_PORT,
@@ -259,6 +263,7 @@ class Egress(Step):
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.product = product
+        self.fetched = fetched
         self.root = root
         self.answer = answer
         self.port = port
@@ -269,7 +274,11 @@ class Egress(Step):
 
     @property
     def hosts(self) -> list[str]:
-        return list(self.product.egress)
+        """The hosts the proxy lets through: the options on decide (rule 40)."""
+        passport = self.fetched.passport
+        if passport is None:
+            raise StepFailed("no-passport")
+        return open_hosts(self.product, switched_on(passport))
 
     def _files(self) -> list[Path]:
         return [

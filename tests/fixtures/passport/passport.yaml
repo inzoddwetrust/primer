@@ -29,11 +29,11 @@ asked:                            # ответы на asked каждого ст�
   payments:
     STRIPE_SECRET_KEY: "<secret: 16+ chars>"
   aivis:
-    MEET_JWT_SECRET: "<secret: 16+ chars>"   # remote-зависимость meet продукта (контракт 3 п.13)
+    MEET_JWT_SECRET: "<secret: 16+ chars>"   # ключ канала на переходе, when: meet (контракт 3 п.38)
 
 params:                           # несекретные параметры инстанса по стеку: не вычищаются, правила длины нет
   aivis:
-    MEET_URL: "https://meet.aivis…"  # provides remote-сервиса приходят сюда (контракт 3 п.13)
+    MEET_URL: "https://meet.aivis…"  # канал на переходе, when: meet (контракт 3 п.38)
     SUPPORT_LANGUAGE: ru
 
 policies:

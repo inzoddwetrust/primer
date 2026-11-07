@@ -1,8 +1,8 @@
 """The plan: a ladder of steps by stacks, modes, point of no return, ``finally``.
 
 The ladder runs the dependencies of the box's root stack in the order given,
-then the root stack last; there is exactly one root, of any kind (a box of a
-shared remote service has a service as its root). Inside a stack, steps run by
+then the root stack last; there is exactly one root, of any kind (a box of an
+external service has a service as its root). Inside a stack, steps run by
 ``order``; ``restore`` and ``finally`` steps are chosen the same way, by
 ``order`` and by ``modes``.
 

@@ -11,10 +11,12 @@ from itertools import count
 from pathlib import Path
 
 import pytest
+from passport_support import passport_example
 
 from pridem.events import Secrets
 from pridem.interrupt import Interrupt, Interrupted
 from pridem.runner import FakeCall, FakeRunner
+from pridem.stacks.passport import PASSPORT
 from pridem.stacks.schema import PRIMER_YAML, Product
 from pridem.steps import host, keys, passport
 from pridem.steps.base import CheckResult, StepContext, StepFailed
@@ -100,6 +102,7 @@ def _proxy(tmp: Path, sleep: Callable[[float], None], mp: pytest.MonkeyPatch) ->
     assert isinstance(made, Product)
     step = Egress(
         made,
+        fetched=Fetched(passport=PASSPORT.validate_python(passport_example())),
         root=tmp,
         ready_s=3,
         poll_s=1,
@@ -126,6 +129,7 @@ def _ready(tmp: Path, sleep: Callable[[float], None], mp: pytest.MonkeyPatch) ->
     assert isinstance(made, Product)
     step = Egress(
         made,
+        fetched=Fetched(passport=PASSPORT.validate_python(passport_example())),
         root=tmp,
         answer=lambda address, port, host: None,
         ready_s=3,
