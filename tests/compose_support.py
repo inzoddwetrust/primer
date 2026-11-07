@@ -47,17 +47,25 @@ CONFIG: dict[str, Json] = {
     "networks": {"default": {"name": "blank_default"}},
     "volumes": {"pgdata": {"name": "blank_pgdata"}},
 }
-LOG = json.dumps(
-    {
-        "ts": "2026-10-31T00:00:00.000Z",
-        "level": "info",
-        "service": "blank",
-        "release": REF,
-        "request_id": "0123abcd",
-        "event": "uvicorn.access",
-        "msg": "GET /health 200",
-    }
-)
+
+
+def log_line(service: str) -> str:
+    """A log line of protocol 9.4 of the stack ``service`` (DM-72: the line
+    names its stack)."""
+    return json.dumps(
+        {
+            "ts": "2026-10-31T00:00:00.000Z",
+            "level": "info",
+            "service": service,
+            "release": REF,
+            "request_id": "0123abcd",
+            "event": "uvicorn.access",
+            "msg": "GET /health 200",
+        }
+    )
+
+
+LOG = log_line("blank")
 
 
 def health(**change: Json) -> dict[str, Json]:

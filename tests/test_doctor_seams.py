@@ -13,12 +13,12 @@ from pathlib import Path
 
 from compose_support import (
     CONTAINER,
-    LOG,
     LiveApp,
     config_call,
     hash_calls,
     health,
     image_call,
+    log_line,
     raw_config_call,
     stdout,
 )
@@ -105,7 +105,7 @@ def _doctor_calls(cs: ComposeStack) -> list[FakeCall]:
         ),
         FakeCall(
             (*own, "logs", "--no-color", "--no-log-prefix", "--tail", "50", APP),
-            lines=stdout(LOG),
+            lines=stdout(log_line("comms")),
         ),
     ]
 

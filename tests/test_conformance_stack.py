@@ -18,6 +18,8 @@ from pridem.conformance.stack import (
     LOG_TAIL,
     Observed,
     Problem,
+    check_health,
+    check_logs,
     check_stack,
     conforming,
     main,
@@ -482,3 +484,94 @@ def test_a_log_line_may_carry_ctx_as_an_object(ctx: object, red: bool) -> None:
     assert found == ([("log-ctx", {"line": 2})] if red else [])
     big = json.dumps({**json.loads(GOOD.logs[0]), "ctx": {"x": "y" * FREE_LIMIT}})
     assert _found(replace(GOOD, logs=[big])) == []
+
+
+# --- the name of the stack (DM-72; protocol 9.1, 9.4) ------------------------------
+
+
+REPORT = {"health": "/health", "ready": "/ready", "logs": "json", "junit": True}
+
+
+def _two_entries() -> Product:
+    """``primer-blank`` with a second entry ``worker``: the name of an entry
+    is not the name of the stack."""
+    app = {"service": "app", "port": 8000, "health": "/health", "ready": "/ready"}
+    made = PRIMER_YAML.validate_python(
+        {
+            "schema": 1,
+            "name": "primer-blank",
+            "kind": "product",
+            "stacks": {
+                "primer-blank": {"compose": "docker-compose.yml", "app": app},
+                "worker": {"compose": "worker-compose.yml", "app": app},
+            },
+            "env": {},
+            "report": {
+                "health": "/health",
+                "ready": "/ready",
+                "logs": "json",
+                "junit": True,
+            },
+        }
+    )
+    assert isinstance(made, Product)
+    return made
+
+
+def _named(service: str) -> conformance.Observed:
+    line = json.loads(GOOD.logs[0])
+    line["service"] = service
+    return replace(GOOD, health=health(service=service), logs=[json.dumps(line)])
+
+
+def test_probe_DM_72_health_service_is_the_stack_name() -> None:
+    """The entry ``worker`` of ``primer-blank`` answering ``/health`` with its
+    entry's name -- ``health-service`` (and ``log-service`` for its lines): the
+    name is the stack's, not the entry's. The pair: the stack's name -- clean."""
+    made = _two_entries()
+    found = check_stack(made, "worker", _named("worker"))
+    assert [p.code for p in found] == ["health-service", "log-service"]
+    assert found[0].params == {"service": "worker", "stack": "primer-blank"}
+    assert check_stack(made, "worker", _named("primer-blank")) == []  # the pair
+
+
+def test_another_name_in_health_is_health_service() -> None:
+    found = check_health(health(service="blank-old"), migrate=True, stack_name="blank")
+    assert [(p.code, p.params) for p in found] == [
+        ("health-service", {"service": "blank-old", "stack": "blank"})
+    ]
+
+
+@pytest.mark.parametrize(
+    ("given", "problem"),
+    [("<absent>", "missing"), ("", "type"), (5, "type")],
+    ids=["absent", "empty", "not-a-string"],
+)
+def test_a_service_field_missing_or_not_a_string_is_health_field_alone(
+    given: object, problem: str
+) -> None:
+    """Twin EMPTY and LACK: one cause, one code -- no ``health-service``."""
+    found = check_health(health(service=given), migrate=True, stack_name="blank")
+    assert [(p.code, p.params) for p in found] == [
+        ("health-field", {"field": "service", "problem": problem})
+    ]
+
+
+def test_every_line_of_another_name_is_log_service() -> None:
+    """Twin REPEAT: each line named by its number; a line without ``service``
+    stays ``log-fields`` alone."""
+    good = json.loads(GOOD.logs[0])
+    other = json.dumps({**good, "service": "other"})
+    bare = json.dumps({k: v for k, v in good.items() if k != "service"})
+    found = check_logs([GOOD.logs[0], other, other, bare], stack_name="blank")
+    assert [(p.code, p.params) for p in found] == [
+        ("log-service", {"line": 2, "service": "other", "stack": "blank"}),
+        ("log-service", {"line": 3, "service": "other", "stack": "blank"}),
+        ("log-fields", {"line": 4, "missing": ["service"], "extra": []}),
+    ]
+
+
+def test_selftest_catches_the_planted_names() -> None:
+    planted = [code for code, _ in conformance._planted()]
+    assert planted.count("health-service") == planted.count("log-service") == 1
+    assert len(planted) == 25 and conformance.selftest() == []

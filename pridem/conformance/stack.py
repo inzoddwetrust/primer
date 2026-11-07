@@ -159,8 +159,13 @@ def _type_ok(name: str, value: Json) -> bool:
     return False
 
 
-def check_health(body: bytes | None, *, migrate: bool) -> list[Problem]:
-    """``/health`` against the form of protocol 9.1."""
+def check_health(
+    body: bytes | None, *, migrate: bool, stack_name: str
+) -> list[Problem]:
+    """``/health`` against the form of protocol 9.1. ``service`` is the name of
+    the stack (``stack_name``, not of its entry): another name is
+    ``health-service``; a field missing or not a string stays ``health-field``
+    -- one cause, one code."""
     if body is None:
         return [Problem("health-unreachable")]
     try:
@@ -175,6 +180,12 @@ def check_health(body: bytes | None, *, migrate: bool) -> list[Problem]:
             out.append(Problem("health-field", {"field": name, "problem": "missing"}))
         elif not _type_ok(name, document[name]):
             out.append(Problem("health-field", {"field": name, "problem": "type"}))
+        elif name == "service" and document[name] != stack_name:
+            out.append(
+                Problem(
+                    "health-service", {"service": document[name], "stack": stack_name}
+                )
+            )
     for name in document:
         if name not in (*HEALTH_FIELDS, HEALTH_OPTIONAL):
             out.append(Problem("health-field", {"field": name, "problem": "extra"}))
@@ -223,9 +234,10 @@ def check_ready(status: int | None) -> list[Problem]:
     return []
 
 
-def check_logs(lines: Sequence[str]) -> list[Problem]:
+def check_logs(lines: Sequence[str], *, stack_name: str) -> list[Problem]:
     """Every line a JSON object with the fields of protocol 9.4, ``ctx`` an
-    object if it is there."""
+    object if it is there, ``service`` the name of the stack (``log-service``;
+    a line without ``service`` stays ``log-fields``)."""
     if not lines:
         return [Problem("logs-empty")]
     out: list[Problem] = []
@@ -244,6 +256,14 @@ def check_logs(lines: Sequence[str]) -> list[Problem]:
         )
         if LOG_OPTIONAL in record and not isinstance(record[LOG_OPTIONAL], dict):
             out.append(Problem("log-ctx", {"line": number}))
+        if "service" in record and record["service"] != stack_name:
+            given: Json = record["service"]
+            out.append(
+                Problem(
+                    "log-service",
+                    {"line": number, "service": given, "stack": stack_name},
+                )
+            )
         if missing or extra:
             out.append(
                 Problem(
@@ -322,11 +342,15 @@ def check_stack(stack: Stack, entry: str, observed: Observed) -> list[Problem]:
         elif observed.address is None:
             out.append(Problem("app-not-on-network", {"network": NETWORK}))
         else:
-            out += check_health(observed.health, migrate=stage.migrate is not None)
+            out += check_health(
+                observed.health,
+                migrate=stage.migrate is not None,
+                stack_name=stack.name,
+            )
             out += check_ready(observed.ready)
             out += check_max_body(stack, entry, observed.health)
         if observed.running:
-            out += check_logs(observed.logs)
+            out += check_logs(observed.logs, stack_name=stack.name)
     out += check_compose(observed.configs)
     return out
 
@@ -555,6 +579,19 @@ def _planted() -> list[tuple[str, Callable[[], list[Problem]]]]:
         # an eighth field alone that is not ctx: an extra one is red too
         ("log-fields", with_(replace(good, logs=[_GOOD_LOG[:-1] + ', "trace": "t"}']))),
         ("log-ctx", with_(replace(good, logs=[_GOOD_LOG[:-1] + ', "ctx": "job 7"}']))),
+        # DM-72: a name that is not the stack's, in /health and in a line
+        ("health-service", with_(replace(good, health=_health(service="other")))),
+        (
+            "log-service",
+            with_(
+                replace(
+                    good,
+                    logs=[
+                        _GOOD_LOG.replace('"service": "blank"', '"service": "other"')
+                    ],
+                )
+            ),
+        ),
         ("health-field", with_(replace(good, health=_health(details=[1])))),
         (
             "health-field",

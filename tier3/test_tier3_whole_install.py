@@ -826,20 +826,25 @@ def test_tier3_the_new_health_of_the_blank_and_its_service() -> None:
         "provides": ["PRODUCT_WEBHOOK_URL"],
         "requires_satisfied": True,
     }, body
-    assert check_health(json.dumps(body).encode(), migrate=True) == [], body
+    assert (
+        check_health(json.dumps(body).encode(), migrate=True, stack_name=STACK) == []
+    ), body
     theirs = _health_of(service)
     assert (theirs["alembic_head"], theirs["status"]) == (None, "ok"), theirs
     assert theirs["details"] == {"provides": 3, "profile": True}, theirs
     assert theirs["seams"] == {"provides": list(SEAMS), "requires_satisfied": True}
-    assert check_health(json.dumps(theirs).encode(), migrate=False) == [], theirs
+    assert (
+        check_health(json.dumps(theirs).encode(), migrate=False, stack_name=SERVICE)
+        == []
+    ), theirs
     # ctx: the start of each names what it started with -- names, no values
     started, lines = _started_line(blank)
     assert started["ctx"] == {"edition": "core", "script_head": "0001"}, started
     assert started["service"] == STACK, started
-    assert check_logs(lines) == [], lines[-5:]
+    assert check_logs(lines, stack_name=STACK) == [], lines[-5:]
     started, lines = _started_line(service)
     assert started["ctx"] == {"edition": "core", "provides": list(SEAMS)}, started
-    assert check_logs(lines) == [], lines[-5:]
+    assert check_logs(lines, stack_name=SERVICE) == [], lines[-5:]
     # degraded: the blank's database stopped -- /health still 200, db error,
     # the revision measured before; conformance names it degraded, nothing else
     postgres = _container(STACK, "postgres")
@@ -849,7 +854,7 @@ def test_tier3_the_new_health_of_the_blank_and_its_service() -> None:
         assert down["status"] == "degraded", down
         assert down["checks"] == {"db": "error", "schema": "error"}, down
         assert down["alembic_head"] == "0001", down
-        found = check_health(json.dumps(down).encode(), migrate=True)
+        found = check_health(json.dumps(down).encode(), migrate=True, stack_name=STACK)
         assert [p.code for p in found] == ["health-degraded"], found
     finally:
         _run(["docker", "start", postgres], 120)

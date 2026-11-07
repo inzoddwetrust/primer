@@ -18,6 +18,7 @@ from compose_support import (
     compose,
     health,
     image_call,
+    log_line,
     observe_calls,
     stdout,
 )
@@ -604,10 +605,11 @@ def _verify(
 
 def _observe(compose: ComposeStack, app: str) -> list[FakeCall]:
     """``observe_calls`` of the blank's ``app``, its last word -- the service
-    of ``ps`` and ``logs`` -- the stack's own app."""
+    of ``ps`` and ``logs`` -- the stack's own app, its log line named by the
+    stack (DM-72)."""
     own = len(compose.product_argv())
     fixed = []
-    for call in observe_calls(compose):
+    for call in observe_calls(compose, logs=(log_line(compose.stack.name),)):
         argv = call.argv
         if len(argv) > own and argv[own] in ("ps", "logs") and argv[-1] == "app":
             argv = (*argv[:-1], app)
@@ -655,7 +657,7 @@ def test_seams_are_read_from_the_live_providers(
     """A seam the rendered file holds but the live provider does not say is
     red; so is a consumer that says its seams are not satisfied."""
     product_app, comms_app = two_apps
-    product_app.health = health(seams=product_seams)
+    product_app.health = health(seams=product_seams, service="aivis")
     comms_app.health = health(seams=comms_seams, service="comms")
     step, calls = _verify(tmp_path, product_app, comms_app)
     runner = FakeRunner(*calls, *calls)  # check, then verify

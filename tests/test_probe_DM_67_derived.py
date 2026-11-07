@@ -14,12 +14,12 @@ from pathlib import Path
 
 from compose_support import (
     CONTAINER,
-    LOG,
     LiveApp,
     config_call,
     hash_calls,
     health,
     image_call,
+    log_line,
     raw_config_call,
     stdout,
 )
@@ -169,7 +169,7 @@ def script(cs: ComposeStack, env_dir: Path) -> list[FakeCall]:
                 "50",
                 "comms-app",
             ),
-            lines=stdout(LOG),
+            lines=stdout(log_line("comms")),
         ),
     ]
 
@@ -178,7 +178,11 @@ def test_probe_DM_67_service_derived_seam_reaches_the_product(tmp_path: Path) ->
     """comms derives ``TELEGRAM_BOT_URL`` in the image its ``build`` made in
     this run, after the build and before ``up``; the product's env holds that
     value, taken as a seam after comms' health. The pair: the product's env
-    contains it, and no ``derive-no-image`` anywhere in the run."""
+    contains it, and no ``derive-no-image`` anywhere in the run.
+
+    Changed by DM-72 (by the dispatcher's word, before the change): the log
+    line of the scenario names its stack ``comms``; conformance compares
+    ``service`` with the stack's name (protocol 9.4, DM-72)."""
     app = LiveApp()
     try:
         made, root = planned(
