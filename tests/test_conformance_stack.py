@@ -575,3 +575,28 @@ def test_selftest_catches_the_planted_names() -> None:
     planted = [code for code, _ in conformance._planted()]
     assert planted.count("health-service") == planted.count("log-service") == 1
     assert len(planted) == 25 and conformance.selftest() == []
+
+
+NEAR = ["primer", "blank", "primer-blank-x"]
+"""Names that are not ``primer-blank`` and yet a prefix of it, a part of it,
+or contain it -- the prefix is no border (par0 14.4; the case of DM-70:
+``service: blank`` at the stack ``primer-blank``)."""
+
+
+@pytest.mark.parametrize("given", NEAR)
+def test_a_name_near_the_stacks_is_still_health_service(given: str) -> None:
+    """DM-72 FIX: equality, not containment and not a prefix."""
+    found = check_health(health(service=given), migrate=True, stack_name="primer-blank")
+    assert [(p.code, p.params) for p in found] == [
+        ("health-service", {"service": given, "stack": "primer-blank"})
+    ]
+
+
+@pytest.mark.parametrize("given", NEAR)
+def test_a_name_near_the_stacks_is_still_log_service(given: str) -> None:
+    """DM-72 FIX: the same for a log line."""
+    line = json.dumps({**json.loads(GOOD.logs[0]), "service": given})
+    found = check_logs([line], stack_name="primer-blank")
+    assert [(p.code, p.params) for p in found] == [
+        ("log-service", {"line": 1, "service": given, "stack": "primer-blank"})
+    ]
