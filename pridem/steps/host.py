@@ -134,6 +134,11 @@ def _active(ctx: StepContext, unit: str) -> bool:
     return code == 0
 
 
+STACK_LABEL = {"pridem.stack": "host"}
+"""The label of what the host's own steps make in docker: the networks
+``pridem`` and ``pridem-egress``."""
+
+
 class _HostStep(_Step):
     """A host step: runs in every mode, on every role, reads files under ``root``."""
 
@@ -578,7 +583,7 @@ class EnsureNetwork(_HostStep):
                     "create",
                     "--internal",
                     "--label",
-                    "pridem.stack=host",
+                    f"pridem.stack={STACK_LABEL['pridem.stack']}",
                     network,
                 ],
             )

@@ -731,7 +731,7 @@ def test_verify_reads_the_proxy_and_its_behaviour(
         calls = [ps(PROXY), *image(), seen(hosts), address("")]
     elif change == "none-running":
         calls = [ps(), ps(PROXY, every=True)]
-    if change in ("silent", "never-answers", "none-running"):
+    if change in ("refuses", "silent", "never-answers", "none-running"):
         calls += diagnosis()  # DM-45 FIX: the refusal carries docker's word
     with FakeRunner(up(tmp_path), *calls) as runner:
         outcome, _ = run([step(tmp_path, hosts, proxy, ready_s=3)], runner)
@@ -739,7 +739,8 @@ def test_verify_reads_the_proxy_and_its_behaviour(
     assert reason is not None and reason.code == code, outcome.steps
     if change == "refuses":
         assert reason.params == {"hosts": ["api.zoom.us"]}
-    if change in ("silent", "never-answers", "none-running"):
+    if change in ("refuses", "silent", "never-answers", "none-running"):
+        # DM-76 FIX: host-refused too -- the next red is not blind
         assert outcome.steps[0].verify == DIAGNOSED, outcome.steps[0].verify
 
 

@@ -408,7 +408,13 @@ class Egress(Step):
                 denied.append(host)
             allowed[host] = status
         if denied:
-            raise StepFailed("host-refused", {"hosts": list[Json](denied)})
+            # DM-76 FIX: the refusal carries docker's word on the proxy (par0
+            # 14.3) -- the reason of a 403 is in squid's log, not in the step
+            raise StepFailed(
+                "host-refused",
+                {"hosts": list[Json](denied)},
+                self.diagnosis(ctx, container),
+            )
         return Verified(
             {
                 "hosts": list[Json](self.hosts),

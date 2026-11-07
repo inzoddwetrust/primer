@@ -59,7 +59,10 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.compose import out
+from pridem.steps.edge import STACK_LABEL as EDGE_LABEL
+from pridem.steps.egress import STACK_LABEL as EGRESS_LABEL
 from pridem.steps.finalize import current_link
+from pridem.steps.host import STACK_LABEL as HOST_LABEL
 from pridem.steps.host import _installed
 from pridem.steps.sources import MARKER, marked
 from pridem.steps.timers import UNIT_DIR
@@ -75,6 +78,12 @@ KEPT = "kept-volumes.json"
 entries, ``{"schema": 1, "volumes": {volume: entry}}``."""
 MACHINE_DIRS = ("edge", "egress")
 """The machine's own stacks' directories under ``/opt/pridem``."""
+MACHINE_ENTRIES = frozenset(
+    label["pridem.stack"] for label in (EDGE_LABEL, EGRESS_LABEL, HOST_LABEL)
+)
+"""The ``pridem.stack`` of the machine's own stacks -- the edge, the proxy,
+the host's networks: no record of a product names them, and their volumes
+(the edge's ACME webroot) are the machine's, not people's -- they go."""
 
 
 def _j(items: Iterable[str]) -> list[Json]:
@@ -116,10 +125,12 @@ class _Objects:
 
 def _entries(root: Path, box: Box) -> tuple[set[str], set[str]]:
     """The entries of every stack ``state.json`` names, by ``primer.yaml`` of
-    its ``current``: the persistent ones and the others. A stack whose
-    release cannot be read gives neither -- its volumes stay unplaced."""
+    its ``current``: the persistent ones and the others -- with the
+    machine's own stacks (``MACHINE_ENTRIES``) among the others. A stack
+    whose release cannot be read gives neither -- its volumes stay
+    unplaced."""
     persistent: set[str] = set()
-    others: set[str] = set()
+    others: set[str] = set(MACHINE_ENTRIES)
     state = box.read_state()
     for stack in state.current if state is not None else ():
         try:
