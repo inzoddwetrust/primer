@@ -23,11 +23,13 @@ from pridem.stacks.passport import Package
 from pridem.steps.base import StepContext
 from pridem.steps.git import git_env, repo, run_git
 from pridem.steps.sources import (
+    MARKER,
     NOT_A_COMMIT,
     CheckLock,
     FetchPackages,
     FetchRoot,
     FetchServices,
+    marked,
     remote_target,
     source_steps,
 )
@@ -663,3 +665,18 @@ def test_deploy_of_a_ref_takes_a_tag_else_a_branch(tmp_path: Path) -> None:
         assert fetch.target.tag is (ref == "v1.0.0")
         assert resolved.releases["aivis"].name == fetch.target.release
     assert (root / "opt" / "aivis" / "releases" / "v1.0.0").is_dir()
+
+
+def test_fetch_root_marks_the_stack_as_the_machines(tmp_path: Path) -> None:
+    """DM-76: the first clone of a stack leaves ``/opt/<stack>/.pridem`` with
+    the stack's name -- the only sign ``destroy`` and ``gc`` take for a
+    stack of the machine. The pair: nothing acted -- no directory, no mark
+    (``test_probe_DM_10_missing_ref_is_red_before_act``)."""
+    remote(tmp_path, "aivis", {"primer.yaml": product(tmp_path, dependency=False)})
+    root = tmp_path / "box"
+    address = f"file://{tmp_path}/aivis.git"
+    _, steps = source_steps(root, stack="aivis", address=address, ref="main", tag=False)
+    assert run(root, steps).code is ExitCode.OK
+    marker = root / "opt" / "aivis" / MARKER
+    assert marker.read_text(encoding="utf-8") == "aivis\n"
+    assert marked(root) == ([root / "opt" / "aivis"], [])

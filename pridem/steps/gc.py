@@ -89,7 +89,7 @@ from pridem.steps.base import (
 from pridem.steps.compose import out
 from pridem.steps.git import run_git
 from pridem.steps.passport import NO_PASSPORT, PASSPORT_COPY, Fetched
-from pridem.steps.sources import package_dir
+from pridem.steps.sources import marked, package_dir
 
 GC_STACK = "box"
 """The stack name a plan builder gives the ``gc`` step in ``finally``."""
@@ -329,10 +329,10 @@ class Gc(Step):
     # --- what the box holds -------------------------------------------------------
 
     def _stacks(self) -> list[str]:
-        opt = self.root / "opt"
-        return sorted(
-            path.parent.name for path in opt.glob("*/releases") if path.is_dir()
-        )
+        """The stacks with the machine's mark and releases (DM-76): another
+        ``/opt/<x>/releases`` is not the machine's to collect."""
+        mine, _ = marked(self.root)
+        return sorted(home.name for home in mine if (home / "releases").is_dir())
 
     def _releases_dir(self, stack: str) -> Path:
         return self.root / "opt" / stack / "releases"

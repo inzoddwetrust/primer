@@ -1792,10 +1792,13 @@ def test_tier3_an_option_off_is_the_literal_and_its_host_closed(
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     """The last of the cycle (DM-45): ``pridem destroy`` -- every container,
     network, volume and image labelled ``pridem.stack`` gone (the blank has no
-    persistent entry), ``/opt/primer-blank`` down to its ``minted.yaml``, the edge's
-    and the proxy's directories gone, the timers gone, ``state.json`` gone;
-    ``history/`` and the passport's copy stay. The pair: ``destroy`` again has
-    nothing to do and is green."""
+    persistent entry), ``/opt/primer-blank`` down to its mark and
+    ``minted.yaml``, the edge's and the proxy's directories gone, the timers
+    gone, ``state.json`` gone; ``history/`` and the passport's copy stay. The
+    pair: ``destroy`` again has nothing to do and is green.
+
+    Changed by DM-76 (by the dispatcher's word, before the change): the
+    machine's mark stays while the directory holds its secret."""
     assert (OPT / "current").is_symlink(), "the install runs first"
     verdict, printed = _verdict_of("destroy")
     assert verdict.result == "green", printed
@@ -1804,7 +1807,11 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     for kind in ("ps -aq", "network ls -q", "volume ls -q", "image ls -q"):
         left = _stdout(["docker", *kind.split(), "--filter", "label=pridem.stack"])
         assert left == [], (kind, left)
-    assert sorted(str(p) for p in OPT.rglob("*")) == [str(OPT / "env"), str(MINTED)]
+    assert sorted(str(p) for p in OPT.rglob("*")) == [
+        str(OPT / ".pridem"),
+        str(OPT / "env"),
+        str(MINTED),
+    ]
     for gone in ("/opt/pridem/edge", "/opt/pridem/egress", "/opt/pridem/state.json"):
         assert not Path(gone).exists(), gone
     assert not Path("/etc/systemd/system/pridem-gc.timer").exists()

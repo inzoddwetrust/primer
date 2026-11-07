@@ -33,6 +33,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
 from pridem.events import Fact, Json, strings
+from pridem.files import atomic_write
 from pridem.stacks.loader import ContractError
 from pridem.stacks.lock import Lock, LockEntry, check_lock, parse_primer_lock
 from pridem.stacks.package import PACKAGE_FILE, parse_primer_package
@@ -145,6 +146,38 @@ ADDRESS_KEY = "pridem.address"
 """The key of a bare repository's git config that holds its address."""
 
 
+MARKER = ".pridem"
+"""``/opt/<stack>/.pridem``: the machine's mark on the directory of a stack it
+checked out, holding the stack's name (DM-76). ``destroy`` and ``gc`` take as
+a stack only a directory with the mark whose name is the directory's: any
+other directory of ``/opt`` -- a virtualenv ``env/``, a ``releases/`` of
+someone else -- is not the machine's and is left alone."""
+
+
+def mark(home: Path, stack: str) -> None:
+    """The mark of ``home``, written once, atomically."""
+    marker = home / MARKER
+    if not marker.is_file():
+        home.mkdir(parents=True, exist_ok=True)
+        atomic_write(marker, f"{stack}\n", 0o644)
+
+
+def marked(root: Path) -> tuple[list[Path], list[Path]]:
+    """``/opt/<stack>`` with the machine's mark, and the directories whose
+    mark names another stack -- neither the machine's nor anyone's to touch."""
+    opt = root / "opt"
+    mine: list[Path] = []
+    astray: list[Path] = []
+    if not opt.is_dir():
+        return mine, astray
+    for path in sorted(opt.iterdir()):
+        marker = path / MARKER
+        if path.is_dir() and marker.is_file():
+            name = marker.read_text(encoding="utf-8").strip()
+            (mine if name == path.name else astray).append(path)
+    return mine, astray
+
+
 class Checkout:
     """A bare repository and its release worktrees under ``/opt/<stack>``."""
 
@@ -164,7 +197,10 @@ class Checkout:
         return run_git(ctx, self.root, ["-C", str(self.bare), *args], expect=expect)
 
     def fetch(self, ctx: StepContext) -> None:
-        """The bare repository with every branch and tag of the remote."""
+        """The bare repository with every branch and tag of the remote; the
+        stack's directory marked as the machine's (``MARKER``)."""
+        if "/" not in self.stack:
+            mark(self.home, self.stack)
         if not (self.bare / "HEAD").exists():
             self.bare.parent.mkdir(parents=True, exist_ok=True)
             run_git(ctx, self.root, ["init", "--quiet", "--bare", str(self.bare)])

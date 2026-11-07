@@ -13,15 +13,23 @@ Everything else goes, in this order:
 - ``remove_objects`` -- the point of no return: every container, network,
   volume and image labelled ``pridem.stack`` (the stacks', the edge's, the
   proxy's, the machine's networks), but the persistent volumes, chosen by
-  their label ``pridem.stack=<entry>``. Which entries are persistent is read
-  from ``primer.yaml`` of ``current`` of every stack ``state.json`` names; a
-  labelled volume the machine cannot place that way -- no ``state.json``, or a
-  release it cannot read -- refuses the step before anything is removed
+  their label ``pridem.stack=<entry>``. An entry is persistent when
+  ``primer.yaml`` of ``current`` of a stack ``state.json`` names says so, or
+  ``/opt/pridem/kept-volumes.json`` -- written before the first ``docker rm``
+  and kept by ``forget_state`` -- names its volume: a repeat after a failure
+  and the next ``destroy`` know what stays. A labelled volume whose entry
+  neither source names refuses the step before anything is removed
   (``persistent-unknown``): a volume of people's files is never removed by
-  guess;
-- ``remove_files`` -- ``/opt/<stack>`` of every stack the machine checked out
-  (a bare ``git``, ``releases/`` or ``env/`` in it), but ``env/minted.yaml``;
-  ``/opt/pridem/edge`` and ``/opt/pridem/egress``;
+  guess; where the sources differ, persistent wins. ``--new-secrets`` with a
+  volume kept refuses too (``new-secrets-kept``): a new password against the
+  old data;
+- ``remove_files`` -- ``/opt/<stack>`` of every stack with the machine's mark
+  (``/opt/<stack>/.pridem``, ``steps/sources.py``), but ``env/minted.yaml``
+  and, while it stays, the mark; ``/opt/pridem/edge`` and
+  ``/opt/pridem/egress``. A directory without the mark is not the machine's
+  and is left alone; one whose mark names another stack refuses
+  (``foreign-marker``), already in ``remove_objects``, before the point of no
+  return;
 - ``remove_timers`` -- the box's own timers and their services;
 - ``forget_state`` -- ``state.json``, last: until here it names what is on the
   box.
@@ -30,12 +38,14 @@ Everything else goes, in this order:
 every ``check`` says so and nothing acts.
 """
 
+import json
 import shutil
 from collections.abc import Iterable
 from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json, strings
+from pridem.files import atomic_write
 from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import load_primer_yaml
 from pridem.state import STATE, Box
@@ -51,6 +61,7 @@ from pridem.steps.base import (
 from pridem.steps.compose import out
 from pridem.steps.finalize import current_link
 from pridem.steps.host import _installed
+from pridem.steps.sources import MARKER, marked
 from pridem.steps.timers import UNIT_DIR
 
 MODES: frozenset[Mode] = frozenset({"destroy", "reinstall"})
@@ -59,6 +70,9 @@ LABEL = "label=pridem.stack"
 MINTED = Path("env") / "minted.yaml"
 TIMERS = ("pridem-gc.timer", "pridem-ssl-renew.timer")
 UNITS = (*TIMERS, "pridem-gc.service", "pridem-ssl-renew.service")
+KEPT = "kept-volumes.json"
+"""``/opt/pridem/kept-volumes.json``: the volumes ``destroy`` keeps and their
+entries, ``{"schema": 1, "volumes": {volume: entry}}``."""
 MACHINE_DIRS = ("edge", "egress")
 """The machine's own stacks' directories under ``/opt/pridem``."""
 
@@ -100,20 +114,37 @@ class _Objects:
         )
 
 
-def _persistent(root: Path, box: Box) -> set[str] | None:
-    """The persistent entries of every stack ``state.json`` names; ``None`` --
-    the box cannot say (no ``state.json``, or a release it cannot read)."""
+def _entries(root: Path, box: Box) -> tuple[set[str], set[str]]:
+    """The entries of every stack ``state.json`` names, by ``primer.yaml`` of
+    its ``current``: the persistent ones and the others. A stack whose
+    release cannot be read gives neither -- its volumes stay unplaced."""
+    persistent: set[str] = set()
+    others: set[str] = set()
     state = box.read_state()
-    if state is None:
-        return None
-    found: set[str] = set()
-    for stack in state.current:
+    for stack in state.current if state is not None else ():
         try:
             config = load_primer_yaml(current_link(root, stack) / "primer.yaml")
         except (ContractError, OSError):
-            return None
-        found |= {name for name, entry in config.stacks.items() if entry.persistent}
-    return found
+            continue
+        for name, entry in config.stacks.items():
+            (persistent if entry.persistent else others).add(name)
+    return persistent, others
+
+
+def read_kept(box: Box) -> dict[str, str]:
+    """``kept-volumes.json``: volume -> entry; none -- an empty mapping."""
+    path = box.root / KEPT
+    if not path.is_file():
+        return {}
+    document = json.loads(path.read_text(encoding="utf-8"))
+    return {str(k): str(v) for k, v in dict(document.get("volumes", {})).items()}
+
+
+def _foreign(root: Path) -> None:
+    """A directory of ``/opt`` whose mark names another stack: refused."""
+    _, astray = marked(root)
+    if astray:
+        raise StepFailed("foreign-marker", {"paths": _j(str(p) for p in astray)})
 
 
 class RemoveObjects(Step):
@@ -129,27 +160,45 @@ class RemoveObjects(Step):
             "volumes, {images} images; keep {kept}"
         ),
         "persistent-unknown": (
-            "volumes {volumes} cannot be told persistent or not: no state.json "
-            "or no readable primer.yaml of current"
+            "volumes {volumes} cannot be told persistent or not: no entry of a "
+            "readable primer.yaml of current nor kept-volumes.json names them"
         ),
+        "new-secrets-kept": (
+            "--new-secrets with volumes kept {volumes}: a new password against "
+            "their data"
+        ),
+        "foreign-marker": "the mark of {paths} names another stack",
         "left": "still on the box: {objects}",
     }
 
-    def __init__(self, *, box: Box, root: Path = Path("/")) -> None:
+    def __init__(
+        self, *, box: Box, root: Path = Path("/"), new_secrets: bool = False
+    ) -> None:
         self.box = box
         self.root = root
+        self.new_secrets = new_secrets
 
     def _seen(self, ctx: StepContext) -> tuple[_Objects, list[str]] | None:
-        """The objects and the volumes kept; ``None`` without docker."""
+        """The objects and the volumes kept; ``None`` without docker. Every
+        refusal of the ladder that can come before the point of no return
+        comes here, in ``check``."""
+        _foreign(self.root)
         if not _installed(ctx, "docker.io"):
             return None
         seen = _Objects(ctx)
-        if not seen.volumes:
-            return seen, []
-        persistent = _persistent(self.root, self.box)
-        if persistent is None:
-            raise StepFailed("persistent-unknown", {"volumes": _j(seen.volumes)})
-        kept = [name for name, entry in seen.volumes.items() if entry in persistent]
+        persistent, others = _entries(self.root, self.box)
+        known = read_kept(self.box)
+        kept: list[str] = []
+        unknown: list[str] = []
+        for name, entry in seen.volumes.items():
+            if name in known or entry in persistent:
+                kept.append(name)  # persistent wins where the sources differ
+            elif entry not in others:
+                unknown.append(name)
+        if unknown:
+            raise StepFailed("persistent-unknown", {"volumes": _j(unknown)})
+        if kept and self.new_secrets:
+            raise StepFailed("new-secrets-kept", {"volumes": _j(kept)})
         return seen, sorted(kept)
 
     def check(self, ctx: StepContext) -> CheckResult:
@@ -175,6 +224,10 @@ class RemoveObjects(Step):
             return
         seen, kept = found
         gone = sorted(name for name in seen.volumes if name not in kept)
+        # what stays is written before the first removal: a repeat after a
+        # failure, and the next destroy, still know it (forget_state keeps it)
+        document = {"schema": 1, "volumes": {name: seen.volumes[name] for name in kept}}
+        atomic_write(self.box.root / KEPT, json.dumps(document, indent=2) + "\n", 0o600)
         if seen.containers:
             out(ctx, ["docker", "rm", "-f", *seen.containers])
         if gone:
@@ -200,17 +253,9 @@ class RemoveObjects(Step):
 
 
 def machine_stacks(root: Path) -> list[Path]:
-    """``/opt/<stack>`` of every stack the machine checked out or rendered."""
-    opt = root / "opt"
-    if not opt.is_dir():
-        return []
-    return sorted(
-        path
-        for path in opt.iterdir()
-        if path.is_dir()
-        and path.name != "pridem"
-        and any((path / part).exists() for part in ("git/HEAD", "releases", "env"))
-    )
+    """``/opt/<stack>`` of every stack with the machine's mark."""
+    mine, _ = marked(root)
+    return mine
 
 
 class RemoveFiles(Step):
@@ -222,6 +267,7 @@ class RemoveFiles(Step):
     codes: ClassVar[dict[str, str]] = {
         "remove": "remove {paths}",
         "left": "still on the box: {paths}",
+        "foreign-marker": "the mark of {paths} names another stack",
     }
 
     def __init__(self, *, root: Path = Path("/"), new_secrets: bool = False) -> None:
@@ -233,6 +279,8 @@ class RemoveFiles(Step):
         doomed: list[Path] = []
         for home in machine_stacks(self.root):
             for path in sorted(home.iterdir()):
+                if path.name == MARKER:
+                    continue  # it goes with the directory, or stays with minted
                 if path.name == MINTED.parts[0] and not self.new_secrets:
                     doomed += [
                         p for p in sorted(path.iterdir()) if p.name != MINTED.name
@@ -244,6 +292,7 @@ class RemoveFiles(Step):
         return doomed
 
     def check(self, ctx: StepContext) -> CheckResult:
+        _foreign(self.root)
         doomed = self._doomed()
         if not doomed:
             return CheckResult(False)
@@ -257,8 +306,8 @@ class RemoveFiles(Step):
             else:
                 path.unlink()
         for home in machine_stacks(self.root):
-            if not any(home.rglob("*")):
-                shutil.rmtree(home)
+            if all(path.name == MARKER for path in home.rglob("*")):
+                shutil.rmtree(home)  # nothing of the stack left but its mark
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         left = self._doomed()
@@ -344,7 +393,7 @@ class ForgetState(Step):
 def destroy_steps(root: Path, *, box: Box, new_secrets: bool = False) -> list[Step]:
     """The ``destroy`` ladder, as stack ``STACK``."""
     return [
-        RemoveObjects(box=box, root=root),
+        RemoveObjects(box=box, root=root, new_secrets=new_secrets),
         RemoveFiles(root=root, new_secrets=new_secrets),
         RemoveTimers(root=root),
         ForgetState(box=box),

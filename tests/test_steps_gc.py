@@ -34,6 +34,7 @@ from pridem.state import Box, JournalHeader
 from pridem.steps import gc as gc_module
 from pridem.steps.gc import GC_STACK, Gc, docker_size, gc_steps
 from pridem.steps.passport import PASSPORT_COPY, Fetched
+from pridem.steps.sources import mark
 
 STACK = "blank"
 NOW = datetime(2026, 11, 1, tzinfo=UTC)
@@ -208,6 +209,7 @@ class World:
         self.home = self.root / "opt" / STACK
         self.bare = self.home / "git"
         self.home.mkdir(parents=True)
+        mark(self.home, STACK)  # as fetch_root leaves it (DM-76)
         _git("clone", "-q", "--bare", str(source), str(self.bare))
         self.releases = self.home / "releases"
         self.releases.mkdir()
@@ -978,3 +980,18 @@ def test_a_fault_of_the_machine_in_gc_is_red_not_unreadable(
     assert outcome.code is ExitCode.FAILED
     assert outcome.incomplete == ()
     assert outcome.steps[0].status == "failed"
+
+
+def test_gc_takes_only_the_stacks_the_machine_marked(tmp_path: Path) -> None:
+    """DM-76: ``/opt/<x>/releases`` of someone else is not a stack of the
+    machine -- ``gc`` does not collect it; a mark naming another stack is not
+    one either. The pair: the machine's marked stack is."""
+    root = tmp_path / "fs"
+    for name in ("aivis", "theirs", "copied"):
+        (root / "opt" / name / "releases").mkdir(parents=True)
+    mark(root / "opt" / "aivis", "aivis")
+    (root / "opt" / "copied" / ".pridem").write_text("aivis\n")
+    step = Gc(
+        box=Box(root / "opt" / "pridem"), run_id="r", fetched=Fetched(), root=root
+    )
+    assert step._stacks() == ["aivis"]
