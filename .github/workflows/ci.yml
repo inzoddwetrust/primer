@@ -95,6 +95,12 @@ jobs:
       # Every check that turns a box red catches its planted defects (par0 9).
       - name: conformance --selftest
         run: python -m pridem.conformance.stack --selftest
+      - name: the groups of tier 3 (DM-73) -- --selftest, then the table
+        # every test of tier3/ in exactly one group, every group a job of the
+        # matrix of tier3.yml; a test in no group would not run quietly
+        run: |
+          python tier3/groups.py --selftest
+          python tier3/groups.py
 
   shellcheck:
     runs-on: ubuntu-24.04

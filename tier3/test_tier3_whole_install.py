@@ -75,6 +75,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from groups import NEEDS_BOX
 
 from pridem.conformance.stack import check_health, check_logs
 from pridem.report.schema import Verdict
@@ -462,11 +463,37 @@ def _curl(tmp: Path, url: str, host: str) -> tuple[str, str]:
 
 @pytest.fixture(scope="module")
 def mirror(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The blank's mirror the sources fetch from: one for the whole install and
-    for the deploys of DM-64, which push their own commits to it. The mirror of
-    the blank's service is the session's (``tier3/conftest.py``)."""
+    """The blank's mirror the sources fetch from, at ``BLANK_COMMIT``: made here
+    once, for whichever group runs first on this runner (DM-73: each group is
+    a runner of its own), and pushed to by the tests that deploy copies. The
+    mirror of the blank's service is the session's (``tier3/conftest.py``)."""
     MIRROR.parent.mkdir(parents=True, exist_ok=True)
+    if not (MIRROR / "HEAD").is_file():
+        checkout = _blank(tmp_path_factory.mktemp("mirror"))
+        _run(["git", "clone", "-q", "--mirror", str(checkout), str(MIRROR)])
+        main = ["update-ref", "refs/heads/main", BLANK_COMMIT]
+        _run(["git", "--git-dir", str(MIRROR), *main])
     return MIRROR
+
+
+def _install_at_pin(tmp: Path) -> None:
+    """The blank installed at its pin -- the preparation of a group whose
+    tests need it (``NEEDS_BOX``), not a test: the assertions of the whole
+    install stay in its own test (group ``b``)."""
+    verdict, printed = _install(_passport(tmp))
+    assert verdict.result == "green", printed
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _group_box(
+    request: pytest.FixtureRequest,
+    mirror: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Groups ``c`` and ``e`` start with the blank installed (DM-73)."""
+    group = request.config.getoption("--tier3-group")
+    if group in NEEDS_BOX and not (OPT / "current").is_symlink():
+        _install_at_pin(tmp_path_factory.mktemp("group-box"))
 
 
 @pytest.fixture(autouse=True)
@@ -490,11 +517,12 @@ def _mirror_back_at_the_pin() -> Iterator[None]:
 
 
 def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> None:
+    """The first of group ``b``: the install of the blank on a clean box.
+
+    Changed by DM-73: the mirror at the pin is the fixture's (``mirror``) --
+    the preparation of the mirror is in the fixture, the groups of tier 3
+    (DM-73)."""
     checkout, passport = _blank(tmp_path), _passport(tmp_path)
-    _run(["git", "clone", "-q", "--mirror", str(checkout), str(mirror)])
-    _run(
-        ["git", "--git-dir", str(mirror), "update-ref", "refs/heads/main", BLANK_COMMIT]
-    )
 
     verdict, printed = _install(passport)
 

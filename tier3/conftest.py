@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from groups import keep_group as pytest_collection_modifyitems
 
 from pridem.runner import Stream, SubprocessRunner
 
@@ -47,3 +48,14 @@ def service_mirror() -> Iterator[Path]:
         [found] = _stdout(git, 60)
         assert found == pin, f"{SERVICE} {tag} names {found}, pinned {pin}"
     yield SERVICE_MIRROR
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--tier3-group",
+        required=True,
+        help="the group of tier3/groups.py this job runs (DM-73)",
+    )
+
+
+__all__ = ["pytest_addoption", "pytest_collection_modifyitems", "service_mirror"]

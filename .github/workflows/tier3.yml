@@ -11,8 +11,15 @@ name: tier3
 # and every file of the repository is named from $GITHUB_WORKSPACE.
 
 # A pull request runs tier 3 too, without secrets: the step that writes the
-# deploy key is skipped and the one probe that needs it (DM-10) is deselected
-# by name, printed in the log.
+# deploy key is skipped and the one probe that needs it (DM-10, group a) is
+# deselected by name, printed in the log of every group (in the others the
+# name selects nothing).
+
+# Tier 3 is a matrix of groups (DM-73; tier3/groups.py): each group a job on a
+# clean runner of its own, with the whole preparation of the box; a group
+# that needs the blank installed gets it from a fixture. A red group does not
+# stop the others (fail-fast: false): one red hides no state of another. Tier
+# 3 is green when every group is.
 
 on:
   push:
@@ -30,7 +37,12 @@ defaults:
 
 jobs:
   box:
+    name: box (${{ matrix.group }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [a, b, c, d, e]
     defaults:
       run:
         working-directory: ${{ github.workspace }}
@@ -90,6 +102,7 @@ jobs:
           (umask 077 && printf 'Authorization: Bearer %s\n' "$GITHUB_API_TOKEN" > "$RUNNER_TEMP/github_api_header")
       - name: tier 3 probes
         env:
+          TIER3_GROUP: ${{ matrix.group }}
           PRIMER_DEPLOY_KEY_FILE: ${{ runner.temp }}/deploy_key
           PRIMER_GITHUB_API_HEADER_FILE: ${{ runner.temp }}/github_api_header
         run: |
@@ -103,4 +116,4 @@ jobs:
             echo "pull_request: no secrets, so no deploy key -- DM-10 is not run"
             deselect=(-k "not test_probe_DM_10_blank_is_fetched_by_ref_over_ssh")
           fi
-          sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE,PRIMER_GITHUB_API_HEADER_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --durations=0 --rootdir "$GITHUB_WORKSPACE" "${deselect[@]}" "$GITHUB_WORKSPACE/tier3"
+          sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE,PRIMER_GITHUB_API_HEADER_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --durations=0 --rootdir "$GITHUB_WORKSPACE" --tier3-group "$TIER3_GROUP" "${deselect[@]}" "$GITHUB_WORKSPACE/tier3"
