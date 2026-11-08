@@ -98,7 +98,7 @@ OPT = Path(f"/opt/{STACK}")
 MIRROR = Path(f"/srv/tier3/{STACK}.git")
 """The blank's ``file://`` mirror the passport names: the machine fetches from
 it with no key of CI, and names the product's directory by it -- ``primer-blank``."""
-BLANK_COMMIT = "7bbc05b9337abe0505c003ca513c68f0cc2e1e8a"
+BLANK_COMMIT = "47f4e7c9a1092c17ef3fdc1b4658b05aa0b690d6"
 # the blank's service (DM-59): its file:// mirror is made by tier3/conftest.py
 # before the first test of the session -- every plan of the blank reads its lock
 SERVICE = "primer-blank-service"
