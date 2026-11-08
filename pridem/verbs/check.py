@@ -38,6 +38,7 @@ that form or names no slot of ``packages``, is refused before anything runs:
 exit 1, a message, no verdict.
 """
 
+import json
 import secrets as token
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -62,7 +63,7 @@ from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.codes import ExitCode
 from pridem.report.render import render_json, summary_line
 from pridem.report.schema import build_verdict
-from pridem.runner import CommandFailed, CommandNotStarted, Stream
+from pridem.runner import CommandFailed, CommandNotStarted, CommandTimedOut, Stream
 from pridem.stacks.egress import UNLISTED, unlisted
 from pridem.stacks.loader import ContractError
 from pridem.stacks.lock import check_lock, load_primer_lock
@@ -106,11 +107,13 @@ CODES: dict[str, dict[str, str]] = {
         **REFUSAL_CODES,
         "no-compose": "{file} of {stack} is missing",
         "config-failed": "docker compose config of {stack} exits {exit_code}",
+        "config-unread": "docker compose config of {stack} gave no answer: {cause}",
         "not-found": "docker compose is not found: the compose files are not checked",
     },
     "packages": {
         **PACKAGE_CODES,
         "not-given": "no package directory was given: {slots} not checked",
+        "manifest-unreadable": "the manifest of the package of {slot}: {cause}",
     },
 }
 
@@ -212,9 +215,28 @@ def _compose_found(ctx: StepContext) -> bool:
         ctx.runner.run(
             ["docker", "compose", "version"], timeout=TIMEOUT_S, on_line=_drop
         )
-    except (CommandNotStarted, CommandFailed):
+    except (CommandNotStarted, CommandFailed, CommandTimedOut):
         return False
     return True
+
+
+MANIFEST_LIMIT = 64 * 1024
+"""The most a package's manifest may take: a few lines of YAML (DM-77)."""
+
+
+def _manifest(slot: str, manifest: Path) -> str | None:
+    """The manifest's text; none -- ``None``; not a file or over the limit --
+    refused by a code, not read."""
+    if not manifest.exists():
+        return None
+    cause = None
+    if not manifest.is_file():
+        cause = "not-a-file"
+    elif manifest.stat().st_size > MANIFEST_LIMIT:
+        cause = "too-big"
+    if cause is not None:
+        raise StepFailed("manifest-unreadable", {"slot": slot, "cause": cause})
+    return manifest.read_text(encoding="utf-8")
 
 
 def _drop(stream: Stream, line: str, cut: bool) -> None:
@@ -251,6 +273,12 @@ def _read(checked: Checked, stack: Stack, entry: str) -> Read:
         read.failed = StepFailed(
             "config-failed", {"stack": entry, "exit_code": failed.code}
         )
+    except (CommandTimedOut, CommandNotStarted, json.JSONDecodeError) as error:
+        cause = {
+            CommandTimedOut: "timed-out",
+            CommandNotStarted: "not-started",
+        }.get(type(error), "not-json")
+        read.failed = StepFailed("config-unread", {"stack": entry, "cause": cause})
     return read
 
 
@@ -296,9 +324,7 @@ def _packages(checked: Checked, stack: Stack) -> None:
         if isinstance(stack, Product):  # a service declares no packages
             for slot, directory in sorted(checked.given.items()):
                 manifest = directory / PACKAGE_FILE
-                text = (
-                    manifest.read_text(encoding="utf-8") if manifest.exists() else None
-                )
+                text = _manifest(slot, manifest)
                 contract = package_contract(
                     stack, slot, text, PACKAGE_FILE, str(directory)
                 )

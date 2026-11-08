@@ -172,8 +172,13 @@ def reload_nginx(ctx: StepContext, root: Path) -> None:
 
 def _copy_issued(root: Path, secrets: Secrets) -> None:
     live = letsencrypt_dir(root) / "live" / CERT_NAME
-    key = (live / "privkey.pem").read_bytes()
-    secrets.add([SecretStr(key.decode("ascii").strip())])
+    path = live / "privkey.pem"
+    key = path.read_bytes()
+    try:
+        text = key.decode("ascii")
+    except UnicodeDecodeError:  # a PEM is ASCII: the key is damaged (DM-77)
+        raise StepFailed("key-damaged", {"path": str(path)}) from None
+    secrets.add([SecretStr(text.strip())])
     write_file(cert_path(root), (live / "fullchain.pem").read_bytes(), 0o644)
     write_file(key_path(root), key, 0o600)
 
@@ -331,6 +336,7 @@ class Ssl(Step):
         "not-issued": "the certificate is still self-signed after certbot",
         "expired": "the certificate expired at {cert_expires}",
         "key-mode": "the TLS key {path} is {mode}, not 0o600; it is left as it is",
+        "key-damaged": "the key certbot wrote at {path} is not a PEM of ASCII",
         "config-invalid": "nginx -t is red in {where}; nothing reloaded",
     }
 
@@ -401,6 +407,7 @@ class SslRenew(Step):
         **NO_PASSPORT,
         "renew": "renew the Let's Encrypt certificate if it is due",
         "key-mode": "the TLS key {path} is {mode}, not 0o600; it is left as it is",
+        "key-damaged": "the key certbot wrote at {path} is not a PEM of ASCII",
         "config-invalid": "nginx -t is red in {where}; nothing reloaded",
     }
 

@@ -9,7 +9,6 @@ close. There is no passport yet, so ``passport_version`` is
 absent (contract 2 v1.9). A busy box is refused before anything runs.
 """
 
-import secrets as token
 from datetime import UTC, datetime
 
 from pridem import __version__
@@ -21,14 +20,10 @@ from pridem.report.render import render_json, summary_line
 from pridem.report.schema import Actor, Verdict, build_verdict
 from pridem.state import Box, BoxBusy, JournalHeader
 from pridem.verbs.base import Context, NoArgs, Refused, Verb
-from pridem.verbs.run import close_journal, found_on_box
+from pridem.verbs.run import close_journal, finished_at, found_on_box
 
 ACTOR = {"type": "engineer", "via": "local"}
 NO_SECRETS = Secrets(())  # no passport, no minted secrets on a fresh box
-
-
-def _run_id(now: datetime) -> str:
-    return f"{now:%Y-%m-%dT%H:%M:%SZ}-{token.token_hex(2)}"
 
 
 def _verdict(box: Box) -> Verdict:
@@ -38,7 +33,7 @@ def _verdict(box: Box) -> Verdict:
     state = box.read_state()
     composition = dict(state.composition) if state else {"pridem": __version__}
     started = datetime.now(UTC).replace(microsecond=0)
-    run_id = _run_id(started)
+    run_id = box.new_run_id(started)
     header = JournalHeader(
         run_id=run_id,
         verb="status",
@@ -48,7 +43,9 @@ def _verdict(box: Box) -> Verdict:
         started=started,
         composition_before=composition,
     )
-    lost = close_journal(box.open_journal(header, NO_SECRETS))
+    journal = box.open_journal(header, NO_SECRETS)
+    finished = finished_at(started, journal)
+    lost = close_journal(journal)
     incomplete = (*found_on_box(box, recovery), *lost)
     verdict = build_verdict(
         PlanOutcome(
@@ -62,7 +59,7 @@ def _verdict(box: Box) -> Verdict:
         args={},
         actor=ACTOR,
         started=started,
-        finished=datetime.now(UTC).replace(microsecond=0),
+        finished=finished,
         passport_version=None,
         composition_before=composition,
         composition_after=composition,

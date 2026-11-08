@@ -52,6 +52,7 @@ it: a red first ``install`` must not leave a composition the box does not have.
 import fcntl
 import json
 import os
+import secrets as token
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -120,6 +121,13 @@ class JournalTaken(RuntimeError):
 
 class HistoryExists(FileExistsError):
     """A verdict with this run_id is already in history/; history is append-only."""
+
+
+class RunIdTaken(FileExistsError):
+    """No free run id in this second after ``RUN_ID_TRIES`` draws."""
+
+
+RUN_ID_TRIES = 16
 
 
 class JournalDamaged(ValueError):
@@ -538,6 +546,20 @@ class Box:
             self.write_state(state.model_copy(update={"last_run": runs}))
 
     # --- journal/ ---------------------------------------------------------------
+
+    def new_run_id(self, now: datetime) -> str:
+        """A run id of ``now`` that names neither a journal nor a verdict on the
+        box (DM-77). ``history/`` is kept for ever and journals are cut by
+        budget: a run id free in ``journal/`` may still name a verdict, and
+        that would stop the run at its very end (``HistoryExists``)."""
+        for _ in range(RUN_ID_TRIES):
+            run_id = f"{now:%Y-%m-%dT%H:%M:%SZ}-{token.token_hex(2)}"
+            taken = (self.history / f"{run_id}.json").exists() or (
+                self.journals / f"{run_id}.jsonl"
+            ).exists()
+            if not taken:
+                return run_id
+        raise RunIdTaken(f"{now:%Y-%m-%dT%H:%M:%SZ}")
 
     def open_journal(self, header: JournalHeader, secrets: Secrets) -> JournalSink:
         """Create the journal of a run with its header line; return its sink.

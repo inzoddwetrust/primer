@@ -139,8 +139,10 @@ def cut_ctx(line: str) -> str:
         return line
     try:
         record = json.loads(line)
-    except (json.JSONDecodeError, RecursionError):
-        return line  # not a log line of a stack: it passes as it is
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        # not a log line of a stack (an integer over 4300 digits is a
+        # ValueError of the parser, DM-77): it passes as it is
+        return line
     if not isinstance(record, dict) or "ctx" not in record:
         return line
     size = free_size(record["ctx"])

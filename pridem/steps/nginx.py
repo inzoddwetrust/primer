@@ -131,7 +131,10 @@ class Nginx(Step):
             self.secrets.add([SecretStr(value)])
             write_file(path, value.encode("ascii"), 0o600)
             return value
-        value = path.read_text(encoding="ascii").strip()
+        try:
+            value = path.read_text(encoding="ascii").strip()
+        except UnicodeDecodeError:  # not ASCII: not a secret this machine minted
+            value = ""
         if mode_of(path) != oct(0o600) or not MINTED_FORM.fullmatch(value):
             raise StepFailed("secret-damaged", {"path": str(path)})
         self.secrets.add([SecretStr(value)])

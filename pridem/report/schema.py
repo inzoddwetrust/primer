@@ -90,7 +90,10 @@ RESULT: Mapping[ExitCode, Result] = {
     ExitCode.FAILED: "red",
     ExitCode.INCOMPLETE: "incomplete",
 }
-RUN_ID = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z-[0-9a-f]{4}")
+RUN_ID = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z-[0-9a-f]{4}"
+)
+# [0-9], not \d: \d matches any Unicode digit, a run id is ASCII (DM-77)
 # pydantic looks for a pattern anywhere in the string: the anchors are what keep
 # a run id from naming a path outside its directory (``../<run id>``).
 RunId = Annotated[str, Field(pattern=f"^{RUN_ID.pattern}$")]

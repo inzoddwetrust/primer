@@ -42,6 +42,7 @@ ENGLISH: Catalog = {
     "state/quarantined": "state.json was damaged and is in quarantine",
     "restore/needed": "past the point of no return: restore from backup is needed",
     "@at": "{phase} {stack} · {name}",
+    "@unknown": "{code} ({params}) — no words in this catalog",
     "@null:ended_at": "the start",
     "@null:errno": "no errno",
     # --- the renderers' words and layout ---
@@ -108,8 +109,15 @@ def _present(catalog: Catalog, name: str, value: Value) -> str:
 def text(
     catalog: Catalog, code: str, params: Mapping[str, Value], what: str | None = None
 ) -> str:
-    """The words for ``code`` with ``params``; a missing key is a ``KeyError``."""
-    template = catalog[catalog_key(code, what)]
+    """The words for ``code`` with ``params``. A code the catalog has no words
+    for -- one of a step since removed, in an old verdict of ``history/`` --
+    is said as it is, by the catalog's ``@unknown`` (DM-77; a new verdict with
+    such a code is refused when it is built, contract 2 rule 6)."""
+    key = catalog_key(code, what)
+    if key not in catalog:
+        shown = ", ".join(f"{name}={value}" for name, value in params.items())
+        return catalog["@unknown"].format(code=key, params=shown)
+    template = catalog[key]
     return template.format(
         **{name: _present(catalog, name, value) for name, value in params.items()}
     )

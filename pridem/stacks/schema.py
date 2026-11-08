@@ -51,6 +51,7 @@ product's; that a co-located service has none is the plan's check too.
 
 import argparse
 import re
+import shlex
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
@@ -158,6 +159,7 @@ RULES = {
     ),
     "S.egress-duplicate": (0, "protocol 4.2: an egress host is named once"),
     "S.option-name": (0, "an option is named ^[a-z][a-z0-9_]*$"),
+    "S.command": (0, "a command is one or more words shlex can split"),
     "S.option-duplicate": (0, "an option is named once"),
     "S.egress-env": (
         0,
@@ -233,7 +235,23 @@ def _option(value: str) -> str:
 Name = Annotated[str, Field(min_length=1)]
 EgressHost = Annotated[str, AfterValidator(_egress_host)]
 Option = Annotated[str, AfterValidator(_option)]
-Command = Annotated[str, Field(min_length=1)]
+
+
+def _command(value: str) -> str:
+    """A command of ``primer.yaml`` (``migrate``, ``test.run``, ``run`` of
+    ``derived``, ``validate``, ``before``/``after``): the words ``shlex``
+    splits it into, at least one -- refused here, not as a ``ValueError`` in
+    the middle of a rollout (DM-77)."""
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        raise _rule_error("S.command", "a quote is not closed") from None
+    if not words:
+        raise _rule_error("S.command", "no word")
+    return value
+
+
+Command = Annotated[str, Field(min_length=1), AfterValidator(_command)]
 UrlPath = Annotated[str, Field(pattern=r"^/[A-Za-z0-9._~/-]*$")]
 """A path of an app: a plain one -- it goes into the nginx config of the box as
 it is (``location =``), so a space, ``;`` or ``{`` is refused here, before any

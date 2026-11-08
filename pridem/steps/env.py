@@ -585,6 +585,8 @@ class DeriveEnv(Step):
         keys = render._derivable()
         params: dict[str, Json] = {"keys": list[Json](keys), "stack": render.stack.name}
         needed = CheckResult(True, local_code("derive", params))
+        if not keys:  # every derived key is of an option off: nothing to derive
+            return CheckResult(False)
         if self.build.app_built is False:
             raise StepFailed("derive-no-image", {"key": keys[0]})
         on_disk = render._on_disk() or {}

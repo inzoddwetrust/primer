@@ -26,7 +26,6 @@ also prints its ladder as it runs, to stderr under ``--json``, so stdout is the
 object alone. A busy box is refused before anything runs.
 """
 
-import secrets as token
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -39,6 +38,7 @@ from pridem.events import (
     EventSink,
     Incomplete,
     Json,
+    LogLine,
     PlanMode,
     PlanOutcome,
     Secrets,
@@ -48,7 +48,7 @@ from pridem.report.catalog import ENGLISH, Catalog, say
 from pridem.report.codes import ExitCode, worst
 from pridem.report.render import render_json, summary_line, words
 from pridem.report.schema import Actor, Verdict, build_verdict
-from pridem.runner import Holding
+from pridem.runner import Holding, Stream
 from pridem.stacks.passport import load_passport
 from pridem.state import Box, BoxBusy, JournalHeader, JournalSink, Recovery
 from pridem.steps.base import Role, Step
@@ -93,8 +93,24 @@ Steps = Callable[[Box, str, Fetched, Secrets], Sequence[Step]]
 run's secrets."""
 
 
-def _run_id(now: datetime) -> str:
-    return f"{now:%Y-%m-%dT%H:%M:%SZ}-{token.token_hex(2)}"
+def finished_at(started: datetime, journal: JournalSink) -> datetime:
+    """Now, or ``started`` when the clock went back during the run (an NTP
+    step): the verdict's ``finished`` is never before ``started``, and the
+    journal says by how much it went back (DM-77)."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    if now >= started:
+        return now
+    back = int((started - now).total_seconds())
+    journal.emit(
+        LogLine(
+            "finally",
+            "pridem",
+            "clock",
+            Stream.STDERR,
+            f"clock-back {back} s: finished is taken as started",
+        )
+    )
+    return started
 
 
 def _actor(ctx: Context) -> dict[str, str]:
@@ -179,7 +195,7 @@ def _verdict(
     state = box.read_state()
     before = dict(state.composition) if state else {"pridem": __version__}
     started = datetime.now(UTC).replace(microsecond=0)
-    run_id = _run_id(started)
+    run_id = box.new_run_id(started)
     actor = _actor(ctx)
     fields: dict[str, object] = {
         "run_id": run_id,
@@ -222,6 +238,7 @@ def _verdict(
         )
         outcome = plan.run()
     finally:
+        finished = finished_at(started, journal)
         lost = close_journal(journal)
     outcome = with_incomplete(outcome, (*found_on_box(box, recovery), *lost))
     read_passport = planned.fetched.passport if planned.fetched else None
@@ -234,7 +251,7 @@ def _verdict(
         args=dict(args),
         actor=actor,
         started=started,
-        finished=datetime.now(UTC).replace(microsecond=0),
+        finished=finished,
         passport_version=shown.version if shown is not None else None,
         composition_before=before,
         composition_after=(

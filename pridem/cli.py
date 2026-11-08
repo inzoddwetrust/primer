@@ -18,6 +18,7 @@ set its flag (``pridem/interrupt.py``); the plan reads it between steps, its
 ``restore`` and ``finally`` run and the verb writes its verdict.
 """
 
+import errno
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -26,9 +27,19 @@ from typing import TextIO
 import click
 from pydantic import ValidationError
 
+from pridem.events import ShortSecret
 from pridem.interrupt import Interrupt
 from pridem.runner import Runner, SubprocessRunner
 from pridem.stacks.loader import ContractError
+from pridem.stacks.stack import CompositionCollision
+from pridem.state import (
+    HistoryExists,
+    JournalDamaged,
+    JournalTaken,
+    RunIdTaken,
+    StateDamaged,
+    VerdictDamaged,
+)
 from pridem.verbs import VERBS, Context, Refused, Verb
 from pridem.verbs.base import BOX_ROOT
 
@@ -142,6 +153,53 @@ def run(
     except ContractError as error:  # the loaders quote no input (DM-43)
         err.write(f"pridem: {error}\n")
         return 1
+    except MACHINE_ERRORS as error:
+        # DM-77: a code and fixed words, never ``str(error)`` -- a pydantic
+        # message quotes its input_value; an error not in the list is a defect
+        # of the machine and keeps its traceback, to be seen
+        err.write(f"pridem: {_said(error)}\n")
+        return 1
+
+
+MACHINE_ERRORS = (
+    OSError,
+    JournalTaken,
+    StateDamaged,
+    VerdictDamaged,
+    JournalDamaged,
+    CompositionCollision,
+    ShortSecret,
+)
+"""What the machine raises that reaches ``run`` and is a state of the box,
+not a defect: each is said by a code. ``RunIdTaken`` and ``HistoryExists`` are
+``OSError`` (``FileExistsError``) and are told apart first."""
+
+
+def _said(
+    error: OSError
+    | JournalTaken
+    | StateDamaged
+    | VerdictDamaged
+    | JournalDamaged
+    | CompositionCollision
+    | ShortSecret,
+) -> str:
+    """``<code>: <words>``, with no value the error may carry."""
+    if isinstance(error, RunIdTaken | HistoryExists | JournalTaken):
+        return "run-id-taken: the run id of this second is taken; run again"
+    if isinstance(error, StateDamaged):
+        return "state-damaged: state.json cannot be read; see pridem status"
+    if isinstance(error, VerdictDamaged):
+        return "verdict-damaged: a verdict of history/ cannot be read"
+    if isinstance(error, JournalDamaged):
+        return "journal-damaged: a journal cannot be read"
+    if isinstance(error, CompositionCollision):
+        return "composition-collision: two stacks give the same name"
+    if isinstance(error, ShortSecret):
+        return "short-secret: a secret is shorter than 16 characters"
+    name = errno.errorcode.get(error.errno or 0, "unknown")
+    where = f" {error.filename}" if error.filename is not None else ""
+    return f"os-error: {name}{where}"
 
 
 def main() -> None:

@@ -206,6 +206,32 @@ class Unresolved(Step):
         raise StepFailed("unresolved", dict(self.params))
 
 
+class Unbuilt(Step):
+    """The one step of a deferred stack whose ``build`` raised (DM-77): its
+    ``check`` raises what ``build`` did, so the plan records it as any step
+    that raises -- ``exception {type}`` in the verdict, the text in the
+    journal under the cleaning -- and goes on to ``finally`` and the verdict.
+    A step never crashes a plan; a ladder that cannot be built does not
+    either."""
+
+    name = "ladder"
+    order = 0
+    modes = MODES
+    codes: ClassVar[dict[str, str]] = {}
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        raise self.error
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        raise self.error
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        raise self.error
+
+
 def _validate_steps(name: str, steps: Sequence[Step]) -> None:
     names: set[str] = set()
     orders: set[int] = set()
@@ -409,7 +435,10 @@ class Plan:
         made now, or are the one step ``ladder`` when they cannot be."""
         if isinstance(stack, StackSteps):
             return _chosen([stack], self._selected)
-        built = stack.build()
+        try:
+            built = stack.build()
+        except Exception as error:  # a ladder that cannot be built is a red step
+            built = [StackSteps(stack.name, [Unbuilt(error)])]
         made: Sequence[StackSteps] = (
             [StackSteps(stack.name, [Unresolved(stack.after)])]
             if built is None

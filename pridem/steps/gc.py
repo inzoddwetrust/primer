@@ -430,6 +430,10 @@ class Gc(Step):
         except (UnreadableOutput, json.JSONDecodeError) as error:
             # what docker printed, not a fault of the machine: that one is red
             return _not_started("unreadable", type(error).__name__)
+        except (OSError, IndexError) as error:
+            # a release the measurement cannot read (gone under it, git printed
+            # nothing): nothing is removed yet -- not-started, not a crash (DM-77)
+            return _not_started("unreadable", type(error).__name__)
 
     def _check(self, ctx: StepContext) -> CheckResult:
         passport = self._passport()
