@@ -1,12 +1,14 @@
 name: release
 
 # A release of the machine is a tag v{__version__} on the first parent of main
-# (TZ section 10.2). Tier 1 runs on the tag's commit first; the release job
-# first asks the tier 3 workflow's runs on that commit (pushes to main only):
-# the latest one must have finished green -- no waiting, the tag is set after
-# it. Only then the wheel is built from the pinned build backend and two
-# assets are published: the wheel and install.sh with its three pins
-# substituted.
+# (TZ section 10.2). Tier 1 runs on the tag's commit first, with every check
+# of ci.yml. The release job first refuses a tag not of the form vX.Y.Z,
+# before the tag is used anywhere; it installs the pinned build backend before
+# any step holds the job token, then asks the runs of ci.yml and of tier3.yml
+# on that commit (pushes to main only): the latest of each must have finished
+# green -- no waiting, the tag is set after them. Only then the wheel is built
+# and two assets are published: the wheel and install.sh with its three pins
+# substituted. No checkout keeps the job token in .git/config (DM-82).
 
 on:
   push:
@@ -24,17 +26,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       # Runtime exactly as boxes get it: from wheels/ by the lock, with hashes.
       - run: python -m pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
       - run: python -m pip install --no-deps -e .
-      # Dev tools from the index, constrained to the installed runtime: a tool
-      # that needs another runtime version fails here instead of moving it.
-      - run: |
-          python -m pip freeze --exclude-editable > "$RUNNER_TEMP/runtime.txt"
-          python -m pip install -c "$RUNNER_TEMP/runtime.txt" -e ".[dev]"
+      # Dev tools by their lock, with hashes (DM-82): the lock is compiled with
+      # requirements.lock as its constraints, so it pins the runtime as above.
+      - run: python -m pip install --require-hashes -r requirements-dev.lock
       - run: ruff check . && ruff format --check .
       - run: mypy .
       # age and sops for the tier 1 tests that decrypt a passport (DM-13): age
@@ -54,6 +56,13 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/sops" /usr/local/bin/sops
           command -v age-keygen sops
       - run: pytest
+      # Every check that turns a box red catches its planted defects (par0 9).
+      - name: conformance --selftest
+        run: python -m pridem.conformance.stack --selftest
+      - name: the groups of tier 3 (DM-73) -- --selftest, then the table
+        run: |
+          python tier3/groups.py --selftest
+          python tier3/groups.py
       - run: shellcheck install.sh
 
   release:
@@ -63,28 +72,18 @@ jobs:
       contents: write
       actions: read
     steps:
-      - name: tier 3 is green on this commit
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # The tag is a name anyone who can push a tag chooses: its form is checked
+      # before any step uses it -- in a sed expression, a path, an asset name.
+      - name: the tag is vX.Y.Z
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/tier3.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=100" > "$RUNNER_TEMP/tier3-runs.json"
-          python3 - "$RUNNER_TEMP/tier3-runs.json" <<'EOF'
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as handle:
-              runs = json.load(handle)["workflow_runs"]
-          if not runs:
-              sys.exit("tier 3 has not run on this commit: no release")
-          last = max(runs, key=lambda run: run["run_number"])
-          state = last["conclusion"] if last["status"] == "completed" else last["status"]
-          if state != "success":
-              sys.exit(f"tier 3 on this commit is {state}: {last['html_url']}")
-          print(f"tier 3 on this commit is green: {last['html_url']}")
-          EOF
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag '$GITHUB_REF_NAME' is not vX.Y.Z"
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
@@ -95,11 +94,37 @@ jobs:
             echo "tag $GITHUB_REF_NAME is not v$version (pridem/__init__.py)"
             exit 1
           fi
-          if ! git rev-list --first-parent origin/main | grep -qx "$GITHUB_SHA"; then
+          # into a file, not a pipe: grep -q stops at the first match, and
+          # rev-list writing a long history into the closed pipe dies of
+          # SIGPIPE, which pipefail turns into a refusal
+          git rev-list --first-parent origin/main > "$RUNNER_TEMP/first-parent"
+          if ! grep -qx "$GITHUB_SHA" "$RUNNER_TEMP/first-parent"; then
             echo "$GITHUB_SHA is not on the first parent of main"
             exit 1
           fi
       - run: python -m pip install --require-hashes -r requirements-build.lock
+      - name: ci and tier 3 are green on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for workflow in ci.yml tier3.yml; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$GITHUB_SHA&event=push&per_page=100" > "$RUNNER_TEMP/runs-$workflow.json"
+            python3 - "$workflow" "$RUNNER_TEMP/runs-$workflow.json" <<'EOF'
+          import json
+          import sys
+
+          workflow, path = sys.argv[1], sys.argv[2]
+          with open(path, encoding="utf-8") as handle:
+              runs = json.load(handle)["workflow_runs"]
+          if not runs:
+              sys.exit(f"{workflow} has not run on this commit: no release")
+          last = max(runs, key=lambda run: run["run_number"])
+          state = last["conclusion"] if last["status"] == "completed" else last["status"]
+          if state != "success":
+              sys.exit(f"{workflow} on this commit is {state}: {last['html_url']}")
+          print(f"{workflow} on this commit is green: {last['html_url']}")
+          EOF
+          done
       - run: python -m pip wheel --no-deps --no-build-isolation --no-index -w dist .
       - name: install.sh with its pins
         run: |

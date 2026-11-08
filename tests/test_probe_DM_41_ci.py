@@ -1,24 +1,37 @@
 """Probes DM-41: CI runs on the versions boxes get, with actions pinned by SHA.
 
-Every job that sets up Python installs, in this order: the runtime from
-``wheels/`` by ``requirements.lock`` with hashes and no index; the package
-without dependencies; the dev tools constrained to the runtime just installed
-(``pip freeze --exclude-editable`` into a file, then ``-c`` that file). Every
-``uses:`` of every workflow is ``owner/repo@<40 hex>``.
+Every ``pip install`` of every workflow is one of four, each by a lock with
+hashes or with no dependencies: the runtime from ``wheels/`` by
+``requirements.lock`` with no index; the package itself without dependencies;
+the dev tools by ``requirements-dev.lock``; the build backend by
+``requirements-build.lock``. A job that installs the dev tools does it after
+the runtime and the package, and no step that installs is conditional (an
+``if:`` would leave the job without it). Every ``uses:`` of every workflow is
+``owner/repo@<40 hex>``.
 
-Two checks back the recipe where it matters: the wheels in ``wheels/`` are
+DM-82, by the dispatcher's word before the edit: the dev tools come by their
+lock with hashes, not from the index constrained by ``pip freeze``; the check
+covers every job that installs packages, ``tier3.yml`` included, not only the
+jobs that set up Python. No step that holds a secret or the job token comes
+before the last install of its job.
+
+Checks back the recipe where it matters: the wheels in ``wheels/`` are
 exactly the lock's (name, version, sha256) -- an extra wheel installs nothing
-and so passes ``pip``, but not this test -- and the runtime this very
-``pytest`` imports has the lock's versions.
+and so passes ``pip``, but not this test -- the runtime this very ``pytest``
+imports has the lock's versions, and ``requirements-dev.lock`` has every dev
+pin of ``pyproject.toml`` and the runtime of ``requirements.lock`` at its
+versions, with its wheels' hashes, so installing it moves nothing.
 
 Each check is a function of the text it reads, so each test plants a defect
 it must catch next to the tree it must pass.
 """
 
 import hashlib
+import json
 import re
 import shlex
 import shutil
+import tomllib
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -28,6 +41,9 @@ REPO = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO / ".github" / "workflows"
 CI = WORKFLOWS / "ci.yml"
 LOCK = REPO / "requirements.lock"
+DEV_LOCK = REPO / "requirements-dev.lock"
+TOOLS_LOCK = REPO / "requirements-tools.lock"
+PYPROJECT = REPO / "pyproject.toml"
 WHEELS = REPO / "wheels"
 
 PINNED = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}")
@@ -38,11 +54,11 @@ Command = tuple[int, list[str]]
 
 RUNTIME_COMMENT = "      # Runtime exactly as boxes get it"
 PACKAGE_STEP = "      - run: python -m pip install --no-deps -e .\n"
-DEV_BLOCK = (
-    "      - run: |\n"
-    '          python -m pip freeze --exclude-editable > "$RUNNER_TEMP/runtime.txt"\n'
-    '          python -m pip install -c "$RUNNER_TEMP/runtime.txt" -e ".[dev]"\n'
+DEV_STEP = (
+    "      - run: python -m pip install --require-hashes -r requirements-dev.lock\n"
 )
+# What gives a step a secret or the job token.
+HOLDS_SECRET = re.compile(r"\$\{\{[^}]*\b(secrets|github\.token)\b")
 
 
 def _normalized(name: str) -> str:
@@ -78,56 +94,150 @@ def _commands(steps: list[dict[str, object]]) -> list[Command]:
     return out
 
 
-def ci_problems(text: str) -> list[str]:
-    """What keeps the CI of ``text`` from testing the locked runtime."""
-    problems: list[str] = []
-    jobs = {
-        name: steps
-        for name, steps in _steps(yaml.safe_load(text)).items()
-        if any(
-            str(step.get("uses", "")).startswith("actions/setup-python@")
-            for step in steps
+def _pip_installs(run: str) -> list[tuple[str, list[str]]]:
+    """Each ``pip install`` command line of a ``run`` text, continuation lines
+    joined, comments left out, with its tokens; other lines are not split."""
+    out: list[tuple[str, list[str]]] = []
+    for line in run.replace("\\\n", " ").splitlines():
+        if line.lstrip().startswith("#") or not re.search(r"\bpip\s+install\b", line):
+            continue
+        tokens = shlex.split(line)
+        if _has(tokens, "pip", "install"):
+            out.append((line.strip(), tokens))
+    return out
+
+
+def _file(tokens: list[str], flag: str, name: str) -> bool:
+    """``flag <path>`` in ``tokens`` where the path is the repository's ``name``
+    -- relative, or under ``$GITHUB_WORKSPACE``."""
+    return any(
+        tokens[i] == flag and tokens[i + 1] in (name, f"$GITHUB_WORKSPACE/{name}")
+        for i in range(len(tokens) - 1)
+    )
+
+
+def _install_kind(tokens: list[str]) -> str | None:
+    """Which of the four installs ``tokens`` is; None -- none of them."""
+    hashed = "--require-hashes" in tokens
+    if (
+        hashed
+        and "--no-index" in tokens
+        and (
+            _file(tokens, "--find-links", "wheels/")
+            or _file(tokens, "--find-links", "wheels")
         )
-    }
-    if not jobs:
-        return ["no job sets up Python"]
+        and _file(tokens, "-r", "requirements.lock")
+    ):
+        return "runtime"
+    if "--no-deps" in tokens and (
+        _has(tokens, "-e", ".") or _has(tokens, "-e", "$GITHUB_WORKSPACE")
+    ):
+        return "package"
+    if hashed and _file(tokens, "-r", "requirements-dev.lock"):
+        return "dev"
+    if hashed and _file(tokens, "-r", "requirements-build.lock"):
+        return "build"
+    return None
+
+
+def ci_problems(text: str) -> list[str]:
+    """What keeps the workflow ``text`` from installing only locked packages."""
+    problems: list[str] = []
+    jobs = _steps(yaml.safe_load(text))
+    installing = 0
     for name, steps in jobs.items():
-        runtime = package = freeze = dev = None
-        frozen: str | None = None
-        for index, tokens in _commands(steps):
-            if _has(tokens, "pip", "freeze", "--exclude-editable", ">"):
-                freeze, frozen = index, tokens[tokens.index(">") + 1]
+        found: dict[str, int] = {}
+        index = 0
+        for step in steps:
+            run = step.get("run")
+            if not isinstance(run, str):
                 continue
-            if not _has(tokens, "pip", "install"):
-                continue
-            if (
-                "--no-index" in tokens
-                and _has(tokens, "--find-links", "wheels/")
-                and "--require-hashes" in tokens
-                and _has(tokens, "-r", "requirements.lock")
-            ):
-                runtime = index
-            elif "--no-deps" in tokens and _has(tokens, "-e", "."):
-                package = index
-            elif _has(tokens, "-e", ".[dev]") and frozen and _has(tokens, "-c", frozen):
-                dev = index
-            else:
+            for line, tokens in _pip_installs(run):
+                index += 1
+                if "if" in step:
+                    problems.append(f"{name}: a conditional install: {line.strip()}")
+                kind = _install_kind(tokens)
+                if kind is None:
+                    problems.append(
+                        f"{name}: pip install outside the recipe: {shlex.join(tokens)}"
+                    )
+                else:
+                    found.setdefault(kind, index)
+        if found:
+            installing += 1
+        if "dev" in found:
+            if "runtime" not in found or "package" not in found:
                 problems.append(
-                    f"{name}: pip install outside the recipe: {shlex.join(tokens)}"
+                    f"{name}: dev tools without the runtime and the package"
                 )
-        order = [runtime, package, freeze, dev]
-        labels = [
-            "runtime from the lock",
-            "package",
-            "runtime freeze",
-            "constrained dev",
+            elif not found["runtime"] < found["package"] < found["dev"]:
+                problems.append(f"{name}: recipe steps out of order")
+    if not installing:
+        problems.append("no job installs packages")
+    return problems
+
+
+def secret_problems(text: str) -> list[str]:
+    """Steps that hold a secret or the job token before the last install of
+    their job: whatever the install brings would run beside it."""
+    problems: list[str] = []
+    for name, steps in _steps(yaml.safe_load(text)).items():
+        installs = [
+            i
+            for i, step in enumerate(steps)
+            if isinstance(step.get("run"), str) and _pip_installs(str(step["run"]))
         ]
-        for label, at in zip(labels, order, strict=True):
-            if at is None:
-                problems.append(f"{name}: no {label} step")
-        present = [at for at in order if at is not None]
-        if present != sorted(present):
-            problems.append(f"{name}: recipe steps out of order")
+        if not installs:
+            continue
+        for i, step in enumerate(steps[: max(installs) + 1]):
+            if HOLDS_SECRET.search(json.dumps(step)):
+                problems.append(f"{name}: step {i} holds a secret before an install")
+    return problems
+
+
+def _hashes_of(text: str) -> dict[str, tuple[str, set[str]]]:
+    return lock_entries(text)
+
+
+def dev_lock_problems(
+    pyproject: str, runtime_lock: str, dev_lock: str, wheels: Path
+) -> list[str]:
+    """What keeps ``requirements-dev.lock`` from pinning the dev tools of
+    ``pyproject.toml`` without moving the runtime."""
+    problems: list[str] = []
+    dev = _hashes_of(dev_lock)
+    for name, (_, hashes) in sorted(dev.items()):
+        if not hashes:
+            problems.append(f"{name}: no hash in the dev lock")
+    declared = tomllib.loads(pyproject)["project"]["optional-dependencies"]["dev"]
+    for requirement in declared:
+        name, _, wanted = requirement.partition("==")
+        key = _normalized(name)
+        if not wanted:
+            problems.append(f"{requirement}: a dev tool not pinned == in pyproject")
+        elif key not in dev:
+            problems.append(f"{key}: in pyproject, not in the dev lock")
+        elif dev[key][0] != wanted:
+            problems.append(
+                f"{key}: pyproject pins {wanted}, the dev lock {dev[key][0]}"
+            )
+    runtime = lock_entries(runtime_lock)
+    shipped = {
+        _normalized(wheel.name.split("-")[0]): hashlib.sha256(
+            wheel.read_bytes()
+        ).hexdigest()
+        for wheel in wheels.glob("*.whl")
+    }
+    for key, (locked, _) in sorted(runtime.items()):
+        if key not in dev:
+            problems.append(f"{key}: in requirements.lock, not in the dev lock")
+            continue
+        if dev[key][0] != locked:
+            problems.append(
+                f"{key}: the dev lock moves the runtime {locked} -> {dev[key][0]}"
+            )
+        if shipped.get(key) not in dev[key][1]:
+            problems.append(f"{key}: the wheel's sha256 is not in the dev lock")
     return problems
 
 
@@ -198,31 +308,120 @@ def runtime_problems(lock_text: str) -> list[str]:
 
 
 def test_probe_DM_41_ci_runs_on_locked_versions() -> None:
+    files = {f.name: f.read_text() for f in sorted(WORKFLOWS.glob("*.yml"))}
+    # the pair: all three workflows install packages, and each passes
+    assert sorted(files) == ["ci.yml", "release.yml", "tier3.yml"]
+    for name, workflow in files.items():
+        assert ci_problems(workflow) == [], name
     text = CI.read_text()
-    assert ci_problems(text) == []
     assert len(_steps(yaml.safe_load(text))) >= 3
 
     plants = {
         "no hashes": text.replace(" --require-hashes", "", 1),
         "index": text.replace(" --no-index", "", 1),
-        "dev unconstrained": text.replace(' -c "$RUNNER_TEMP/runtime.txt"', "", 1),
-        "dev first": text.replace(DEV_BLOCK, "", 1).replace(
-            RUNTIME_COMMENT, DEV_BLOCK + RUNTIME_COMMENT, 1
+        "dev from the index": text.replace(
+            DEV_STEP, '      - run: python -m pip install -e ".[dev]"\n', 1
         ),
-        "old recipe": re.sub(
-            r"      # Runtime exactly.*?runtime.txt\" -e \"\.\[dev\]\"\n",
-            '      - run: python -m pip install -e ".[dev]"\n',
-            text,
-            count=1,
-            flags=re.S,
+        "dev constrained, not hashed": text.replace(
+            DEV_STEP,
+            DEV_STEP.replace(
+                "--require-hashes -r requirements-dev.lock",
+                '-c "$RUNNER_TEMP/runtime.txt" -e ".[dev]"',
+            ),
+            1,
+        ),
+        "dev first": text.replace(DEV_STEP, "", 1).replace(
+            RUNTIME_COMMENT, DEV_STEP + RUNTIME_COMMENT, 1
         ),
         "package last": text.replace(PACKAGE_STEP, "", 1).replace(
-            DEV_BLOCK, DEV_BLOCK + PACKAGE_STEP, 1
+            DEV_STEP, DEV_STEP + PACKAGE_STEP, 1
+        ),
+        "a conditional install": text.replace(
+            DEV_STEP,
+            DEV_STEP.replace(
+                "      - run:", "      - if: github.ref == 'x'\n        run:"
+            ),
+            1,
         ),
     }
+    tier3 = files["tier3.yml"]
+    plants["tier3 dev from the index"] = tier3.replace(
+        '-m pip install --require-hashes -r "$GITHUB_WORKSPACE/requirements-dev.lock"',
+        '-m pip install -e "$GITHUB_WORKSPACE[dev]"',
+    )
+    plants["release build unhashed"] = files["release.yml"].replace(
+        "pip install --require-hashes -r requirements-build.lock",
+        "pip install flit_core",
+    )
     for label, planted in plants.items():
-        assert planted != text, label
+        assert planted not in files.values(), label
         assert ci_problems(planted), label
+
+
+def test_no_secret_before_the_last_install() -> None:
+    files = {f.name: f.read_text() for f in sorted(WORKFLOWS.glob("*.yml"))}
+    for name, workflow in files.items():
+        assert secret_problems(workflow) == [], name
+    tier3 = files["tier3.yml"]
+    assert HOLDS_SECRET.search(tier3)  # the pair: tier 3 has secrets to see
+    document = yaml.safe_load(tier3)
+    steps = document["jobs"]["box"]["steps"]
+    [venv] = [s for s in steps if str(s.get("name", "")).startswith("the probes' venv")]
+    [key] = [s for s in steps if str(s.get("name", "")).startswith("the deploy key")]
+    steps.remove(venv)
+    steps.insert(steps.index(key) + 1, venv)
+    planted = yaml.safe_dump(document, sort_keys=False)
+    assert secret_problems(planted) == ["box: step 4 holds a secret before an install"]
+
+
+def test_the_dev_lock_pins_the_dev_tools_and_the_runtime() -> None:
+    pyproject, runtime, dev = (
+        PYPROJECT.read_text(),
+        LOCK.read_text(),
+        DEV_LOCK.read_text(),
+    )
+    assert dev_lock_problems(pyproject, runtime, dev, WHEELS) == []
+    assert len(lock_entries(dev)) > len(lock_entries(runtime)) > 0
+    tools = lock_entries(TOOLS_LOCK.read_text())
+    assert "pip-tools" in tools
+    assert all(hashes for _, hashes in tools.values())
+
+    click = lock_entries(runtime)["click"][0]
+    pytest_pin = re.search(r'"pytest==([^"]+)"', pyproject)
+    assert pytest_pin is not None
+    [wheel] = WHEELS.glob("click-*.whl")
+    wheel_hash = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    plants = {
+        "runtime moved": (
+            pyproject,
+            dev.replace(f"click=={click} ", "click==0.0.1 ", 1),
+            "click: the dev lock moves the runtime",
+        ),
+        "wheel hash missing": (
+            pyproject,
+            dev.replace(f"--hash=sha256:{wheel_hash}", "--hash=sha256:" + "0" * 64, 1),
+            "click: the wheel's sha256 is not in the dev lock",
+        ),
+        "dev tool moved": (
+            pyproject.replace(f'"pytest=={pytest_pin.group(1)}"', '"pytest==0.0.1"', 1),
+            dev,
+            "pytest: pyproject pins 0.0.1",
+        ),
+        "dev tool unpinned": (
+            pyproject.replace(f'"pytest=={pytest_pin.group(1)}"', '"pytest"', 1),
+            dev,
+            "pytest: a dev tool not pinned == in pyproject",
+        ),
+        "a runtime package left out": (
+            pyproject,
+            re.sub(r"^click==.*?(?=^\S)", "", dev, count=1, flags=re.M | re.S),
+            "click: in requirements.lock, not in the dev lock",
+        ),
+    }
+    for label, (project, lock, words) in plants.items():
+        assert (project, lock) != (pyproject, dev), label
+        found = dev_lock_problems(project, runtime, lock, WHEELS)
+        assert any(words in problem for problem in found), (label, found)
 
 
 def test_probe_DM_41_ci_actions_pinned_by_sha() -> None:
@@ -253,6 +452,45 @@ def test_probe_DM_41_ci_actions_pinned_by_sha() -> None:
     ):
         assert planted != text
         assert len(unpinned(planted)[1]) == 1
+
+
+def checkout_problems(text: str) -> tuple[int, list[str]]:
+    """(number of ``actions/checkout``, those that keep the job token in
+    ``.git/config``: without ``persist-credentials: false``)."""
+    count, problems = 0, []
+    for name, steps in _steps(yaml.safe_load(text)).items():
+        for step in steps:
+            if not str(step.get("uses", "")).startswith("actions/checkout@"):
+                continue
+            count += 1
+            given = step.get("with")
+            if (
+                not isinstance(given, dict)
+                or given.get("persist-credentials") is not False
+            ):
+                problems.append(f"{name}: checkout keeps the job token")
+    return count, problems
+
+
+def test_no_checkout_keeps_the_job_token() -> None:
+    """DM-82: every checkout of every workflow leaves the token out of
+    ``.git/config``, where every later step could read it."""
+    total = 0
+    for file in sorted(WORKFLOWS.glob("*.yml")):
+        count, problems = checkout_problems(file.read_text())
+        assert problems == [], file.name
+        total += count
+    assert total == 7  # the pair: ci 4, release 2, tier3 1
+    text = CI.read_text()
+    flag = "          persist-credentials: false\n"
+    planted = {
+        "dropped": text.replace(flag, "", 1),
+        "true": text.replace(flag, "          persist-credentials: true\n", 1),
+        "a string": text.replace(flag, '          persist-credentials: "false"\n', 1),
+    }
+    for label, defect in planted.items():
+        assert defect != text, label
+        assert len(checkout_problems(defect)[1]) == 1, label
 
 
 def test_wheels_equal_the_lock(tmp_path: Path) -> None:

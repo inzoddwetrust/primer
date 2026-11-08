@@ -58,7 +58,7 @@ python3.12 -m venv .venv
 export PATH=<absolute path>/pridem/.venv/bin:$PATH
 pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
 pip install --no-deps -e .
-pip freeze --exclude-editable > /tmp/runtime.txt && pip install -c /tmp/runtime.txt -e ".[dev]"
+pip install --require-hashes -r requirements-dev.lock
 ruff check . && ruff format --check . && mypy . && pytest -q
 ```
 
@@ -69,10 +69,23 @@ Runtime dependencies are declared as ranges in `pyproject.toml`, pinned with
 hashes in `requirements.lock` and shipped as wheels in `wheels/`, because boxes
 have no access to PyPI. The recipe above installs the runtime exactly as a box
 gets it, then the package without dependencies, then the dev tools (pinned `==`
-in `pyproject.toml`) constrained to the installed runtime, so a tool that needs
-another runtime version fails instead of moving it. A test checks that the
-wheels in `wheels/` are exactly the lock's (name, version, sha256) and that the
-installed runtime has the lock's versions.
+in `pyproject.toml`) by `requirements-dev.lock`, with hashes. That lock is
+compiled with `requirements.lock` as its constraints, so it pins the runtime at
+the same versions and a tool that needs another runtime version cannot be
+locked. Tests check that the wheels in `wheels/` are exactly the lock's (name,
+version, sha256), that the installed runtime has the lock's versions, and that
+`requirements-dev.lock` has every dev pin of `pyproject.toml` and the runtime
+of `requirements.lock` with its wheels' hashes.
+
+The locks are compiled by pip-tools, itself installed by
+`requirements-tools.lock` with hashes, in a venv of its own:
+
+```
+python3.12 -m venv /tmp/locks
+/tmp/locks/bin/pip install --require-hashes -r requirements-tools.lock
+/tmp/locks/bin/pip-compile --extra dev --generate-hashes --strip-extras --no-emit-index-url -c requirements.lock --output-file requirements-dev.lock pyproject.toml
+echo "pip-tools==7.6.2" | /tmp/locks/bin/pip-compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url --output-file requirements-tools.lock -
+```
 
 CI runs on every push to `main` (`.github/workflows/ci.yml`, `ubuntu-24.04`,
 Python 3.12) as four jobs: `ruff` (lint and format check), `mypy` and `pytest`,

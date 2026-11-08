@@ -3,12 +3,25 @@
 The fence walks the AST of every ``*.py`` under ``pridem/`` and ``tests/`` and
 reports, with file and line, every way of starting a process it knows:
 
-- importing ``subprocess``, ``pty``, ``asyncio.subprocess`` or
-  ``_posixsubprocess`` in any form (``import``, ``import as``, ``from ... import``);
+- importing, in any form (``import``, ``import as``, ``from ... import``), a
+  module that exists to start processes or does it on its own: ``subprocess``,
+  ``pty``, ``asyncio.subprocess``, ``_posixsubprocess``; ``posix``, ``nt`` and
+  ``_winapi``, the modules under ``os``; ``venv`` and ``ensurepip`` (they run
+  pip), ``webbrowser`` (a browser), ``pipes`` (``os.popen``), ``platform``
+  (``uname().processor`` and ``architecture`` run ``uname`` and ``file``),
+  ``tkinter`` (Tcl's ``exec``) -- DM-82, from a census of the standard library
+  of Python 3.12;
 - referring to ``os.system``, ``os.popen``, ``os.spawn*``, ``os.exec*``,
   ``os.posix_spawn``, ``os.posix_spawnp``, ``os.fork``, ``os.forkpty``,
-  ``asyncio.create_subprocess_exec`` or ``asyncio.create_subprocess_shell``,
-  called or not, through the module name, an alias or ``from ... import``;
+  ``os.startfile``, ``asyncio.create_subprocess_exec`` or
+  ``asyncio.create_subprocess_shell``, and (DM-82) ``uuid.getnode``,
+  ``uuid.uuid1``, ``imaplib.IMAP4_stream``, ``pydoc.pager``, ``pydoc.pipepager``,
+  the forking servers of ``socketserver``, ``http.server.CGIHTTPRequestHandler``,
+  ``click.launch``, ``click.edit``, ``click.echo_via_pager`` (also through
+  ``click.termui``), called or not, through the module name, an alias, a dotted
+  path or ``from ... import``;
+- the attributes ``subprocess_exec`` and ``subprocess_shell`` of any object --
+  the event loop's methods, reached through an object, not a module (DM-82);
 - ``from os import *`` and ``from asyncio import *``, which hide what they bind;
 - dynamic access with a constant string: ``getattr(os, "system")``, and getting
   a module by name -- ``__import__``, ``builtins.__import__``,
@@ -47,9 +60,17 @@ KNOWN CEILING: a module whose names are forbidden, reached past a tracked name.
    (dispatcher answers to the DM-34 and DM-40 gates);
    ``multiprocessing`` and ``concurrent.futures.ProcessPoolExecutor`` are not
    fenced -- they start Python workers, not external commands (dispatcher
-   answer to the DM-5 gate); a runtime audit hook (``sys.addaudithook`` on
-   ``subprocess.Popen``/``os.system``) is rejected because it sees only the paths
-   a test run happens to execute, while the fence must cover the whole tree.
+   answer to the DM-5 gate, confirmed at the DM-82 gate); a runtime audit hook
+   (``sys.addaudithook`` on ``subprocess.Popen``/``os.system``) is rejected
+   because it sees only the paths a test run happens to execute, while the
+   fence must cover the whole tree.
+
+Left open on purpose (DM-82): ``ctypes`` (``ctypes.util.find_library`` runs a
+compiler) -- forbidden by the import-direction fence instead; ``mailcap`` --
+it finds commands and runs none; methods that start processes on an object
+the fence does not follow from a module -- a fixture or an instance, such as
+pytest's ``pytester.run``/``runpytest_subprocess`` -- except the two event-loop
+names above, closed by name.
 """
 
 import ast
@@ -63,16 +84,58 @@ SCANNED_DIRS = ("pridem", "tests", "tier3")  # tier3: DM-16
 ALLOWED_FILE = "pridem/runner.py"
 
 FORBIDDEN_MODULES = frozenset(
-    {"subprocess", "pty", "asyncio.subprocess", "_posixsubprocess"}
+    {
+        "subprocess",
+        "pty",
+        "asyncio.subprocess",
+        "_posixsubprocess",
+        # DM-82
+        "posix",
+        "nt",
+        "_winapi",
+        "venv",
+        "ensurepip",
+        "webbrowser",
+        "pipes",
+        "platform",
+        "tkinter",
+    }
 )
+_CLICK = frozenset({"launch", "edit", "echo_via_pager"})
 FORBIDDEN_NAMES = {
     "os": frozenset(
-        {"system", "popen", "posix_spawn", "posix_spawnp", "fork", "forkpty"}
+        {
+            "system",
+            "popen",
+            "posix_spawn",
+            "posix_spawnp",
+            "fork",
+            "forkpty",
+            "startfile",
+        }
     ),
     "asyncio": frozenset(
         {"create_subprocess_exec", "create_subprocess_shell", "subprocess"}
     ),
+    # DM-82
+    "uuid": frozenset({"getnode", "uuid1"}),
+    "imaplib": frozenset({"IMAP4_stream"}),
+    "pydoc": frozenset({"pager", "pipepager"}),
+    "socketserver": frozenset(
+        {
+            "ForkingMixIn",
+            "ForkingTCPServer",
+            "ForkingUDPServer",
+            "ForkingUnixStreamServer",
+            "ForkingUnixDatagramServer",
+        }
+    ),
+    "http.server": frozenset({"CGIHTTPRequestHandler"}),
+    "click": _CLICK,
+    "click.termui": _CLICK,
 }
+# Methods that start a process, on any object (DM-82): the event loop's.
+FORBIDDEN_ATTRIBUTES = frozenset({"subprocess_exec", "subprocess_shell"})
 FORBIDDEN_PREFIXES = {"os": ("spawn", "exec")}
 MODULE_GETTERS = frozenset(
     {"builtins.__import__", "importlib.__import__", "importlib.import_module"}
@@ -164,11 +227,26 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if isinstance(node.value, ast.Name):
-            module = self.modules.get(node.value.id)
-            if module is not None and _forbidden_name(module, node.attr):
-                self._hit(node, f"{module}.{node.attr}")
+        module = self._module_of(node.value)
+        if module is not None and _forbidden_name(module, node.attr):
+            self._hit(node, f"{module}.{node.attr}")
+        elif node.attr in FORBIDDEN_ATTRIBUTES:
+            self._hit(node, f".{node.attr}")
         self.generic_visit(node)
+
+    def _module_of(self, node: ast.expr) -> str | None:
+        """The module ``node`` names: a name bound by ``import`` (or bound by
+        ``from ... import`` to a module the fence knows), or a dotted path of
+        one -- ``http.server``."""
+        if isinstance(node, ast.Name):
+            if node.id in self.modules:
+                return self.modules[node.id]
+            bound = self.bound.get(node.id)
+            return bound if bound in FORBIDDEN_NAMES else None
+        if isinstance(node, ast.Attribute):
+            head = self._module_of(node.value)
+            return None if head is None else f"{head}.{node.attr}"
+        return None
 
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
@@ -275,6 +353,41 @@ FORMS = [
     ("from importlib import import_module\nimport_module('pty')\n", 2),
     ("import os\ngetattr(os, 'system')('x')\n", 2),
     ("import sys\nsys.modules['subprocess']\n", 2),
+    # DM-82: the modules under os, and modules that start processes
+    ("import posix\n", 1),
+    ("from posix import system\n", 1),
+    ("import nt\n", 1),
+    ("import _winapi\n", 1),
+    ("import venv\n", 1),
+    ("from venv import create\n", 1),
+    ("import ensurepip\n", 1),
+    ("import webbrowser as wb\n", 1),
+    ("from webbrowser import open\n", 1),
+    ("import pipes\n", 1),
+    ("import platform\n", 1),
+    ("from platform import uname\n", 1),
+    ("import tkinter\n", 1),
+    ("__import__('posix')\n", 1),
+    ("import importlib\nimportlib.import_module('webbrowser')\n", 2),
+    # DM-82: names that start processes
+    ("import os\nos.startfile('x')\n", 2),
+    ("import uuid\nuuid.getnode()\n", 2),
+    ("from uuid import uuid1\n", 1),
+    ("import imaplib\nimaplib.IMAP4_stream('x')\n", 2),
+    ("import pydoc\npydoc.pager('x')\n", 2),
+    ("from pydoc import pipepager\n", 1),
+    ("import socketserver\nsocketserver.ForkingTCPServer\n", 2),
+    ("from socketserver import ForkingMixIn\n", 1),
+    ("import http.server\nhttp.server.CGIHTTPRequestHandler\n", 2),
+    ("from http.server import CGIHTTPRequestHandler\n", 1),
+    ("from http import server\nserver.CGIHTTPRequestHandler\n", 2),
+    ("import click\nclick.launch('x')\n", 2),
+    ("import click\nclick.edit('x')\n", 2),
+    ("import click as c\nc.echo_via_pager('x')\n", 2),
+    ("from click import termui\ntermui.launch('x')\n", 2),
+    ("from click.termui import edit\n", 1),
+    ("import asyncio\nloop = asyncio.new_event_loop()\nloop.subprocess_exec\n", 3),
+    ("def f(loop):\n    return loop.subprocess_shell('x')\n", 2),
 ]
 
 
@@ -295,6 +408,15 @@ CLEAN = [
     "import sys\nsys.modules['json']\n",
     "text = 'import subprocess; os.system(1)'\n",
     "from pridem.runner import SubprocessRunner\n",
+    # DM-82: the harmless neighbours of the new names
+    "import uuid\nuuid.uuid4()\n",
+    "import click\nclick.echo('x')\n",
+    "from click import echo, termui\n",
+    "import http.server\nhttp.server.HTTPServer\n",
+    "import socketserver\nsocketserver.TCPServer\n",
+    "import pydoc\npydoc.render_doc\n",
+    "import os\nos.path.join('a')\n",
+    "loop = None\nsubprocess_exec = 1\n",
 ]
 
 

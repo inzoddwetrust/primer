@@ -203,7 +203,11 @@ def test_tier3_steps_read_the_repository_only_after_checkout() -> None:
     text = TIER3.read_text()
     assert workflow_problems(text) == []
     assert "$GITHUB_WORKSPACE/requirements-build.lock" in text  # the check sees reads
-    found = re.search(r"      - uses: actions/checkout@.*\n        with:\n.*\n", text)
+    # the checkout with every line of its ``with:`` -- two since DM-82
+    # (``persist-credentials: false``); one line left behind breaks the YAML
+    found = re.search(
+        r"      - uses: actions/checkout@.*\n        with:\n(?:          .*\n)+", text
+    )
     assert found is not None
     checkout = found.group(0)
     late = text.replace(checkout, "").replace(

@@ -8,6 +8,10 @@ DM-45: the signal sets the flag of the command's ``Interrupt`` (installed as
 middle of the command and the plan returns its outcome instead of raising. The
 statement of DM-53 holds as before, and is now measured: the sleeping command
 is gone, long before its 60 seconds.
+
+DM-82: the child writes each file it reports (its pid, the sleeper's) whole,
+by a rename, so a file that exists has its number; each wait ends with an
+assertion that names what did not come.
 """
 
 import json
@@ -43,9 +47,11 @@ class Sleep(Step):
         return CheckResult(True, local_code("do"))
 
     def act(self, ctx, check):
-        (here / "pid").write_text(str(os.getpid()))
+        (here / "pid.tmp").write_text(str(os.getpid()))
+        (here / "pid.tmp").rename(here / "pid")
+        sleeper, partial = here / "sleeper", here / "sleeper.tmp"
         ctx.runner.run(
-            ["sh", "-c", f"echo $$ > {here / 'sleeper'}; exec sleep 60"],
+            ["sh", "-c", f"echo $$ > {partial}; mv {partial} {sleeper}; exec sleep 60"],
             timeout=120,
             on_line=ctx.on_line,
         )
@@ -108,6 +114,7 @@ def test_sigterm_runs_finally_and_keeps_the_outcome(tmp_path: Path) -> None:
     sleeper_file = tmp_path / "sleeper"
     while not sleeper_file.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
+    assert sleeper_file.exists(), lines
     time.sleep(0.3)  # the sleep command has started
     sleeper = int(sleeper_file.read_text())
     os.kill(sleeper, 0)  # the pair: it runs before the signal

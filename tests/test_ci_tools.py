@@ -5,8 +5,9 @@ for the wrong reason, or -- worse -- a later edit makes the tests skip. A job
 has the tools when, before its ``pytest`` line, it either runs ``install.sh``
 (tier 3: the box's own bootstrap) or installs ``age`` with apt and ``sops`` by
 the version and sha256 it reads from ``install.sh`` -- one copy of the pin --
-checked by ``sha256sum -c``. Each check is a function of the workflow text, so
-each planted defect sits next to the tree it must pass.
+checked by ``sha256sum -c``. A step with ``if:`` gives the job nothing: it may
+not run (DM-82). Each check is a function of the workflow text, so each
+planted defect sits next to the tree it must pass.
 """
 
 import re
@@ -50,7 +51,8 @@ def tool_problems(text: str) -> list[str]:
                 )
                 if not (bootstrap or pinned):
                     problems.append(f"{name}: pytest without age and sops by the pin")
-            seen += lines
+            if "if" not in step:
+                seen += lines
     return problems
 
 
@@ -94,6 +96,11 @@ def test_planted_defects_are_caught() -> None:
         ),
         "no age": ci.replace("install -y age", "install -y git"),
         "after pytest": _tools_last(ci),
+        "conditional": ci.replace(
+            "      - name: age and sops at the pin of install.sh\n",
+            "      - name: age and sops at the pin of install.sh\n"
+            "        if: github.ref == 'refs/heads/x'\n",
+        ),
     }
     for label, text in planted.items():
         assert text != ci, label
