@@ -168,6 +168,25 @@ def test_a_run_id_taken_in_history_is_drawn_again(
         box.new_run_id(NOW)
 
 
+def test_a_run_id_taken_in_journal_is_drawn_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DM-77 FIX: the other half of the condition -- a journal under the first
+    token, no verdict yet (a run that broke off): the next draw is free. The
+    pair: taken in both, every draw -- ``RunIdTaken``."""
+    box = Box(tmp_path)
+    box.journals.mkdir(parents=True)
+    box.history.mkdir(parents=True)
+    tokens = iter(["c0de", "d00d"])
+    monkeypatch.setattr("pridem.state.token.token_hex", lambda n: next(tokens))
+    (box.journals / "2026-11-08T12:00:00Z-c0de.jsonl").write_text("{}\n")
+    assert box.new_run_id(NOW) == "2026-11-08T12:00:00Z-d00d"
+    (box.history / "2026-11-08T12:00:00Z-c0de.json").write_text("{}")
+    monkeypatch.setattr("pridem.state.token.token_hex", lambda n: "c0de")
+    with pytest.raises(RunIdTaken):
+        box.new_run_id(NOW)
+
+
 # --- pridem check: the manifest ---------------------------------------------------
 
 
