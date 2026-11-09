@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
-from pridem.files import atomic_write
+from pridem.files import atomic_write, commit_set, private_dir, temp_of
 from pridem.runner import Stream
 from pridem.steps.base import (
     CheckResult,
@@ -160,7 +160,7 @@ def ssh_config_differs(root: Path, repos: Sequence[Repo]) -> list[Path]:
 
 def write_ssh_config(root: Path, repos: Sequence[Repo]) -> None:
     """Write the files of ``drawn_ssh_config`` (0600) that are not as drawn."""
-    (root / KEYS).mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_dir(root / KEYS)
     drawn = drawn_ssh_config(root, repos)
     for path in ssh_config_differs(root, repos):
         atomic_write(path, drawn[path], 0o600)
@@ -233,13 +233,7 @@ class DeployKey(Step):
         if self._key.exists() and has_access(ctx, self.root, self.repo):
             return  # only the files were not as drawn
         if not self._key.exists():
-            self._key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            comment = f"pridem {self.repo.alias}"
-            argv = ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment]
-            ctx.runner.run(
-                [*argv, "-f", str(self._key)], timeout=60, on_line=ctx.on_line
-            )
-            self._key.chmod(0o600)
+            self._mint(ctx)
         ctx.on_line(Stream.STDOUT, f"deploy key for {self.repo.address}:", False)
         ctx.on_line(Stream.STDOUT, self._public(), False)
         deadline = self.clock() + self.wait_s
@@ -256,6 +250,28 @@ class DeployKey(Step):
             ctx.interrupt.check()  # a signal ends the wait (DM-45)
             self.sleep(self.poll_s)
             ctx.interrupt.check()
+
+    def _mint(self, ctx: StepContext) -> None:
+        """A new pair as one change (DM-80): ``ssh-keygen`` writes both parts
+        into temporary files, the public part is renamed first and the private
+        part last -- a key in place always has its ``.pub``, and a crash leaves
+        no key, so the next run mints again."""
+        private_dir(self._key.parent)
+        temp = temp_of(self._key)
+        public = self._key.with_name(self._key.name + ".pub")
+        temp_public = temp.with_name(temp.name + ".pub")
+        temp.unlink(missing_ok=True)  # left by a run that died
+        temp_public.unlink(missing_ok=True)
+        comment = f"pridem {self.repo.alias}"
+        argv = ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment]
+        try:
+            ctx.runner.run([*argv, "-f", str(temp)], timeout=60, on_line=ctx.on_line)
+            temp.chmod(0o600)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            temp_public.unlink(missing_ok=True)
+            raise
+        commit_set([(temp_public, public), (temp, self._key)])
 
     def _public(self) -> str:
         path = self._key.with_name(self._key.name + ".pub")

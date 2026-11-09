@@ -211,15 +211,35 @@ def test_probe_DM_25_installs_with_pypi_blocked(tmp_path: Path) -> None:
     )
 
 
+def _options(call: list[str]) -> list[str]:
+    """The values of every ``-o`` of an ``apt-get`` call."""
+    return [call[i + 1] for i, word in enumerate(call[:-1]) if word == "-o"]
+
+
+def _operands(call: list[str]) -> list[str]:
+    """The words of an ``apt-get`` call that are neither ``-o`` nor its value."""
+    skip = {i + 1 for i, word in enumerate(call[:-1]) if word == "-o"}
+    return [w for i, w in enumerate(call[1:], 1) if w != "-o" and i not in skip]
+
+
 def test_probe_DM_25_apt_called_with_lock_timeout(tmp_path: Path) -> None:
+    """Both apt calls wait for the dpkg lock and retry what they fetch; the
+    second installs the five packages, asking nothing.
+
+    Retries of apt's downloads are the class F10 of DM-80 (by the dispatcher's
+    word): the options are found by their content, not by their place, so the
+    next option does not break this probe again."""
     box = _clean(tmp_path)
     apts = [call for call in box.calls() if call[0] == "apt-get"]
     assert len(apts) == 2
     for call in apts:
-        assert call[1:3] == ["-o", "DPkg::Lock::Timeout=600"], call
-    install = apts[1]
-    assert install[3:5] == ["install", "-y"]
-    assert set(install[5:]) == {"python3", "python3-venv", "git", "curl", "age"}
+        assert "DPkg::Lock::Timeout=600" in _options(call), call
+        assert "Acquire::Retries=5" in _options(call), call
+    update, install = (_operands(call) for call in apts)
+    assert update == ["update"]
+    assert install[:2] == ["install", "-y"]
+    assert set(install[2:]) == {"python3", "python3-venv", "git", "curl", "age"}
+    assert len(install[2:]) == 5
 
 
 def test_apt_get_alone_asks_nothing(tmp_path: Path) -> None:

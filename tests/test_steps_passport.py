@@ -11,6 +11,7 @@ command at all.
 
 import io
 import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from itertools import count
@@ -483,6 +484,31 @@ def test_age_key_is_minted_once_and_its_public_part_printed(tmp_path: Path) -> N
     assert fact(outcome, "age_key")["public_key"] == public
     assert key.read_bytes() == first and not recording.has("-o")
     assert "age key of this box:" not in printed(sink)  # nothing to add again
+
+
+def test_age_key_bytes_are_fsynced_before_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DM-80: what ``age-keygen`` wrote is fsynced before the rename gives it
+    its name, and the directory after it -- a power loss keeps no empty key."""
+    order: list[str] = []
+    fsync, replace = os.fsync, os.replace
+
+    def watch_fsync(fd: int) -> None:
+        order.append("fsync dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync")
+        fsync(fd)
+
+    def watch_replace(src: object, dst: object) -> None:
+        order.append(f"replace {Path(str(dst)).name}")
+        replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "fsync", watch_fsync)
+    monkeypatch.setattr(os, "replace", watch_replace)
+    root = tmp_path / "box"
+    outcome, _ = run([AgeKey(root)], Recording())
+    assert fact(outcome, "age_key")["key_mode"] == oct(0o600)
+    at = order.index(f"replace {AGE_KEY.name}")
+    assert order[at - 1 : at + 2] == ["fsync", f"replace {AGE_KEY.name}", "fsync dir"]
 
 
 def test_age_key_that_is_not_a_key_is_red(tmp_path: Path) -> None:
@@ -1166,3 +1192,13 @@ def test_a_label_is_a_server_name(tmp_path: Path, server: str) -> None:
 
 def test_fetch_passport_declares_the_code_of_a_remote_commit() -> None:
     assert "not-a-commit" in FetchPassport.codes
+
+
+def test_age_key_directory_found_wider_is_made_0700(tmp_path: Path) -> None:
+    """DM-80: ``keys/`` of the age key is 0700 whatever it was found as."""
+    root = tmp_path / "box"
+    (root / AGE_KEY).parent.mkdir(parents=True)
+    (root / AGE_KEY).parent.chmod(0o755)
+    outcome, _ = run([AgeKey(root)], Recording())
+    assert fact(outcome, "age_key")["key_mode"] == oct(0o600)
+    assert mode_of((root / AGE_KEY).parent) == oct(0o700)

@@ -25,7 +25,9 @@ from pridem.steps.base import (
     StepContext,
     StepFailed,
     Verified,
+    Waiting,
     local_code,
+    wait_until,
 )
 from pridem.steps.compose import out
 from pridem.steps.passport import NO_PASSPORT, Fetched
@@ -33,6 +35,9 @@ from pridem.steps.ssl import reload_nginx
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 CURL_TIMEOUT_S = 15
+READY = Waiting(deadline_s=60, poll_s=2)
+"""How long ``verify`` asks the front again after the reload: nginx answers at
+once, the front's container may still be starting (DM-80)."""
 
 
 class Frontend(Step):
@@ -49,11 +54,17 @@ class Frontend(Step):
     }
 
     def __init__(
-        self, product: Product, *, fetched: Fetched, root: Path = Path("/")
+        self,
+        product: Product,
+        *,
+        fetched: Fetched,
+        root: Path = Path("/"),
+        waiting: Waiting = READY,
     ) -> None:
         self.product = product
         self.fetched = fetched
         self.root = root
+        self.waiting = waiting
 
     def _domain(self) -> str | None:
         passport = self.fetched.passport
@@ -114,8 +125,13 @@ class Frontend(Step):
         domain = self._domain()
         if domain is None:
             return Verified({"frontend": "none"})
-        status = self._status(ctx, domain)
-        if status != "200":
-            raise StepFailed("not-200", {"domain": domain, "status": status})
+        seen: list[str] = []
+
+        def answers() -> bool:
+            seen[:] = [self._status(ctx, domain)]
+            return seen[0] == "200"
+
+        if not wait_until(ctx, answers, self.waiting):
+            raise StepFailed("not-200", {"domain": domain, "status": seen[0]})
         result: dict[str, Json] = {"domain": domain, "status": 200}
         return Verified(result)

@@ -44,6 +44,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import SecretStr
 
 from pridem.events import Json, Secrets
+from pridem.files import private_dir
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
     CheckResult,
@@ -348,7 +349,7 @@ class Tests(Step):
             context = built
             if "pridem.edition" in key:
                 edition = ["--build-arg", f"PRIMER_EDITION={key['pridem.edition']}"]
-        self._home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_dir(self._home)
         iidfile = self._home / "image.id"
         iidfile.unlink(missing_ok=True)
         labels = {**self.compose.release_labels(), "pridem.service": f"{self.app}-test"}

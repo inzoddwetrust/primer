@@ -14,16 +14,28 @@ directory is fsynced, so the new name survives a power loss. On any failure
 rename: the body of its ``with`` gets the temporary file and refuses it by
 raising, so a file is checked from the very bytes that become ``path``.
 
+``write_set`` puts several files in place as one change: each is staged as
+above, all are fsynced, then renamed in the caller's order with the directory
+fsynced after each rename. ``commit_set`` does the same for temporary files a
+command wrote (``openssl``, ``ssh-keygen``, ``age-keygen``): each is fsynced,
+then renamed in order. A reader sees the old set or the new one, except
+between two renames -- a crash there leaves the set torn, which is why the
+order is the caller's (a key before its certificate, a public part before its
+private key) and the caller's ``check`` must recognise a torn set (DM-80).
+
+``private_dir`` makes a directory 0700, an existing one included: ``mkdir``
+with ``exist_ok`` leaves an existing directory's mode as it is (DM-80).
+
 The temporary name is fixed, so a writer that died leaves one file at most:
 it is removed before the next write, and ``O_EXCL`` refuses whatever appears
 at that name in between -- a planted symlink is never written through. That
 rests on one writer per path, which the box lock gives: every write of the
-machine runs under it (par0 8). The directory is the caller's and is never
-created here, so its mode stays the caller's choice.
+machine runs under it (par0 8). A write never creates its directory: the
+directory's mode is the caller's choice (``private_dir`` for a private one).
 """
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -106,3 +118,67 @@ def resolve_inside(root: Path, rel: str | Path) -> Path:
         if target.is_symlink():
             raise PathOutside("a symlink in the path")
     return target
+
+
+def _fsync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def commit_set(pairs: Sequence[tuple[Path, Path]]) -> None:
+    """Each ``(temporary, final)`` of ``pairs``: every temporary file fsynced
+    first, then renamed over its final name in the given order, the directory
+    fsynced after each rename. On a failure the temporary files left are
+    removed; the finals already renamed stay -- the caller's order decides
+    which partial set a crash can leave."""
+    if not pairs:
+        raise ValueError("commit_set: no files")
+    try:
+        for temp, _ in pairs:
+            _fsync_file(temp)
+        for temp, final in pairs:
+            os.replace(temp, final)
+            fsync_dir(final.parent)
+    finally:
+        for temp, _ in pairs:
+            temp.unlink(missing_ok=True)
+
+
+def write_set(items: Sequence[tuple[Path, bytes | str, int]]) -> None:
+    """Each ``(path, data, mode)`` of ``items`` staged in its temporary file
+    (as ``staged_write``), then all renamed in the given order by
+    ``commit_set``: the files of one change, written as one."""
+    if not items:
+        raise ValueError("write_set: no files")
+    pairs: list[tuple[Path, Path]] = []
+    try:
+        for path, data, mode in items:
+            raw = data.encode("utf-8") if isinstance(data, str) else data
+            temp = temp_of(path)
+            temp.unlink(missing_ok=True)  # left by a writer that died
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            pairs.append((temp, path))
+            try:
+                os.fchmod(fd, mode)
+                view = memoryview(raw)
+                while view:
+                    view = view[os.write(fd, view) :]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    except BaseException:
+        for temp, _ in pairs:
+            temp.unlink(missing_ok=True)
+        raise
+    commit_set(pairs)
+
+
+def private_dir(path: Path) -> None:
+    """``path`` a directory of mode 0700: made with its parents when missing,
+    set to 0700 when it exists with another mode."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.stat().st_mode & 0o777 != 0o700:
+        path.chmod(0o700)

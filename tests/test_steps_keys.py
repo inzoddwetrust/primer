@@ -6,6 +6,7 @@ the machine's ``ssh_config`` and its copy of GitHub's host keys (DM-52).
 
 import base64
 import hashlib
+import os
 import stat
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -16,10 +17,13 @@ import pytest
 from plan_support import ListSink
 
 from pridem.events import PlanOutcome
+from pridem.files import temp_of
+from pridem.interrupt import Interrupt
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result
 from pridem.steps import keys as keys_module
+from pridem.steps.base import StepContext
 from pridem.steps.git import KEYS, collisions, git_env, repo
 from pridem.steps.keys import (
     GITHUB_HOST_KEYS,
@@ -90,7 +94,9 @@ def run(
 
 
 def keygen(root: Path) -> FakeCall:
-    key = root / KEYS / repo(ADDRESS).alias
+    """``ssh-keygen`` into the key's temporary file: the pair is renamed into
+    place by the machine, the public part first (DM-80)."""
+    key = temp_of(root / KEYS / repo(ADDRESS).alias)
     argv = (
         "ssh-keygen",
         "-q",
@@ -423,3 +429,49 @@ def test_a_block_is_drawn_again_and_the_others_are_kept(tmp_path: Path) -> None:
     write_ssh_config(tmp_path, [other, repo("ssh://deploy@host/a/b.git")])
     assert (config.stat().st_ino, config.stat().st_mtime_ns) == (inode, mtime)
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
+
+
+# --- DM-80: the pair of a deploy key is one change -----------------------------
+
+
+def test_the_public_part_is_in_place_before_the_private_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ssh-keygen`` writes into temporary files; the public part is renamed
+    first, the private part last. A crash between the two leaves no key -- so
+    the next run mints again -- and never a key without its ``.pub``."""
+    key = tmp_path / KEYS / repo(ADDRESS).alias
+    public = key.with_name(key.name + ".pub")
+    real = os.replace
+
+    def crash_at_the_key(src: object, dst: object) -> None:
+        if Path(str(dst)) == key:
+            raise OSError("power gone")
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", crash_at_the_key)
+    step = DeployKey(ADDRESS, tmp_path)
+    with _KeygenRunner(keygen(tmp_path)) as runner:
+        ctx = StepContext(runner, "install", "test", "x", lambda *_: None, Interrupt())
+        with pytest.raises(OSError, match="power gone"):
+            step._mint(ctx)
+    assert public.read_text() == PUBLIC + "\n"
+    assert not key.exists()
+    assert not [p for p in key.parent.iterdir() if p.name.endswith(".tmp")]
+    assert not [p for p in key.parent.iterdir() if p.name.endswith(".tmp.pub")]
+    # the pair: without the crash both parts are in place, the key 0600
+    monkeypatch.setattr(os, "replace", real)
+    with _KeygenRunner(keygen(tmp_path)) as runner:
+        ctx = StepContext(runner, "install", "test", "x", lambda *_: None, Interrupt())
+        step._mint(ctx)
+    assert key.read_text() == PRIVATE
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600
+
+
+def test_a_keys_directory_found_wider_is_made_0700(tmp_path: Path) -> None:
+    """DM-80: the machine's ``keys/`` is 0700 whatever it was found as."""
+    keys = tmp_path / KEYS
+    keys.mkdir(parents=True)
+    keys.chmod(0o755)
+    write_ssh_config(tmp_path, [repo(ADDRESS)])
+    assert stat.S_IMODE(keys.stat().st_mode) == 0o700

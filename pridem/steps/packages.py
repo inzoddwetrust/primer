@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
-from pridem.files import PathOutside, resolve_inside
+from pridem.files import PathOutside, private_dir, resolve_inside
 from pridem.stacks.passport import Package, Passport
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
@@ -220,7 +220,7 @@ def write_context(source: Path, target: Path, places: Collection[PackagePlace]) 
     temp = target.with_name(target.name + ".tmp")
     if temp.exists():  # left by a run that died
         shutil.rmtree(temp)
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_dir(target.parent)
     shutil.copytree(source, temp, symlinks=True, ignore=_ignore_git)
     for place in places:
         inside = temp / place.path

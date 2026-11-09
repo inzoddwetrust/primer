@@ -373,6 +373,10 @@ BROKEN_RECORDS = [
     (b"\xff\xfe", "not UTF-8"),
     (b'{"timers": ["apt-daily.timer"]}', "not a list"),
     (b'["apt-daily.timer", 7]', "not a list of strings"),
+    # DM-80: restore_timers starts what the record names -- only the timers
+    # wait_host_quiet pauses
+    (b'["apt-daily.timer", "evil.timer"]', "not a timer it pauses: evil.timer"),
+    (b'["apt-daily.service"]', "not a timer it pauses: apt-daily.service"),
 ]
 
 
@@ -788,3 +792,113 @@ def test_install_restarts_docker_and_a_daemon_still_not_local_is_red(
             assert step.reason == Code(
                 "daemon_json:log-driver-wrong", {"found": "json-file"}
             )
+
+
+# --- DM-80: a oneshot at work, a unit that is not there, cloud-init's 2 --------
+
+
+def state(unit: str, printed: str) -> FakeCall:
+    """``systemctl is-active``: 0 for ``active``/``reloading``, 3 for any other
+    state, 4 for no such unit (systemd 255)."""
+    code = 0 if printed in ("active", "reloading") else 4 if printed == "" else 3
+    return call(
+        "systemctl", "is-active", unit, code=code, lines=(printed,) * bool(printed)
+    )
+
+
+@pytest.mark.parametrize(
+    "printed", ["activating", "deactivating", "refreshing", "active", "reloading"]
+)
+def test_a_service_at_work_is_waited_for(tmp_path: Path, printed: str) -> None:
+    """``apt-daily.service`` is ``activating`` all the while the oneshot runs:
+    it is waited for like an active one, then the host is quiet."""
+    root = box(tmp_path)
+    quiet_timers = [active(u, False) for u in APT_TIMERS]
+    check = [
+        *quiet_timers,
+        state("apt-daily.service", printed),
+        active("apt-daily-upgrade.service", False),
+    ]
+    act = [dpkg("cloud-init", False)]
+    act += [
+        state("apt-daily.service", printed),
+        active("apt-daily-upgrade.service", False),
+    ]
+    act += [active(u, False) for u in APT_SERVICES]  # the second look: done
+    verify = [active(u, False) for u in APT_SERVICES]
+    sleeps: list[float] = []
+    step = WaitHostQuiet(
+        root, timeout_s=100, poll_s=5, clock=lambda: 0.0, sleep=sleeps.append
+    )
+    outcome = run([step], [*check, *act, *verify])
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert sleeps == [5]
+
+
+@pytest.mark.parametrize("printed", ["inactive", "failed", ""])
+def test_a_service_at_rest_or_missing_is_not_waited_for(
+    tmp_path: Path, printed: str
+) -> None:
+    """``inactive``, ``failed`` and a unit that is not there (code 4) are not
+    at work: nothing to wait for, and code 4 is no exception."""
+    root = box(tmp_path)
+    looks = [active(u, False) for u in APT_TIMERS]
+    looks += [
+        state("apt-daily.service", printed),
+        active("apt-daily-upgrade.service", False),
+    ]
+    verify = [
+        state("apt-daily.service", printed),
+        active("apt-daily-upgrade.service", False),
+    ]
+    outcome = run([WaitHostQuiet(root)], [*looks, *verify])
+    assert outcome.code is ExitCode.OK, outcome.steps
+
+
+def _cloud_init(root: Path, code: int) -> PlanOutcome:
+    busy = [active("apt-daily.timer", True), active("apt-daily-upgrade.timer", False)]
+    busy += [active(u, False) for u in APT_SERVICES]
+    act = [
+        dpkg("cloud-init"),
+        call("cloud-init", "status", "--wait", code=code),
+        call("systemctl", "stop", "apt-daily.timer"),
+        *[active(u, False) for u in APT_SERVICES],
+    ]
+    verify = [
+        active("apt-daily.timer", False),
+        *[active(u, False) for u in APT_SERVICES],
+    ]
+    if code == 1:  # refused at cloud-init: no timer stopped, nothing recorded
+        return run([WaitHostQuiet(root)], [*busy, *act[:2]])
+    return run([WaitHostQuiet(root)], [*busy, *act, *verify])
+
+
+def test_cloud_init_done_or_degraded_goes_on_and_failed_is_red(tmp_path: Path) -> None:
+    """cloud-init 26.2 of Ubuntu 24.04: 0 -- done; 2 -- a recoverable error, the
+    box works; 1 -- a hard error, red as the command's failure."""
+    for code in (0, 2):
+        outcome = _cloud_init(box(tmp_path / str(code)), code)
+        assert outcome.code is ExitCode.OK, (code, outcome.steps)
+    outcome = _cloud_init(box(tmp_path / "1"), 1)
+    reason = outcome.steps[0].reason
+    assert reason is not None and reason.code == "command-failed", outcome.steps
+    assert reason.params["exit_code"] == 1
+    assert not (tmp_path / "1" / PAUSED).exists()
+
+
+def test_the_record_directory_found_wider_is_made_0700(tmp_path: Path) -> None:
+    """DM-80: the directory of ``paused-timers.json`` is 0700 whatever it was."""
+    root = box(tmp_path)
+    (root / PAUSED).parent.mkdir(parents=True)
+    (root / PAUSED).parent.chmod(0o755)
+    check = [active("apt-daily.timer", True), active("apt-daily-upgrade.timer", False)]
+    check += [active(u, False) for u in APT_SERVICES]
+    act = [dpkg("cloud-init", False), call("systemctl", "stop", "apt-daily.timer")]
+    act += [active(u, False) for u in APT_SERVICES]
+    verify = [
+        active("apt-daily.timer", False),
+        *[active(u, False) for u in APT_SERVICES],
+    ]
+    outcome = run([WaitHostQuiet(root)], [*check, *act, *verify])
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert oct((root / PAUSED).parent.stat().st_mode & 0o777) == oct(0o700)

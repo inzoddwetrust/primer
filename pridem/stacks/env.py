@@ -38,7 +38,7 @@ from pathlib import Path
 import yaml
 
 from pridem.events import Json
-from pridem.files import atomic_write
+from pridem.files import atomic_write, private_dir
 from pridem.stacks.loader import ContractError, load_yaml_mapping
 from pridem.stacks.options import FLAG, LITERAL, flag, off_keys, switched_on
 from pridem.stacks.passport import Passport
@@ -102,7 +102,7 @@ def mode_of(path: Path) -> str:
 
 def write_private(path: Path, text: str) -> None:
     """``text`` to ``path`` (0600, directory 0700) by ``atomic_write``."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_dir(path.parent)
     atomic_write(path, text, 0o600)
 
 

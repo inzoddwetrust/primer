@@ -757,3 +757,12 @@ def test_derive_env_gives_the_provides_their_derived_value(tmp_path: Path) -> No
         outcome, _ = run([second], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert first.provided() == {"TELEGRAM_BOT_URL": DERIVED}
+
+
+def test_an_env_directory_found_wider_is_made_0700(tmp_path: Path) -> None:
+    """DM-80: the directory of a stack's ``.env`` is 0700 whatever it was."""
+    path = tmp_path / "opt" / "comms" / "env" / ".env"
+    path.parent.mkdir(parents=True)
+    path.parent.chmod(0o755)
+    write_private(path, "A=1\n")
+    assert path.parent.stat().st_mode & 0o777 == 0o700

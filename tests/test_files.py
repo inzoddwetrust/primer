@@ -13,7 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from pridem.files import atomic_write, staged_write, temp_of
+from pridem.files import (
+    atomic_write,
+    commit_set,
+    private_dir,
+    staged_write,
+    temp_of,
+    write_set,
+)
 
 
 def mode(path: Path) -> int:
@@ -226,3 +233,104 @@ def test_staged_body_that_raises_leaves_the_file_and_no_temp(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="not this server"):
         _staged(path, refuse)
     assert path.read_text() == "server: box-0\n" and names(tmp_path) == [path.name]
+
+
+# --- DM-80: a set of files as one change, a private directory -------------------
+
+
+def test_a_set_is_staged_whole_then_renamed_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every file of the set fsynced before the first rename; the renames in
+    the caller's order, the directory fsynced after each."""
+    watched = Watched(monkeypatch)
+    key, cert = tmp_path / "privkey.pem", tmp_path / "fullchain.pem"
+    write_set([(key, b"KEY", 0o600), (cert, b"CERT", 0o644)])
+    assert watched.calls == [
+        "fchmod 0o600",
+        "fsync file",
+        "fchmod 0o644",
+        "fsync file",
+        "fsync file",  # commit_set: each temp again, before any rename
+        "fsync file",
+        "replace",
+        "fsync dir",
+        "replace",
+        "fsync dir",
+    ]
+    assert (key.read_bytes(), mode(key), cert.read_bytes(), mode(cert)) == (
+        b"KEY",
+        0o600,
+        b"CERT",
+        0o644,
+    )
+    assert names(tmp_path) == ["fullchain.pem", "privkey.pem"]
+
+
+def test_a_crash_between_two_renames_leaves_the_first_and_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The torn set a crash leaves is the caller's order: the first file new,
+    the second old; no temporary file is left behind."""
+    key, cert = tmp_path / "privkey.pem", tmp_path / "fullchain.pem"
+    key.write_bytes(b"OLD KEY")
+    cert.write_bytes(b"OLD CERT")
+    real = os.replace
+    done: list[str] = []
+
+    def second_fails(src: str, dst: str) -> None:
+        if done:
+            raise OSError("power gone")
+        done.append(dst)
+        real(src, dst)
+
+    monkeypatch.setattr(os, "replace", second_fails)
+    with pytest.raises(OSError, match="power gone"):
+        write_set([(key, b"NEW KEY", 0o600), (cert, b"NEW CERT", 0o644)])
+    assert (key.read_bytes(), cert.read_bytes()) == (b"NEW KEY", b"OLD CERT")
+    assert names(tmp_path) == ["fullchain.pem", "privkey.pem"]
+
+
+def test_a_failed_stage_renames_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key, cert = tmp_path / "privkey.pem", tmp_path / "fullchain.pem"
+    key.write_bytes(b"OLD KEY")
+    temp_of(cert).mkdir()  # the second temp cannot be opened
+    with pytest.raises(OSError):
+        write_set([(key, b"NEW KEY", 0o600), (cert, b"NEW CERT", 0o644)])
+    assert key.read_bytes() == b"OLD KEY"
+    assert not temp_of(key).exists()
+
+
+def test_commit_set_fsyncs_what_a_command_wrote_before_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, final = tmp_path / ".age.key.tmp", tmp_path / "age.key"
+    temp.write_bytes(b"AGE-SECRET-KEY")
+    watched = Watched(monkeypatch)
+    commit_set([(temp, final)])
+    assert watched.calls == ["fsync file", "replace", "fsync dir"]
+    assert final.read_bytes() == b"AGE-SECRET-KEY" and not temp.exists()
+
+
+def test_an_empty_set_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        write_set([])
+    with pytest.raises(ValueError):
+        commit_set([])
+
+
+@pytest.mark.parametrize("found", [0o755, 0o711, 0o500])
+def test_a_private_directory_is_0700_whatever_it_was(
+    tmp_path: Path, found: int
+) -> None:
+    directory = tmp_path / "keys"
+    directory.mkdir()
+    directory.chmod(found)
+    private_dir(directory)
+    assert mode(directory) == 0o700
+    # the pair: one that is missing is made 0700
+    fresh = tmp_path / "a" / "certs"
+    private_dir(fresh)
+    assert mode(fresh) == 0o700

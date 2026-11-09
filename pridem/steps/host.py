@@ -14,12 +14,14 @@ killed. Every step reads its fact back: a package is installed when
   The table ``{domain, resolves_to, expected}`` is the ``dns`` key of its
   fact, which the verdict builder copies to ``report.dns``.
 - ``wait_host_quiet`` -- ``cloud-init status --wait`` when cloud-init is
-  installed, the ``apt-daily*`` timers stopped for the run, the ``apt-daily*``
-  services waited out. The stopped timers are recorded in
-  ``host/paused-timers.json`` before they stop, so a run that dies still
-  leaves the record; ``restore_timers`` in ``finally`` starts exactly them and
-  deletes the record (contract 2 section 3). A record that is not a JSON list
-  of timer names is ``paused-broken`` in both steps and stays as it is.
+  installed (0 and 2, a recoverable error, go on; 1 is red), the
+  ``apt-daily*`` timers stopped for the run, the ``apt-daily*`` services waited
+  out -- active, or ``activating`` as a running oneshot is (DM-80). The stopped
+  timers are recorded in ``host/paused-timers.json`` before they stop, so a
+  run that dies still leaves the record; ``restore_timers`` in ``finally``
+  starts exactly them and deletes the record (contract 2 section 3). A record
+  that is not a JSON list of the timers this step pauses is ``paused-broken``
+  in both steps and stays as it is.
 - ``provision_host`` -- the host packages, docker among them, from noble;
   ``apt-get`` runs with ``APT_ENV`` and asks nothing.
 - ``daemon_json`` -- docker's log driver ``local`` (TZ section 7.3); docker is
@@ -44,7 +46,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json, strings
-from pridem.files import atomic_write
+from pridem.files import atomic_write, private_dir
 from pridem.runner import Stream
 from pridem.steps.base import (
     CheckResult,
@@ -129,9 +131,29 @@ def _installed(ctx: StepContext, package: str) -> bool:
     return code == 0 and lines == ["install ok installed"]
 
 
+BUSY_STATES = frozenset({"activating", "deactivating", "refreshing"})
+"""States of a unit at work that ``systemctl is-active`` answers with 3, not 0:
+a oneshot such as ``apt-daily.service`` is ``activating`` all the while it
+runs (systemd 255, ``systemctl-is-active.c``; DM-80)."""
+
+
+def _is_active(ctx: StepContext, unit: str) -> tuple[bool, str]:
+    """``systemctl is-active <unit>``: 0 -- ``active`` or ``reloading``; 3 --
+    any other state; 4 -- no such unit. Whether it is active, and the state it
+    printed."""
+    code, lines = _out(ctx, ["systemctl", "is-active", unit], expect=(0, 3, 4))
+    return code == 0, lines[0].strip() if lines else ""
+
+
 def _active(ctx: StepContext, unit: str) -> bool:
-    code, _ = _out(ctx, ["systemctl", "is-active", unit], expect=(0, 3))
-    return code == 0
+    """The unit runs: ``active`` or ``reloading``."""
+    return _is_active(ctx, unit)[0]
+
+
+def _busy(ctx: StepContext, unit: str) -> bool:
+    """The unit is at work: active, or on its way in or out of it."""
+    active, state = _is_active(ctx, unit)
+    return active or state in BUSY_STATES
 
 
 STACK_LABEL = {"pridem.stack": "host"}
@@ -285,7 +307,7 @@ class WaitHostQuiet(_HostStep):
 
     def check(self, ctx: StepContext) -> CheckResult:
         timers = [timer for timer in APT_TIMERS if _active(ctx, timer)]
-        services = [service for service in APT_SERVICES if _active(ctx, service)]
+        services = [service for service in APT_SERVICES if _busy(ctx, service)]
         if not timers and not services:
             return CheckResult(False)
         return CheckResult(
@@ -296,7 +318,15 @@ class WaitHostQuiet(_HostStep):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         if _installed(ctx, "cloud-init"):
-            _out(ctx, ["cloud-init", "status", "--wait"], timeout=self.timeout_s)
+            # 2 -- a recoverable error: cloud-init is done and the box works
+            # (cloud-init 26.2 of Ubuntu 24.04, cmd/status.py); 1 -- a hard
+            # error, refused as the command's failure (DM-80)
+            _out(
+                ctx,
+                ["cloud-init", "status", "--wait"],
+                expect=(0, 2),
+                timeout=self.timeout_s,
+            )
         timers = strings(check.data.get("timers"))
         if timers:
             _record_paused(
@@ -304,7 +334,7 @@ class WaitHostQuiet(_HostStep):
             )  # before stopping: a dying run leaves the record
             _out(ctx, ["systemctl", "stop", *timers])
         deadline = self.clock() + self.timeout_s
-        while busy := [service for service in APT_SERVICES if _active(ctx, service)]:
+        while busy := [service for service in APT_SERVICES if _busy(ctx, service)]:
             if self.clock() >= deadline:
                 raise StepFailed(
                     "host-busy", {"services": _j(busy), "timeout_s": self.timeout_s}
@@ -318,7 +348,7 @@ class WaitHostQuiet(_HostStep):
         running = [timer for timer in paused if _active(ctx, timer)]
         if running:
             raise StepFailed("timers-running", {"timers": _j(running)})
-        busy = [service for service in APT_SERVICES if _active(ctx, service)]
+        busy = [service for service in APT_SERVICES if _busy(ctx, service)]
         if busy:
             raise StepFailed(
                 "host-busy", {"services": _j(busy), "timeout_s": self.timeout_s}
@@ -349,6 +379,14 @@ def _paused(root: Path) -> list[str]:
         raise StepFailed(
             "paused-broken", {"path": str(path), "problem": "not a list of strings"}
         )
+    # only the timers wait_host_quiet stops: restore_timers starts what the
+    # record names, and a record is a file anyone with root can edit (DM-80)
+    unknown = [timer for timer in timers if timer not in APT_TIMERS]
+    if unknown:
+        raise StepFailed(
+            "paused-broken",
+            {"path": str(path), "problem": f"not a timer it pauses: {unknown[0]}"},
+        )
     return timers
 
 
@@ -356,7 +394,7 @@ def _record_paused(root: Path, timers: Sequence[str]) -> None:
     """Add ``timers`` to the record (0600, ``atomic_write``); a crash keeps the
     old one."""
     path = root / PAUSED
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_dir(path.parent)
     merged = sorted({*_paused(root), *timers})
     atomic_write(path, json.dumps(merged), 0o600)
 

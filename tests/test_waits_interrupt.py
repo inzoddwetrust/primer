@@ -19,8 +19,9 @@ from pridem.runner import FakeCall, FakeRunner
 from pridem.stacks.passport import PASSPORT
 from pridem.stacks.schema import PRIMER_YAML, Product
 from pridem.steps import host, keys, passport
-from pridem.steps.base import CheckResult, StepContext, StepFailed
+from pridem.steps.base import CheckResult, StepContext, StepFailed, Waiting
 from pridem.steps.egress import STATE_FORMAT, Egress
+from pridem.steps.frontend import Frontend
 from pridem.steps.host import WaitHostQuiet
 from pridem.steps.keys import DeployKey
 from pridem.steps.passport import Fetched, FetchPassport, _NotRecipient
@@ -33,7 +34,8 @@ def _ctx(runner: FakeRunner, interrupt: Interrupt) -> StepContext:
 
 
 def _host(tmp: Path, sleep: Callable[[float], None], mp: pytest.MonkeyPatch) -> Wait:
-    mp.setattr(host, "_active", lambda ctx, unit: True)
+    # the wait asks whether apt is at work, ``activating`` included (DM-80)
+    mp.setattr(host, "_busy", lambda ctx, unit: True)
     mp.setattr(host, "_installed", lambda ctx, package: False)
     ticks = count()
     step = WaitHostQuiet(
@@ -140,7 +142,34 @@ def _ready(tmp: Path, sleep: Callable[[float], None], mp: pytest.MonkeyPatch) ->
     return lambda ctx: step._first_answer(ctx, "172.30.0.2", "c0ffee")
 
 
+def _front(tmp: Path, sleep: Callable[[float], None], mp: pytest.MonkeyPatch) -> Wait:
+    """DM-80: ``frontend`` reads the front again until it answers 200; the
+    wait is ``wait_until``, the one ``up`` waits by too."""
+    mp.setattr(Frontend, "_domain", lambda self: "blank.example.org")
+    mp.setattr(Frontend, "_status", lambda self, ctx, domain: "502")
+    ticks = count()
+    made = PRIMER_YAML.validate_python(
+        {
+            "schema": 1,
+            "name": "blank",
+            "kind": "product",
+            "stacks": {"blank": {"compose": "c.yml"}},
+            "env": {},
+            "report": {"health": "/h", "ready": "/r", "logs": "json", "junit": True},
+        }
+    )
+    assert isinstance(made, Product)
+    step = Frontend(
+        made,
+        fetched=Fetched(),
+        root=tmp,
+        waiting=Waiting(3, 1, clock=lambda: float(next(ticks)), sleep=sleep),
+    )
+    return lambda ctx: step.verify(ctx, CheckResult(False))
+
+
 WAITS = {
+    "frontend": _front,
     "host": _host,
     "key": _key,
     "passport": _passport,

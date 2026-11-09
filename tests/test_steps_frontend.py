@@ -28,7 +28,7 @@ from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
 from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import Product, load_primer_yaml
-from pridem.steps.base import Step
+from pridem.steps.base import Step, Waiting
 from pridem.steps.build import Build
 from pridem.steps.compose import (
     ComposeStack,
@@ -376,9 +376,14 @@ def test_probe_DM_51_frontend_needs_no_reload_when_config_and_front_are_live(
 
 
 def test_front_answers_200_or_the_step_is_red(tmp_path: Path) -> None:
-    """DM-51: a front still not 200 after the reload is red by its status."""
+    """DM-51: a front still not 200 after the reload is red by its status.
+
+    One look (DM-80: ``verify`` waits up to ``READY``; here its deadline is
+    zero -- the wait itself is tested apart)."""
     root, fetched = passport(tmp_path)
-    step = Frontend(product(), fetched=fetched, root=root)
+    step = Frontend(
+        product(), fetched=fetched, root=root, waiting=Waiting(deadline_s=0, poll_s=0)
+    )
     bad = [
         FakeCall(_curl(root), lines=stdout("502")),
         exec_call(root, "nginx", "-t"),
@@ -616,3 +621,29 @@ def test_a_candidate_left_by_another_run_is_never_put_in_place(tmp_path: Path) -
     assert outcome.code is ExitCode.OK, outcome.steps
     assert cs.override.read_text() == "mine\n"
     assert not cs.candidate().override.exists()
+
+
+def test_a_front_still_starting_is_asked_again_until_200(tmp_path: Path) -> None:
+    """DM-80: after the reload the front's container may still be starting:
+    ``verify`` asks again after a pause until it answers 200."""
+    root, fetched = passport(tmp_path)
+    pauses: list[float] = []
+    ticks = iter(float(n) for n in range(100))
+    step = Frontend(
+        product(),
+        fetched=fetched,
+        root=root,
+        waiting=Waiting(60, 2, clock=lambda: next(ticks), sleep=pauses.append),
+    )
+    calls = [
+        FakeCall(_curl(root), lines=stdout("502")),
+        exec_call(root, "nginx", "-t"),
+        exec_call(root, "nginx", "-s", "reload"),
+        FakeCall(_curl(root), lines=stdout("000")),
+        FakeCall(_curl(root), lines=stdout("502")),
+        FakeCall(_curl(root), lines=stdout("200")),
+    ]
+    with Mixed(*calls) as runner:
+        outcome = run([step], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert pauses == [2, 2]

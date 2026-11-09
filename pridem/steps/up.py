@@ -45,7 +45,9 @@ from pridem.steps.base import (
     StepContext,
     StepFailed,
     Verified,
+    Waiting,
     local_code,
+    wait_until,
 )
 from pridem.steps.compose import (
     REFUSAL_CODES,
@@ -62,6 +64,11 @@ from pridem.steps.packages import KEY_CODES, image_key
 from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
+READY = Waiting(deadline_s=120, poll_s=2)
+"""How long ``verify`` reads the live checks again after ``up``: past the
+healthcheck ``up --wait`` waited for (``UP_WAIT_S``), what is left is an
+application without one -- a cold start of the server and its first
+connections, well inside two minutes (DM-80)."""
 
 
 def _document(seen: Observed) -> dict[str, Json]:
@@ -107,11 +114,13 @@ class Up(Step):
         memory: SeamMemory | None = None,
         render: RenderEnv | None = None,
         fetched: Fetched | None = None,
+        waiting: Waiting = READY,
     ) -> None:
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
         self.fetched = fetched
         self.memory = memory
         self.render = render
+        self.waiting = waiting
 
     def _watched(self, ctx: StepContext) -> list[str]:
         """The services whose image ``up`` checks: ``app``, and every service
@@ -246,7 +255,18 @@ class Up(Step):
                 "old-config",
                 {"service": service, "expected": expected, "running": running},
             )
-        problems, document = self._problems(ctx)
+        # ``up --wait`` waited for a healthcheck the compose file declares; an
+        # application without one may still be starting: its live checks are
+        # read again until they pass or READY_WAIT_S ends (DM-80)
+        seen: list[tuple[list[str], dict[str, Json]]] = []
+
+        def conforms() -> bool:
+            seen[:] = [self._problems(ctx)]
+            problems, document = seen[0]
+            return not problems and self._same_release(document)
+
+        wait_until(ctx, conforms, self.waiting)
+        problems, document = seen[0]
         if problems:
             raise StepFailed(
                 "conformance",

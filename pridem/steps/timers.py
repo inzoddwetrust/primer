@@ -13,10 +13,18 @@ is refused (exit 1, no verdict) and tries again on its next day -- ``gc`` alread
 ran in that run's ``finally``, and a certificate is renewed 30 days before it
 ends. ``Persistent=true`` runs a day missed while the box was off.
 
-``check`` compares each file with its render and asks systemd whether each timer
-is enabled and active. ``act`` writes what differs (``atomic_write``, 0644),
-reloads systemd when a file changed, enables the timers and restarts them, so a
-changed calendar is the one that runs. ``verify`` reads back the files, then
+Each service starts after docker and the network (``After=docker.service
+network-online.target``, with ``Wants=network-online.target``: ``After`` alone
+orders, it does not pull the target in) -- ``gc`` and the renewal both talk to
+docker (DM-80).
+
+``check`` compares each file with its render, asks systemd whether it still
+holds an older text of a unit (``NeedDaemonReload``: a run that died between
+the write and the reload leaves the file right and systemd wrong), and whether
+each timer is enabled and active. ``act`` writes what differs (``atomic_write``,
+0644), reloads systemd when a file changed or systemd holds an older text,
+enables the timers and restarts them, so a changed calendar is the one that
+runs. ``verify`` reads back the files, ``NeedDaemonReload`` of every unit, then
 ``is-enabled`` and ``is-active`` of each timer. Other timers of the host are
 never touched.
 """
@@ -54,6 +62,8 @@ def _service(verb: str) -> str:
     return (
         "[Unit]\n"
         f"Description=pridem {verb}\n"
+        "Wants=network-online.target\n"
+        "After=docker.service network-online.target\n"
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
@@ -99,6 +109,16 @@ def _write(path: Path, text: str) -> None:
     atomic_write(path, text, 0o644)
 
 
+def _stale(ctx: StepContext, unit: str) -> bool:
+    """systemd holds an older text of ``unit`` than its file on disk."""
+    _, lines = out(
+        ctx,
+        ["systemctl", "show", "-p", "NeedDaemonReload", "--value", unit],
+        passed_on=False,
+    )
+    return bool(lines) and lines[0].strip() == "yes"
+
+
 def _state(ctx: StepContext, question: str, timer: str) -> str:
     """``systemctl is-enabled|is-active <timer>``: what systemd answers."""
     _, lines = out(
@@ -119,6 +139,7 @@ class Timers(Step):
         "unit-differs": "{path} is not what the machine writes",
         "not-enabled": "{timer} is {state}, not enabled",
         "not-active": "{timer} is {state}, not active",
+        "not-loaded": "systemd holds an older text of {unit} after daemon-reload",
     }
 
     def __init__(self, *, fetched: Fetched, root: Path = Path("/")) -> None:
@@ -141,15 +162,21 @@ class Timers(Step):
             or self._path(name).read_text(encoding="utf-8") != text
         ]
 
+    def _stale(self, ctx: StepContext) -> list[str]:
+        return [
+            name for name in sorted(unit_files(self._passport())) if _stale(ctx, name)
+        ]
+
     def check(self, ctx: StepContext) -> CheckResult:
         files = self._differs()
+        stale = self._stale(ctx)
         stopped = [
             timer
             for timer in sorted(units(self._passport()))
             if _state(ctx, "is-enabled", timer) != "enabled"
             or _state(ctx, "is-active", timer) != "active"
         ]
-        if not files and not stopped:
+        if not files and not stale and not stopped:
             return CheckResult(False)
         params: dict[str, Json] = {
             "files": list[Json](files),
@@ -162,7 +189,7 @@ class Timers(Step):
         changed = self._differs()
         for name in changed:
             _write(self._path(name), texts[name])
-        if changed:
+        if changed or self._stale(ctx):
             out(ctx, ["systemctl", "daemon-reload"])
         timers = sorted(units(self._passport()))
         out(ctx, ["systemctl", "enable", *timers])
@@ -171,6 +198,8 @@ class Timers(Step):
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         for name in self._differs():
             raise StepFailed("unit-differs", {"path": str(self._path(name))})
+        for name in self._stale(ctx):
+            raise StepFailed("not-loaded", {"unit": name})
         facts: list[Json] = []
         for timer, (verb, calendar) in sorted(units(self._passport()).items()):
             enabled = _state(ctx, "is-enabled", timer)

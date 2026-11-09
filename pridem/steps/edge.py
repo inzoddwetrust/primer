@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 
 from pridem.events import Json
-from pridem.files import atomic_write
+from pridem.files import atomic_write, private_dir
 from pridem.steps.compose import NETWORK
 
 PROJECT = "pridem-edge"
@@ -109,7 +109,7 @@ def compose_text(root: Path) -> str:
 def write_file(path: Path, data: bytes, mode: int) -> None:
     """``data`` to ``path`` with ``mode`` by ``atomic_write``; the directory
     0700."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_dir(path.parent)
     atomic_write(path, data, mode)
 
 

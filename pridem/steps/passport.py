@@ -63,7 +63,13 @@ import yaml
 from pydantic import SecretStr, ValidationError
 
 from pridem.events import Fact, Json, Secrets
-from pridem.files import PathOutside, fsync_dir, resolve_inside, staged_write
+from pridem.files import (
+    PathOutside,
+    commit_set,
+    private_dir,
+    resolve_inside,
+    staged_write,
+)
 from pridem.runner import OnLine, Stream
 from pridem.stacks.loader import ContractError, load_yaml_mapping, render_path
 from pridem.stacks.passport import PASSPORT, SERVER_NAME, Passport, load_passport
@@ -225,13 +231,19 @@ class AgeKey(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         keys = self._key.parent
-        keys.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_dir(keys)
         temp = self._key.with_name(self._key.name + ".tmp")
         temp.unlink(missing_ok=True)  # left by a run that died
-        ctx.runner.run(["age-keygen", "-o", str(temp)], timeout=60, on_line=ctx.on_line)
-        temp.chmod(0o600)
-        os.replace(temp, self._key)
-        fsync_dir(keys)
+        try:
+            ctx.runner.run(
+                ["age-keygen", "-o", str(temp)], timeout=60, on_line=ctx.on_line
+            )
+            temp.chmod(0o600)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+        # the key's bytes are fsynced before its name (DM-80)
+        commit_set([(temp, self._key)])
         ctx.on_line(Stream.STDOUT, "age key of this box:", False)
         ctx.on_line(Stream.STDOUT, self._read(ctx), False)
 
@@ -668,7 +680,7 @@ class FetchPassport(Step):
             if not self._key.exists() or self._bare_head(ctx) != commit:
                 return needed
         scratch = self._copy.with_name(self._copy.name + ".check")
-        self._copy.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_dir(self._copy.parent)
         try:
             composed, short = self._compose(
                 self._source(ctx, scratch, commit), asking=False
@@ -697,7 +709,7 @@ class FetchPassport(Step):
         self.fetched.ops_commit = commit
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        self._copy.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_dir(self._copy.parent)
         decrypted = self._copy.with_name(self._copy.name + ".tmp")
         try:
             commit = self._fetch(ctx) if self.ops is not None else None

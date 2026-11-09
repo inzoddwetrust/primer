@@ -26,6 +26,25 @@ def answer(question: str, timer: str, state: str) -> FakeCall:
     )
 
 
+UNITS = (
+    "pridem-gc.service",
+    "pridem-gc.timer",
+    "pridem-ssl-renew.service",
+    "pridem-ssl-renew.timer",
+)
+
+
+def loaded(*stale: str) -> list[FakeCall]:
+    """``NeedDaemonReload`` of every unit, ``yes`` for ``stale`` (DM-80)."""
+    return [
+        FakeCall(
+            ("systemctl", "show", "-p", "NeedDaemonReload", "--value", unit),
+            lines=((Stream.STDOUT, "yes" if unit in stale else "no"),),
+        )
+        for unit in UNITS
+    ]
+
+
 def up() -> list[FakeCall]:
     """Both timers enabled and active, as ``check`` and ``verify`` ask."""
     return [
@@ -62,9 +81,11 @@ def run(root: Path, fetched: Fetched, runner: FakeRunner) -> PlanOutcome:
 def test_a_fresh_box_gets_both_timers(tmp_path: Path) -> None:
     root, fetched = box(tmp_path, passport_data())
     with FakeRunner(
+        *loaded(),
         answer("is-enabled", TIMERS[0], "disabled"),
         answer("is-enabled", TIMERS[1], "disabled"),
         *start(),
+        *loaded(),
         *up(),
     ) as runner:
         outcome = run(root, fetched, runner)
@@ -100,7 +121,8 @@ def test_the_same_timers_are_left_as_they_are(tmp_path: Path) -> None:
     for name, text in unit_files(fetched.passport).items():
         (root / UNIT_DIR).mkdir(parents=True, exist_ok=True)
         (root / UNIT_DIR / name).write_text(text, encoding="utf-8")
-    with FakeRunner(*up(), *up()) as runner:  # check, verify: nothing written
+    # check, verify: nothing written
+    with FakeRunner(*loaded(), *up(), *loaded(), *up()) as runner:
         outcome = run(root, fetched, runner)
     assert outcome.code is ExitCode.OK, outcome.steps
 
@@ -115,7 +137,7 @@ def test_a_changed_unit_is_written_and_reloaded(tmp_path: Path) -> None:
     stale.write_text("[Timer]\nOnCalendar=weekly\n", encoding="utf-8")
     other = root / UNIT_DIR / "apt-daily.timer"
     other.write_text("not ours\n", encoding="utf-8")
-    with FakeRunner(*up(), *start(), *up()) as runner:
+    with FakeRunner(*loaded(), *up(), *start(), *loaded(), *up()) as runner:
         outcome = run(root, fetched, runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert "OnCalendar=daily" in stale.read_text(encoding="utf-8")
@@ -125,9 +147,11 @@ def test_a_changed_unit_is_written_and_reloaded(tmp_path: Path) -> None:
 def test_a_timer_systemd_did_not_enable_is_red(tmp_path: Path) -> None:
     root, fetched = box(tmp_path, passport_data())
     with FakeRunner(
+        *loaded(),
         answer("is-enabled", TIMERS[0], "disabled"),
         answer("is-enabled", TIMERS[1], "disabled"),
         *start(),
+        *loaded(),
         answer("is-enabled", TIMERS[0], "disabled"),
     ) as runner:
         outcome = run(root, fetched, runner)
@@ -137,9 +161,11 @@ def test_a_timer_systemd_did_not_enable_is_red(tmp_path: Path) -> None:
     # an enabled timer that does not run is red too
     root, fetched = box(tmp_path / "inactive", passport_data())
     with FakeRunner(
+        *loaded(),
         answer("is-enabled", TIMERS[0], "disabled"),
         answer("is-enabled", TIMERS[1], "disabled"),
         *start(),
+        *loaded(),
         answer("is-enabled", TIMERS[0], "enabled"),
         answer("is-active", TIMERS[0], "inactive"),
     ) as runner:
@@ -153,3 +179,61 @@ def test_without_a_passport_the_timers_refuse(tmp_path: Path) -> None:
     with FakeRunner() as runner:
         outcome = run(tmp_path, Fetched(), runner)
     assert outcome.steps[0].reason == Code("timers:no-passport")
+
+
+# --- DM-80: after docker and the network; systemd holding an older text -------
+
+
+def test_each_service_starts_after_docker_and_the_network(tmp_path: Path) -> None:
+    _, fetched = box(tmp_path, passport_data())
+    assert fetched.passport is not None
+    for name, text in unit_files(fetched.passport).items():
+        if name.endswith(".service"):
+            unit = text.split("[Service]")[0]
+            assert "Wants=network-online.target\n" in unit, name
+            assert "After=docker.service network-online.target\n" in unit, name
+
+
+def _written(root: Path, fetched: Fetched) -> None:
+    assert fetched.passport is not None
+    (root / UNIT_DIR).mkdir(parents=True, exist_ok=True)
+    for name, text in unit_files(fetched.passport).items():
+        (root / UNIT_DIR / name).write_text(text, encoding="utf-8")
+
+
+def test_files_right_and_systemd_wrong_get_a_reload(tmp_path: Path) -> None:
+    """A run that died between the write and the reload leaves every file as
+    rendered and systemd on the older text: ``daemon-reload`` without a write."""
+    root, fetched = box(tmp_path, passport_data())
+    _written(root, fetched)
+    before = {p.name: p.stat().st_mtime_ns for p in (root / UNIT_DIR).iterdir()}
+    with FakeRunner(
+        *loaded("pridem-gc.service"),
+        *up(),
+        *loaded("pridem-gc.service"),  # act asks again: nothing was written
+        *start(),
+        *loaded(),
+        *up(),
+    ) as runner:
+        outcome = run(root, fetched, runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    after = {p.name: p.stat().st_mtime_ns for p in (root / UNIT_DIR).iterdir()}
+    assert after == before
+
+
+def test_systemd_still_on_an_older_text_after_the_reload_is_red(
+    tmp_path: Path,
+) -> None:
+    root, fetched = box(tmp_path, passport_data())
+    _written(root, fetched)
+    with FakeRunner(
+        *loaded("pridem-ssl-renew.timer"),
+        *up(),
+        *loaded("pridem-ssl-renew.timer"),
+        *start(),
+        *loaded("pridem-ssl-renew.timer"),
+    ) as runner:
+        outcome = run(root, fetched, runner)
+    assert outcome.steps[0].reason == Code(
+        "timers:not-loaded", {"unit": "pridem-ssl-renew.timer"}
+    )

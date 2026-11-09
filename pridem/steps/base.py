@@ -17,8 +17,9 @@ a text.
 """
 
 import re
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
@@ -124,3 +125,28 @@ class Step(ABC):
     @abstractmethod
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         """Read the result back; return a non-empty fact."""
+
+
+@dataclass(frozen=True)
+class Waiting:
+    """How a step waits for a state it reads back: until ``deadline_s`` after
+    the first look, ``poll_s`` between looks, by ``clock`` and ``sleep``."""
+
+    deadline_s: float
+    poll_s: float
+    clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
+
+
+def wait_until(ctx: StepContext, ready: Callable[[], bool], waiting: Waiting) -> bool:
+    """Look with ``ready`` until it is true or the deadline passes; whether it
+    became true. A signal ends the wait between two looks (DM-45). One helper
+    for every ``verify`` that waits for a service to come up (DM-80)."""
+    deadline = waiting.clock() + waiting.deadline_s
+    while not ready():
+        if waiting.clock() >= deadline:
+            return False
+        ctx.interrupt.check()
+        waiting.sleep(waiting.poll_s)
+        ctx.interrupt.check()
+    return True

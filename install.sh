@@ -12,6 +12,10 @@
 #
 # PRIDEM_ROOT prefixes every path the script reads or writes (empty on a box);
 # it changes where, never what.
+#
+# Every fetch over the network is tried again: one 504 of a server outside must
+# not fail an install (DM-80). curl by its own retries, git clone by a loop,
+# apt by Acquire::Retries; the sha256 of every download is checked after it.
 set -euo pipefail
 
 TAG="@PRIDEM_TAG@"
@@ -30,6 +34,26 @@ BIN="$ROOT/usr/local/bin"
 fail() {
     echo "install.sh: $*" >&2
     exit 1
+}
+
+# curl with its retries: 5 more tries, on any error, 2 s apart
+curl_get=(curl -fsSL --retry 5 --retry-all-errors --retry-delay 2)
+
+fetch() { # <url> <file>
+    "${curl_get[@]}" -o "$2" "$1" || fail "cannot download $1"
+}
+
+clone() { # <tag> <repository> <directory>: 5 tries, 2 s apart
+    local try
+    for try in 1 2 3 4 5; do
+        if git clone --quiet --depth 1 --branch "$1" "$2" "$3"; then
+            return 0
+        fi
+        rm -rf "$3"
+        echo "install.sh: git clone of $2 failed (try $try of 5)" >&2
+        [[ $try == 5 ]] || sleep 2
+    done
+    fail "cannot clone $2 at $1"
 }
 
 # 1. The host: exactly Ubuntu 24.04 on x86_64, as root, with real pins.
@@ -61,19 +85,20 @@ else
     #    variables are for the apt calls alone; sops is not in apt on 24.04 and
     #    comes from its release by version and sha256.
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-        apt-get -o DPkg::Lock::Timeout=600 update
+        apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 update
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-        apt-get -o DPkg::Lock::Timeout=600 install -y python3 python3-venv git curl age
+        apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 \
+        install -y python3 python3-venv git curl age
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
-    curl -fsSL -o "$work/sops" \
-        "https://github.com/getsops/sops/releases/download/$SOPS_VERSION/sops-$SOPS_VERSION.linux.amd64"
+    fetch "https://github.com/getsops/sops/releases/download/$SOPS_VERSION/sops-$SOPS_VERSION.linux.amd64" \
+        "$work/sops"
     echo "$SOPS_SHA256  $work/sops" | sha256sum -c --strict
     install -m 0755 "$work/sops" "$BIN/sops"
     echo "2/5 packages: python3 python3-venv git curl age sops $SOPS_VERSION"
 
     # 3. The pinned clone: the tag must be the commit the release was built from.
-    git clone --quiet --depth 1 --branch "$TAG" "$REPO.git" "$work/pridem"
+    clone "$TAG" "$REPO.git" "$work/pridem"
     head=$(git -C "$work/pridem" rev-parse HEAD)
     [[ $head == "$COMMIT" ]] || fail "tag $TAG is $head, the pin is $COMMIT"
     echo "3/5 clone: $TAG at $COMMIT"
@@ -81,7 +106,7 @@ else
     # 4. The venv without an index: the runtime from wheels/ by the lock, the
     #    wheel of pridem from the Release; nothing is built here. A venv cannot
     #    be moved, so an earlier attempt that did not end installed is removed.
-    curl -fsSL -o "$work/pridem-${TAG#v}-py3-none-any.whl" "$WHEEL_URL"
+    fetch "$WHEEL_URL" "$work/pridem-${TAG#v}-py3-none-any.whl"
     echo "$WHEEL_SHA256  $work/pridem-${TAG#v}-py3-none-any.whl" | sha256sum -c --strict
     rm -rf "$TARGET"
     # the machine's home is root's alone, like every file of the box

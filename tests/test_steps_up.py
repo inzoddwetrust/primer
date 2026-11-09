@@ -38,6 +38,7 @@ from pridem.events import Code
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result
 from pridem.stacks.seams import SeamMemory
+from pridem.steps.base import Waiting
 from pridem.steps.build import Build
 from pridem.steps.compose import NETWORK, ComposeStack, OverrideHandoff, override_text
 from pridem.steps.migrate import Migrate
@@ -49,8 +50,14 @@ def app() -> Iterator[LiveApp]:
     yield from live()
 
 
+ONCE = Waiting(deadline_s=0, poll_s=0)
+"""One look at the live checks: ``verify`` waits up to ``READY`` (DM-80); the
+wait itself is tested apart, every other test reads the application once."""
+
+
 def up(root: Path, port: int, **extra: object) -> Up:
     cs = compose(root, port)
+    extra.setdefault("waiting", ONCE)
     return Up(
         cs.stack,
         cs.entry,
@@ -351,3 +358,69 @@ def test_up_verify_is_red_when_a_service_stays_on_an_old_configuration(
         "up:old-config",
         {"service": "postgres", "expected": HASHES["postgres"], "running": "none"},
     )
+
+
+# --- DM-80: verify waits for an application that is still starting ------------
+
+
+def test_a_cold_application_is_read_again_until_it_conforms(
+    tmp_path: Path, app: LiveApp
+) -> None:
+    """``/health`` not yet as it must be on the first look -- the live checks
+    are read again after a pause, and the second look passes: green."""
+    app.health = health(alembic_head=None)
+    looks: list[float] = []
+
+    def pause(seconds: float) -> None:
+        looks.append(seconds)
+        app.health = health()  # the application finished starting
+
+    ticks = iter(float(n) for n in range(100))
+    waiting = Waiting(deadline_s=30, poll_s=2, clock=lambda: next(ticks), sleep=pause)
+    cs = compose(tmp_path, app.port)
+    script = [*first_up(tmp_path, app.port), *observe_calls(cs)]
+    with FakeRunner(*script) as runner:
+        outcome, _ = run([up(tmp_path, app.port, waiting=waiting)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert looks == [2]
+
+
+def test_an_application_that_never_conforms_is_red_at_the_deadline(
+    tmp_path: Path, app: LiveApp
+) -> None:
+    app.health = health(alembic_head=None)
+    looks: list[float] = []
+    clock = iter([0.0, 1.0, 2.0])  # start; after look 1: 1 s; after look 2: 2 s
+    waiting = Waiting(
+        deadline_s=2, poll_s=1, clock=lambda: next(clock), sleep=looks.append
+    )
+    cs = compose(tmp_path, app.port)
+    script = [*first_up(tmp_path, app.port), *observe_calls(cs)]  # two looks
+    with FakeRunner(*script) as runner:
+        outcome, _ = run([up(tmp_path, app.port, waiting=waiting)], runner)
+    assert outcome.steps[0].reason == Code(
+        "up:conformance", {"stack": "blank", "problems": ["alembic-head-null"]}
+    )
+    assert looks == [1]
+
+
+def test_an_old_release_still_answering_is_read_again(
+    tmp_path: Path, app: LiveApp
+) -> None:
+    """The old container answers ``/health`` while the new one starts: a
+    conforming answer of another release is read again, not taken."""
+    app.health = health(release="v0.0.1", commit="0" * 40)
+    looks: list[float] = []
+
+    def pause(seconds: float) -> None:
+        looks.append(seconds)
+        app.health = health()
+
+    ticks = iter(float(n) for n in range(100))
+    waiting = Waiting(deadline_s=30, poll_s=2, clock=lambda: next(ticks), sleep=pause)
+    cs = compose(tmp_path, app.port)
+    script = [*first_up(tmp_path, app.port), *observe_calls(cs)]
+    with FakeRunner(*script) as runner:
+        outcome, _ = run([up(tmp_path, app.port, waiting=waiting)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert looks == [2]
