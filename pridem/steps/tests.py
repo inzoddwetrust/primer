@@ -34,6 +34,7 @@ On ``prod`` and ``preview`` the plan skips the step with the code ``role``.
 import os
 import shlex
 import shutil
+import stat
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -55,7 +56,13 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.build import build_args, copied_dockerfile
-from pridem.steps.compose import BUILD_TIMEOUT_S, ComposeStack, config, out
+from pridem.steps.compose import (
+    BUILD_TIMEOUT_S,
+    REFUSAL_CODES,
+    ComposeStack,
+    config,
+    out,
+)
 from pridem.steps.packages import KEY_CODES, context_dir, image_key
 from pridem.steps.passport import NO_PASSPORT, Fetched
 
@@ -155,6 +162,34 @@ def read_junit(path: Path) -> TestReport:
     return TestReport({"total": total, "failed": failed, "skipped": skipped}, failures)
 
 
+JUNIT_LIMIT = 16 * 1024 * 1024
+"""The most a junit file of the tests may take (DM-78)."""
+
+
+def _take_junit(produced: Path, kept: Path) -> None:
+    """Copy the junit the test container wrote: opened without following a
+    symlink and checked on the open descriptor -- the container writes the
+    directory in this very run, so a check of the path and a later open are
+    not the same file (DM-78)."""
+    try:  # O_NONBLOCK: a FIFO put there would hold the open for ever
+        fd = os.open(produced, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:  # ELOOP: the name is a symlink
+        raise StepFailed(
+            "junit-unsafe", {"path": str(produced), "cause": "symlink"}
+        ) from None
+    found = os.fstat(fd)  # on the descriptor: what was opened is what is read
+    cause = None
+    if not stat.S_ISREG(found.st_mode):
+        cause = "not-a-file"
+    elif found.st_size > JUNIT_LIMIT:
+        cause = "too-big"
+    if cause is not None:
+        os.close(fd)
+        raise StepFailed("junit-unsafe", {"path": str(produced), "cause": cause})
+    with os.fdopen(fd, "rb") as source:
+        kept.write_bytes(source.read(JUNIT_LIMIT + 1))
+
+
 class Tests(Step):
     """The stack's tests, from the test target, in ``<live>_test``."""
 
@@ -164,6 +199,7 @@ class Tests(Step):
     modes = ALL_MODES
     roles = TEST_ROLES
     codes: ClassVar[dict[str, str]] = {
+        **REFUSAL_CODES,
         **NO_PASSPORT,
         **KEY_CODES,
         "run": "run the tests of {stack} at {commit} in {test_db}",
@@ -171,6 +207,7 @@ class Tests(Step):
         "test-db-is-live": "the test database {test} would be the live {live}",
         "junit-path-unknown": "report.junit is on and the test run has no --junitxml=",
         "junit-missing": "the tests wrote no junit at {path}",
+        "junit-unsafe": "the junit at {path} is not taken: {cause}",
         "no-tests": "the tests ran no test",
         "failed": "{failed} of {total} tests failed",
         "no-test": "{stack} declares no test or no app",
@@ -391,9 +428,9 @@ class Tests(Step):
             env_file.unlink(missing_ok=True)
         produced = junit_host / JUNIT_FILE
         if self.junit:
-            if not produced.is_file():
+            if not os.path.lexists(produced):
                 raise StepFailed("junit-missing", {"path": str(produced)})
-            shutil.copyfile(produced, home / JUNIT_FILE)
+            _take_junit(produced, home / JUNIT_FILE)
             report = read_junit(home / JUNIT_FILE)
             self.report.junit, self.report.failures = report.junit, report.failures
             totals = report.junit or {}

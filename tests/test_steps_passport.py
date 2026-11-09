@@ -559,6 +559,10 @@ def test_sops_runs_with_the_machines_whole_environment(tmp_path: Path) -> None:
         ("server", "name-mismatch"),
         ("rule", "invalid"),
         ("absent", "not-in-ops"),
+        (
+            "symlink",
+            "path-outside",
+        ),  # DM-78: git makes it a symlink, sops reads its target
         ("tampered", "damaged"),
         ("plain", "damaged"),
     ],
@@ -587,6 +591,13 @@ def test_a_bad_passport_leaves_the_copy_as_it_was(
         text = yaml.safe_dump(bad)
     if change == "absent":
         (ops.work / "passports" / f"{SERVER}.yaml").unlink()
+        git(ops.work, "add", "-A")
+        ops.put("other-box", "x: 1\n")
+    elif change == "symlink":
+        mine = ops.work / "passports" / f"{SERVER}.yaml"
+        mine.unlink()
+        (ops.work / "elsewhere.yaml").write_text(text)
+        mine.symlink_to("../elsewhere.yaml")
         git(ops.work, "add", "-A")
         ops.put("other-box", "x: 1\n")
     else:

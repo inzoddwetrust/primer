@@ -70,12 +70,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+import yaml
+
 from pridem.events import Json, as_list
-from pridem.files import atomic_write
+from pridem.files import PathOutside, atomic_write, resolve_inside
 from pridem.runner import Stream
 from pridem.stacks.routes import alias, routed_services
 from pridem.stacks.schema import PROXY_VARIABLES, Product, Service
-from pridem.steps.base import StepContext
+from pridem.steps.base import StepContext, StepFailed
 
 NETWORK = "pridem"
 EGRESS_NETWORK = "pridem-egress"
@@ -222,6 +224,34 @@ def out(
     return result.code, lines
 
 
+def unfolded(compose: ComposeStack) -> list[str]:
+    """What ``config`` would unfold before the machine sees it (DM-78): a
+    top-level ``include``, a service's ``extends`` -- both gone from its
+    document, read with or without interpolation -- and ``env_file``, which
+    compose reads off the host on ``config``. Read from the file itself, with
+    no symlink on its way out of the release."""
+    try:
+        path = resolve_inside(
+            compose.release, compose.stack.stacks[compose.entry].compose
+        )
+    except PathOutside:
+        return ["compose: symlink"]
+    if not path.is_file():
+        return []  # no compose: the callers' own refusal (no-compose)
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, UnicodeDecodeError):
+        return []  # config says what is wrong with it, as before
+    if not isinstance(document, dict):
+        return []
+    found = ["compose: include"] if "include" in document else []
+    for name, body in _mapping(document.get("services")).items():
+        found += [
+            f"{name}: {key}" for key in ("extends", "env_file") if key in _mapping(body)
+        ]
+    return sorted(found)
+
+
 def config(
     ctx: StepContext,
     compose: ComposeStack,
@@ -235,6 +265,11 @@ def config(
     (``pridem check``): no env file is read or written, the values are the
     environment of compose alone (``PATH``, ``HOME`` and them), and compose's
     own ``.env`` of the directory is off (``COMPOSE_DISABLE_ENV_FILE``)."""
+    found = unfolded(compose)
+    if found:  # before compose reads a file of the host for them (DM-78)
+        raise StepFailed(
+            "compose-forbidden", {"stack": compose.entry, "found": list[Json](found)}
+        )
     args = ["config", "--format", "json"] + (
         [] if interpolate else ["--no-interpolate"]
     )
@@ -485,7 +520,13 @@ def forbidden(compose: ComposeStack, document: Mapping[str, Json]) -> list[str]:
     found += [
         f"{name}: name reserved"
         for name in services
-        if name in exact or name.startswith(prefixes)
+        # the name itself is a DNS name on pridem too (compose gives every
+        # service its name on each network); its alias against the other
+        # entries' aliases, whole -- velo + storage-init is velo-storage + init
+        # (DM-78); a prefix -- others' names only
+        if name in exact
+        or alias(compose.entry, name) in exact
+        or name.startswith(prefixes)
     ]
     return sorted(found)
 

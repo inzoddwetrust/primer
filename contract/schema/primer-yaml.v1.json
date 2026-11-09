@@ -5,7 +5,7 @@
       "description": "A kind of the product's data a service takes (protocol 4.5, 4.7):\n``validate`` -- its command, ``<dir>`` the data's path in the container;\n``env`` -- the variable the machine gives that path under.",
       "properties": {
         "env": {
-          "minLength": 1,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "title": "Env",
           "type": "string"
         },
@@ -61,7 +61,7 @@
           "type": "string"
         },
         "service": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Service",
           "type": "string"
         }
@@ -103,7 +103,7 @@
           "type": "string"
         },
         "service": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Service",
           "type": "string"
         }
@@ -120,12 +120,11 @@
       "description": "``data`` -- the form D of protocol 4.5: a directory of the product's\nrepository, by kind, copied to the service, which ``accepts`` that kind.",
       "properties": {
         "data": {
-          "additionalProperties": {
-            "type": "string"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "type": "string"
+            }
           },
           "title": "Data",
           "type": "object"
@@ -181,7 +180,7 @@
       "properties": {
         "services": {
           "items": {
-            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
             "type": "string"
           },
           "title": "Services",
@@ -228,7 +227,7 @@
           "type": "integer"
         },
         "service": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Service",
           "type": "string"
         }
@@ -301,12 +300,12 @@
       "description": "Checked as a whole by rule 10 in the rule layer.",
       "properties": {
         "dependency": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Dependency",
           "type": "string"
         },
         "env": {
-          "minLength": 1,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "title": "Env",
           "type": "string"
         },
@@ -319,7 +318,7 @@
           "type": "string"
         },
         "service": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Service",
           "type": "string"
         }
@@ -425,23 +424,21 @@
       "additionalProperties": false,
       "properties": {
         "dependencies": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Dependency"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Dependency"
+            }
           },
           "title": "Dependencies",
           "type": "object"
         },
         "editions": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Edition"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Edition"
+            }
           },
           "title": "Editions",
           "type": "object"
@@ -462,46 +459,45 @@
           "type": "array"
         },
         "env": {
-          "additionalProperties": {
-            "discriminator": {
-              "mapping": {
-                "address": "#/$defs/Address",
-                "asked": "#/$defs/Asked",
-                "derived": "#/$defs/Derived",
-                "minted": "#/$defs/Minted",
-                "param": "#/$defs/Param",
-                "passport": "#/$defs/Passport",
-                "seam": "#/$defs/Seam"
-              },
-              "propertyName": "source"
-            },
-            "oneOf": [
-              {
-                "$ref": "#/$defs/Minted"
-              },
-              {
-                "$ref": "#/$defs/Asked"
-              },
-              {
-                "$ref": "#/$defs/Derived"
-              },
-              {
-                "$ref": "#/$defs/Param"
-              },
-              {
-                "$ref": "#/$defs/Passport"
-              },
-              {
-                "$ref": "#/$defs/Seam"
-              },
-              {
-                "$ref": "#/$defs/Address"
-              }
-            ]
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$": {
+              "discriminator": {
+                "mapping": {
+                  "address": "#/$defs/Address",
+                  "asked": "#/$defs/Asked",
+                  "derived": "#/$defs/Derived",
+                  "minted": "#/$defs/Minted",
+                  "param": "#/$defs/Param",
+                  "passport": "#/$defs/Passport",
+                  "seam": "#/$defs/Seam"
+                },
+                "propertyName": "source"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Minted"
+                },
+                {
+                  "$ref": "#/$defs/Asked"
+                },
+                {
+                  "$ref": "#/$defs/Derived"
+                },
+                {
+                  "$ref": "#/$defs/Param"
+                },
+                {
+                  "$ref": "#/$defs/Passport"
+                },
+                {
+                  "$ref": "#/$defs/Seam"
+                },
+                {
+                  "$ref": "#/$defs/Address"
+                }
+              ]
+            }
           },
           "title": "Env",
           "type": "object"
@@ -524,7 +520,7 @@
           "type": "array"
         },
         "name": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Name",
           "type": "string"
         },
@@ -545,42 +541,39 @@
           "type": "array"
         },
         "packages": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Package"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Package"
+            }
           },
           "title": "Packages",
           "type": "object"
         },
         "provides": {
-          "additionalProperties": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ProvideUrl"
-              },
-              {
-                "$ref": "#/$defs/ProvideVerb"
-              }
-            ]
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProvideUrl"
+                },
+                {
+                  "$ref": "#/$defs/ProvideVerb"
+                }
+              ]
+            }
           },
           "title": "Provides",
           "type": "object"
         },
         "replay": {
-          "additionalProperties": {
-            "minLength": 1,
-            "type": "string"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "minLength": 1,
+              "type": "string"
+            }
           },
           "title": "Replay",
           "type": "object"
@@ -594,23 +587,21 @@
           "type": "integer"
         },
         "stacks": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Stack"
-          },
           "minProperties": 1,
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Stack"
+            }
           },
           "title": "Stacks",
           "type": "object"
         },
         "verbs": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Verb"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Verb"
+            }
           },
           "title": "Verbs",
           "type": "object"
@@ -632,7 +623,7 @@
         "domains": {
           "default": [],
           "items": {
-            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
             "type": "string"
           },
           "title": "Domains",
@@ -642,12 +633,11 @@
           "$ref": "#/$defs/Headers"
         },
         "routes": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Route"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Route"
+            }
           },
           "title": "Routes",
           "type": "object"
@@ -681,7 +671,7 @@
       "additionalProperties": false,
       "properties": {
         "verb": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Verb",
           "type": "string"
         }
@@ -753,7 +743,7 @@
       "additionalProperties": false,
       "properties": {
         "from": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "From",
           "type": "string"
         },
@@ -802,57 +792,55 @@
       "additionalProperties": false,
       "properties": {
         "accepts": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Accepted"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Accepted"
+            }
           },
           "title": "Accepts",
           "type": "object"
         },
         "env": {
-          "additionalProperties": {
-            "discriminator": {
-              "mapping": {
-                "address": "#/$defs/Address",
-                "asked": "#/$defs/Asked",
-                "derived": "#/$defs/Derived",
-                "minted": "#/$defs/Minted",
-                "param": "#/$defs/Param",
-                "passport": "#/$defs/Passport",
-                "seam": "#/$defs/Seam"
-              },
-              "propertyName": "source"
-            },
-            "oneOf": [
-              {
-                "$ref": "#/$defs/Minted"
-              },
-              {
-                "$ref": "#/$defs/Asked"
-              },
-              {
-                "$ref": "#/$defs/Derived"
-              },
-              {
-                "$ref": "#/$defs/Param"
-              },
-              {
-                "$ref": "#/$defs/Passport"
-              },
-              {
-                "$ref": "#/$defs/Seam"
-              },
-              {
-                "$ref": "#/$defs/Address"
-              }
-            ]
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$": {
+              "discriminator": {
+                "mapping": {
+                  "address": "#/$defs/Address",
+                  "asked": "#/$defs/Asked",
+                  "derived": "#/$defs/Derived",
+                  "minted": "#/$defs/Minted",
+                  "param": "#/$defs/Param",
+                  "passport": "#/$defs/Passport",
+                  "seam": "#/$defs/Seam"
+                },
+                "propertyName": "source"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Minted"
+                },
+                {
+                  "$ref": "#/$defs/Asked"
+                },
+                {
+                  "$ref": "#/$defs/Derived"
+                },
+                {
+                  "$ref": "#/$defs/Param"
+                },
+                {
+                  "$ref": "#/$defs/Passport"
+                },
+                {
+                  "$ref": "#/$defs/Seam"
+                },
+                {
+                  "$ref": "#/$defs/Address"
+                }
+              ]
+            }
           },
           "title": "Env",
           "type": "object"
@@ -866,7 +854,7 @@
           "type": "string"
         },
         "name": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Name",
           "type": "string"
         },
@@ -881,7 +869,7 @@
         "provides": {
           "default": [],
           "items": {
-            "minLength": 1,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
             "type": "string"
           },
           "title": "Provides",
@@ -893,7 +881,7 @@
         "requires": {
           "default": [],
           "items": {
-            "minLength": 1,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
             "type": "string"
           },
           "title": "Requires",
@@ -905,12 +893,11 @@
           "type": "integer"
         },
         "stacks": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Stack"
-          },
           "minProperties": 1,
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Stack"
+            }
           },
           "title": "Stacks",
           "type": "object"
@@ -936,7 +923,7 @@
         "domains": {
           "default": [],
           "items": {
-            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
             "type": "string"
           },
           "title": "Domains",
@@ -951,12 +938,11 @@
           "type": "array"
         },
         "routes": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Route"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Route"
+            }
           },
           "title": "Routes",
           "type": "object"
@@ -994,12 +980,11 @@
           "type": "string"
         },
         "seeds": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Seed"
-          },
           "default": {},
-          "propertyNames": {
-            "minLength": 1
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Seed"
+            }
           },
           "title": "Seeds",
           "type": "object"
@@ -1027,7 +1012,7 @@
         },
         "services": {
           "items": {
-            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
             "type": "string"
           },
           "minItems": 1,
@@ -1035,7 +1020,7 @@
           "type": "array"
         },
         "target": {
-          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "title": "Target",
           "type": "string"
         }
@@ -1097,7 +1082,7 @@
         "drops": {
           "default": [],
           "items": {
-            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
             "type": "string"
           },
           "title": "Drops",
@@ -1121,7 +1106,7 @@
         "args": {
           "default": [],
           "items": {
-            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
             "type": "string"
           },
           "title": "Args",

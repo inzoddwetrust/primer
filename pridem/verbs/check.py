@@ -273,6 +273,8 @@ def _read(checked: Checked, stack: Stack, entry: str) -> Read:
         read.failed = StepFailed(
             "config-failed", {"stack": entry, "exit_code": failed.code}
         )
+    except StepFailed as refused:  # unfolded before config (DM-78)
+        read.failed = refused
     except (CommandTimedOut, CommandNotStarted, json.JSONDecodeError) as error:
         cause = {
             CommandTimedOut: "timed-out",

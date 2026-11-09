@@ -262,3 +262,26 @@ def test_the_same_types_need_no_commit(tmp_path: Path, openapi: int) -> None:
     with RealGit(*app_calls(openapi, cs, 1)) as runner:
         outcome = run(step, runner)
     assert outcome.steps[0].verify == {"types": "current", "path": OUT}
+
+
+def test_types_out_through_a_symlink_of_the_product_is_refused(
+    tmp_path: Path, openapi: int
+) -> None:
+    """DM-78: the product's branch makes ``frontend/src`` a symlink out of the
+    tree -- root's write of ``out`` would land there. ``types:path-outside``,
+    and the place outside is untouched. The pair: the probe above."""
+    step, remote, cs = types(tmp_path, openapi, "test")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    work = tmp_path / "origin"
+    git("-C", str(work), "rm", "-q", "-r", "frontend/src")
+    (work / "frontend").mkdir(exist_ok=True)
+    (work / "frontend" / "src").symlink_to(outside, target_is_directory=True)
+    git("-C", str(work), "add", "-A")
+    git("-C", str(work), "commit", "-q", "-m", "a symlinked src")
+    for bare in (remote, tmp_path / "box.git"):
+        git("-C", str(work), "push", "-q", "--force", str(bare), f"{REF}:{REF}")
+    with RealGit(*app_calls(openapi, cs, 2)) as runner:
+        outcome = run(step, runner)
+    assert outcome.steps[0].reason == Code("types:path-outside", {"path": OUT})
+    assert list(outside.iterdir()) == []

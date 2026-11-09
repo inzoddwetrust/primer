@@ -22,7 +22,7 @@ from pydantic import TypeAdapter
 
 from pridem.report.schema import Composition
 from pridem.stacks.lock import LockEntry
-from pridem.stacks.passport import Package
+from pridem.stacks.passport import Package, repo_name
 from pridem.stacks.schema import Product, Service
 
 MACHINE = "pridem"
@@ -54,12 +54,6 @@ class Stack:
     def service(cls, yaml: Service, pin: LockEntry) -> "Stack":
         """A co-located service at the release the lock pins."""
         return cls(yaml.name, "service", pin.version)
-
-
-def repo_name(repo: str) -> str:
-    """``git@github.com:partner-x/velo-look.git`` -> ``velo-look``."""
-    last = repo.rstrip("/").replace(":", "/").rsplit("/", 1)[-1]
-    return last.removesuffix(".git")
 
 
 def composition(

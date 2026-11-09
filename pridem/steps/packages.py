@@ -55,7 +55,8 @@ from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
-from pridem.stacks.passport import Passport
+from pridem.files import PathOutside, resolve_inside
+from pridem.stacks.passport import Package, Passport
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
     CheckResult,
@@ -67,6 +68,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.compose import (
+    REFUSAL_CODES,
     ComposeStack,
     OverrideHandoff,
     config,
@@ -118,6 +120,25 @@ KEY_CODES = {
 that finds an image by its key."""
 
 
+def inside_package(base: Path, rel: str, slot: str) -> Path:
+    """``base / rel`` with no symlink on the way and inside ``base``
+    (``resolve_inside``): the package is someone else's tree, the binds and
+    the copies are its own directory and nothing of the box beside it."""
+    try:
+        return resolve_inside(base, rel)
+    except PathOutside:
+        raise StepFailed("path-outside", {"slot": slot, "from": rel}) from None
+
+
+def package_base(root: Path, stack: str, given: Package, slot: str) -> Path:
+    """The package's directory on the box, its ``subpath`` checked the same
+    way (DM-78: a symlinked ``subpath`` led the copy and the mount out)."""
+    base = package_dir(root, stack, given)
+    if given.subpath is None:
+        return base
+    return inside_package(base, given.subpath, slot)
+
+
 def build_places(
     product: Product,
     stack: str,
@@ -135,9 +156,7 @@ def build_places(
         given = passport.packages.get(slot)
         if given is None:
             raise StepFailed("package-missing", {"slot": slot})
-        base = package_dir(root, stack, given)
-        if given.subpath is not None:
-            base = base / given.subpath
+        base = package_base(root, stack, given, slot)
         for place in declared.build:
             if place.service in services:
                 out_.append(
@@ -235,16 +254,14 @@ def package_mounts(
         if given is None:  # a slot of apply: build has no mount (rule 10)
             continue
         release = package_release(given)
-        base = package_dir(root, stack, given)
-        if given.subpath is not None:
-            base = base / given.subpath
+        base = package_base(root, stack, given, slot)
         for element in declared.mount:
             if element.service is None or element.path is None:
                 continue
             if services is not None and element.service not in services:
                 continue  # another entry's service: its stack binds it
             part = element.from_ or ""  # relative, normalized: the loader's R10
-            source = base / part if part else base
+            source = inside_package(base, part, slot) if part else base
             out_.append(
                 PackageMount(slot, release, element.service, source, element.path, base)
             )
@@ -266,6 +283,7 @@ class Packages(Step):
     order = 9
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **REFUSAL_CODES,
         **NO_PASSPORT,
         **KEY_CODES,
         "validate": "validate the packages {slots}",
@@ -316,16 +334,6 @@ class Packages(Step):
             if not mount.source.is_dir():
                 raise StepFailed(
                     "missing-release", {"slot": mount.slot, "path": str(mount.source)}
-                )
-            # a symlink of the package must not lead out of it (the binds are
-            # the package's own directory and nothing of the box beside it)
-            if not mount.source.resolve().is_relative_to(mount.package.resolve()):
-                raise StepFailed(
-                    "path-outside",
-                    {
-                        "slot": mount.slot,
-                        "from": str(mount.source.relative_to(mount.package)),
-                    },
                 )
         return mounts, known
 

@@ -128,6 +128,9 @@ def run(steps: list[Step], runner: FakeRunner) -> PlanOutcome:
 def test_probe_DM_19_package_mount_rejects_paths_outside_release(
     tmp_path: Path, bad: str
 ) -> None:
+    """Changed by DM-78 (by the dispatcher's word, before the change): the
+    package's path is checked before the first command (``resolve_inside``,
+    DM-78) -- the refusal comes with no command run, not after ``config``."""
     with pytest.raises(ContractError):  # .. and an absolute from: the loader
         made(tmp_path, skin_product(bad))
     # a symlink of the package that leads out of it: the step, before act
@@ -136,7 +139,7 @@ def test_probe_DM_19_package_mount_rejects_paths_outside_release(
     (package / "css").rmdir()
     (package / "css").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
     (tmp_path / "elsewhere").mkdir()
-    with FakeRunner(config_call(root, stack)) as runner:  # no validate runs
+    with FakeRunner() as runner:  # no command at all: refused before config
         outcome = run([packages(root, fetched, stack)], runner)
     assert outcome.steps[0].reason == Code(
         "packages:path-outside", {"slot": "skin", "from": "css"}

@@ -82,3 +82,27 @@ def atomic_write(
     link), fsync of the directory."""
     with staged_write(path, data, mode, exclusive=exclusive):
         pass
+
+
+class PathOutside(ValueError):
+    """A path of a foreign tree that leaves it or goes through a symlink."""
+
+
+def resolve_inside(root: Path, rel: str | Path) -> Path:
+    """``root / rel`` where ``rel`` is relative, of names only (no ``..``), and
+    no part from ``root`` down is a symlink (DM-78): a package, a release or
+    the ops repository is someone else's tree, and a link in it -- out or even
+    in -- would take the machine's read or write past what it checked. With
+    the three, the path stays under ``root`` by construction. The path need
+    not exist; what exists of it is checked. A refusal names no part of the
+    path."""
+    if Path(rel).is_absolute():
+        raise PathOutside("an absolute path")
+    target = Path(root)
+    for part in Path(rel).parts:
+        if part in ("", ".", ".."):
+            raise PathOutside("a relative path of names only")
+        target = target / part
+        if target.is_symlink():
+            raise PathOutside("a symlink in the path")
+    return target

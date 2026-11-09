@@ -87,6 +87,10 @@ RULES = {
         "a domain is written in lowercase: some clients compare hosts by case",
     ),
     "R17.option-name": (17, "an option of the instance is named ^[a-z][a-z0-9_]*$"),
+    "R18.repo-name": (
+        18,
+        "the name of a repository is ^[a-z0-9][a-z0-9_-]{0,62}$: it names /opt/<stack>",
+    ),
     "R17.option-duplicate": (17, "an option of the instance is named once"),
     "R12.secret-length": (
         12,
@@ -142,6 +146,28 @@ def _not_empty_secret(value: SecretStr) -> SecretStr:
 
 
 _OPTION = re.compile(r"[a-z][a-z0-9_]*")
+_REPO_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
+
+
+def repo_name(repo: str) -> str:
+    """``git@github.com:partner-x/velo-look.git`` -> ``velo-look``."""
+    last = repo.rstrip("/").replace(":", "/").rsplit("/", 1)[-1]
+    return last.removesuffix(".git")
+
+
+def _repo_address(value: str) -> str:
+    """Rule 18 (DM-78): the repository's name is the stack's name on the box
+    -- ``/opt/<name>`` is made from it before any ``primer.yaml`` is read."""
+    if not value or not _REPO_NAME.fullmatch(repo_name(value)):
+        raise PydanticCustomError(
+            "R18.repo-name",
+            "{message}",
+            {"message": rule_message("R18.repo-name", "not a name of a stack")},
+        )
+    return value
+
+
+RepoAddress = Annotated[str, Field(min_length=1), AfterValidator(_repo_address)]
 
 
 def _options(value: list[str]) -> list[str]:
@@ -218,7 +244,7 @@ class Server(Strict):
 
 
 class ProductRef(Strict):
-    repo: Name
+    repo: RepoAddress
     ref: Name
 
 
@@ -275,7 +301,7 @@ class Policies(Strict):
 
 
 class Package(Strict):
-    repo: Name
+    repo: RepoAddress
     version: ExactVersion
     subpath: RepoPath | None = None
 

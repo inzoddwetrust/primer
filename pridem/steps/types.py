@@ -37,6 +37,7 @@ from typing import ClassVar
 
 from pridem.conformance.stack import app_address, http_get
 from pridem.events import Json
+from pridem.files import PathOutside, resolve_inside
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
     CheckResult,
@@ -66,6 +67,7 @@ class Types(Step):
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
         "commit": "commit {path} to {branch}",
+        "path-outside": "{path} of types goes through a symlink or leaves the tree",
         "generator-unknown": "no command generates the types of {stack}",
         "openapi-unreachable": "the app answers no {path}",
         "openapi-empty": "the app's {path} is empty",
@@ -159,7 +161,10 @@ class Types(Step):
             f"refs/heads/{self.branch}",
         )
         try:
-            target = work / self.types.out
+            try:  # the product's tree: a symlink in out would lead root's write
+                target = resolve_inside(work, self.types.out)
+            except PathOutside:
+                raise StepFailed("path-outside", {"path": self.types.out}) from None
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(text)
             here = ["-C", str(work)]

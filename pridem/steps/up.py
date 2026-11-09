@@ -48,6 +48,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.compose import (
+    REFUSAL_CODES,
     UP_WAIT_S,
     ComposeStack,
     config,
@@ -80,6 +81,7 @@ class Up(Step):
     order = 13  # after egress (12): the application starts with its proxy ready
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
+        **REFUSAL_CODES,
         **NO_PASSPORT,
         **KEY_CODES,
         "up": "bring {stack} up at {commit}",

@@ -462,10 +462,12 @@ def test_mount_dependency_must_be_declared(tmp_path: Path) -> None:
 
 
 def test_empty_mount_dependency_stops_at_field_layer(tmp_path: Path) -> None:
+    """Changed by DM-78: a dependency is a name of the form ``S.name`` -- the
+    empty one is refused by that form, still at the field layer."""
     data = example("product.yaml")
     node(data, "packages", "texts", "mount", 1)["dependency"] = ""
     assert yaml_problems(tmp_path, data) == [
-        ("packages.texts.mount[1].dependency", "string_too_short")
+        ("packages.texts.mount[1].dependency", "S.name")
     ]
 
 

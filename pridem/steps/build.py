@@ -148,6 +148,7 @@ class Build(Step):
         **NO_PASSPORT,
         **KEY_CODES,
         "build": "build {services} of {stack} at {commit}",
+        "path-outside": "{slot}: the package's path {from} leaves the package",
         **REFUSAL_CODES,
         "egress-unlisted": UNLISTED,
         "missing-release": "{slot}: {path} is not on the box",

@@ -5,9 +5,9 @@ from contract_support import FIXTURES
 from passport_support import EXAMPLE as PASSPORT
 
 from pridem.stacks.lock import load_primer_lock
-from pridem.stacks.passport import Package, load_passport
+from pridem.stacks.passport import Package, load_passport, repo_name
 from pridem.stacks.schema import Product, Service, load_primer_yaml
-from pridem.stacks.stack import Stack, composition, repo_name
+from pridem.stacks.stack import Stack, composition
 
 
 def _example_stacks() -> list[Stack]:

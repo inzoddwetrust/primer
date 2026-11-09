@@ -66,6 +66,7 @@ from pydantic import (
     Tag,
     TypeAdapter,
     ValidationError,
+    WithJsonSchema,
 )
 from pydantic_core import PydanticCustomError
 
@@ -159,6 +160,13 @@ RULES = {
     ),
     "S.egress-duplicate": (0, "protocol 4.2: an egress host is named once"),
     "S.option-name": (0, "an option is named ^[a-z][a-z0-9_]*$"),
+    "S.name": (0, "a name is ^[a-z0-9][a-z0-9_-]{0,62}$"),
+    "S.env-key": (0, "a key of env is ^[A-Za-z_][A-Za-z0-9_]*$"),
+    "S.env-reserved": (
+        0,
+        "a key of env is none docker, compose, the process or the machine reads",
+    ),
+    "S.alias-collision": (0, "two entries of the product give one alias on pridem"),
     "S.command": (0, "a command is one or more words shlex can split"),
     "S.option-duplicate": (0, "an option is named once"),
     "S.egress-env": (
@@ -233,6 +241,55 @@ def _option(value: str) -> str:
 
 
 Name = Annotated[str, Field(min_length=1)]
+"""A string that is not a name the machine builds paths or files from: a
+repository address, a CSP, a key of the passport."""
+
+_IDENT = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _ident(value: str) -> str:
+    """A name the machine builds a path, an alias or a block of nginx from
+    (DM-78): ``^[a-z0-9][a-z0-9_-]{0,62}$`` -- no dot, slash, space, newline."""
+    if not _IDENT.fullmatch(value):
+        raise _rule_error("S.name", "not ^[a-z0-9][a-z0-9_-]{0,62}$")
+    return value
+
+
+def _env_key(value: str) -> str:
+    """A key of ``env``: a line of the stack's ``.env`` (DM-78)."""
+    if not _ENV_KEY.fullmatch(value):
+        raise _rule_error("S.env-key", "not ^[A-Za-z_][A-Za-z0-9_]*$")
+    return value
+
+
+Ident = Annotated[
+    str,
+    AfterValidator(_ident),
+    WithJsonSchema({"type": "string", "pattern": f"^{_IDENT.pattern}$"}),
+]
+EnvKey = Annotated[
+    str,
+    AfterValidator(_env_key),
+    WithJsonSchema({"type": "string", "pattern": f"^{_ENV_KEY.pattern}$"}),
+]
+
+RESERVED_ENV = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "HOSTNAME",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+    }
+)
+"""Keys of ``env`` a container's process or the machine reads for itself."""
+RESERVED_ENV_PREFIXES = ("COMPOSE_", "DOCKER_", "BUILDKIT_", "PRIMER_")
+"""What compose reads from ``--env-file`` for itself, and the machine's own
+build arguments."""
 EgressHost = Annotated[str, AfterValidator(_egress_host)]
 Option = Annotated[str, AfterValidator(_option)]
 
@@ -262,14 +319,14 @@ RepoPath = Annotated[str, AfterValidator(_relative_path)]
 
 
 class App(Strict):
-    service: Name
+    service: Ident
     port: Port
     health: UrlPath
     ready: UrlPath
 
 
 class Frontend(Strict):
-    service: Name
+    service: Ident
     port: Port
 
 
@@ -295,8 +352,8 @@ class Seed(Strict):
 # before them without the application and the frontend.
 class StackTest(Strict):
     run: Command
-    target: Name
-    services: Annotated[list[Name], Field(min_length=1)] | None = None
+    target: Ident
+    services: Annotated[list[Ident], Field(min_length=1)] | None = None
 
 
 class Types(Strict):
@@ -315,7 +372,7 @@ class Stack(Strict):
     ) = None
     types: Types | None = None
     seeds: dict[
-        Name, Annotated[Seed, _object_form("R17.seed-form", "{run, when}")]
+        Ident, Annotated[Seed, _object_form("R17.seed-form", "{run, when}")]
     ] = {}
     repo: Name | None = None
     persistent: bool = False
@@ -355,7 +412,7 @@ class Passport(_Var):
 
 class Seam(_Var):
     source: Literal["seam"]
-    from_: Name = Field(alias="from")
+    from_: Ident = Field(alias="from")
 
 
 # The stack's own application on the network ``pridem``:
@@ -391,7 +448,7 @@ class Dependency(Strict):
 
     repo: Name
     version: Range
-    data: dict[Name, RepoPath] = {}
+    data: dict[Ident, RepoPath] = {}
     when: Option | None = None
     """Installed only when this option of the instance is on (rule 38)."""
 
@@ -406,7 +463,7 @@ DependencyEntry = Annotated[Dependency, BeforeValidator(_no_branch)]
 
 
 class Edition(Strict):
-    services: list[Name]
+    services: list[Ident]
 
 
 class ProvideUrl(Strict):
@@ -415,24 +472,24 @@ class ProvideUrl(Strict):
 
 
 class ProvideVerb(Strict):
-    verb: Name
+    verb: Ident
 
 
 class Mount(Strict):
     """Checked as a whole by rule 10 in the rule layer."""
 
-    service: Name | None = None
-    dependency: Name | None = None
+    service: Ident | None = None
+    dependency: Ident | None = None
     from_: str | None = Field(default=None, alias="from")
     path: str | None = None
-    env: Name | None = None
+    env: EnvKey | None = None
 
 
 class BuildPlace(Strict):
     """Where ``apply: build`` puts a package: ``path`` inside the build context
     of ``service`` (rule 10, the owner's decision of 02.11)."""
 
-    service: Name
+    service: Ident
     path: str
 
 
@@ -458,8 +515,8 @@ class Headers(Strict):
 
 
 class ProductHost(Strict):
-    domains: list[Name] = []
-    routes: dict[Name, Route] = {}
+    domains: list[Ident] = []
+    routes: dict[Ident, Route] = {}
     headers: Headers | None = None
 
 
@@ -472,14 +529,14 @@ class ServiceHost(Strict):
     """``routes`` -- of a service on its own box (protocol 4, form A); a
     co-located service has none (``seams_check``)."""
 
-    domains: list[Name] = []
-    routes: dict[Name, Route] = {}
+    domains: list[Ident] = []
+    routes: dict[Ident, Route] = {}
     ports: list[HostPort] = []
 
 
 class Verb(Strict):
     run: Command
-    args: list[Name] = []
+    args: list[Ident] = []
     roles: (
         Annotated[list[Literal["test", "prod", "preview"]], Field(min_length=1)] | None
     ) = None
@@ -490,7 +547,7 @@ class UpdateWindow(Strict):
     validate_: Command = Field(alias="validate")
     before: list[Command] = []
     after: list[Command] = []
-    drops: list[Name] = []
+    drops: list[Ident] = []
 
 
 class Accepted(Strict):
@@ -499,7 +556,7 @@ class Accepted(Strict):
     ``env`` -- the variable the machine gives that path under."""
 
     validate_: Command = Field(alias="validate")
-    env: Name
+    env: EnvKey
 
 
 class Report(Strict):
@@ -530,9 +587,9 @@ EgressEntry = Annotated[
 
 class _Stack(Strict):
     schema_: SchemaVersion = Field(alias="schema")
-    name: Name
-    stacks: Annotated[dict[Name, Stack], Field(min_length=1)]
-    env: dict[Name, EnvVar] = {}
+    name: Ident
+    stacks: Annotated[dict[Ident, Stack], Field(min_length=1)]
+    env: dict[EnvKey, EnvVar] = {}
     report: Report
     options: list[Option] = []
     """The options of an instance the stack knows (rule 36)."""
@@ -540,13 +597,13 @@ class _Stack(Strict):
 
 class Product(_Stack):
     kind: Literal["product"]
-    dependencies: dict[Name, DependencyEntry] = {}
-    editions: dict[Name, Edition] = {}
-    provides: dict[Name, ProvideUrl | ProvideVerb] = {}
-    replay: dict[Name, Command] = {}
-    packages: dict[Name, Package] = {}
+    dependencies: dict[Ident, DependencyEntry] = {}
+    editions: dict[Ident, Edition] = {}
+    provides: dict[EnvKey, ProvideUrl | ProvideVerb] = {}
+    replay: dict[Ident, Command] = {}
+    packages: dict[Ident, Package] = {}
     host: ProductHost | None = None
-    verbs: dict[Name, Verb] = {}
+    verbs: dict[Ident, Verb] = {}
     egress: list[EgressEntry] = []
     languages: Languages | None = None
     options_required: list[Option] = []
@@ -555,11 +612,11 @@ class Product(_Stack):
 
 class Service(_Stack):
     kind: Literal["service"]
-    provides: list[Name] = []
-    requires: list[Name] = []
+    provides: list[EnvKey] = []
+    requires: list[EnvKey] = []
     update_window: UpdateWindow | None = None
     host: ServiceHost | None = None
-    accepts: dict[Name, Accepted] = {}
+    accepts: dict[Ident, Accepted] = {}
 
 
 PrimerYaml = Annotated[Product | Service, Field(discriminator="kind")]
@@ -843,6 +900,38 @@ def _duplicates(names: Sequence[str], path: tuple[str, ...]) -> list[Problem]:
     return out
 
 
+def _env_reserved(stack: Product | Service) -> list[Problem]:
+    """A key of ``env`` docker, compose, the container's process or the
+    machine reads for itself (DM-78)."""
+    return [
+        problem_at(("env", key), "S.env-reserved", repr(key))
+        for key in stack.env
+        if key in RESERVED_ENV or key.startswith(RESERVED_ENV_PREFIXES)
+    ]
+
+
+def _aliases(stack: Product | Service) -> list[Problem]:
+    """``<entry>-<service>`` of the app and the frontend of every entry is a
+    name on the network ``pridem``: two pairs giving one name -- ``a-b`` +
+    ``c`` and ``a`` + ``b-c`` -- would share an address (DM-78)."""
+    if not isinstance(stack, Product):
+        return []
+    seen: dict[str, tuple[str, str]] = {}
+    out: list[Problem] = []
+    for entry, stage in stack.stacks.items():
+        for part in (stage.app, stage.frontend):
+            if part is None:
+                continue
+            pair = (entry, part.service)
+            name = f"{entry}-{part.service}"
+            other = seen.setdefault(name, pair)
+            if other != pair:
+                out.append(
+                    problem_at(("stacks", entry), "S.alias-collision", repr(name))
+                )
+    return out
+
+
 def _options(stack: Product | Service) -> list[Problem]:
     """Rules 36-38 and 41 within one file: options named once, ``when:`` and
     a flag ``options.<o>`` only of the stack's own options, ``options_required``
@@ -930,6 +1019,8 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r11_editions,
     _s_seam_from,
     _s_egress,
+    _env_reserved,
+    _aliases,
     _options,
     _s_entries,
     _r20_test_services,

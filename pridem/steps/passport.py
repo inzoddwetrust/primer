@@ -63,7 +63,7 @@ import yaml
 from pydantic import SecretStr, ValidationError
 
 from pridem.events import Fact, Json, Secrets
-from pridem.files import fsync_dir, staged_write
+from pridem.files import PathOutside, fsync_dir, resolve_inside, staged_write
 from pridem.runner import OnLine, Stream
 from pridem.stacks.loader import ContractError, load_yaml_mapping, render_path
 from pridem.stacks.passport import PASSPORT, SERVER_NAME, Passport, load_passport
@@ -430,6 +430,7 @@ class FetchPassport(Step):
         "copy": "copy the passport from {file}",
         "no-ref": "the ops repository {repo} has no branch {ref}",
         "not-in-ops": "the ops repository has no {path} at {commit}",
+        "path-outside": "{path} of the ops repository is a symlink or goes through one",
         "not-recipient": (
             "passports/{server}.yaml is not encrypted for this box's key "
             "{public_key} after {wait_s} s"
@@ -553,6 +554,10 @@ class FetchPassport(Step):
             )
             if code != 0:
                 raise StepFailed("not-in-ops", {"path": self._path, "commit": commit})
+            try:  # git makes a symlink of the ops repository a symlink (DM-78)
+                resolve_inside(scratch / "tree", self._path)
+            except PathOutside:
+                raise StepFailed("path-outside", {"path": self._path}) from None
             _empty_0600(out)
             result = ctx.runner.run(
                 [
