@@ -585,3 +585,56 @@ def test_install_judges_the_end_in_tls_files_and_in_ssl(tmp_path: Path) -> None:
             with pytest.raises(StepFailed) as failed:
                 step.verify(ctx, CheckResult(False))
         assert failed.value.reason.code == "expiring", step.name
+
+
+# --- DM-80 FIX: the number of days left is checked, not only the bounds -------
+
+
+def test_days_left_is_the_whole_days_to_the_end(tmp_path: Path) -> None:
+    """The fact ``days_left`` of a green ``tls_files``, ``ssl`` and ``ssl renew``
+    and the parameter ``days_left`` of ``expiring`` are the whole days to the
+    end on known clocks -- a fact is checked by its number (par0 10)."""
+    cert, key = self_signed_pair(tmp_path, NAMES)
+    root, fetched = passport(tmp_path, ssl="provided", tls=(cert, key))
+    _placed(root, cert, key)
+    ends = _ends(root)
+    made = product()
+    for left, days in (
+        (timedelta(days=20, hours=1), 20),
+        (timedelta(days=12, hours=23), 12),
+        (timedelta(days=7), 7),
+    ):
+        now = ends - left
+        for step in (
+            TlsFiles(made, fetched=fetched, root=root, now=now),
+            Ssl(made, fetched=fetched, secrets=Secrets(()), root=root, now=now),
+            _renew(root, fetched, now),
+        ):
+            with Mixed() as runner:
+                ctx = StepContext(
+                    runner, "install", "test", "x", lambda *_: None, Interrupt()
+                )
+                verified = step.verify(ctx, CheckResult(False))
+            assert verified.fact["days_left"] == days, (step.name, left)
+    for left, days in (
+        (timedelta(days=6, hours=23), 6),
+        (timedelta(days=1, hours=1), 1),
+        (timedelta(hours=5), 0),
+    ):
+        now = ends - left
+        for step in (
+            TlsFiles(made, fetched=fetched, root=root, now=now),
+            Ssl(made, fetched=fetched, secrets=Secrets(()), root=root, now=now),
+            _renew(root, fetched, now),
+        ):
+            with Mixed() as runner:
+                ctx = StepContext(
+                    runner, "install", "test", "x", lambda *_: None, Interrupt()
+                )
+                with pytest.raises(StepFailed) as failed:
+                    step.verify(ctx, CheckResult(False))
+            assert failed.value.reason.code == "expiring", step.name
+            assert failed.value.reason.params == {
+                "cert_expires": ends.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "days_left": days,
+            }, (step.name, left)

@@ -25,6 +25,7 @@ from plan_support import ListSink
 from state_support import state
 
 from pridem.events import ConsoleSink, Event, Json, PlanOutcome, Secrets
+from pridem.interrupt import Interrupt
 from pridem.plan import Plan, StackSteps
 from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.codes import ExitCode
@@ -1202,3 +1203,38 @@ def test_age_key_directory_found_wider_is_made_0700(tmp_path: Path) -> None:
     outcome, _ = run([AgeKey(root)], Recording())
     assert fact(outcome, "age_key")["key_mode"] == oct(0o600)
     assert mode_of((root / AGE_KEY).parent) == oct(0o700)
+
+
+# --- DM-80 FIX: the copy's directory is 0700 in check and in act alike --------
+
+
+def _wide_home(root: Path) -> Path:
+    home = (root / PASSPORT_COPY).parent
+    home.mkdir(parents=True)
+    home.chmod(0o755)
+    return home
+
+
+def test_check_makes_the_copy_directory_0700(tmp_path: Path) -> None:
+    """``check`` writes its scratch beside the copy: the directory is 0700
+    whatever it was found as, before anything is written there."""
+    root = tmp_path / "box"
+    home = _wide_home(root)
+    given = write_file(tmp_path, passport(version=4))
+    _, [step] = file_steps(root, given)
+    with FakeRunner() as runner:
+        ctx = StepContext(runner, "install", "test", "x", lambda *_: None, Interrupt())
+        step.check(ctx)
+    assert mode_of(home) == oct(0o700)
+
+
+def test_act_makes_the_copy_directory_0700(tmp_path: Path) -> None:
+    root = tmp_path / "box"
+    home = _wide_home(root)
+    given = write_file(tmp_path, passport(version=4))
+    _, [step] = file_steps(root, given)
+    with FakeRunner() as runner:
+        ctx = StepContext(runner, "install", "test", "x", lambda *_: None, Interrupt())
+        step.act(ctx, CheckResult(True, local_code("copy", {"file": str(given)})))
+    assert mode_of(home) == oct(0o700)
+    assert mode_of(root / PASSPORT_COPY) == oct(0o600)

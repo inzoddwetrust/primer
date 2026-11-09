@@ -1172,3 +1172,15 @@ def test_up_watches_only_the_services_of_its_own_entry(tmp_path: Path) -> None:
         with FakeRunner(config_call(cs, document)) as runner:
             ctx = StepContext(runner, "install", "test", entry, _drop)
             assert step._watched(ctx) == found, entry
+
+
+def test_the_contexts_directory_found_wider_is_made_0700(tmp_path: Path) -> None:
+    """DM-80: the directory of the build contexts is 0700 whatever it was."""
+    source = tmp_path / "release" / "frontend"
+    source.mkdir(parents=True)
+    (source / "Dockerfile").write_text("FROM x\n")
+    target = tmp_path / "contexts" / "frontend"
+    target.parent.mkdir(parents=True)
+    target.parent.chmod(0o755)
+    write_context(source, target, [])
+    assert target.parent.stat().st_mode & 0o777 == 0o700

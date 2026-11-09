@@ -356,3 +356,16 @@ def test_the_same_commit_passed_needs_no_act(tmp_path: Path) -> None:
     with FakeRunner(config, config) as again:  # check and verify only
         outcome = run([step(tmp_path)], again)
     assert outcome.code is ExitCode.OK
+
+
+def test_the_home_of_the_tests_found_wider_is_made_0700(tmp_path: Path) -> None:
+    """DM-80: the tests' directory (image id, junit) is 0700 whatever it was
+    found as; the junit directory inside stays 0777 for the image's user."""
+    home = tmp_path / "opt" / "blank" / "tests" / SHA
+    home.mkdir(parents=True)
+    home.chmod(0o755)
+    runner = Effects(GREEN, *script(tmp_path))
+    with runner:
+        outcome = run([step(tmp_path)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert home.stat().st_mode & 0o777 == 0o700
