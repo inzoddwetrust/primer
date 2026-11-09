@@ -49,6 +49,7 @@ from pridem.steps.compose import (
 from pridem.steps.egress import (
     CONTAINER_CONFIG,
     LABEL_FILTER,
+    LOG_FORMAT,
     LOG_TAG,
     OUTSIDE,
     SENTINEL,
@@ -426,6 +427,15 @@ class Proxy:
         return self.status if host in self.allowed else 403
 
 
+def getent(host: str, *addresses: str, code: int = 0) -> FakeCall:
+    """``getent ahosts`` in the proxy's container (DM-84): a line per address
+    and socket type, as libc prints it."""
+    lines = tuple(f"{a}      STREAM {host}" for a in addresses)
+    return call(
+        "docker", "exec", PROXY, "getent", "ahosts", host, code=code, lines=lines
+    )
+
+
 def call(*argv: str, code: int = 0, lines: tuple[str, ...] = ()) -> FakeCall:
     return FakeCall(argv, code=code, lines=stdout(*lines))
 
@@ -712,8 +722,11 @@ def test_a_proxy_still_there_after_removal_is_red(tmp_path: Path) -> None:
 def test_verify_reads_the_proxy_and_its_behaviour(
     tmp_path: Path, change: str, code: str
 ) -> None:
+    """Changed by DM-84: a host of the list refused until ``ready_s`` is red
+    with what the proxy's container resolves it to (``resolved``) beside
+    docker's word."""
     hosts = list(ZOOM)
-    proxy = Proxy(hosts)
+    proxy = Bounded(hosts)
     calls = verify_calls(hosts)[:-1]  # red before the log is read (DM-45)
     if change == "open":
         proxy.allowed = [*hosts, SENTINEL]
@@ -733,15 +746,19 @@ def test_verify_reads_the_proxy_and_its_behaviour(
         calls = [ps(), ps(PROXY, every=True)]
     if change in ("refuses", "silent", "never-answers", "none-running"):
         calls += diagnosis()  # DM-45 FIX: the refusal carries docker's word
+    if change == "refuses":
+        calls.append(getent("api.zoom.us", "170.114.52.2"))
     with FakeRunner(up(tmp_path), *calls) as runner:
         outcome, _ = run([step(tmp_path, hosts, proxy, ready_s=3)], runner)
     reason = outcome.steps[0].reason
     assert reason is not None and reason.code == code, outcome.steps
     if change == "refuses":
         assert reason.params == {"hosts": ["api.zoom.us"]}
-    if change in ("refuses", "silent", "never-answers", "none-running"):
-        # DM-76 FIX: host-refused too -- the next red is not blind
+    if change in ("silent", "never-answers", "none-running"):
         assert outcome.steps[0].verify == DIAGNOSED, outcome.steps[0].verify
+    if change == "refuses":  # DM-76 FIX, DM-84: docker's word and the address
+        resolved = {"resolved": {"api.zoom.us": ["170.114.52.2"]}}
+        assert outcome.steps[0].verify == {**DIAGNOSED, **resolved}
 
 
 def test_a_host_with_no_answer_of_its_own_is_still_allowed(tmp_path: Path) -> None:
@@ -950,3 +967,105 @@ def test_a_diagnosis_that_fails_names_its_exit_code(tmp_path: Path) -> None:
         "logs": [],
         "logs_exit_code": 1,
     }
+
+
+# --- DM-84: a fresh proxy's first answer comes before its DNS -------------------
+
+
+ASKED_TO_THE_DEADLINE = 3
+"""With ``ready_s=3`` and a clock that ticks once a reading: the probes of a
+refused host of the list before the deadline -- exactly, so a deadline of
+``>`` instead of ``>=`` is one probe more."""
+
+
+class Bounded(Proxy):
+    """A ``Proxy`` that fails the test past ``limit`` probes of one host -- a
+    wait with no deadline ends as a red assertion, not a hang."""
+
+    limit = 20
+
+    def __call__(self, address: str, port: int, host: str) -> int | None:
+        if self.asked.count(host) >= self.limit:
+            raise AssertionError(f"{host} asked past any deadline")
+        return super().__call__(address, port, host)
+
+
+class Flaky(Proxy):
+    """403 for ``host`` the first ``refusals`` times it is asked, then 200."""
+
+    def __init__(self, allowed: list[str], host: str, refusals: int) -> None:
+        super().__init__(allowed)
+        self.host = host
+        self.left = refusals
+
+    def __call__(self, address: str, port: int, host: str) -> int | None:
+        if host == self.host and self.left > 0:
+            self.asked.append(host)
+            self.left -= 1
+            return 403
+        return super().__call__(address, port, host)
+
+
+def test_a_listed_host_refused_by_a_fresh_proxy_is_asked_again(tmp_path: Path) -> None:
+    """DM-84: 403, 403, then 200 for a host of the list -- green; no probe
+    after the 200; ``SENTINEL`` asked once."""
+    proxy = Flaky(list(ZOOM), "api.zoom.us", 2)
+    with FakeRunner(up(tmp_path), *verify_calls(ZOOM)) as runner:
+        outcome, _ = run([step(tmp_path, ZOOM, proxy)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert proxy.asked.count("api.zoom.us") == 3
+    assert proxy.asked.count(SENTINEL) == 1
+
+
+def test_a_listed_host_refused_until_the_deadline_is_red_with_its_address(
+    tmp_path: Path,
+) -> None:
+    """Refused past ``ready_s`` (a private address stays private): red, with
+    docker's word and the address the proxy's container resolves; none --
+    ``none``; no getent in the image -- its exit code."""
+    for answer, resolved in (
+        (getent("api.zoom.us", "10.0.0.7"), ["10.0.0.7"]),
+        (getent("api.zoom.us", code=2), "none"),
+        (getent("api.zoom.us", code=127), {"getent": 127}),
+    ):
+        root = tmp_path / str(len(str(resolved)))
+        root.mkdir()
+        proxy = Bounded(["zoom.us"])
+        calls = [*verify_calls(ZOOM)[:-1], *diagnosis(), answer]
+        with FakeRunner(up(root), *calls) as runner:
+            outcome, _ = run([step(root, ZOOM, proxy, ready_s=3)], runner)
+        reason = outcome.steps[0].reason
+        assert reason is not None and reason.code == "egress:host-refused"
+        assert outcome.steps[0].verify == {
+            **DIAGNOSED,
+            "resolved": {"api.zoom.us": resolved},
+        }
+        assert proxy.asked.count("api.zoom.us") == ASKED_TO_THE_DEADLINE
+
+
+def test_the_sentinel_is_never_asked_again(tmp_path: Path) -> None:
+    """``SENTINEL`` must be refused: a 200 for it is ``proxy-open`` at once."""
+    proxy = Proxy([*ZOOM, SENTINEL])
+    calls = verify_calls(ZOOM)[:-1]
+    with FakeRunner(up(tmp_path), *calls) as runner:
+        outcome, _ = run([step(tmp_path, ZOOM, proxy)], runner)
+    reason = outcome.steps[0].reason
+    assert reason is not None and reason.code == "egress:proxy-open"
+    assert proxy.asked.count(SENTINEL) == 1
+
+
+def test_the_log_line_carries_the_address_and_no_path() -> None:
+    assert LOG_FORMAT.endswith(" addr=%<a")
+    assert "%ru" not in LOG_FORMAT and "%>rp" not in LOG_FORMAT
+
+
+def test_a_silent_host_is_not_asked_again(tmp_path: Path) -> None:
+    """Silence is ``proxy-silent`` at once: only a refusal is asked again."""
+    proxy = Bounded(list(ZOOM))
+    proxy.silent = {"api.zoom.us"}
+    calls = [*verify_calls(ZOOM)[:-1], *diagnosis()]
+    with FakeRunner(up(tmp_path), *calls) as runner:
+        outcome, _ = run([step(tmp_path, ZOOM, proxy, ready_s=3)], runner)
+    reason = outcome.steps[0].reason
+    assert reason is not None and reason.code == "egress:proxy-silent"
+    assert proxy.asked.count("api.zoom.us") == 1

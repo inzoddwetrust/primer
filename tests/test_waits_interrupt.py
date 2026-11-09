@@ -207,3 +207,75 @@ def test_a_signal_ends_every_wait_of_a_step(
     with pytest.raises(StepFailed):
         wait(_ctx(runner, quiet))
     runner.assert_consumed()  # DM-45 FIX: the diagnosis read at the deadline
+
+
+def test_a_signal_ends_the_wait_for_a_refused_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DM-84: the wait for a host of the list a fresh proxy still refuses
+    ends on a signal. The pair: no signal -- the wait runs to its deadline
+    and gives the refusal back to ``verify`` (which is red by it)."""
+    asked: list[str] = []
+    on_answer: list[Callable[[], None]] = []
+
+    def wait_of(sleep: Callable[[float], None]) -> Wait:
+        ticks = count()
+        made = PRIMER_YAML.validate_python(
+            {
+                "schema": 1,
+                "name": "blank",
+                "kind": "product",
+                "stacks": {"blank": {"compose": "c.yml"}},
+                "env": {},
+                "egress": ["api.github.com"],
+                "report": {
+                    "health": "/h",
+                    "ready": "/r",
+                    "logs": "json",
+                    "junit": True,
+                },
+            }
+        )
+        assert isinstance(made, Product)
+
+        def refuses(address: str, port: int, host: str) -> int:
+            if len(asked) >= 20:  # a wait with no deadline: red, not a hang
+                raise AssertionError("asked past any deadline")
+            asked.append(host)
+            for hook in on_answer:
+                hook()
+            return 403
+
+        step = Egress(
+            made,
+            fetched=Fetched(passport=PASSPORT.validate_python(passport_example())),
+            root=tmp_path,
+            answer=refuses,
+            ready_s=3,
+            poll_s=1,
+            clock=lambda: float(next(ticks)),
+            sleep=sleep,
+        )
+        return lambda ctx: step._allowed_answer(ctx, "172.30.0.2", "api.github.com")
+
+    interrupt = Interrupt()
+    interrupt.watch()
+    wait = wait_of(lambda _: interrupt.receive(signal.SIGTERM))
+    with pytest.raises(Interrupted):
+        wait(_ctx(FakeRunner(), interrupt))
+    assert asked == ["api.github.com"]
+    # the signal comes during a probe: the wait ends before it sleeps
+    asked.clear()
+    early = Interrupt()
+    early.watch()
+    slept: list[float] = []
+    on_answer.append(lambda: early.receive(signal.SIGTERM))
+    with pytest.raises(Interrupted):
+        wait_of(slept.append)(_ctx(FakeRunner(), early))
+    assert (asked, slept) == (["api.github.com"], [])
+    on_answer.clear()
+    asked.clear()
+    quiet = Interrupt()
+    quiet.watch()
+    assert wait_of(lambda _: None)(_ctx(FakeRunner(), quiet)) == 403
+    assert len(asked) > 1

@@ -114,10 +114,14 @@ STATE_FORMAT = (
     '"restarts":{{.RestartCount}},"error":{{json .State.Error}}}'
 )
 LOG_TAG = "pridem-egress"
-LOG_FORMAT = f"{LOG_TAG} host=%>rd port=%>rP status=%>Hs result=%Ss"
+LOG_FORMAT = f"{LOG_TAG} host=%>rd port=%>rP status=%>Hs result=%Ss addr=%<a"
 """squid 6 ``logformat`` codes: the request's domain and port, the status sent
-to the client, squid's own result. No ``%ru``: a request that is not
-``CONNECT`` carries its path there."""
+to the client, squid's own result, the address of the server it went to
+(``%<a``; ``-`` when it made no connection -- a refusal by ``http_access``
+comes before any, DM-84). No ``%ru``: a request that is not ``CONNECT``
+carries its path there."""
+GETENT_CODES = (0, 1, 2, 3, 125, 126, 127)
+"""What ``docker exec <proxy> getent ahosts`` may end with; each is a fact."""
 SENTINEL = "refused.pridem.invalid"
 """A host on no list (``.invalid`` never resolves): the proxy must refuse it."""
 PRIVATE = (
@@ -397,7 +401,7 @@ class Egress(Step):
         allowed: dict[str, Json] = {}
         denied: list[str] = []
         for host in self.hosts:
-            status = self.answer(address, self.port, host)
+            status = self._allowed_answer(ctx, address, host)
             if status is None:
                 raise StepFailed(
                     "proxy-silent",
@@ -410,11 +414,11 @@ class Egress(Step):
         if denied:
             # DM-76 FIX: the refusal carries docker's word on the proxy (par0
             # 14.3) -- the reason of a 403 is in squid's log, not in the step
-            raise StepFailed(
-                "host-refused",
-                {"hosts": list[Json](denied)},
-                self.diagnosis(ctx, container),
-            )
+            fact = {
+                **self.diagnosis(ctx, container),
+                "resolved": self._resolved(ctx, container, denied),
+            }
+            raise StepFailed("host-refused", {"hosts": list[Json](denied)}, fact)
         return Verified(
             {
                 "hosts": list[Json](self.hosts),
@@ -494,6 +498,51 @@ class Egress(Step):
         if result.code != 0:
             fact["logs_exit_code"] = result.code
         return fact
+
+    def _allowed_answer(self, ctx: StepContext, address: str, host: str) -> int | None:
+        """The answer for a host of the list, asked again while squid refuses
+        it, up to ``ready_s`` (DM-84). The config is checked in the container
+        and the host is in ``acl egress``: a 403 can come only from ``deny
+        private`` -- squid has no address for it yet, or a private one. A
+        fresh proxy's first answer comes before its DNS does; a private
+        address stays private, and the refusal is red at the deadline, only
+        later. Silence is not asked again: that is ``proxy-silent``."""
+        deadline = self.clock() + self.ready_s
+        while (status := self.answer(address, self.port, host)) == REFUSED:
+            if self.clock() >= deadline:
+                return status
+            ctx.interrupt.check()  # a signal ends the wait (DM-45)
+            self.sleep(self.poll_s)
+            ctx.interrupt.check()
+        return status
+
+    def _resolved(
+        self, ctx: StepContext, container: str, hosts: list[str]
+    ) -> dict[str, Json]:
+        """What the proxy's container resolves each refused host to now, by
+        ``getent ahosts`` -- the same server as squid's (``127.0.0.11``), not
+        the same client (libc, not squid's own): near what squid saw, not it.
+        ``none`` -- no address; a failed command -- its exit code."""
+        out_: dict[str, Json] = {}
+        for host in hosts:
+            argv = ["docker", "exec", container, "getent", "ahosts", host]
+            lines: list[str] = []
+
+            def keep(
+                stream: Stream, line: str, cut: bool, into: list[str] = lines
+            ) -> None:
+                if stream is Stream.STDOUT:
+                    into.append(line)
+
+            # getent: 0 found, 2 not found; docker exec: 125-127 no container
+            # or no getent in the image -- the code names it, not a crash
+            result = ctx.runner.run(argv, expect=GETENT_CODES, timeout=60, on_line=keep)
+            if result.code not in (0, 2):
+                out_[host] = {"getent": result.code}
+                continue
+            found = sorted({line.split()[0] for line in lines if line.split()})
+            out_[host] = list[Json](found) if found else "none"
+        return out_
 
     def _first_answer(self, ctx: StepContext, address: str, container: str) -> int:
         """The answer for ``SENTINEL``, waiting up to ``ready_s`` for a
