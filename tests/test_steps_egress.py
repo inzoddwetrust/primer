@@ -384,6 +384,55 @@ def test_the_config_lets_through_connect_to_the_hosts_by_name_alone() -> None:
     assert "cache deny all" in lines and "http_port 3128" in lines
 
 
+PRIVATE_BLOCKS = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "::/128",
+    "::1",
+    "::ffff:0:0/96",
+    "64:ff9b::/96",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
+)
+"""Every range the proxy refuses, written out here and not read from
+``PRIVATE``: a range dropped from the code is red (DM-79; the cloud's metadata
+``169.254.0.0/16`` among them)."""
+
+
+def test_the_proxy_refuses_every_private_range_once() -> None:
+    """DM-79: ``acl private dst`` names each range of ``PRIVATE_BLOCKS``
+    exactly once, nothing else -- the two lists are the same sets with no
+    duplicate on either side."""
+    lines = config_text(["zoom.us"]).splitlines()
+    private = [line for line in lines if line.startswith("acl private dst")]
+    assert len(private) == 1
+    found = private[0].split()[3:]
+    assert len(found) == len(set(found)) == len(PRIVATE_BLOCKS)
+    assert set(found) == set(PRIVATE_BLOCKS)
+
+
+def test_the_proxy_runs_confined(tmp_path: Path) -> None:
+    """DM-79: squid runs as ``proxy`` from its first instruction and needs no
+    capability: every one dropped, none given back, ``no-new-privileges``, a
+    limit on processes; its log is the host's (no ``logging`` here)."""
+    proxy = json.loads(compose_text(tmp_path))["services"]["proxy"]
+    assert proxy["cap_drop"] == ["ALL"]
+    assert "cap_add" not in proxy
+    assert proxy["security_opt"] == ["no-new-privileges:true"]
+    assert proxy["pids_limit"] == 256
+    assert proxy["user"] == "proxy" and "logging" not in proxy
+
+
 def test_the_proxy_compose_puts_it_on_its_network_and_a_way_out(tmp_path: Path) -> None:
     document = json.loads(compose_text(tmp_path))
     proxy = document["services"]["proxy"]

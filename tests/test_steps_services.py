@@ -526,6 +526,8 @@ def test_an_unchanged_copy_on_a_service_on_its_configuration_needs_nothing(
 
 
 def test_a_changed_copy_is_copied_again_and_validated(tmp_path: Path) -> None:
+    """Changed by DM-79: the validate of the data drops every capability and never
+    pulls the image of this run."""
     step, compose, item = _copy(tmp_path)
     item.target.mkdir(parents=True)
     (item.target / "kinds.yaml").write_text("kinds: [old]\n")
@@ -541,6 +543,10 @@ def test_a_changed_copy_is_copied_again_and_validated(tmp_path: Path) -> None:
             "--rm",
             "--network",
             "none",
+            "--cap-drop",
+            "ALL",
+            "--pull",
+            "never",
             *labels,
             "-v",
             item.volume,
@@ -834,7 +840,10 @@ def test_seams_check_takes_an_edition_only_where_the_product_has_editions(
 
 def test_an_empty_directory_is_copied_too(tmp_path: Path) -> None:
     """The service gets the directory it takes even when it is empty: a bind of
-    a path that is not there would be made by docker, as root, empty."""
+    a path that is not there would be made by docker, as root, empty.
+
+    Changed by DM-79: the validate of the data drops every capability and never
+    pulls the image of this run."""
     step, compose, item = _copy(tmp_path)
     (item.source / "kinds.yaml").unlink()
     labels = [
@@ -849,6 +858,10 @@ def test_an_empty_directory_is_copied_too(tmp_path: Path) -> None:
             "--rm",
             "--network",
             "none",
+            "--cap-drop",
+            "ALL",
+            "--pull",
+            "never",
             *labels,
             "-v",
             item.volume,

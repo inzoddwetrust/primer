@@ -15,6 +15,13 @@ the box meanwhile. A signal that the command's ``Interrupt`` says stops it
 (``pridem/interrupt.py``) stops the command's group as a timeout does and
 raises ``Interrupted``.
 
+A command run with no ``env`` gets ``CLEAN_ENV``, never the environment of
+``pridem``'s own process: a ``DOCKER_HOST``, a ``COMPOSE_*`` or a product's
+variable of an ssh session would reach docker and compose (an exported
+variable beats ``--env-file`` in compose's interpolation), and a run from the
+timer and one from an ssh session would hash one configuration two ways. A
+caller that passes ``env`` gives the whole environment itself.
+
 ``FakeRunner`` is a strict script for tests: calls must arrive in the scripted
 order, an unplanned call fails at the moment it is made, and an expectation
 left unconsumed fails when the script is closed.
@@ -41,7 +48,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from types import TracebackType
+from types import MappingProxyType, TracebackType
 from typing import IO, Literal, Protocol, Self, cast, runtime_checkable
 
 from pridem.interrupt import Interrupt, Interrupted
@@ -72,6 +79,19 @@ _BREAK = re.compile(r"\r\n|\r|\n")
 _POLL_SECONDS = 0.05
 _LOOK_SECONDS = 0.1
 """The longest a command runs between two looks at the interrupt."""
+
+CLEAN_ENV: Mapping[str, str] = MappingProxyType(
+    {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME": "/root",
+        "DOCKER_CONFIG": "/root/.docker",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+)
+"""The whole environment of a command run with no ``env``: constants, the
+same from the timer and from any session -- none of them is read from the
+process."""
 
 SETPRIV = "/usr/bin/setpriv"
 """util-linux on Ubuntu 24.04: ``--pdeathsig KILL`` -- the command's leader dies
@@ -239,15 +259,16 @@ class SubprocessRunner:
             tail.append((stream, line))
             on_line(stream, line, continued)
 
+        environment = dict(CLEAN_ENV if env is None else env)
         try:
-            program = _program(command[0], cwd, env)
+            program = _program(command[0], cwd, environment)
             process = subprocess.Popen(
                 [SETPRIV, "--pdeathsig", "KILL", "--", program, *command[1:]],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cwd,
-                env=None if env is None else dict(env),
+                env=environment,
                 start_new_session=True,
                 pass_fds=self._held,
             )

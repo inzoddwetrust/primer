@@ -161,6 +161,8 @@ def test_probe_DM_19_package_mount_rejects_paths_outside_release(
 
 
 def test_red_validate_stops_before_anything_is_switched(tmp_path: Path) -> None:
+    """Changed by DM-79: the product's validate has no network and no
+    capability; the image of this run is never pulled."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, package = skin_box(tmp_path)
     cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
@@ -177,6 +179,7 @@ def test_red_validate_stops_before_anything_is_switched(tmp_path: Path) -> None:
             "docker",
             "run",
             "--rm",
+            *("--network", "none", "--cap-drop", "ALL", "--pull", "never"),
             *labels,
             "-v",
             f"{package / 'css'}:/srv/skin:ro",
@@ -219,7 +222,10 @@ def test_an_image_named_in_compose_is_used_only_without_build(
     """DM-54 (the condition kept when its ``type: ignore`` went): no image of
     the commit carries the service's label -- a service that is built has no
     image to validate (``no-image``); one that only names an image validates
-    that image."""
+    that image.
+
+    Changed by DM-79: that image is a registry's, so its validate has no
+    network and no capability but no ``--pull never`` -- no step pulls it."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, package = skin_box(tmp_path)
     cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
@@ -249,6 +255,8 @@ def test_an_image_named_in_compose_is_used_only_without_build(
             "docker",
             "run",
             "--rm",
+            # a registry image no step pulls: docker run still may (DM-79)
+            *("--network", "none", "--cap-drop", "ALL"),
             *("--label", "pridem.stack=blank", "--label", "pridem.release=main"),
             *("--label", f"pridem.commit={SHA}"),
             *("-v", f"{package / 'css'}:/srv/skin:ro"),
@@ -512,6 +520,7 @@ def _validate(package: Path, code: int) -> FakeCall:
             "docker",
             "run",
             "--rm",
+            *("--network", "none", "--cap-drop", "ALL", "--pull", "never"),
             *labels,
             "-v",
             f"{package / 'css'}:/srv/skin:ro",
@@ -549,7 +558,10 @@ def test_the_override_of_this_run_goes_in_place_only_after_a_green_validate(
     """``build`` left its override as the candidate and handed its text over;
     ``packages`` reads the candidate (``stale``) and puts the text in place
     after ``validate`` -- red: the override on disk is the old one and the
-    candidate is gone; the pair, green: the new one is in place."""
+    candidate is gone; the pair, green: the new one is in place.
+
+    Changed by DM-79: the product's validate has no network and no
+    capability; the image of this run is never pulled."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, package = skin_box(tmp_path)
     cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)

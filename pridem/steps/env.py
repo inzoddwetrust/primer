@@ -32,9 +32,11 @@ on a non-zero exit only stderr is passed on.
 
 ``derive`` runs only in ``act``: ``check`` of either pass reads files and
 asks docker which image ``app`` runs on, and runs no container. It runs
-``docker run --rm --env-file <file> <image> <run>`` in a throwaway container
-of the stack's image, not ``docker compose run``: compose interpolates the
-whole file.
+``docker run --rm [--network none] --cap-drop ALL --pull never --env-file
+<file> <image> <run>`` in a throwaway container of the stack's image, not
+``docker compose run``: compose interpolates the whole file. A product's
+container has no network (protocol 4.1); a service's has the default one,
+its way out.
 
 A missing ``asked``, ``params``, domain or ``edition`` is asked through
 ``ask`` (contract 1 rule 3, owner's decision of 27.10); with nobody to ask it
@@ -88,6 +90,9 @@ from pridem.stacks.seams import (
     unaccepted,
 )
 from pridem.steps.base import (
+    NO_NETWORK,
+    NO_PULL,
+    THROWAWAY,
     CheckResult,
     Mode,
     Step,
@@ -639,6 +644,9 @@ class DeriveEnv(Step):
         def keep(stream: Stream, line: str, cut: bool) -> None:
             lines.append((stream, line, cut))
 
+        # a product has no way out (protocol 4.1): its derive gets no network;
+        # a service's derive keeps the default one (comms asks Telegram)
+        network = NO_NETWORK if isinstance(render.stack, Product) else ()
         try:
             # the docker form of an env file: KEY=value, taken as it is
             write_private(env_file, "".join(f"{k}={v}\n" for k, v in known.items()))
@@ -647,6 +655,9 @@ class DeriveEnv(Step):
                     "docker",
                     "run",
                     "--rm",
+                    *network,
+                    *THROWAWAY,
+                    *NO_PULL,
                     "--label",
                     f"pridem.stack={render.stack.name}",
                     "--env-file",

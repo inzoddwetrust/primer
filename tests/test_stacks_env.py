@@ -60,10 +60,17 @@ DERIVED = "https://t.me/invented_bot_000000005"
 DERIVED_NEW = "https://t.me/invented_bot_000000006"
 OLD_IMAGE = "sha256:" + "1" * 64
 URL_SAFE = re.compile(r"[A-Za-z0-9_-]{32,}")
+# Changed by DM-79: throwaway containers drop every capability; an image of
+# this run is never pulled. comms is a service: its derive keeps the default
+# network (protocol 4.1).
 DERIVE_ARGV = (
     "docker",
     "run",
     "--rm",
+    "--cap-drop",
+    "ALL",
+    "--pull",
+    "never",
     "--label",
     "pridem.stack=comms",
     "--env-file",
@@ -231,7 +238,11 @@ def test_probe_DM_14_derived_runs_in_container_and_fails_on_nonzero(
     tmp_path: Path,
 ) -> None:
     """Changed by DM-67: ``derive`` runs in the run's image after ``build``, in
-    the step ``derive_env``; its codes are ``derive_env``'s."""
+    the step ``derive_env``; its codes are ``derive_env``'s.
+
+    Changed by DM-79 (``DERIVE_ARGV``; by the dispatcher's word, before the change):
+    throwaway containers drop every capability; an image of this run is never
+    pulled."""
     made, comms, root, fetched = comms_box(tmp_path, derived=True)
     env_file = root / "opt" / "comms" / "env" / "derive.env"
 
@@ -318,6 +329,9 @@ def test_probe_DM_14_verify_reads_env_back(tmp_path: Path) -> None:
 
 
 def test_probe_DM_14_secret_never_in_argv(tmp_path: Path) -> None:
+    """Changed by DM-79 (``DERIVE_ARGV``; by the dispatcher's word, before the change):
+    throwaway containers drop every capability; an image of this run is never
+    pulled."""
     made, comms, root, fetched = comms_box(tmp_path, derived=True)
     env_file = root / "opt" / "comms" / "env" / "derive.env"
     runner = Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)]))

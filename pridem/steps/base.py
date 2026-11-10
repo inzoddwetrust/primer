@@ -36,6 +36,15 @@ MODES: frozenset[Mode] = frozenset(
     {"install", "deploy", "reinstall", "destroy", "gc", "renew"}
 )
 
+NO_NETWORK = ("--network", "none")
+"""A throwaway container of a product with no network at all (protocol 4.1:
+a product has no way out); a service's keeps its way out."""
+THROWAWAY = ("--cap-drop", "ALL")
+"""Every throwaway container of DM-79 (``derive``, ``validate`` of a package
+and of a service's data) runs with no capability."""
+NO_PULL = ("--pull", "never")
+"""On an image this run built or found by its key: never one of a registry."""
+
 
 def local_code(code: str, params: Mapping[str, Json] | None = None) -> Code:
     """A code as a step says it, before the plan prefixes the step name."""

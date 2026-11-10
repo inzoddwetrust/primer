@@ -22,6 +22,12 @@ the secret in its query, so it is never in the access log: its location has
 ``access_log off`` on 443 and, for a link opened over http, on port 80, where
 it is redirected to https.
 
+nginx of the machine is the outermost proxy: contract 1 rule 6 sets every
+domain of the passport to the box's own public IP, and a box behind a load
+balancer would stop ``install`` there. So the client's address is
+``$remote_addr``, and ``X-Forwarded-For`` is that address alone -- whatever a
+client sent in its own ``X-Forwarded-For`` never reaches the app.
+
 ``/health`` and ``/ready`` are not seen from outside (protocol 9.3): a route
 to an ``app`` answers 404 itself on that app's ``health`` and ``ready`` paths,
 before anything is proxied (``location =``); the machine reads them on the
@@ -191,7 +197,7 @@ def _server(
         "    proxy_http_version 1.1;",
         "    proxy_set_header Host $host;",
         "    proxy_set_header X-Real-IP $remote_addr;",
-        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "    proxy_set_header X-Forwarded-For $remote_addr;",
         "    proxy_set_header X-Forwarded-Proto https;",
     ]
     if route.read_timeout is not None:

@@ -12,9 +12,17 @@ config from ``/opt/pridem/edge/nginx`` and the certificate from
 with certbot. certbot never runs as a service: ``run --rm`` when a
 certificate is issued or renewed, writing to ``/opt/pridem/edge/letsencrypt``.
 Every object carries ``pridem.stack=edge``. Images are pinned by digest.
+
+nginx runs confined (``confined``): every capability dropped and only
+``NGINX_CAPS`` given back -- its master binds 80 and 443 and drops its
+workers to the user ``nginx`` (``SETUID``, ``SETGID``), the image's entrypoint
+makes its cache directories theirs (``CHOWN``) -- with ``no-new-privileges``
+and a limit on processes. Its log is limited by the host's docker (driver
+``local``, ``daemon.json``), not here.
 """
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from pridem.events import Json
@@ -39,6 +47,25 @@ CERTBOT_IMAGE = (
 ``--version`` said ``certbot 5.9.0`` -- the tag named here. docker pulls by the
 digest; the tag is for people. Tier 3 checks on every run that this tag names
 this digest (``tier3/test_tier3_whole_install.py``)."""
+
+NGINX_CAPS = ("CHOWN", "NET_BIND_SERVICE", "SETGID", "SETUID")
+"""The capabilities nginx of the image gets back after ``cap_drop: [ALL]``."""
+PIDS_LIMIT = 256
+"""The most processes a container of the machine holds: nginx's master and a
+worker per core, or squid alone, with room to spare."""
+
+
+def confined(caps: Sequence[str]) -> dict[str, Json]:
+    """The keys of a machine's service that confine it: no capability but
+    ``caps``, no gain of privileges, a limit on processes."""
+    body: dict[str, Json] = {
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "pids_limit": PIDS_LIMIT,
+    }
+    if caps:
+        body["cap_add"] = list[Json](caps)
+    return body
 
 
 def home(root: Path) -> Path:
@@ -79,6 +106,7 @@ def compose_text(root: Path) -> str:
     document: dict[str, Json] = {
         "services": {
             "nginx": {
+                **confined(NGINX_CAPS),
                 "image": NGINX_IMAGE,
                 "restart": "unless-stopped",
                 "ports": ["80:80", "443:443"],

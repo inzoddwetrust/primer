@@ -19,7 +19,8 @@ own messages on stderr (``-d 1``). squid opens its access log after it drops to
 container's user: started as root, squid cannot open it and stops (``FATAL:
 Cannot open '/dev/stdout' for writing``; measured with squid 6.6 of Ubuntu
 24.04, the image's version, DM-45 FIX); started as ``proxy``, the pipe is its
-own.
+own. It needs no capability: the container drops them all, with
+``no-new-privileges`` and a limit on processes (``steps.edge.confined``).
 
 The config (``/opt/pridem/egress/squid.conf``, rendered by ``config_text``) lets
 through ``CONNECT`` to port 443 of a host of ``egress``, by its name exactly
@@ -82,7 +83,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.compose import EGRESS_NETWORK, PROXY_ALIAS, PROXY_PORT, out
-from pridem.steps.edge import write_file
+from pridem.steps.edge import confined, write_file
 from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
@@ -131,12 +132,24 @@ PRIVATE = (
     "127.0.0.0/8",
     "169.254.0.0/16",
     "172.16.0.0/12",
+    "192.0.0.0/24",
     "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "::/128",
     "::1",
+    "::ffff:0:0/96",
+    "64:ff9b::/96",
     "fc00::/7",
     "fe80::/10",
+    "ff00::/8",
 )
-"""Addresses the proxy never connects to: the box and its networks."""
+"""Addresses the proxy never connects to: the box, its networks, the cloud's
+metadata (``169.254.0.0/16``), the IETF and benchmark blocks, multicast and
+the reserved rest of IPv4, and the IPv6 forms that carry an IPv4 address
+inside (``::ffff:0:0/96`` mapped, ``64:ff9b::/96`` NAT64) or mean this host
+(``::``)."""
 CONNECT_TIMEOUT_S = 10
 """How long squid waits for a host of ``egress`` to accept."""
 ANSWER_TIMEOUT_S = 20
@@ -197,6 +210,7 @@ def compose_text(root: Path) -> str:
     document: dict[str, Json] = {
         "services": {
             "proxy": {
+                **confined(()),  # squid runs as proxy: it needs no capability
                 "image": SQUID_IMAGE,
                 "user": SQUID_USER,
                 "entrypoint": ["/usr/sbin/squid"],

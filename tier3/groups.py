@@ -52,6 +52,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_a_service_of_the_edition_goes_up_before_the_product", "c"),
     ("test_tier3_two_instances_with_their_own_languages", "c"),
     ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "c"),
+    ("test_tier3_product_derive_reaches_nothing", "c"),
     ("test_tier3_only_the_declared_consumer_reaches_a_point", "c"),
     ("test_tier3_destroy_takes_the_blank_off_the_box", "c"),
     # d -- a clean box: the blank without its service, then with it

@@ -416,6 +416,40 @@ def test_a_preview_box_closes_health_beside_its_entry(tmp_path: Path) -> None:
     assert entry < closed < api.index("  location / {")
 
 
+@pytest.mark.parametrize(("role", "secret"), [("test", None), ("preview", "s" * 32)])
+def test_the_app_gets_the_client_address_alone_as_x_forwarded_for(
+    tmp_path: Path, role: str, secret: str | None
+) -> None:
+    """DM-79: nginx of the machine is the outermost proxy (contract 1 rule 6),
+    so every proxied location sets ``X-Forwarded-For`` to ``$remote_addr``
+    -- what a client sent in its own header is not appended to -- on every
+    route and on a preview box too; the pair: ``X-Real-IP`` is the same
+    address, and every route has a proxied location to check."""
+    _, fetched = passport(tmp_path, role=role)
+    assert fetched.passport is not None
+    text = render(product(), fetched.passport, secret)
+    for domain in (DOMAINS["api"], DOMAINS["frontend"]):
+        server = _server_of(text, domain)
+        assert server.count("proxy_pass $upstream;") == 1, domain
+        assert server.count("proxy_set_header X-Forwarded-For $remote_addr;") == 1
+        assert server.count("proxy_set_header X-Real-IP $remote_addr;") == 1
+    assert "proxy_add_x_forwarded_for" not in text
+    assert text.count("X-Forwarded-For") == text.count("proxy_pass $upstream;")
+
+
+def test_nginx_runs_confined(tmp_path: Path) -> None:
+    """DM-79: nginx drops every capability and gets back only what its
+    master needs -- the bind of 80 and 443, its workers' user, the cache
+    directories its entrypoint hands them -- with ``no-new-privileges`` and a
+    limit on processes; its log is the host's (no ``logging`` here)."""
+    nginx = json.loads(compose_text(tmp_path))["services"]["nginx"]
+    assert nginx["cap_drop"] == ["ALL"]
+    assert nginx["cap_add"] == ["CHOWN", "NET_BIND_SERVICE", "SETGID", "SETUID"]
+    assert nginx["security_opt"] == ["no-new-privileges:true"]
+    assert nginx["pids_limit"] == 256
+    assert "logging" not in nginx and "privileged" not in nginx
+
+
 @pytest.mark.parametrize("path", ["/h; deny all", "/h {", "/h\nx", "/h$", "/h?x=1"])
 def test_a_path_that_reads_as_more_than_a_path_is_refused(
     tmp_path: Path, path: str

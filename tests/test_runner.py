@@ -1,6 +1,7 @@
 """State grid of the runner (DM-5): inputs, exit codes, output, time, FakeRunner."""
 
 import contextlib
+import json
 import os
 import shlex
 import signal
@@ -290,6 +291,66 @@ def test_cwd_and_env_are_passed(tmp_path: Path) -> None:
         on_line=lines,
     )
     assert lines.of(Stream.STDOUT) == [str(tmp_path), "y", "False"]
+
+
+CLEAN = {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "HOME": "/root",
+    "DOCKER_CONFIG": "/root/.docker",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+}
+"""What a command run with no ``env`` sees, written out here: a key missing
+from ``CLEAN_ENV`` or another value in it is red (DM-79)."""
+
+
+def test_no_env_is_the_clean_minimum_not_the_process_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DM-79: an ssh session's ``DOCKER_HOST``, ``COMPOSE_*`` or a product's
+    variable never reaches a command run with no ``env``, and a process with
+    no ``HOME`` (the timer's) gives the same environment: exactly the clean
+    minimum. The pair -- an explicit ``env`` is passed as it is -- is
+    ``test_cwd_and_env_are_passed``."""
+    monkeypatch.setenv("DOCKER_HOST", "tcp://elsewhere:2375")
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "other")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "from-the-session")
+    seen = []
+    for home in ("/home/somebody", None):
+        if home is None:
+            monkeypatch.delenv("HOME", raising=False)
+        else:
+            monkeypatch.setenv("HOME", home)
+        lines = Lines()
+        SubprocessRunner().run(
+            [PY, "-c", "import json, os; print(json.dumps(dict(os.environ)))"],
+            timeout=TIMEOUT,
+            on_line=lines,
+        )
+        seen.append(json.loads(lines.of(Stream.STDOUT)[0]))
+    assert seen == [CLEAN, CLEAN]
+
+
+def test_no_env_finds_a_program_on_the_clean_path_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DM-79: a program on the process's ``PATH`` alone is not started: the
+    clean ``PATH`` is the only one; the pair -- the same name with that
+    directory in an explicit ``env`` runs."""
+    program = tmp_path / "pridem-dm79-only-here"
+    program.write_text("#!/bin/sh\necho here\n")
+    program.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    with pytest.raises(CommandNotStarted):
+        SubprocessRunner().run([program.name], timeout=TIMEOUT, on_line=Lines())
+    lines = Lines()
+    SubprocessRunner().run(
+        [program.name],
+        timeout=TIMEOUT,
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin"},
+        on_line=lines,
+    )
+    assert lines.of(Stream.STDOUT) == ["here"]
 
 
 def test_stdin_is_closed() -> None:

@@ -96,6 +96,10 @@ def script(cs: ComposeStack, env_dir: Path) -> list[FakeCall]:
             "docker",
             "run",
             "--rm",
+            "--cap-drop",
+            "ALL",
+            "--pull",
+            "never",
             "--label",
             "pridem.stack=comms",
             "--env-file",
@@ -182,7 +186,11 @@ def test_probe_DM_67_service_derived_seam_reaches_the_product(tmp_path: Path) ->
 
     Changed by DM-72 (by the dispatcher's word, before the change): the log
     line of the scenario names its stack ``comms``; conformance compares
-    ``service`` with the stack's name (protocol 9.4, DM-72)."""
+    ``service`` with the stack's name (protocol 9.4, DM-72).
+
+    Changed by DM-79 (``script``; by the dispatcher's word, before the change):
+    throwaway containers drop every capability; an image of this run is never
+    pulled."""
     app = LiveApp()
     try:
         made, root = planned(

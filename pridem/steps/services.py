@@ -22,7 +22,9 @@ leading out of where it comes from is ``data-unsafe``, before anything is
 copied.
 
 ``validate`` of the kind runs in a throwaway container of the service's new
-image, the copy mounted, with no network -- before the service's ``migrate``,
+image, the copy mounted, with no network, no capability and no pull
+(``--network none --cap-drop ALL --pull never``) -- before the service's
+``migrate``,
 the point of no return: red (``validate-failed``) leaves the override on disk
 as it was, so the running service stays on its old data and its old image,
 and the plan stops before the service and the product (protocol 4.5, 4.6:
@@ -55,6 +57,9 @@ from pridem.runner import CommandFailed
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Product, Seam, Service
 from pridem.steps.base import (
+    NO_NETWORK,
+    NO_PULL,
+    THROWAWAY,
     CheckResult,
     Mode,
     Step,
@@ -319,8 +324,9 @@ class DataCopy(Step):
                         "docker",
                         "run",
                         "--rm",
-                        "--network",
-                        "none",
+                        *NO_NETWORK,
+                        *THROWAWAY,
+                        *NO_PULL,  # the image build verified in this run
                         *labels,
                         "-v",
                         item.volume,

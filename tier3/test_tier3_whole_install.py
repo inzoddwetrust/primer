@@ -1784,6 +1784,80 @@ def test_tier3_an_option_off_is_the_literal_and_on_the_value(
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
 
+ISOLATION_RUN = (
+    'python -c "import socket, errno; s = socket.socket(); s.settimeout(5); '
+    "c = s.connect_ex(('1.1.1.1', 443)); "
+    "print('isolated-' + (errno.errorcode.get(c) or 'connected').lower()"
+    " + '-dm79-probe')\""
+)
+"""A ``derive`` that tries the internet by address (no DNS on the way) and
+prints what it got: ``isolated-enetunreach-dm79-probe`` with no network."""
+
+
+def _host_config(project: str, service: str) -> dict[str, object]:
+    container = _container(project, service)
+    [line] = _stdout(["docker", "inspect", "-f", "{{json .HostConfig}}", container])
+    found = json.loads(line)
+    assert isinstance(found, dict)
+    return found
+
+
+def _caps(value: object) -> list[str]:
+    """A list of ``HostConfig`` as sorted names, ``CAP_`` taken off; ``null``
+    is none."""
+    if value is None:
+        return []
+    assert isinstance(value, list), value
+    return sorted(str(item).removeprefix("CAP_") for item in value)
+
+
+def test_tier3_product_derive_reaches_nothing(tmp_path: Path, mirror: Path) -> None:
+    """DM-79 on the box the earlier tests left: a copy of the blank with a
+    ``derived`` key whose command connects to ``1.1.1.1:443`` from the
+    product's image -- the value derived is the error of a container with no
+    network (``ENETUNREACH``), in this run's image; the copy also declares
+    ``egress`` so that the proxy runs. The confinement of nginx and the proxy
+    is read off docker (``HostConfig``) and goes to the run's output (par0
+    14.3): no capability but nginx's four, ``no-new-privileges``, a limit on
+    processes, the host's ``local`` log driver. ``doctor`` is empty."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    copy = _copy_of_blank(tmp_path, mirror, "isolation")
+    primer = copy / "primer.yaml"
+    _replace_once(
+        primer,
+        "  SERVICE_API_URL:",
+        # a JSON string is a YAML double-quoted scalar
+        f"  ISOLATION_PROBE: {{ source: derived, run: {json.dumps(ISOLATION_RUN)} }}\n"
+        "  SERVICE_API_URL:",
+    )
+    text = primer.read_text(encoding="utf-8")
+    primer.write_text(text + f"egress:\n  - {EGRESS_HOST}\n", encoding="utf-8")
+    _push(copy, mirror, "DM-79: the blank derives from a container with no network")
+    passport = _passport(tmp_path, version=55)
+    verdict, printed = _install(passport, "update")
+    assert verdict.result == "green", printed
+    assert _env()["ISOLATION_PROBE"] == "isolated-enetunreach-dm79-probe"
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    assert (
+        facts[(STACK, "derive_env")]["image"] == facts[(STACK, "build")]["app_image"]
+    ), facts[(STACK, "derive_env")]
+    assert facts[(STACK, "egress")]["hosts"] == [EGRESS_HOST], facts
+    nginx = _host_config("pridem-edge", "nginx")
+    proxy = _host_config("pridem-egress", "proxy")
+    warnings.warn(f"DM-79 HostConfig nginx: {json.dumps(nginx)}", stacklevel=1)
+    warnings.warn(f"DM-79 HostConfig proxy: {json.dumps(proxy)}", stacklevel=1)
+    for found in (nginx, proxy):  # the names with or without CAP_ (unmeasured)
+        assert _caps(found["CapDrop"]) == ["ALL"], found
+        assert _caps(found["SecurityOpt"]) == ["no-new-privileges:true"], found
+        assert found["PidsLimit"] == 256, found
+        log = found["LogConfig"]
+        assert isinstance(log, dict) and log["Type"] == "local", found
+    assert _caps(nginx["CapAdd"]) == ["CHOWN", "NET_BIND_SERVICE", "SETGID", "SETUID"]
+    assert _caps(proxy["CapAdd"]) == [], proxy
+    diff, failed, doctor = _doctor(passport)
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+
 POINT_TAG = "v1.1.0"
 """The tag of the copy of the service with a point (DM-62): pushed to the
 service's mirror beside ``v1.0.0``, which stays."""

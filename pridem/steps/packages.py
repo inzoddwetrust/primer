@@ -33,8 +33,10 @@ configuration (``steps.compose.stale``: the hash ``up`` gives it now, with the
 override that names the package's release) -- another version, or no
 container yet; ``up`` recreates such a service (DM-58). ``act`` runs the
 product's ``validate`` in a throwaway container of the service's new image
-(``image_key``) with the same mounts, ``<dir>`` replaced by the mount path:
-red -- the plan stops before ``up``, nothing is switched.
+(``image_key``) with the same mounts, ``<dir>`` replaced by the mount path,
+with no network and no capability (``--network none --cap-drop ALL``; the
+image of this run with ``--pull never``): red -- the plan stops before
+``up``, nothing is switched.
 
 ``apply: build`` (the owner's decision of 02.11): ``build`` copies the build
 context of the service out of the immutable release into
@@ -59,6 +61,9 @@ from pridem.files import PathOutside, private_dir, resolve_inside
 from pridem.stacks.passport import Package, Passport
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
+    NO_NETWORK,
+    NO_PULL,
+    THROWAWAY,
     CheckResult,
     Mode,
     Step,
@@ -360,16 +365,20 @@ class Packages(Step):
 
     def _image(
         self, ctx: StepContext, mount: PackageMount, known: dict[str, Json]
-    ) -> str:
+    ) -> tuple[str, bool]:
+        """The image ``validate`` runs in, and whether this run has it by its
+        key (built or found): only such an image runs with ``--pull never``;
+        a registry image of a service with no ``build`` is still pulled by
+        ``docker run`` itself -- no step of the machine pulls it before."""
         key = image_key(self.product, mount.service, self.fetched.passport)
         found = image_of(ctx, self.compose, mount.service, key)
         if len(found) == 1:
-            return found[0]
+            return found[0], True
         body = known.get(mount.service)
         if isinstance(body, dict):
             image = body.get("image")
             if isinstance(image, str) and "build" not in body:
-                return image
+                return image, False
         raise StepFailed(
             "no-image",
             {
@@ -401,19 +410,26 @@ class Packages(Step):
             mine = [mount for mount in mounts if mount.slot == slot]
             first = mine[0]
             same = [mount for mount in mine if mount.service == first.service]
-            # apply: runtime has validate (rule 10): package_mounts gives no other
-            validate = self.product.packages[slot].validate_ or ""
+            validate = self.product.packages[slot].validate_
+            if validate is None:
+                raise RuntimeError("apply: runtime has validate (rule 10)")
             command = shlex.split(validate.replace("<dir>", first.path))
             binds = [word for mount in same for word in ("-v", mount.volume)]
+            image, ours = self._image(ctx, first, known)
+            # the product's image has no network (protocol 4.1) and no
+            # capability; one of this run is never pulled
             out(
                 ctx,
                 [
                     "docker",
                     "run",
                     "--rm",
+                    *NO_NETWORK,
+                    *THROWAWAY,
+                    *(NO_PULL if ours else ()),
                     *labels,
                     *binds,
-                    self._image(ctx, first, known),
+                    image,
                     *command,
                 ],
                 timeout=VALIDATE_TIMEOUT_S,

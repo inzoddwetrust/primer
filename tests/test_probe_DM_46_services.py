@@ -131,6 +131,10 @@ def _validate_call(compose: ComposeStack, item: DataItem, code: int) -> FakeCall
             "--rm",
             "--network",
             "none",
+            "--cap-drop",
+            "ALL",
+            "--pull",
+            "never",
             *labels,
             "-v",
             item.volume,
@@ -167,7 +171,11 @@ def test_probe_DM_46_overlay_validate_failure_leaves_old_running(
     """A red ``validate`` of the new profile by the new image: the override on
     disk stays the one the running service is on, the candidate is gone, the
     service is not restarted (``up`` never runs); the pair -- green: the
-    override of this run in place, the ladder goes on."""
+    override of this run in place, the ladder goes on.
+
+    Changed by DM-79 (``_validate_call``; by the dispatcher's word, before the change):
+    throwaway containers drop every capability; an image of this run is never
+    pulled."""
     step, compose, item, _ = _data_copy(tmp_path)
     runner = FakeRunner(
         image_call(compose, "comms-app", "sha256:" + "c" * 64),
