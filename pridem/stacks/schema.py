@@ -173,6 +173,16 @@ RULES = {
     ),
     "S.endpoint-unknown": (0, "an address names a point its entry does not expose"),
     "S.command": (0, "a command is one or more words shlex can split"),
+    "S.minted-length": (0, "a minted value is no shorter than 32 characters"),
+    "S.job-service": (
+        0,
+        "a job is a one-off service of its entry: not the app, the frontend, a "
+        "point, a route's or a test's service, nor another job's",
+    ),
+    "S.stop-service": (
+        0,
+        "stop_for_migrate is for an entry with migrate and an app, each service once",
+    ),
     "S.option-duplicate": (0, "an option is named once"),
     "S.egress-env": (
         0,
@@ -346,10 +356,27 @@ def _object_form(code: str, form: str) -> BeforeValidator:
     return BeforeValidator(check)
 
 
-# A seed profile (rule 17); the machine knows no profile by name.
+Roles = Annotated[list[Literal["test", "prod", "preview"]], Field(min_length=1)]
+"""The roles of the box a verb or a seed is for (rule 15): one or more of
+``test``, ``prod``, ``preview``; absent -- every role."""
+
+
+# A seed profile (rule 17); the machine knows no profile by name. ``roles`` --
+# the roles of the box it may run on, as a verb's (DM-22); the refusal of a seed
+# outside them comes with the machine's running of seeds (DM-86).
 class Seed(Strict):
     run: Command
     when: Literal["install", "command"]
+    roles: Roles | None = None
+
+
+class Job(Strict):
+    """A job of the entry (contract 3 rule 24): a one-off service of its
+    compose, run on every deploy of the entry after the services it depends
+    on are healthy and before those that depend on it; it needs no
+    healthcheck (DM-22)."""
+
+    service: Ident
 
 
 # Tests of a stack (rule 20): ``run`` in a container of build target ``target``;
@@ -402,6 +429,12 @@ class Stack(Strict):
     persistent: bool = False
     expose: dict[Ident, Expose] = {}
     """The points of this entry, seen only by the pairs that declare them."""
+    jobs: dict[Ident, Job] = {}
+    """The one-off services of this entry's compose, by the job's name."""
+    stop_for_migrate: list[Ident] = []
+    """Services of this entry's compose stopped before its ``migrate`` acts --
+    workers, consumers, the API too (protocol 6.3, contract 3 rule 35); ``up``
+    brings them up after it (DM-22)."""
 
 
 class _Var(Strict):
@@ -412,8 +445,23 @@ class _Var(Strict):
     when: Option | None = None
 
 
+MINTED_MIN = 32
+"""The shortest ``minted`` value (contract 3 section 3)."""
+
+
+def _minted_length(value: int) -> int:
+    if value < MINTED_MIN:
+        raise _rule_error("S.minted-length", f"{value} is shorter than {MINTED_MIN}")
+    return value
+
+
 class Minted(_Var):
+    """``length`` -- the exact length of the value, of the machine's alphabet
+    ``[A-Za-z0-9_-]``, no shorter than 32 (DM-22: a consumer that takes no
+    longer one); absent -- ``token_urlsafe(32)``, 43 characters."""
+
     source: Literal["minted"]
+    length: Annotated[int, AfterValidator(_minted_length)] | None = None
 
 
 class Asked(_Var):
@@ -576,9 +624,7 @@ class ServiceHost(Strict):
 class Verb(Strict):
     run: Command
     args: list[Ident] = []
-    roles: (
-        Annotated[list[Literal["test", "prod", "preview"]], Field(min_length=1)] | None
-    ) = None
+    roles: Roles | None = None
     destructive: bool = False
 
 
@@ -708,6 +754,55 @@ def _r20_test_services(stack: Product | Service) -> list[Problem]:
                 out.append(problem_at(path, "R20.test-form", detail))
             elif name in stage.test.services[:index]:
                 out.append(problem_at(path, "R20.test-form", f"{name!r} twice"))
+    return out
+
+
+def _s_jobs(stack: Product | Service) -> list[Problem]:
+    """A job's service runs once and exits (rule 24): it is none of the
+    services the machine keeps running or reads live -- the app, the frontend,
+    a point, a service a route goes to, a service the tests need -- and no two
+    jobs share one (DM-22)."""
+    out: list[Problem] = []
+    routed = (
+        {r.to.partition(":")[0] for r in stack.host.routes.values()}
+        if stack.host is not None
+        else set()
+    )
+    for entry, stage in stack.stacks.items():
+        kept = {part.service for part in (stage.app, stage.frontend) if part}
+        kept |= {point.service for point in stage.expose.values()}
+        if stage.test is not None and stage.test.services is not None:
+            kept |= set(stage.test.services)
+        kept |= routed
+        seen: dict[str, str] = {}
+        for name, job in stage.jobs.items():
+            at = ("stacks", entry, "jobs", name, "service")
+            other = seen.setdefault(job.service, name)
+            if job.service in kept:
+                out.append(problem_at(at, "S.job-service", repr(job.service)))
+            elif other != name:
+                detail = f"{job.service!r} is the service of job {other!r} too"
+                out.append(problem_at(at, "S.job-service", detail))
+            elif job.service in stage.stop_for_migrate:
+                detail = f"{job.service!r} is stopped for migrate: a job does not run"
+                out.append(problem_at(at, "S.job-service", detail))
+    return out
+
+
+def _s_stop(stack: Product | Service) -> list[Problem]:
+    """``stop_for_migrate`` stops for a ``migrate`` the entry runs in its app
+    -- without them it would mean nothing -- and names each service once
+    (DM-22)."""
+    out: list[Problem] = []
+    for entry, stage in stack.stacks.items():
+        path = ("stacks", entry, "stop_for_migrate")
+        if stage.stop_for_migrate and (stage.migrate is None or stage.app is None):
+            out.append(problem_at(path, "S.stop-service", "no migrate to stop for"))
+        for index, name in enumerate(stage.stop_for_migrate):
+            if name in stage.stop_for_migrate[:index]:
+                out.append(
+                    problem_at((*path, index), "S.stop-service", f"{name!r} twice")
+                )
     return out
 
 
@@ -1105,6 +1200,8 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _options,
     _s_entries,
     _r20_test_services,
+    _s_jobs,
+    _s_stop,
 )
 
 

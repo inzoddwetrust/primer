@@ -349,6 +349,6 @@ def test_a_service_whose_alias_is_another_entry_s_alias_is_reserved(
     stack = made(data)
     cs = compose(tmp_path, stack, "velo")
     (tmp_path / "release").mkdir(exist_ok=True)
-    body = {"image": "x@sha256:x"}
+    body = {"image": "x@sha256:x", "healthcheck": {"test": ["CMD", "true"]}}
     document: dict[str, object] = {"services": {"storage-app": body, "web": body}}
     assert forbidden(cs, document) == ["storage-app: name reserved"]  # type: ignore[arg-type]

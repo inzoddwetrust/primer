@@ -801,12 +801,16 @@ def test_gc_keeps_mounted_current_previous_copies_then_the_newest(
 def test_a_services_ladder_validates_its_data_before_the_point_of_no_return(
     tmp_path: Path,
 ) -> None:
-    """``render_env -> build -> [derive_env] -> data_copy -> migrate -> up``: a
+    """``render_env -> build -> [derive_env] -> data_copy -> stop_for_migrate ->
+    migrate -> up``: a
     red ``validate`` stops the ladder before ``migrate``; no tests on the
     product's box (protocol 7.4).
 
     Changed by DM-67: comms has a ``derived`` value, so ``derive_env`` follows
-    its ``build``; payments has none and no such step."""
+    its ``build``; payments has none and no such step.
+
+    Changed by DM-22: ``stop_for_migrate`` stands before every ``migrate``,
+    before the point of no return -- with no list it has nothing to do."""
     made, _ = planned(tmp_path, "full")
     ladders = {
         s.name: [step.name for step in s.steps] for s in deferred(made, "services")
@@ -816,10 +820,18 @@ def test_a_services_ladder_validates_its_data_before_the_point_of_no_return(
         "build",
         "derive_env",
         "data_copy",
+        "stop_for_migrate",
         "migrate",
         "up",
     ]
-    assert ladders["payments"] == ["render_env", "build", "data_copy", "migrate", "up"]
+    assert ladders["payments"] == [
+        "render_env",
+        "build",
+        "data_copy",
+        "stop_for_migrate",
+        "migrate",
+        "up",
+    ]
     assert list(ladders)[:3] == ["seams", "comms", "payments"]
 
 

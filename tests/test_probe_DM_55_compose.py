@@ -22,6 +22,7 @@ from compose_support import (
     CONFIG,
     ENTRY,
     FRONT_IMAGE,
+    HEALTHCHECK,
     REF,
     SHA,
     build_call,
@@ -77,11 +78,12 @@ def released(root: Path) -> ComposeStack:
 
 
 def app(**body: Json) -> dict[str, Json]:
-    """A compose document with one service ``app`` and ``postgres`` beside it."""
+    """A compose document with one service ``app`` and ``postgres`` beside it,
+    each with its healthcheck (protocol 3.4, DM-22)."""
     return {
         "services": {
-            "app": {"image": "app:1", **body},
-            "postgres": {"image": "postgres:16"},
+            "app": {"image": "app:1", "healthcheck": HEALTHCHECK, **body},
+            "postgres": {"image": "postgres:16", "healthcheck": HEALTHCHECK},
         }
     }
 
@@ -569,6 +571,7 @@ def test_the_dispatchers_macvlan_and_plugin_document_is_red(tmp_path: Path) -> N
     and ``host.ports``, a volume of another driver passed -- ``[]`` then."""
     service: dict[str, Json] = {
         "image": "app:1",
+        "healthcheck": HEALTHCHECK,
         "networks": {"lan": None},
         "volumes": [
             {"type": "volume", "source": "remote", "target": "/d", "volume": {}}
@@ -658,7 +661,11 @@ def test_only_services_are_read_and_every_finding_is_named(tmp_path: Path) -> No
     document["x-common"] = {"privileged": True, "network_mode": "host"}
     services = document["services"]
     assert isinstance(services, dict)
-    services["postgres"] = {"image": "postgres:16", "cap_add": ["SYS_PTRACE"]}
+    services["postgres"] = {
+        "image": "postgres:16",
+        "healthcheck": HEALTHCHECK,
+        "cap_add": ["SYS_PTRACE"],
+    }
     assert forbidden(cs, document) == [
         "app: pid",
         "app: privileged",

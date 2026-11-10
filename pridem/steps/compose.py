@@ -498,6 +498,51 @@ def package_places(
     return sorted(set(found))
 
 
+def job_services(compose: ComposeStack) -> frozenset[str]:
+    """The services of the entry's ``jobs`` (contract 3 rule 24, DM-22): run
+    once by ``up`` and gone, no healthcheck asked of them, no container left
+    for ``stale`` to compare."""
+    jobs = compose.stack.stacks[compose.entry].jobs
+    return frozenset(job.service for job in jobs.values())
+
+
+def _health_checked(body: Mapping[str, Json]) -> bool:
+    """The service declares a healthcheck compose runs: the key, not
+    ``disable: true``, not ``test: [NONE]`` (DM-22). One of the image alone
+    is not read: protocol 3.4 asks it of the compose file."""
+    check = body.get("healthcheck")
+    if not isinstance(check, dict) or check.get("disable") is True:
+        return False
+    test = check.get("test")
+    return not (test == ["NONE"] or test == "NONE")
+
+
+def depended(services: Mapping[str, Json], start: str) -> set[str]:
+    """Every service ``start`` depends on in ``config``, through any of them."""
+    seen: set[str] = set()
+    todo = list(_mapping(_mapping(services.get(start)).get("depends_on")))
+    while todo:
+        name = todo.pop()
+        if name not in seen:
+            seen.add(name)
+            todo += list(_mapping(_mapping(services.get(name)).get("depends_on")))
+    return seen
+
+
+def _stop_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[str]:
+    """``stop_for_migrate`` (DM-22): a service compose has, and none that
+    ``run --rm <app>`` of ``migrate`` would bring up again by ``depends_on``."""
+    stage = compose.stack.stacks[compose.entry]
+    needed = depended(services, stage.app.service) if stage.app is not None else set()
+    found: list[str] = []
+    for name in stage.stop_for_migrate:
+        if name not in services:
+            found.append(f"stop_for_migrate: no service {name}")
+        elif name in needed:
+            found.append(f"{name}: stopped for migrate, migrate needs it")
+    return found
+
+
 def forbidden(compose: ComposeStack, document: Mapping[str, Json]) -> list[str]:
     """What the compose ``document`` uses beyond the lists of what a stack may
     use -- of its services, of its top level and of the volumes and networks
@@ -510,9 +555,16 @@ def forbidden(compose: ComposeStack, document: Mapping[str, Json]) -> list[str]:
         declared = {(port.proto, int(port.port)) for port in stack.host.ports}
     services = _mapping(document.get("services"))
     found: list[str] = []
+    jobs = job_services(compose)
     for name, body in services.items():
         problems = _service_problems(_mapping(body), release, declared)
+        if name not in jobs and not _health_checked(_mapping(body)):
+            problems.append("no healthcheck")  # protocol 3.4 (DM-22)
         found += [f"{name}: {problem}" for problem in problems]
+    for job, part in stack.stacks[compose.entry].jobs.items():
+        if part.service not in services:
+            found.append(f"jobs.{job}: no service {part.service}")
+    found += _stop_problems(compose, services)
     top = [key for key in document if not key.startswith("x-")]
     found += [f"compose: {key}" for key in sorted(top) if key not in TOP_KEYS]
     project = compose.project
@@ -914,8 +966,14 @@ def stale(ctx: StepContext, compose: ComposeStack) -> dict[str, tuple[str, str]]
     another mount, environment, image name -- or that has none: ``{service:
     (expected, running)}``, ``running`` ``"none"`` without a container. On one
     commit only this tells that ``up`` has something to do for a service whose
-    image did not change (a package of another version, apply: runtime)."""
-    expected = config_hashes(ctx, compose)
+    image did not change (a package of another version, apply: runtime). A
+    job's service is none of them: it ran and is gone (DM-22)."""
+    jobs = job_services(compose)  # no container after their run (DM-22)
+    expected = {
+        service: value
+        for service, value in config_hashes(ctx, compose).items()
+        if service not in jobs
+    }
     if not expected:
         return {}
     running = running_hashes(ctx, compose)

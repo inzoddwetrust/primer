@@ -49,7 +49,7 @@ def test_probe_DM_18_two_alembic_heads_red_before_up(tmp_path: Path) -> None:
         image_call(cs, "app", APP_IMAGE),
         heads_call(cs, APP_IMAGE, "0002a (head)", "0002b (head)"),
     ]
-    later = ScriptedStep("up", 12, Journal())
+    later = ScriptedStep("up", 13, Journal())
     with FakeRunner(*heads) as runner:  # no migrate, no current, no up
         outcome, _ = run([migrate(tmp_path, 8000), later], runner)
     assert outcome.steps[0].reason == Code(
@@ -72,7 +72,7 @@ def test_probe_DM_18_migrate_is_point_of_no_return(
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
-    red_after = ScriptedStep("up", 12, Journal(), fact={})  # verify reads nothing
+    red_after = ScriptedStep("up", 13, Journal(), fact={})  # verify reads nothing
     with FakeRunner(*first_install) as runner:
         outcome, _ = run([migrate(tmp_path, app.port), red_after], runner)
     assert [r.status for r in outcome.steps] == ["ok", "failed"]
@@ -101,7 +101,7 @@ def test_the_running_head_is_the_new_head_no_act(tmp_path: Path, app: LiveApp) -
         *observe_calls(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
-    red_after = ScriptedStep("up", 12, Journal(), fact={})
+    red_after = ScriptedStep("up", 13, Journal(), fact={})
     with FakeRunner(*same) as runner:  # no migrate in the script
         outcome, _ = run([migrate(tmp_path, app.port), red_after], runner)
     assert [r.status for r in outcome.steps] == ["ok", "failed"]
@@ -128,7 +128,7 @@ def test_no_head_read_is_red_before_act(tmp_path: Path) -> None:
         image_call(cs, "app", APP_IMAGE),
         heads_call(cs, APP_IMAGE, "INFO  [x] y"),
     ]
-    later = ScriptedStep("up", 12, Journal())
+    later = ScriptedStep("up", 13, Journal())
     with FakeRunner(*script) as runner:  # no migrate, no current
         outcome, _ = run([migrate(tmp_path, 8000), later], runner)
     assert outcome.steps[0].reason == Code(

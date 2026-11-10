@@ -47,6 +47,7 @@ CONFIG: dict[str, Json] = {
     "services": {
         "comms-app": {
             "build": {"context": "/r/", "dockerfile": "Dockerfile"},
+            "healthcheck": {"test": ["CMD", "true"]},  # protocol 3.4 (DM-22)
             "networks": {"default": None},
         }
     },

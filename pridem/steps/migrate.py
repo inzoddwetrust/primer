@@ -18,10 +18,21 @@ is not crossed; another, no answer, no running ``app`` (a first install) --
 comes up by ``depends_on`` -- and ``verify`` reads ``alembic current`` back:
 it must be the head. Once ``act`` has started, nothing automatic undoes it: a
 red step after it ends the plan with "restore needed".
+
+``stop_for_migrate`` (DM-22, protocol 6.3, contract 3 rule 35) runs just before
+``migrate``, before the point of no return: the services of the entry's
+``stop_for_migrate`` are stopped when -- and only when -- ``migrate`` will act
+(its ``check`` is read), and ``verify`` reads that none of them runs. Stopping
+is undone by ``start_stopped`` of ``finally``: a plan that ends before
+``migrate`` started its ``act`` starts again what it stopped; once ``migrate``
+acted, nothing is started -- see the KNOWN CEILING at ``StartStopped``. After
+a green ``migrate`` the services come up by ``up`` of the entry, as every
+service does.
 """
 
 import json
 import shlex
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
@@ -77,7 +88,7 @@ class Migrate(Step):
     """The stack's migrations, once, on the image of the new commit."""
 
     name = "migrate"
-    order = 11
+    order = 12  # after stop_for_migrate (11, DM-22)
     modes = ALL_MODES
     point_of_no_return = True
     codes: ClassVar[dict[str, str]] = {
@@ -108,6 +119,9 @@ class Migrate(Step):
             raise ValueError(f"{entry} has no migrate to run in an app container")
         self.command = shlex.split(stage.migrate)
         self.app = stage.app.service
+        self.acted = False
+        """``act`` has started: the point of no return of this entry is
+        crossed, ``start_stopped`` starts nothing for it (DM-22)."""
 
     def _heads(self, ctx: StepContext) -> tuple[list[str], int]:
         """Heads of the built image, by ``docker run`` on it; and the line count."""
@@ -169,6 +183,7 @@ class Migrate(Step):
         return CheckResult(True, local_code("migrate", params), data)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
+        self.acted = True
         out(
             ctx,
             self.compose.argv("run", "--rm", self.app, *self.command),
@@ -190,3 +205,149 @@ class Migrate(Step):
                 },
             )
         return Verified({"alembic_head": head})
+
+
+# --- stop_for_migrate ---------------------------------------------------------------
+
+STOP_TIMEOUT_S = COMMAND_TIMEOUT_S + 60
+"""``compose stop`` waits each service's ``stop_grace_period``."""
+
+
+def _running(ctx: StepContext, compose: ComposeStack, services: list[str]) -> list[str]:
+    """Those of ``services`` with a running container, sorted."""
+    found: list[str] = []
+    for service in services:
+        _, lines = out(
+            ctx,
+            compose.argv("ps", "--status", "running", "-q", service),
+            timeout=COMMAND_TIMEOUT_S,
+        )
+        if any(line.strip() for line in lines):
+            found.append(service)
+    return sorted(found)
+
+
+@dataclass
+class Stopped:
+    """What ``stop_for_migrate`` stopped in this run, entry by entry, with the
+    ``migrate`` it stopped them for: ``start_stopped`` reads it."""
+
+    entries: list[tuple[ComposeStack, list[str], Migrate]] = field(default_factory=list)
+
+
+class StopForMigrate(Step):
+    """The services of ``stop_for_migrate``, stopped before ``migrate`` acts."""
+
+    name = "stop_for_migrate"
+    order = 11
+    modes = ALL_MODES
+    codes: ClassVar[dict[str, str]] = {
+        "stop": "stop {services} of {stack} for its migration",
+        "stop-failed": "{services} of {stack} still run after stop",
+    }
+
+    def __init__(self, migrate: Migrate, stopped: Stopped) -> None:
+        self.migrate = migrate
+        self.compose = migrate.compose
+        stage = self.compose.stack.stacks[self.compose.entry]
+        self.services = list(stage.stop_for_migrate)
+        self.stopped = stopped
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        """Nothing to stop without a list, or when ``migrate`` has nothing to
+        do -- its ``check`` decides, read here before it runs."""
+        if not self.services or not self.migrate.check(ctx).needed:
+            return CheckResult(False, None, {})
+        params: dict[str, Json] = {
+            "stack": self.compose.entry,
+            "services": list[Json](self.services),
+        }
+        return CheckResult(True, local_code("stop", params), {"stop": True})
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        # recorded before the command: a stop that fails half-way is started
+        # again by ``start_stopped`` all the same
+        self.stopped.entries.append((self.compose, self.services, self.migrate))
+        out(
+            ctx,
+            self.compose.argv("stop", *self.services),
+            timeout=STOP_TIMEOUT_S,
+        )
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        if not check.data.get("stop"):
+            return Verified({"stack": self.compose.entry, "stopped": []})
+        still = _running(ctx, self.compose, self.services)
+        if still:
+            params: dict[str, Json] = {
+                "stack": self.compose.entry,
+                "services": list[Json](still),
+            }
+            raise StepFailed("stop-failed", params)
+        return Verified(
+            {"stack": self.compose.entry, "stopped": list[Json](self.services)}
+        )
+
+
+class StartStopped(Step):
+    """``finally``: what ``stop_for_migrate`` stopped, started again where the
+    entry's ``migrate`` never began its ``act``.
+
+    KNOWN CEILING (DM-22):
+    1. mechanics: a red ``migrate`` -- or any red step after it -- leaves the
+       services of ``stop_for_migrate`` stopped; the verdict names them in the
+       fact of ``stop_for_migrate``, and nothing on the box starts them;
+    2. status: acknowledged by design;
+    3. task: DM-87 (the retries of ``migrate`` and the dump before it);
+    4. trigger: DM-87 lands -- ``migrate`` is retried, the database dumped
+       before it, ``install --restore`` exists;
+    5. agreed form of the fix: three tries of ``migrate``, then ``install
+       --restore`` (protocol 6.5);
+    6. rejected: starting the old code again on a schema that may be half
+       migrated -- worse than keeping it stopped.
+    """
+
+    name = "start_stopped"
+    order = 1
+    modes = ALL_MODES
+    codes: ClassVar[dict[str, str]] = {
+        "start": "start {services} of {stack} again: its migrate never ran",
+        "start-failed": "{services} of {stack} do not run after start",
+    }
+
+    def __init__(self, stopped: Stopped) -> None:
+        self.stopped = stopped
+
+    def _due(self) -> list[tuple[ComposeStack, list[str]]]:
+        return [
+            (compose, services)
+            for compose, services, migrate in self.stopped.entries
+            if not migrate.acted
+        ]
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        due = self._due()
+        if not due:
+            return CheckResult(False, None, {})
+        params: dict[str, Json] = {
+            "stack": ", ".join(compose.entry for compose, _ in due),
+            "services": [s for _, services in due for s in services],
+        }
+        return CheckResult(True, local_code("start", params), {"start": True})
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        for compose, services in self._due():
+            out(ctx, compose.argv("start", *services), timeout=STOP_TIMEOUT_S)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        started: dict[str, Json] = {}
+        for compose, services in self._due():
+            down = sorted(set(services) - set(_running(ctx, compose, services)))
+            if down:
+                params: dict[str, Json] = {
+                    "stack": compose.entry,
+                    "services": list[Json](down),
+                }
+                raise StepFailed("start-failed", params)
+            started[compose.entry] = list[Json](services)
+        return Verified({"started": started})

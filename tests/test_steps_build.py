@@ -290,7 +290,11 @@ def test_an_app_without_build_has_no_image_for_derive(tmp_path: Path) -> None:
     document = copy.deepcopy(CONFIG)
     services = document["services"]
     assert isinstance(services, dict)
-    services["app"] = {"image": "app@sha256:x", "networks": {"default": None}}
+    services["app"] = {
+        "image": "app@sha256:x",
+        "healthcheck": {"test": ["CMD", "true"]},
+        "networks": {"default": None},
+    }
     build = steps(tmp_path)[0]
     with FakeRunner(raw_config_call(cs, document), config_call(cs, document)) as r:
         build.check(context(r))

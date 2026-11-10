@@ -23,6 +23,17 @@ conformance (DM-15: ``/health`` by its form, ``/ready`` 200, JSON logs,
 the release and the commit the build got. Then the stack's ``provides`` reach
 the plan's seam memory -- after its health (TZ 7.1). ``check`` needs no
 ``act`` when all of that already holds.
+
+An entry with ``jobs`` (contract 3 rule 24, DM-22) comes up in the order of
+``depends_on`` of its compose: for each job, in that order, the services it
+needs (all it depends on, through any but jobs) ``up --no-deps --wait``, then
+the job ``run --rm --no-deps`` -- its output goes to the journal, a code but 0
+is red and nothing after it runs; last, every service but the jobs ``up
+--no-deps --wait``. ``--no-deps`` keeps compose from running a job again as a
+dependency of a service. A job runs whenever ``up`` of its entry acts: every
+service carries ``pridem.commit`` in its configuration, so a new commit, a new
+passport or package acts; an update with nothing changed does not, and
+``doctor`` -- which ``stale`` leaves the jobs out of -- has nothing to say.
 """
 
 import json
@@ -57,6 +68,7 @@ from pridem.steps.compose import (
     ComposeStack,
     config,
     image_of,
+    job_services,
     out,
     running_image,
     stale,
@@ -74,6 +86,52 @@ connections, well inside two minutes (DM-80)."""
 
 
 INSPECT_FORMAT = "{{.Name}} {{len .Containers}}"
+JOB_TIMEOUT_S = UP_WAIT_S + 60
+"""A job's ``run``: as long as ``up`` may wait, and a minute."""
+
+
+def _depends(body: Json) -> list[str]:
+    """The services ``depends_on`` names in ``config`` (a mapping there)."""
+    found = body.get("depends_on") if isinstance(body, dict) else None
+    return sorted(found) if isinstance(found, dict) else []
+
+
+def job_order(document: dict[str, Json], jobs: frozenset[str]) -> list[str]:
+    """The jobs of ``document`` in the order of ``depends_on`` (compose has no
+    cycle), each tie by name: of the services nothing still waits for, the
+    first by name goes first."""
+    services = document.get("services")
+    graph = {
+        name: set(_depends(body))
+        for name, body in (services.items() if isinstance(services, dict) else ())
+    }
+    order: list[str] = []
+    while graph:
+        ready = sorted(name for name, needs in graph.items() if not needs & set(graph))
+        if not ready:  # a cycle: compose refuses it before up runs
+            break
+        order.append(ready[0])
+        del graph[ready[0]]
+    return [name for name in order if name in jobs]
+
+
+def needed_by(document: dict[str, Json], job: str, jobs: frozenset[str]) -> list[str]:
+    """Every service but a job that ``job`` depends on, directly or through
+    another such service, sorted; the jobs on its way ran before it."""
+    services = document.get("services")
+    graph = {
+        name: _depends(body)
+        for name, body in (services.items() if isinstance(services, dict) else ())
+    }
+    seen: set[str] = set()
+    todo = list(graph.get(job, []))
+    while todo:
+        name = todo.pop()
+        if name in seen or name in jobs:
+            continue
+        seen.add(name)
+        todo += graph.get(name, [])
+    return sorted(seen)
 
 
 def _lines(ctx: StepContext, argv: list[str]) -> list[str]:
@@ -105,7 +163,7 @@ class Up(Step):
     """One stack entry up on the images of this commit and key, checked live."""
 
     name = "up"
-    order = 13  # after egress (12): the application starts with its proxy ready
+    order = 14  # after egress (13): the application starts with its proxy ready
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
         **REFUSAL_CODES,
@@ -145,6 +203,7 @@ class Up(Step):
         self.memory = memory
         self.render = render
         self.waiting = waiting
+        self._ran: list[str] = []  # the jobs ``act`` ran, in order (DM-22)
 
     def _watched(self, ctx: StepContext) -> list[str]:
         """The services whose image ``up`` checks: ``app``, and every service
@@ -293,21 +352,49 @@ class Up(Step):
             self.compose.commit,
         )
 
-    def act(self, ctx: StepContext, check: CheckResult) -> None:
-        if check.data.get("up", True):
+    def _up(self, ctx: StepContext, *services: str) -> None:
+        argv = ["up", "-d", "--no-build", "--wait", "--wait-timeout", str(UP_WAIT_S)]
+        if services:  # an entry with jobs names what comes up (DM-22)
+            argv += ["--no-deps", *services]
+        out(ctx, self.compose.argv(*argv), timeout=UP_WAIT_S + 60)
+
+    def _with_jobs(self, ctx: StepContext, jobs: frozenset[str]) -> list[str]:
+        """The jobs, each after what it needs; then every other service. The
+        jobs run, in their order -- the fact of ``verify``."""
+        document = config(ctx, self.compose)
+        ran: list[str] = []
+        for job in job_order(document, jobs):
+            needed = needed_by(document, job, jobs)
+            if needed:
+                self._up(ctx, *needed)
             out(
                 ctx,
-                self.compose.argv(
-                    "up", "-d", "--no-build", "--wait", "--wait-timeout", str(UP_WAIT_S)
-                ),
-                timeout=UP_WAIT_S + 60,
+                self.compose.argv("run", "--rm", "--no-deps", job),
+                timeout=JOB_TIMEOUT_S,
             )
+            ran.append(job)
+        services = document.get("services")
+        rest = sorted(set(services) - jobs) if isinstance(services, dict) else []
+        if rest:  # an entry of jobs alone has nothing to keep running
+            self._up(ctx, *rest)
+        return ran
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        self._ran = []
+        if check.data.get("up", True):
+            jobs = job_services(self.compose)
+            if jobs:
+                self._ran = self._with_jobs(ctx, jobs)
+            else:
+                self._up(ctx)
         gone = [str(name) for name in _json_list(check.data.get("gone"))]
         if gone:  # exactly the ones check found (DM-62)
             out(ctx, ["docker", "network", "rm", *gone])
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         fact: dict[str, Json] = {"stack": self.compose.entry, **self._taken(ctx, check)}
+        if self._ran:  # each one's code 0, read by the runner (DM-22)
+            fact["jobs"] = list[Json](self._ran)
         app = self.compose.app_service
         built: dict[str, Json] = {}
         for service in self._watched(ctx):

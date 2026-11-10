@@ -3,8 +3,9 @@
 
 Each co-located service of the edition goes up by its own ladder before the
 product, in the order of ``installed`` (``stacks/seams.py``): ``render_env ->
-build -> data_copy -> migrate -> up``; ``up`` checks it live (conformance,
-``/health``) and only then puts its ``provides`` in the plan's memory, so
+build -> data_copy -> stop_for_migrate -> migrate -> up``; ``up`` checks it
+live (conformance, ``/health``) and only then puts its ``provides`` in the
+plan's memory, so
 the product's ``render_env`` -- and every step of the product after it -- waits
 for every service. A service's tests are its CI's (protocol 7.4): none here.
 
@@ -456,7 +457,7 @@ class SeamsVerify(Step):
     """Every seam of the box is held by its live provider."""
 
     name = "seams_verify"
-    order = 14
+    order = 15
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
         "provide-not-live": "{stack} does not provide {names} live",

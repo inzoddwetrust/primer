@@ -7,8 +7,10 @@ no command into values and keeps the two files of a stack's environment under
 
 - ``minted.yaml`` (0600): the ``minted`` secrets, minted once by
   ``secrets.token_urlsafe(32)`` -- 43 characters of ``[A-Za-z0-9_-]``, safe in
-  a URL, an env file and a command. A key is never minted again; a key the
-  schema no longer has stays (the stack's data; ``destroy`` removes it).
+  a URL, an env file and a command -- or, for a key with ``length``, exactly
+  that many characters of the same alphabet (DM-22). A key is never minted
+  again; a key the schema no longer has stays (the stack's data; ``destroy``
+  removes it).
 - ``.env`` (0600): every variable as ``KEY='value'`` -- a single-quoted value
   is taken as it is by compose's ``--env-file``, with no interpolation. A value
   with ``'`` or a line break cannot be written so: refused, by its key only.
@@ -69,6 +71,8 @@ MINT_BYTES = 32
 """``token_urlsafe(32)``: 43 characters of ``[A-Za-z0-9_-]`` (measured)."""
 
 MINTED_FORM = re.compile(r"[A-Za-z0-9_-]{32,}")
+MINT_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+"""The alphabet of ``token_urlsafe``, of a minted value of a given length too."""
 _LINE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)='([^'\n\r]*)'")
 _UNSAFE = ("'", "\n", "\r")
 _PLACEHOLDER = re.compile(r"<.*>")
@@ -92,8 +96,12 @@ def env_dir(root: Path, name: str) -> Path:
     return root / "opt" / name / ENV_DIR
 
 
-def mint() -> str:
-    return token.token_urlsafe(MINT_BYTES)
+def mint(length: int | None = None) -> str:
+    """A new secret: ``token_urlsafe(32)``, or ``length`` characters of
+    ``MINT_ALPHABET`` -- each drawn by ``secrets``, 6 bits apiece."""
+    if length is None:
+        return token.token_urlsafe(MINT_BYTES)
+    return "".join(token.choice(MINT_ALPHABET) for _ in range(length))
 
 
 def mode_of(path: Path) -> str:

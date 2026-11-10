@@ -2102,6 +2102,195 @@ def test_tier3_only_the_declared_consumer_reaches_a_point(
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
 
+JOB_RUN = (
+    'python -c "import datetime; '
+    "open('/tmp/runs', 'a').write(datetime.datetime.now().isoformat() + chr(10))\""
+)
+"""The job of the copy: a line in its volume per run, the time of the run."""
+
+
+def _blank_with_a_job(tmp: Path, mirror: Path, name: str, run: str) -> None:
+    """The blank with a job, consistent as a whole (par0 14.3): a service
+    ``init`` of the app's image, no healthcheck, on ``postgres`` healthy; the
+    app after it (``service_completed_successfully``); ``jobs: {init}`` in
+    the entry; the job's volume at ``/tmp`` -- the image's ``/tmp`` is 1777,
+    so the user ``blank`` writes there."""
+    copy = _copy_of_blank(tmp, mirror, name)
+    _replace_once(
+        copy / "primer.yaml",
+        "    migrate:  python -m alembic upgrade head\n",
+        "    migrate:  python -m alembic upgrade head\n"
+        "    jobs:     { init: { service: init } }\n",
+    )
+    compose = copy / "docker-compose.yml"
+    _replace_once(
+        compose,
+        "    depends_on:\n      postgres: { condition: service_healthy }\n",
+        "    depends_on:\n      postgres: { condition: service_healthy }\n"
+        "      init: { condition: service_completed_successfully }\n",
+    )
+    _replace_once(
+        compose,
+        "\n  postgres:\n",
+        "\n  init:\n"
+        "    build:\n      context: ./backend\n      target: runtime\n"
+        f"    command: {json.dumps(run)}\n"
+        "    volumes:\n      - jobs:/tmp\n"
+        "    depends_on:\n      postgres: { condition: service_healthy }\n"
+        "\n  postgres:\n",
+    )
+    _replace_once(
+        compose, "volumes:\n  pgdata: {}\n", "volumes:\n  pgdata: {}\n  jobs: {}\n"
+    )
+    _push(copy, mirror, f"DM-22: the blank with a job ({name})")
+
+
+def _runs() -> list[str]:
+    """The lines the job wrote, read from its volume by the image of
+    ``postgres`` -- on the box already, no network."""
+    [image] = _stdout(
+        ["docker", "inspect", "-f", "{{.Config.Image}}", _container(STACK, "postgres")]
+    )
+    return _stdout(
+        ["docker", "run", "--rm", "--network", "none", "-v",
+         f"{STACK}_jobs:/v", image, "cat", "/v/runs"]
+    )  # fmt: skip
+
+
+def _started(service: str) -> str:
+    [at] = _stdout(
+        ["docker", "inspect", "-f", "{{.State.StartedAt}}", _container(STACK, service)]
+    )
+    return at
+
+
+def _up_fact(verdict: Verdict) -> dict[str, object]:
+    [up] = [s for s in verdict.steps if (s.stack, s.name) == (STACK, "up")]
+    return dict(up.verify or {})
+
+
+def test_tier3_a_job_runs_before_its_dependent_on_every_deploy(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-22, contract 3 rule 24, on the box the earlier tests left: a copy of
+    the blank with the job ``init``. A deploy that acts runs it once, after
+    ``postgres`` and before the app -- a line in its volume, ``up`` names it,
+    ``doctor`` is empty; the next deploy (another passport) runs it again;
+    an update with nothing changed -- not (the reading of "every deploy" at
+    the gate). The pair: the job exits 1 -- red ``up``, the app the same
+    container. Measured into the journal of the run (par0 14.3): when
+    ``postgres``, the job and the app started -- compose 2.40 under
+    ``--no-deps --wait`` and ``run --rm``."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    _blank_with_a_job(tmp_path, mirror, "job", JOB_RUN)
+    first = _passport(tmp_path, version=40)
+    verdict, printed = _install(first, "update")
+    assert verdict.result == "green", printed
+    runs = _runs()
+    print("DM-22 measure:", {"postgres": _started("postgres"), "job": runs,
+                             "app": _started("app")})  # fmt: skip
+    assert _up_fact(verdict).get("jobs") == ["init"], verdict.steps
+    assert len(runs) == 1, runs
+    diff, failed, doctor = _doctor(first)
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+    second = _passport(tmp_path, version=41)
+    verdict, printed = _install(second, "update")
+    assert verdict.result == "green", printed
+    assert _up_fact(verdict).get("jobs") == ["init"], verdict.steps
+    assert len(_runs()) == 2
+
+    verdict, printed = _install(second, "update")  # nothing changed
+    assert verdict.result == "green", printed
+    assert "jobs" not in _up_fact(verdict), verdict.steps
+    assert len(_runs()) == 2
+    diff, failed, doctor = _doctor(second)
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+    # the pair: the job exits 1 -- red, the app not brought up anew
+    app = _container(STACK, "app")
+    _blank_with_a_job(tmp_path, mirror, "job-red", 'python -c "raise SystemExit(1)"')
+    red, printed = _install(_passport(tmp_path, version=42), "update")
+    assert red.result != "green", printed
+    [failed_step] = [s for s in red.steps if s.status == "failed"]
+    assert (failed_step.stack, failed_step.name) == (STACK, "up"), red.steps
+    assert failed_step.reason is not None
+    assert failed_step.reason.code == "command-failed", failed_step.reason
+    assert "init" in failed_step.reason.model_dump()["argv"], failed_step.reason
+    assert _container(STACK, "app") == app
+
+
+REVISION = """\"\"\"dm22 probe
+
+Revision ID: 0002
+Revises: 0001
+\"\"\"
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = "0002"
+down_revision = "0001"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.add_column("app_settings", sa.Column("dm22", sa.Text(), nullable=True))
+
+
+def downgrade() -> None:
+    op.drop_column("app_settings", "dm22")
+"""
+"""A migration of the copy: the head moves, so ``migrate`` acts."""
+
+
+def _blank_stopping_for_migrate(tmp: Path, mirror: Path) -> None:
+    """The blank with ``stop_for_migrate: [frontend]`` and a new revision,
+    consistent as a whole (par0 14.3): ``frontend`` depends on nothing, the
+    app's ``run --rm`` of ``migrate`` does not bring it back; the revision
+    after ``0001``, in the image's migrations."""
+    copy = _copy_of_blank(tmp, mirror, "stop")
+    _replace_once(
+        copy / "primer.yaml",
+        "    migrate:  python -m alembic upgrade head\n",
+        "    migrate:  python -m alembic upgrade head\n"
+        "    stop_for_migrate: [frontend]\n",
+    )
+    versions = copy / "backend" / "migrations" / "versions"
+    (versions / "2026_11_10_0002_dm22.py").write_text(REVISION, encoding="utf-8")
+    _push(copy, mirror, "DM-22: the blank stops its frontend for migrate")
+
+
+def test_tier3_services_stopped_for_migrate_come_back(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-22, protocol 6.3, contract 3 rule 35: a copy of the blank with
+    ``stop_for_migrate: [frontend]`` and a new head. The run stops
+    ``frontend`` before ``migrate`` (the step's fact; ``stop_for_migrate``
+    stands before ``migrate`` in the verdict), ``migrate`` moves the head,
+    ``up`` brings ``frontend`` back -- running, started after the run
+    began; ``doctor`` is empty. Measured into the journal of the run (par0
+    14.3): ``frontend`` started before and after."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    before = _started("frontend")
+    _blank_stopping_for_migrate(tmp_path, mirror)
+    passport = _passport(tmp_path, version=43)
+    verdict, printed = _install(passport, "update")
+    assert verdict.result == "green", printed
+    after = _started("frontend")
+    print("DM-22 measure:", {"frontend before": before, "frontend after": after})
+    names = [s.name for s in verdict.steps if s.stack == STACK]
+    assert names.index("stop_for_migrate") + 1 == names.index("migrate"), names
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    assert facts[(STACK, "stop_for_migrate")]["stopped"] == ["frontend"], facts
+    assert facts[(STACK, "migrate")]["alembic_head"] == "0002", facts
+    assert _container(STACK, "frontend")  # running again
+    assert after > before, (before, after)
+    diff, failed, doctor = _doctor(passport)
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     """The last of the cycle (DM-45): ``pridem destroy`` -- every container,
     network, volume and image labelled ``pridem.stack`` gone (the blank has no

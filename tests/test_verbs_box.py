@@ -383,7 +383,11 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
     the edge, ``frontend`` and ``finalize`` made once the target is read --
     ``finally``
     the host's timers and ``gc``; ``reinstall`` destroys after the passport is
-    read and before anything is installed."""
+    read and before anything is installed.
+
+    Changed by DM-22: ``finally`` starts with ``stopped`` -- what
+    ``stop_for_migrate`` stopped, started again where ``migrate`` never acted
+    -- before the host's timers come back."""
     box = Box(tmp_path / "opt" / "pridem")
     wanted = Wanted(mode=mode, source=Source(file=tmp_path / "x"))
     planned = deploy_plan(
@@ -406,7 +410,7 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
         "finalize",
     ]
     assert [s.name for s in planned.stacks if s.root] == ["finalize"]
-    assert [stack.name for stack in planned.finally_] == ["host", "box"]
+    assert [stack.name for stack in planned.finally_] == ["stopped", "host", "box"]
     deferred = {s.name for s in planned.stacks if isinstance(s, Deferred)}
     assert deferred == {
         "sources",

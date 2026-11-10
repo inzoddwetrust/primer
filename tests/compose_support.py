@@ -31,18 +31,27 @@ FRONT_IMAGE = "sha256:" + "f" * 64
 OLD_IMAGE = "sha256:" + "0" * 64
 CONTAINER = "c0ffee"
 HEAD = "0001"
+HEALTHCHECK: dict[str, Json] = {"test": ["CMD", "true"]}
+"""A healthcheck of a service in a compose document (protocol 3.4, DM-22)."""
+
 CONFIG: dict[str, Json] = {
     "name": "blank",
     "services": {
         "app": {
             "build": {"context": "/r/backend", "dockerfile": "Dockerfile"},
+            "healthcheck": HEALTHCHECK,
             "networks": {"default": None},
         },
         "frontend": {
             "build": {"context": "/r/frontend", "dockerfile": "Dockerfile"},
+            "healthcheck": HEALTHCHECK,
             "networks": {"default": None},
         },
-        "postgres": {"image": "postgres@sha256:x", "networks": {"default": None}},
+        "postgres": {
+            "image": "postgres@sha256:x",
+            "healthcheck": HEALTHCHECK,
+            "networks": {"default": None},
+        },
     },
     "networks": {"default": {"name": "blank_default"}},
     "volumes": {"pgdata": {"name": "blank_pgdata"}},

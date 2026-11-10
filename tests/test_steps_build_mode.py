@@ -20,6 +20,7 @@ from compose_support import (
     CONFIG,
     CONTAINER,
     ENTRY,
+    HEALTHCHECK,
     REF,
     SHA,
     LiveApp,
@@ -756,7 +757,11 @@ def velo_data(skin_service: str = "frontend") -> dict[str, object]:
     assert isinstance(stacks, dict)
     velo = stacks.pop("blank")
     stacks["velo"] = velo
-    stacks["velo-storage"] = {"compose": "deploy/storage-compose.yml"}
+    stacks["velo-storage"] = {
+        "compose": "deploy/storage-compose.yml",
+        # velo's own form (DM-22): the init of the store is a job of its entry
+        "jobs": {"init": {"service": "velo-storage-init"}},
+    }
     data["host"] = {
         "domains": ["frontend"],
         "routes": {"frontend": {"to": "frontend:80"}},
@@ -782,7 +787,11 @@ VELO: dict[str, Json] = json.loads(
 STORAGE: dict[str, Json] = {
     "name": "velo-storage",
     "services": {
-        "storage": {"image": "minio@sha256:x", "networks": {"default": None}},
+        "storage": {
+            "image": "minio@sha256:x",
+            "healthcheck": HEALTHCHECK,
+            "networks": {"default": None},
+        },
         "velo-storage-init": {"image": "minio-mc@sha256:x"},
     },
     "networks": {"default": {"name": "velo-storage_default"}},
@@ -901,11 +910,18 @@ def test_names_the_machine_gives_are_reserved(tmp_path: Path) -> None:
     # the velo-like pair: velo-storage-init of velo-storage is green
     assert forbidden(cs, STORAGE) == []
     planted = json.loads(json.dumps(STORAGE))
-    planted["services"]["pridem-cache"] = {"image": "redis@sha256:x"}
-    planted["services"]["velo-app"] = {"image": "x@sha256:x"}
-    planted["services"]["comms-worker"] = {"image": "x@sha256:x"}
-    planted["services"]["velo-frontend"] = {"image": "x@sha256:x"}
-    planted["services"]["velo-postgres"] = {"image": "x@sha256:x"}  # no alias
+    planted["services"]["pridem-cache"] = {
+        "image": "redis@sha256:x",
+        "healthcheck": HEALTHCHECK,
+    }
+    planted["services"]["velo-app"] = {
+        "image": "x@sha256:x",
+        "healthcheck": HEALTHCHECK,
+    }
+    healthy = {"image": "x@sha256:x", "healthcheck": HEALTHCHECK}
+    planted["services"]["comms-worker"] = healthy
+    planted["services"]["velo-frontend"] = healthy
+    planted["services"]["velo-postgres"] = healthy  # no alias
     assert forbidden(cs, planted) == [
         "comms-worker: name reserved",
         "pridem-cache: name reserved",

@@ -314,9 +314,30 @@
       "title": "HostPort",
       "type": "object"
     },
+    "Job": {
+      "additionalProperties": false,
+      "description": "A job of the entry (contract 3 rule 24): a one-off service of its\ncompose, run on every deploy of the entry after the services it depends\non are healthy and before those that depend on it; it needs no\nhealthcheck (DM-22).",
+      "properties": {
+        "service": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Service",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service"
+      ],
+      "title": "Job",
+      "type": "object"
+    },
     "Minted": {
       "additionalProperties": false,
+      "description": "``length`` -- the exact length of the value, of the machine's alphabet\n``[A-Za-z0-9_-]``, no shorter than 32 (DM-22: a consumer that takes no\nlonger one); absent -- ``token_urlsafe(32)``, 43 characters.",
       "properties": {
+        "length": {
+          "title": "Length",
+          "type": "integer"
+        },
         "source": {
           "const": "minted",
           "title": "Source",
@@ -830,6 +851,19 @@
     "Seed": {
       "additionalProperties": false,
       "properties": {
+        "roles": {
+          "items": {
+            "enum": [
+              "test",
+              "prod",
+              "preview"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Roles",
+          "type": "array"
+        },
         "run": {
           "minLength": 1,
           "title": "Run",
@@ -1037,6 +1071,16 @@
         "frontend": {
           "$ref": "#/$defs/Frontend"
         },
+        "jobs": {
+          "default": {},
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Job"
+            }
+          },
+          "title": "Jobs",
+          "type": "object"
+        },
         "migrate": {
           "minLength": 1,
           "title": "Migrate",
@@ -1061,6 +1105,15 @@
           },
           "title": "Seeds",
           "type": "object"
+        },
+        "stop_for_migrate": {
+          "default": [],
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "type": "string"
+          },
+          "title": "Stop For Migrate",
+          "type": "array"
         },
         "test": {
           "$ref": "#/$defs/StackTest"

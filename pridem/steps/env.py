@@ -303,6 +303,10 @@ class RenderEnv(Step):
         "no-answer": "no answer for {field}",
         "invalid": "the answer is rejected: {problems}",
         "minted-mode": "{path} is {mode}, not 0o600; it is left as it is",
+        "minted-length": (
+            "{key} was minted with {found} characters, the schema says {length}: "
+            "a secret is minted once (reinstall --new-secrets mints anew)"
+        ),
         "minted-damaged": "{path} is not a minted file of this machine",
         "edition-unknown": "{key}: edition {edition} is not in editions",
         "passport-key": "{key}: the passport has no source {passport_key}",
@@ -362,6 +366,21 @@ class RenderEnv(Step):
             if isinstance(v, Minted) and k not in off
         ]
 
+    def _length(self, key: str) -> int | None:
+        var = self.stack.env[key]
+        return var.length if isinstance(var, Minted) else None
+
+    def _lengths_held(self, minted: Mapping[str, str]) -> None:
+        """A key minted before its ``length`` was declared, or with another:
+        red, never minted again -- a secret is minted once (TZ 7.3, DM-22)."""
+        for key in self._minted_keys():
+            length = self._length(key)
+            if key in minted and length is not None and len(minted[key]) != length:
+                found = len(minted[key])
+                raise StepFailed(
+                    "minted-length", {"key": key, "length": length, "found": found}
+                )
+
     def _derivable(self) -> list[str]:
         off = set(self._switched())
         return [
@@ -379,6 +398,7 @@ class RenderEnv(Step):
         self.secrets.add(passport_secrets(passport))
         minted = read_minted(self._minted)
         self.secrets.add(SecretStr(value) for value in minted.values())
+        self._lengths_held(minted)
         unminted = {key: "" for key in self._minted_keys() if key not in minted}
         return minted, resolve(
             self.stack, self.product, passport, {**minted, **unminted}, self.memory
@@ -443,7 +463,11 @@ class RenderEnv(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         minted, resolved = self._known()
-        new = {key: mint() for key in self._minted_keys() if key not in minted}
+        new = {
+            key: mint(self._length(key))
+            for key in self._minted_keys()
+            if key not in minted
+        }
         if resolved.missing:
             self._answer(resolved.missing)
         if resolved.switched_off and self.ask is not None:

@@ -503,7 +503,9 @@ def _build(args: Json, key: bool) -> dict[str, Json]:
     build: dict[str, Json] = {"context": "/r/backend"}
     if key:
         build["args"] = args
-    return {"services": {"app": {"image": "app:1", "build": build}}}
+    app: dict[str, Json] = {"image": "app:1", "build": build}
+    app["healthcheck"] = {"test": ["CMD", "true"]}  # protocol 3.4 (DM-22)
+    return {"services": {"app": app}}
 
 
 @pytest.mark.parametrize(("form", "raw", "printed"), ARGS_FORMS)

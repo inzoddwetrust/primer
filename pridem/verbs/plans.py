@@ -8,7 +8,8 @@ One function makes the plan of ``install``, ``update``, ``deploy``,
     host -> passport -> [destroy: reinstall] -> timers -> sources ->
     dependencies -> services -> <the product's entries> -> types -> edge ->
     frontend -> finalize
-    finally: host (timers back), gc
+    finally: stopped (what stop_for_migrate stopped, when migrate never
+    acted), host (timers back), gc
 
 What a stack needs and when it is known:
 
@@ -26,11 +27,12 @@ What a stack needs and when it is known:
   ``primer.yaml``: ``seams_check`` first, before any ``act`` of a stack; then
   each co-located service of the edition in the order of ``installed``, one
   stack per entry, the ladder ``render_env -> build -> [derive_env] ->
-  data_copy -> migrate -> up`` (``steps/services.py``);
+  data_copy -> stop_for_migrate -> migrate -> up`` (``steps/services.py``);
 - the product -- deferred: its ``primer.yaml@target``, read by ``fetch_root``.
   One stack per entry of ``stacks``: the entry named as the product first, with
   ``render_env`` at its head and ``egress`` before its ``up``; then the other
-  entries; ``tests`` and ``migrate`` where the entry declares them; then
+  entries; ``tests`` and ``migrate`` where the entry declares them, each
+  ``migrate`` after its ``stop_for_migrate`` (DM-22); then
   ``seams_verify``, every seam read from the live providers;
 - ``derive_env`` -- on the own entry of a stack (service or product) with a
   ``derived`` value, right after its ``build``: ``derive`` runs in the ``app``
@@ -80,7 +82,7 @@ from pridem.steps.gc import GC_STACK, gc_steps
 from pridem.steps.git import repo
 from pridem.steps.host import host_steps
 from pridem.steps.keys import DeployKey
-from pridem.steps.migrate import Migrate
+from pridem.steps.migrate import Migrate, StartStopped, StopForMigrate, Stopped
 from pridem.steps.nginx import Nginx
 from pridem.steps.packages import Packages
 from pridem.steps.passport import (
@@ -181,6 +183,8 @@ class _Known:
     product: Product | None = None
     memory: SeamMemory = field(default_factory=SeamMemory)
     handoff: OverrideHandoff = field(default_factory=OverrideHandoff)
+    stopped: Stopped = field(default_factory=Stopped)
+    """What ``stop_for_migrate`` stopped; ``start_stopped`` reads it (DM-22)."""
 
 
 @dataclass(frozen=True)
@@ -306,7 +310,8 @@ def deploy_plan(
         # KNOWN CEILING (DM-46): a service migrates before the product's tests.
         # 1. Mechanism: the product's render_env takes the seams of the live
         #    services, and its build reads that env; so each service runs
-        #    render_env -> build -> [derive_env] -> data_copy -> migrate -> up
+        #    render_env -> build -> [derive_env] -> data_copy ->
+        #    stop_for_migrate -> migrate -> up
         #    before the product's build and tests (TZ 6.2, protocol 4.5). Red
         #    tests of the product after a service's migrate that acted are
         #    past the point of no return: "restore needed".
@@ -394,17 +399,16 @@ def deploy_plan(
                 ),
             ]
             if stage.migrate is not None and stage.app is not None:
-                steps.append(
-                    Migrate(
-                        service,
-                        entry,
-                        release=release,
-                        ref=tag,
-                        commit=commit,
-                        root=root,
-                        fetched=fetched,
-                    )
+                migrate = Migrate(
+                    service,
+                    entry,
+                    release=release,
+                    ref=tag,
+                    commit=commit,
+                    root=root,
+                    fetched=fetched,
                 )
+                steps += [StopForMigrate(migrate, known.stopped), migrate]
             steps.append(
                 Up(
                     service,
@@ -506,17 +510,16 @@ def deploy_plan(
                     )
                 )
             if stage.migrate is not None and stage.app is not None:
-                steps.append(
-                    Migrate(
-                        product,
-                        entry,
-                        release=release,
-                        ref=ref,
-                        commit=commit,
-                        root=root,
-                        fetched=fetched,
-                    )
+                migrate = Migrate(
+                    product,
+                    entry,
+                    release=release,
+                    ref=ref,
+                    commit=commit,
+                    root=root,
+                    fetched=fetched,
                 )
+                steps += [StopForMigrate(migrate, known.stopped), migrate]
             if index == 0:
                 steps.append(Egress(product, fetched=fetched, root=root))
             steps.append(
@@ -666,6 +669,7 @@ def deploy_plan(
         Deferred("finalize", finalize, after="fetch_root", root=True),
     ]
     finally_ = [
+        StackSteps("stopped", [StartStopped(known.stopped)]),
         StackSteps("host", final),
         StackSteps(
             GC_STACK, gc_steps(root, box=box, run_id=session.run_id, fetched=fetched)
