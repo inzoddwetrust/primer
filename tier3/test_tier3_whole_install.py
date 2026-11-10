@@ -2321,8 +2321,9 @@ def test_tier3_a_dump_of_the_blank_restores_what_was_in_it() -> None:
     ``app_settings``; ``db dump`` -- the dump and its manifest under
     ``/opt/pridem/backups/<run_id>/`` (0600), its table of contents read
     back; the row deleted; ``db restore --confirm <server.name>`` -- the row
-    back, the app running, the head of the manifest. ``backup`` -- green, the
-    service without a database in its scope. Measured into the journal (par0
+    back, the app running, the head of the manifest. ``backup`` -- green with
+    the policy of this box's passport off: the fact says so, no new directory
+    of dumps (FIX 2). Measured into the journal (par0
     14.3): the modes of the dump's file and directory, the manifest."""
     assert (OPT / "current").is_symlink(), "the whole install runs first"
     _psql("DELETE FROM app_settings WHERE key = 'dm86'")
@@ -2357,13 +2358,15 @@ def test_tier3_a_dump_of_the_blank_restores_what_was_in_it() -> None:
     assert facts["start_restored"]["started"] == ["app", "frontend"], facts
     assert _container(STACK, "app")
 
+    # FIX 2: the passport of this box says policies.backup.enabled: false --
+    # green with no command and the fact, no new directory under backups/
+    # (the policy on is held by tier 1; the dump on a live database -- above)
+    before = sorted(Path("/opt/pridem/backups").iterdir())
     verdict, printed = _verdict_of("backup")
     assert verdict.result == "green", printed
     [scope] = [s for s in verdict.steps if s.name == "backup_scope"]
-    assert scope.verify == {
-        "dumped": [STACK],
-        "no_database": ["primer-blank-service"],
-    }, scope.verify
+    assert scope.verify == {"policy": "disabled"}, scope.verify
+    assert sorted(Path("/opt/pridem/backups").iterdir()) == before
 
 
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
