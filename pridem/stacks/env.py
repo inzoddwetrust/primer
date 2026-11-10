@@ -1,8 +1,8 @@
 """The environment of a stack (contract 3 section 3, rules 13, 18; TZ 7.3, 8).
 
 Every variable of ``env`` has a source; this module turns the sources that need
-no command into values and keeps the two files of a stack's environment under
-``/opt/<name>/env/`` (0700), ``<name>`` being the ``name`` of its
+no command into values and keeps the three files of a stack's environment
+under ``/opt/<name>/env/`` (0700), ``<name>`` being the ``name`` of its
 ``primer.yaml``:
 
 - ``minted.yaml`` (0600): the ``minted`` secrets, minted once by
@@ -14,8 +14,17 @@ no command into values and keeps the two files of a stack's environment under
 - ``.env`` (0600): every variable as ``KEY='value'`` -- a single-quoted value
   is taken as it is by compose's ``--env-file``, with no interpolation. A value
   with ``'`` or a line break cannot be written so: refused, by its key only.
+  It is the environment of the release ``current`` names: only ``finalize``
+  writes it, a copy of ``next.env``, with ``current`` (DM-68).
+- ``next.env`` (0600), of the same form: the environment of the release a
+  deploy puts on the box. ``render_env`` and ``derive_env`` write it, every
+  compose command of the deploy's steps reads it; the release that runs reads
+  ``.env``, as it was, until ``finalize``. So a step red before the point of no
+  return leaves the running release its own environment, a new passport on
+  the same commit too -- the release's name is the same, its file is not.
+  ``env_file`` is the one place either path is made.
 
-Both are written by ``atomic_write`` with 0600 (temp, fsync, rename, fsync of
+All three are written by ``atomic_write`` with 0600 (temp, fsync, rename, fsync of
 the directory). A file found with another mode is refused, never
 ``chmod``-ed.
 
@@ -67,6 +76,7 @@ from pridem.steps.base import StepFailed
 ENV_DIR = "env"
 MINTED_FILE = "minted.yaml"
 ENV_FILE = ".env"
+STAGED_FILE = "next.env"
 MINT_BYTES = 32
 """``token_urlsafe(32)``: 43 characters of ``[A-Za-z0-9_-]`` (measured)."""
 
@@ -94,6 +104,13 @@ def own_entry(stack: Stack) -> str:
 
 def env_dir(root: Path, name: str) -> Path:
     return root / "opt" / name / ENV_DIR
+
+
+def env_file(root: Path, name: str, *, staged: bool) -> Path:
+    """The environment of stack ``name``: ``next.env`` of the deploy
+    (``staged``) or ``.env`` of the release ``current`` names -- the one
+    function every reader and writer of either goes by."""
+    return env_dir(root, name) / (STAGED_FILE if staged else ENV_FILE)
 
 
 def mint(length: int | None = None) -> str:

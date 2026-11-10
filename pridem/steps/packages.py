@@ -312,7 +312,9 @@ class Packages(Step):
         root: Path = Path("/"),
     ) -> None:
         self.product = product
-        self.compose = ComposeStack(product, entry, release, ref, commit, root)
+        self.compose = ComposeStack(
+            product, entry, release, ref, commit, root, staged_env=True
+        )
         self.fetched = fetched
         self.handoff = handoff
         self.root = root

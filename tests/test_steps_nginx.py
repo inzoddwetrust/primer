@@ -164,7 +164,9 @@ def test_probe_DM_17_route_targets_the_stack_alias_on_the_shared_network(
     assert "set $upstream http://aivis-frontend:80;" in text
     # the override of each stack gives the alias the route goes to
     for entry, service, port in (("aivis", "frontend", 80), ("storage", "app", 9000)):
-        cs = ComposeStack(made, entry, tmp_path, "main", "0" * 40, tmp_path)
+        cs = ComposeStack(
+            made, entry, tmp_path, "main", "0" * 40, tmp_path, staged_env=True
+        )
         document = json.loads(json.dumps(CONFIG))
         document["services"] = {service: {"networks": {"default": None}}}
         rendered = json.loads(

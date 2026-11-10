@@ -53,7 +53,7 @@ from pridem.events import Code, Json, PlanOutcome
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
-from pridem.stacks.env import MINT_ALPHABET, mint
+from pridem.stacks.env import MINT_ALPHABET, env_file, mint
 from pridem.stacks.schema import PRIMER_YAML, Product, rule_problems
 from pridem.steps.base import (
     CheckResult,
@@ -133,7 +133,9 @@ JOB_HASHES = {**HASHES, "init": "1" * 64}
 
 
 def cs_of(stack: Product, root: Path, commit: str = SHA) -> ComposeStack:
-    return ComposeStack(stack, ENTRY, root / "release", REF, commit, root)
+    return ComposeStack(
+        stack, ENTRY, root / "release", REF, commit, root, staged_env=True
+    )
 
 
 def up_of(stack: Product, root: Path, commit: str = SHA) -> Up:
@@ -963,7 +965,8 @@ def test_a_value_the_passport_puts_in_env_changes_it_its_number_alone_does_not(
         root, fetched = box(place, passport)
         outcome, _ = run_env([render(stack, root, fetched)], FakeRunner())
         assert outcome.code is ExitCode.OK, outcome.steps
-        texts.append((root / "opt" / stack.name / "env" / ".env").read_bytes())
+        # DM-68: render_env writes the deploy's file
+        texts.append(env_file(root, stack.name, staged=True).read_bytes())
     assert texts[0] == texts[1]  # the number alone
     assert texts[1] != texts[2]  # a value the passport puts in env
 

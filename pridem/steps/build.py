@@ -55,7 +55,7 @@ place only after the service's ``validate`` of it (``data_copy``).
 
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
@@ -173,7 +173,9 @@ class Build(Step):
     ) -> None:
         """``data`` -- what the product gives this entry of a service (form D):
         its binds and variables go into the override (``data_copy``)."""
-        self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.compose = ComposeStack(
+            stack, entry, release, ref, commit, root, staged_env=True
+        )
         self.handoff = handoff
         self.fetched = fetched
         self.data = list(data)
@@ -234,14 +236,7 @@ class Build(Step):
         if isinstance(compose.stack, Product):
             for entry in sorted(compose.stack.stacks):
                 if entry != compose.entry:
-                    other = ComposeStack(
-                        compose.stack,
-                        entry,
-                        compose.release,
-                        compose.ref,
-                        compose.commit,
-                        compose.root,
-                    )
+                    other = replace(compose, entry=entry, next=False)
                     found[entry] = config(ctx, other)
         return found
 

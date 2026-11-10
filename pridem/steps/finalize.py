@@ -16,6 +16,12 @@ them). ``check`` acts whenever ``state.json`` is not the state this run
 would write -- the passport's version and ops commit too: a new passport on
 the same releases is applied by the run, and ``state.json`` says so (DM-81);
 ``verify`` reads both back (``state-passport``).
+
+With ``current`` goes the environment (DM-68): a deploy's steps run on
+``env/next.env``, the release that runs keeps ``env/.env`` until this step
+copies the first over the second, stack by stack, right after its
+``current``. ``check`` acts when ``.env`` is not ``next.env``; ``verify``
+reads it back (``env``).
 """
 
 import os
@@ -25,6 +31,7 @@ from typing import ClassVar
 
 from pridem.events import Json
 from pridem.files import fsync_dir
+from pridem.stacks.env import env_file, write_private
 from pridem.state import Box, BoxState
 from pridem.steps.base import (
     CheckResult,
@@ -78,6 +85,7 @@ class Finalize(Step):
         "state": "state.json does not name {stack} at {release}",
         "state-passport": "state.json does not name passport v{passport_version} "
         "from {ops_commit}",
+        "env": "env/.env of {stack} is not the environment of its release",
     }
 
     def __init__(
@@ -121,8 +129,21 @@ class Finalize(Step):
                 behind.append(stack)
         return behind
 
+    def _env_behind(self) -> list[str]:
+        """The stacks whose ``.env`` is not the deploy's ``next.env`` -- or
+        is missing, or has none to be."""
+        behind = []
+        for stack in sorted(self.releases):
+            staged = env_file(self.root, stack, staged=True)
+            running = env_file(self.root, stack, staged=False)
+            if not (staged.is_file() and running.is_file()) or (
+                staged.read_bytes() != running.read_bytes()
+            ):
+                behind.append(stack)
+        return behind
+
     def check(self, ctx: StepContext) -> CheckResult:
-        behind = self._behind()
+        behind = sorted({*self._behind(), *self._env_behind()})
         state = self.box.read_state()
         passport = self.fetched.passport
         same = (
@@ -155,6 +176,23 @@ class Finalize(Step):
             os.symlink(release, temp)
             os.replace(temp, link)  # never a moment without current
             fsync_dir(link.parent)  # the switch survives a power loss
+            # KNOWN CEILING (DM-68): current and .env are two names, switched
+            # one after the other.
+            # 1. A run cut between the two leaves the new release under
+            #    current with the old release's .env: a variable it lacks
+            #    fails loudly on ${VAR:?}, one it changed runs silently old
+            #    on the next compose command of current, until the next run.
+            # 2. Status: acknowledged by design.
+            # 3. Task: none -- a window of two writes on one disk, which the
+            #    next run closes (``check``: .env behind -> act).
+            # 4. Trigger: a run seen with the old environment after a cut
+            #    finalize.
+            # 5. Fix agreed: the pair switched at once, behind one symlink.
+            # 6. Rejected: .env before current -- the old release on the new
+            #    values, the very defect of DM-68.
+            staged = env_file(self.root, stack, staged=True)
+            running = env_file(self.root, stack, staged=False)
+            write_private(running, staged.read_text(encoding="utf-8"))
         self.box.write_state(self._state())
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
@@ -166,6 +204,9 @@ class Finalize(Step):
                     "not-switched",
                     {"stack": stack, "found": found, "release": str(release)},
                 )
+        env = self._env_behind()
+        if env:
+            raise StepFailed("env", {"stack": env[0]})
         state = self.box.read_state()
         wanted = self._wanted()
         for stack, name in wanted.items():
@@ -189,5 +230,6 @@ class Finalize(Step):
                 "current": current,
                 "state": "written",
                 "passport_version": passport.version,
+                "env": list[Json](sorted(self.releases)),
             }
         )

@@ -106,7 +106,7 @@ def comms(root: Path, ports: list[dict[str, object]]) -> ComposeStack:
     assert isinstance(stack, Service)
     release = root / "comms-release"
     release.mkdir(parents=True, exist_ok=True)
-    return ComposeStack(stack, "comms", release, "v1.0.0", SHA, root)
+    return ComposeStack(stack, "comms", release, "v1.0.0", SHA, root, staged_env=True)
 
 
 # --- probe ----------------------------------------------------------------------

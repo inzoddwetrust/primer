@@ -368,7 +368,9 @@ def test_the_override_carries_a_services_data_on_its_app(tmp_path: Path) -> None
     assert mounts == {"comms-app": [f"{item.target}:/primer/data/profile:ro"]}
     assert env == {"comms-app": {"PROFILE_DIR": "/primer/data/profile"}}
     comms = _service(tmp_path)
-    compose = ComposeStack(comms, "comms", tmp_path / "r", "v1.0.0", SHA, tmp_path)
+    compose = ComposeStack(
+        comms, "comms", tmp_path / "r", "v1.0.0", SHA, tmp_path, staged_env=True
+    )
     document: dict[str, Json] = {
         "services": {"comms-app": {"image": "x"}, "comms-redis": {"image": "r"}}
     }
@@ -471,7 +473,11 @@ def _copy(tmp: Path) -> tuple[DataCopy, ComposeStack, DataItem]:
         handoff=handoff,
         root=root,
     )
-    return step, ComposeStack(comms, "comms", release, "v1.0.0", SHA, root), item
+    return (
+        step,
+        ComposeStack(comms, "comms", release, "v1.0.0", SHA, root, staged_env=True),
+        item,
+    )
 
 
 def _hashes(compose: ComposeStack, running: str) -> list[FakeCall]:
@@ -616,8 +622,12 @@ def _verify(
     assert isinstance(comms, Service)
     root = tmp / "box"
     stacks_of = {
-        "aivis": ComposeStack(made, "aivis", root / "a", "main", SHA, root),
-        "comms": ComposeStack(comms, "comms", root / "c", "v1.0.0", SHA, root),
+        "aivis": ComposeStack(
+            made, "aivis", root / "a", "main", SHA, root, staged_env=True
+        ),
+        "comms": ComposeStack(
+            comms, "comms", root / "c", "v1.0.0", SHA, root, staged_env=True
+        ),
     }
     step = SeamsVerify(made, {"comms": comms}, stacks_of)
     calls = [
@@ -721,7 +731,9 @@ def test_test_services_come_up_with_the_database(tmp_path: Path) -> None:
         secrets=Secrets(()),
         root=root,
     )
-    compose = ComposeStack(made, "aivis", root / "r", "main", SHA, root)
+    compose = ComposeStack(
+        made, "aivis", root / "r", "main", SHA, root, staged_env=True
+    )
     document = json.loads(json.dumps(CONFIG))
     document["services"]["app"]["environment"] = {
         "DATABASE_URL": "postgresql://u:p@postgres:5432/aivis"

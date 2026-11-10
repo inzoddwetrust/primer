@@ -8,13 +8,17 @@ stack: the plan builder puts it ahead of the
 services' ladders, once ``fetch_services`` has read their ``primer.yaml`` (the
 edition decides which services are installed).
 
-``render_env`` renders a stack's ``.env`` from its schema and reads it back,
-in two passes around ``build`` (DM-67). Before it (``render_env``), every
+``render_env`` renders a stack's environment from its schema and reads it
+back, in two passes around ``build`` (DM-67). The file is the deploy's,
+``env/next.env`` (``stacks.env.env_file``): the release that runs keeps
+``env/.env`` as it was until ``finalize`` copies the deploy's over it with
+``current`` (DM-68) -- a step red before the point of no return leaves it its
+own values. Before it (``render_env``), every
 source but ``derived``; a ``derived`` key holds its value on disk when it
 could be one -- the running release's -- else ``<derived>``, which satisfies
 compose's ``${VAR:?}`` for the build and is no value of anything. After it
 (``derive_env``, on the stack's own entry), ``derive`` runs in the ``app``
-image of this run, ``.env`` is written once with every key and read back with
+image of this run, the file is written once with every key and read back with
 no placeholder left -- before ``packages``, ``data_copy``, ``tests``,
 ``migrate`` and ``up`` start a container of the stack, and before its
 ``provides`` reach the plan's memory after health. A stack with ``derived``
@@ -56,10 +60,10 @@ from pridem.events import Json, Secrets
 from pridem.runner import CommandFailed, Stream
 from pridem.stacks.env import (
     DERIVED_PLACEHOLDER,
-    ENV_FILE,
     MINTED_FILE,
     Resolved,
     env_dir,
+    env_file,
     env_text,
     mint,
     minted_text,
@@ -288,7 +292,8 @@ def _put(data: dict[str, object], path: Sequence[str], value: object) -> None:
 
 
 class RenderEnv(Step):
-    """``/opt/<n>/env/.env`` of one stack, rendered and read back: every source
+    """``/opt/<n>/env/next.env`` of one stack -- the deploy's environment --
+    rendered and read back: every source
     but ``derived``, whose keys hold the value on disk or ``<derived>`` until
     ``derive_env`` (below) puts the value of this run's image there."""
 
@@ -347,7 +352,8 @@ class RenderEnv(Step):
 
     @property
     def _env(self) -> Path:
-        return self._dir / ENV_FILE
+        """The deploy's file: the running release's is not written here."""
+        return env_file(self.root, self.stack.name, staged=True)
 
     @property
     def _minted(self) -> Path:
@@ -405,8 +411,8 @@ class RenderEnv(Step):
         )
 
     def _on_disk(self) -> dict[str, str] | None:
-        """The values of ``.env`` as they are; ``None`` when there is no file
-        or it is not of the machine's form."""
+        """The values of the deploy's file as they are; ``None`` when there is
+        no file or it is not of the machine's form."""
         if not self._env.exists():
             return None
         try:
@@ -416,7 +422,7 @@ class RenderEnv(Step):
 
     def _held(self, on_disk: Mapping[str, str] | None) -> dict[str, str]:
         """What a ``derived`` key holds before ``derive_env``: its value on disk
-        when it could be one -- the running release's -- else the placeholder.
+        when it could be one -- the last deploy's -- else the placeholder.
         Held values are secrets."""
         held: dict[str, str] = {}
         for key in self._derivable():
@@ -507,8 +513,8 @@ class RenderEnv(Step):
         self.fetched.passport = passport
 
     def read_back(self, *, waiting: Sequence[str]) -> Verified:
-        """``.env`` read back: 0600, exactly the schema's keys, no placeholder
-        but ``<derived>`` on the keys of ``waiting``; the values become
+        """The deploy's file read back: 0600, exactly the schema's keys, no
+        placeholder but ``<derived>`` on the keys of ``waiting``; the values become
         ``rendered``."""
         if not self._env.exists():
             raise StepFailed(
@@ -577,13 +583,14 @@ class AppImage(Protocol):
 
 class DeriveEnv(Step):
     """The ``derived`` values of one stack, computed in this run's image and
-    written to ``.env``, which is read back with no placeholder left.
+    written to the deploy's ``next.env``, which is read back with no
+    placeholder left.
 
     ``check`` needs ``act`` when a ``derived`` value on disk could not be one
     (none, ``<derived>``, short), when ``render_env`` found the other values
     behind -- they are ``derive``'s input -- or when ``app`` runs on another
     image than ``build`` gives (a new commit, or a run that stopped after
-    deriving and before ``up``). It reads ``.env`` and asks docker which image
+    deriving and before ``up``). It reads that file and asks docker which image
     ``app`` runs on; it runs no container.
     """
 

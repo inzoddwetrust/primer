@@ -14,6 +14,7 @@ from env_support import (
     COMMS_REPO,
     box,
     derive,
+    env_of,
     passport_data,
     product,
     product_data,
@@ -356,7 +357,7 @@ def test_the_literal_on_a_key_without_when_is_a_placeholder(tmp_path: Path) -> N
     step = render(made, root, fetched)
     run([step], FakeRunner())
     assert step.read_back(waiting=()).fact["keys"] == len(SOURCES)
-    env_file = root / "opt" / "aivis" / "env" / ".env"
+    env_file = env_of(root, "aivis")  # DM-68: the deploy's file
     text = env_file.read_text()
     env_file.write_text(text.replace("PLAIN='p'", f"PLAIN='{LITERAL}'"))
     with pytest.raises(StepFailed) as refused:

@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -324,7 +325,7 @@ def test_build_finds_a_consumer_of_a_point_by_the_uninterpolated_document(
         update={"env": {**made.env, "POINT_ADDRESS": Param(source="param")}}
     )
     base = compose(tmp_path)
-    cs = type(base)(made, base.entry, base.release, base.ref, base.commit, tmp_path)
+    cs = replace(base, stack=made)
     pair = Pair("svc", "probe", "point", "blank", "POINT_ADDRESS")
 
     def with_app_env(value: str) -> dict[str, Json]:

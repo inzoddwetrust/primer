@@ -13,6 +13,7 @@ from state_support import state
 from pridem.events import Code
 from pridem.plan import StackSteps
 from pridem.report.codes import ExitCode
+from pridem.stacks.env import env_file, write_private
 from pridem.state import Box
 from pridem.steps.base import CheckResult, Step, StepContext, StepFailed, Verified
 from pridem.steps.finalize import FinalCheck, Finalize, current_link
@@ -39,8 +40,11 @@ def fetched_passport(tmp: Path) -> Fetched:
 
 
 def finalize(tmp: Path, box: Box) -> tuple[Finalize, Path]:
+    """``finalize`` of the stack ``blank``, its release made and the deploy's
+    environment written, as ``render_env`` of the plan writes it (DM-68)."""
     release = tmp / "opt" / "blank" / "releases" / ("c" * 40)
     release.mkdir(parents=True)
+    write_private(env_file(tmp, "blank", staged=True), "A='new'\n")
     step = Finalize(
         releases={"blank": release},
         composition={"blank": "c" * 40, "pridem": "0.0.0"},

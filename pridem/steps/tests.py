@@ -235,7 +235,9 @@ class Tests(Step):
         root: Path = Path("/"),
         fetched: Fetched | None = None,
     ) -> None:
-        self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.compose = ComposeStack(
+            stack, entry, release, ref, commit, root, staged_env=True
+        )
         self.fetched = fetched
         stage = stack.stacks[entry]
         if stage.test is None or stage.app is None:

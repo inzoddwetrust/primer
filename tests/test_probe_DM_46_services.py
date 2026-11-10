@@ -113,7 +113,9 @@ def _data_copy(tmp: Path) -> tuple[DataCopy, ComposeStack, DataItem, OverrideHan
         handoff=handoff,
         root=root,
     )
-    compose = ComposeStack(comms, "comms", release, "v1.0.0", SHA, root)
+    compose = ComposeStack(
+        comms, "comms", release, "v1.0.0", SHA, root, staged_env=True
+    )
     write_override(compose, "old\n")  # the override the running service is on
     handoff.texts["comms"] = "new\n"  # build's of this run
     write_override(compose.candidate(), "new\n")

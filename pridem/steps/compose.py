@@ -1,8 +1,11 @@
 """Compose of one entry of ``stacks`` as the machine runs it (TZ 7.3).
 
-Every command is ``docker compose -p <entry> --env-file /opt/<name>/env/.env
+Every command is ``docker compose -p <entry> --env-file /opt/<name>/env/<file>
 -f <release>/<compose> -f /opt/<name>/compose/<entry>.yml``: the project name
-is the machine's, the env is the rendered one (DM-14), the product's compose
+is the machine's, the env is the rendered one (DM-14) -- ``next.env``, the
+deploy's, for the steps of a deploy (``staged_env``), ``.env``, the release's
+``current`` names, for any other command (DM-68; ``stacks.env.env_file``) --
+the product's compose
 is read from the immutable release, and the second file is the machine's own
 override. The product's compose is never changed (contract 3 rule 9).
 
@@ -78,6 +81,7 @@ import yaml
 from pridem.events import Json, as_list
 from pridem.files import PathOutside, atomic_write, resolve_inside
 from pridem.runner import Stream
+from pridem.stacks.env import env_file
 from pridem.stacks.routes import alias, routed_services
 from pridem.stacks.schema import PROXY_VARIABLES, Product, Service
 from pridem.stacks.seams import Pair
@@ -119,6 +123,11 @@ class ComposeStack:
     next: bool = False
     """The candidate override (``build``'s of this run) in place of the one on
     disk: ``override`` names ``<entry>.next.yml``."""
+    staged_env: bool = False
+    """The deploy's environment (``env/next.env``) in place of the one of the
+    release ``current`` names (``env/.env``): what a step of a deploy runs on.
+    The default is the running release's -- a command that does not ask for
+    the deploy's never reads a value no gate passed yet (DM-68)."""
 
     @property
     def name(self) -> str:
@@ -134,7 +143,7 @@ class ComposeStack:
 
     @property
     def env_file(self) -> Path:
-        return self.root / "opt" / self.name / "env" / ".env"
+        return env_file(self.root, self.name, staged=self.staged_env)
 
     @property
     def compose_file(self) -> Path:

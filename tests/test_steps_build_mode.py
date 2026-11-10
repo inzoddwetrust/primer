@@ -148,7 +148,7 @@ def skin_box(
 
 
 def compose(root: Path, stack: Product, entry: str = ENTRY) -> ComposeStack:
-    return ComposeStack(stack, entry, root / "release", REF, SHA, root)
+    return ComposeStack(stack, entry, root / "release", REF, SHA, root, staged_env=True)
 
 
 def config_call(

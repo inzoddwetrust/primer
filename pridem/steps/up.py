@@ -202,7 +202,9 @@ class Up(Step):
         waiting: Waiting = READY,
         points: Sequence[Pair] = (),
     ) -> None:
-        self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.compose = ComposeStack(
+            stack, entry, release, ref, commit, root, staged_env=True
+        )
         self.points = list(points)  # the pairs of the box (DM-62)
         self.fetched = fetched
         self.memory = memory
@@ -335,8 +337,8 @@ class Up(Step):
         return CheckResult(False)
 
     def _provide(self) -> None:
-        """The stack's ``provides`` to the plan's memory, read from its
-        ``.env`` as ``render_env`` reads it back.
+        """The stack's ``provides`` to the plan's memory, read from the
+        deploy's ``next.env`` as ``render_env`` reads it back (DM-68).
 
         ``check`` calls it only where it found nothing to do: the stack runs on
         this commit's image and configuration, and its live ``/health`` passed

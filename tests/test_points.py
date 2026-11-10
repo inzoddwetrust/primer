@@ -270,7 +270,9 @@ def test_one_key_by_two_variables_is_one_network_not_a_collision() -> None:
 
 
 def _compose(stack: Product | Service, entry: str, root: Path) -> ComposeStack:
-    return ComposeStack(stack, entry, root / "release", "main", SHA, root)
+    return ComposeStack(
+        stack, entry, root / "release", "main", SHA, root, staged_env=True
+    )
 
 
 _ADDRESS = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::\?[^}]*)?\}")

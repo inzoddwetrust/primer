@@ -104,7 +104,7 @@ def packages(root: Path, fetched: Fetched, stack: Product) -> Packages:
 
 
 def config_call(root: Path, stack: Product) -> FakeCall:
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
     return FakeCall(
         tuple(cs.product_argv("config", "--format", "json")),
         lines=stdout(json.dumps(CONFIG)),
@@ -148,7 +148,7 @@ def test_probe_DM_19_package_mount_rejects_paths_outside_release(
     root2, fetched2, package2 = skin_box(tmp_path / "ok")
     assert fetched2.passport is not None
     mounts = package_mounts(stack, ENTRY, fetched2.passport, root2)
-    cs = ComposeStack(stack, ENTRY, root2 / "release", REF, SHA, root2)
+    cs = ComposeStack(stack, ENTRY, root2 / "release", REF, SHA, root2, staged_env=True)
     rendered = json.loads(
         override_text(cs, CONFIG, volumes(mounts), proxy=False, references=CONFIG)
     )
@@ -165,7 +165,7 @@ def test_red_validate_stops_before_anything_is_switched(tmp_path: Path) -> None:
     capability; the image of this run is never pulled."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, package = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
     labels = (
         "--label",
         "pridem.stack=blank",
@@ -228,7 +228,7 @@ def test_an_image_named_in_compose_is_used_only_without_build(
     network and no capability but no ``--pull never`` -- no step pulls it."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, package = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
     front: dict[str, Json] = {"image": "front:1", "networks": {"default": None}}
     if build:
         front["build"] = {"context": "/r/frontend", "dockerfile": "Dockerfile"}
@@ -284,7 +284,7 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
     anything is built. The pair: with the service, the package is no finding."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, _ = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
     services = CONFIG["services"]
     assert isinstance(services, dict)
     lacking = {
@@ -420,7 +420,7 @@ def test_a_package_is_mounted_from_the_stack_dir_not_the_entry(tmp_path: Path) -
     assert fetched.passport is not None
     given = fetched.passport.packages["skin"]
     assert package == package_dir(root, "blank", given)  # fetch_packages' place
-    cs = ComposeStack(stack, "web", root / "release", REF, SHA, root)
+    cs = ComposeStack(stack, "web", root / "release", REF, SHA, root, staged_env=True)
     step = Packages(
         stack,
         "web",
@@ -473,7 +473,7 @@ def test_packages_validate_only_when_a_service_they_mount_into_is_behind(
     business."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, _ = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
     step = packages(root, fetched, stack)
     config = config_call(root, stack)
     assert _doctor(step, config, *hash_calls(cs)) == []
@@ -564,7 +564,7 @@ def test_the_override_of_this_run_goes_in_place_only_after_a_green_validate(
     capability; the image of this run is never pulled."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, package = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
     cs.override.parent.mkdir(parents=True, exist_ok=True)
     cs.override.write_text("old\n")
     cs.candidate().override.write_text("new\n")
@@ -608,7 +608,7 @@ def test_a_candidate_left_by_another_run_is_never_put_in_place(tmp_path: Path) -
     the pair: it does put this run's text in place."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, _ = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
     cs.override.parent.mkdir(parents=True, exist_ok=True)
     cs.override.write_text("old\n")
     cs.candidate().override.write_text("unvalidated\n")

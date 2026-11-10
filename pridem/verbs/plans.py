@@ -550,7 +550,7 @@ def deploy_plan(
         on = frozenset[str]() if passport is None else switched_on(passport)
         stacks = {
             product.name: ComposeStack(
-                product, own_entry(product), release, ref, commit, root
+                product, own_entry(product), release, ref, commit, root, staged_env=True
             )
         }
         services: dict[str, Service] = {}
@@ -565,6 +565,7 @@ def deploy_plan(
                     lock.dependencies[name].tag if lock else "",
                     resolved.commits[name],
                     root,
+                    staged_env=True,
                 )
         return SeamsVerify(product, services, stacks)
 

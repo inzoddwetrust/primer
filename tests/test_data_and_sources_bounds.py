@@ -552,7 +552,9 @@ def test_the_override_binds_the_release_read_only(tmp_path: Path) -> None:
     made = _product(tmp_path)
     release = tmp_path / "rel"
     release.mkdir()
-    compose = ComposeStack(made, "aivis", release, "main", "c" * 40, tmp_path)
+    compose = ComposeStack(
+        made, "aivis", release, "main", "c" * 40, tmp_path, staged_env=True
+    )
     rw: dict[str, Json] = {
         "type": "bind",
         "source": str(release / "src"),

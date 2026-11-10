@@ -294,7 +294,9 @@ class DataCopy(Step):
         handoff: OverrideHandoff,
         root: Path = Path("/"),
     ) -> None:
-        self.compose = ComposeStack(service, entry, release, ref, commit, root)
+        self.compose = ComposeStack(
+            service, entry, release, ref, commit, root, staged_env=True
+        )
         self.items = list(items)
         self.handoff = handoff
 

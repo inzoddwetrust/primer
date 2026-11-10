@@ -19,7 +19,7 @@ from plan_support import ListSink
 from pridem.events import Event, PlanOutcome, Secrets
 from pridem.plan import Plan, StackSteps
 from pridem.runner import FakeCall, Runner, Stream
-from pridem.stacks.env import own_entry
+from pridem.stacks.env import env_file, own_entry
 from pridem.stacks.passport import load_passport
 from pridem.stacks.schema import Product, Service, load_primer_yaml
 from pridem.stacks.seams import SeamMemory
@@ -201,7 +201,13 @@ def derive(
     """``derive_env`` of ``render``'s stack, ``build`` giving ``image``."""
     stack = render.stack
     compose = ComposeStack(
-        stack, own_entry(stack), root / "release", "v1.0.0", RELEASE_SHA, root
+        stack,
+        own_entry(stack),
+        root / "release",
+        "v1.0.0",
+        RELEASE_SHA,
+        root,
+        staged_env=True,
     )
     return DeriveEnv(render, Built(compose, image, built))
 
@@ -268,7 +274,9 @@ def printed(sink: ListSink) -> str:
 
 
 def env_of(root: Path, name: str) -> Path:
-    return root / "opt" / name / "env" / ".env"
+    """The file ``render_env`` and ``derive_env`` write: the deploy's
+    ``next.env`` (DM-68; it was ``.env``, now the running release's)."""
+    return env_file(root, name, staged=True)
 
 
 def minted_of(root: Path, name: str) -> Path:

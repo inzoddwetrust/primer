@@ -98,7 +98,9 @@ class Types(Step):
         generator: Generator | None = None,
         env: Mapping[str, str] | None = None,
     ) -> None:
-        self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.compose = ComposeStack(
+            stack, entry, release, ref, commit, root, staged_env=True
+        )
         self.types = stack.stacks[entry].types
         self.role = role
         self.branch = branch

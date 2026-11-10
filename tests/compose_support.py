@@ -133,7 +133,9 @@ def blank(port: int = 8000) -> Product:
 
 
 def compose(root: Path, port: int = 8000, commit: str = SHA) -> ComposeStack:
-    return ComposeStack(blank(port), ENTRY, root / "release", REF, commit, root)
+    return ComposeStack(
+        blank(port), ENTRY, root / "release", REF, commit, root, staged_env=True
+    )
 
 
 def stdout(*lines: str) -> tuple[tuple[Stream, str], ...]:
