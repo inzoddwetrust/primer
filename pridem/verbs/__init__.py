@@ -8,7 +8,7 @@ message on stderr, no verdict (contract 2 v1.9).
 
 from pridem.verbs.base import Context, Refused, Verb
 from pridem.verbs.check import CHECK
-from pridem.verbs.data import BACKUP, DB
+from pridem.verbs.data import BACKUP, DB, SEED
 from pridem.verbs.deploy import DEPLOY, DESTROY, DOCTOR, INSTALL, REINSTALL, UPDATE
 from pridem.verbs.gc import GC
 from pridem.verbs.report import REPORT
@@ -33,6 +33,7 @@ VERBS: dict[str, Verb] = {
         REPORT,
         DB,
         BACKUP,
+        SEED,
     )
 }
 

@@ -72,6 +72,7 @@ from pridem.stacks.seams import Pair, SeamMemory, installed, pairs
 from pridem.steps.base import Step
 from pridem.steps.build import Build
 from pridem.steps.compose import ComposeStack
+from pridem.steps.data import Seeds
 from pridem.steps.destroy import STACK as DESTROY_STACK
 from pridem.steps.destroy import destroy_steps
 from pridem.steps.egress import Egress
@@ -420,8 +421,22 @@ def deploy_plan(
                     points=points(product),
                 )
             )
+            steps += _seeds(service, entry, release, tag, commit)
             made.append(StackSteps(entry, steps))
         return made
+
+    def _seeds(
+        stack: Product | Service, entry: str, release: Path, ref: str, commit: str
+    ) -> list[Step]:
+        """``seeds`` after ``up`` of an entry with seeds of ``when: install``
+        (contract 3 rule 17, DM-86); none without them."""
+        stage = stack.stacks[entry]
+        if not any(seed.when == "install" for seed in stage.seeds.values()):
+            return []
+        if stage.app is None:
+            return []
+        compose = ComposeStack(stack, entry, release, ref, commit, root, staged=True)
+        return [Seeds(compose)]
 
     def points(product: Product) -> list[Pair]:
         """The pairs of the box (DM-62): each ``build`` puts its side of them
@@ -531,6 +546,7 @@ def deploy_plan(
                     points=points(product),
                 )
             )
+            steps += _seeds(product, entry, release, ref, commit)
             made.append(StackSteps(entry, steps))
         made.append(StackSteps("seams", [_seams_verify(product, release, ref, commit)]))
         return made

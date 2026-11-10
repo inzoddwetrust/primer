@@ -2369,6 +2369,52 @@ def test_tier3_a_dump_of_the_blank_restores_what_was_in_it() -> None:
     assert sorted(Path("/opt/pridem/backups").iterdir()) == before
 
 
+def test_tier3_a_reset_of_the_blank_makes_its_database_new() -> None:
+    """DM-86, pass 2, on the box the earlier tests left. The install of the
+    group seeded ``bootstrap`` (``when: install``): ``installed_at`` is there.
+    Measured into the journal first (par0 14.3): the image ``compose run app``
+    starts and its commit, the commit of ``current``. ``db reset --confirm
+    <server.name>`` -- another database (OID), at the same head, the app
+    running, the seeded and the test's rows gone. ``seed --list`` -- green;
+    ``seed --profile bootstrap`` -- refused, it runs at install only; ``db
+    migrate`` -- green, nothing to do."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    assert _psql("SELECT key FROM app_settings WHERE key = 'installed_at'") == [
+        "installed_at"
+    ]
+    _psql("INSERT INTO app_settings (key, value) VALUES ('dm86-reset', 'x')")
+    project = [
+        *("docker", "compose", "-p", STACK, "--env-file", str(OPT / "env" / ".env")),
+        *("-f", str(OPT / "current" / "docker-compose.yml")),
+        *("-f", str(OPT / "compose" / f"{STACK}.yml")),
+    ]
+    images = _stdout([*project, "config", "--images"])
+    label = '{{index .Config.Labels "pridem.commit"}}'
+    [built] = _stdout(["docker", "image", "inspect", "-f", label, f"{STACK}-app"])
+    [head] = _stdout(["git", "-C", str(OPT / "current"), "rev-parse", "HEAD"])
+    print("DM-86 measure:", {"config --images": images, "app image commit": built,
+                             "current": head})  # fmt: skip
+
+    verdict, printed = _verdict_of("db", "reset", STACK, "--confirm", "tier3-env")
+    assert verdict.result == "green", printed
+    facts = {s.name: s.verify or {} for s in verdict.steps}
+    reset = facts["db_reset"]
+    print("DM-86 measure:", {"reset": reset})
+    assert reset["oid_before"] != reset["oid_after"], reset
+    assert _psql("SELECT count(*) FROM app_settings") == ["0"]
+    assert _container(STACK, "app")
+
+    verdict, printed = _verdict_of("seed", "--list")
+    assert verdict.result == "green", printed
+    code, out, err = _pridem("seed", STACK, "--profile", "bootstrap")
+    assert code == 1 and "install only" in "\n".join(err), (out, err)
+
+    verdict, printed = _verdict_of("db", "migrate", STACK)
+    assert verdict.result == "green", printed
+    [migrate] = [s for s in verdict.steps if s.name == "db_migrate"]
+    assert migrate.verify == {"stack": STACK, "alembic_head": reset["alembic_head"]}
+
+
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     """The last of the cycle (DM-45): ``pridem destroy`` -- every container,
     network, volume and image labelled ``pridem.stack`` gone (the blank has no

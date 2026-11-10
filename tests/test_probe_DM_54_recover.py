@@ -42,9 +42,10 @@ ARGV = {
     "destroy": ["destroy"],
     "db": ["db", "dump", "blank"],
     "backup": ["backup"],
+    "seed": ["seed", "--list"],
 }
 """The command line of each verb with a verdict."""
-ON_A_BOX = {"db", "backup"}
+ON_A_BOX = {"db", "backup", "seed"}
 """DM-86: the data verbs refuse before the run without an entry the box runs
 and the passport's copy; the probe gives them a box that runs the blank
 (``data_support.blank_box``), and their steps' commands are refused here
@@ -82,8 +83,9 @@ def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
     ``version`` (no verdict) is not among them, and the verbs without a box
     are exactly ``check`` -- a new verb does not leave ``recover`` by a flag.
 
-    Changed by DM-86: ``db`` and ``backup`` are verbs with a verdict on a box;
-    the list names them, and the probe runs them on a box with an entry."""
+    Changed by DM-86: ``db``, ``backup`` and (pass 2) ``seed`` are verbs with
+    a verdict on a box; the list names them, and the probe runs them on a box
+    with an entry."""
     assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS, *ON_A_BOX])
     assert "version" in VERBS and not VERBS["version"].verdict
     assert {name for name, verb in VERBS.items() if not verb.box} == {"check"}

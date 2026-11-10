@@ -154,6 +154,13 @@ def dump_calls(
     ]
 
 
+def git_call(cs: ComposeStack, commit: str = SHA) -> FakeCall:
+    """The commit of the current release: its worktree's ``HEAD`` (DM-86,
+    pass 2: a service's release is named by its tag)."""
+    argv = ("git", "-C", str(cs.release), "rev-parse", "HEAD")
+    return FakeCall(argv, lines=lines(commit))
+
+
 def head_call(cs: ComposeStack, head: str = HEAD) -> FakeCall:
     argv = cs.argv("run", "--rm", "app", "python", "-m", "alembic", "current")
     return FakeCall(tuple(argv), lines=lines(f"{head} (head)"))
@@ -181,8 +188,9 @@ def dumped(tmp_path: Path) -> tuple[ComposeStack, Path, DbDump]:
     cs = compose(tmp_path)
     directory = backups_dir(box.root, RUN_ID)
     step = DbDump(cs, directory=directory, run_id=RUN_ID)
-    with Copying(*dump_calls(cs, directory), head_call(cs)) as runner:
-        outcome = plan([step], runner)
+    commit = "c" * 40  # the worktree's HEAD, not the release directory's name
+    with Copying(*dump_calls(cs, directory), head_call(cs), git_call(cs, commit)) as r:
+        outcome = plan([step], r)
     assert outcome.code is ExitCode.OK, outcome.steps
     return cs, directory, step
 
@@ -240,7 +248,7 @@ def test_db_dump_writes_the_dump_and_its_manifest_under_the_box(tmp_path: Path) 
         "stack": STACK,
         "entry": STACK,
         "release": SHA,
-        "commit": SHA,
+        "commit": "c" * 40,
         "bytes": len(b"PGDMP\x00dump"),
         "sha256": sha256_of(path),
         "toc": 2,
@@ -327,6 +335,7 @@ def _restore_calls(
 ) -> list[FakeCall]:
     restore_inside = f"/tmp/pridem-restore-{STACK}.dump"  # noqa: S108 -- the container
     calls = [
+        config_call(cs),  # db_restore's check, before anything is stopped
         config_call(cs),
         running_call(cs, "app", "c-app"),
         running_call(cs, "frontend", "c-front"),
@@ -526,32 +535,26 @@ def test_a_red_stop_crosses_no_point_and_finally_starts_what_it_stopped(
 def test_a_dump_changed_since_its_manifest_is_red_before_the_restore(
     tmp_path: Path,
 ) -> None:
-    """``db_restore`` reads the file against its manifest before ``act``:
-    ``dump-drift``, the point not crossed, ``finally`` starts the stopped."""
+    """``db_restore`` reads the file against its manifest before ``act`` --
+    and, since pass 2, before ``stop_for_restore`` stops anything: its check
+    runs first there. ``dump-drift``, nothing stopped, the point not crossed.
+
+    Changed by DM-86 pass 2: the drift was red at ``db_restore`` after the
+    services were stopped and ``finally`` started them again; now nothing is
+    stopped (the script has no ``stop`` and no ``start``)."""
     blank_box(tmp_path, name="box-1")
     path = _a_dump(tmp_path)
     path.write_bytes(b"PGDMP\x00changed")
-    cs = compose(tmp_path)
-    calls = [
-        config_call(cs),
-        running_call(cs, "app", "c-app"),
-        running_call(cs, "frontend", "c-front"),
-        FakeCall(tuple(cs.argv("stop", "app", "frontend"))),
-        running_call(cs, "app"),
-        running_call(cs, "frontend"),
-        FakeCall(tuple(cs.argv("start", "app", "frontend"))),
-        running_call(cs, "app", "c-app"),
-        running_call(cs, "frontend", "c-front"),
-    ]
-    with FakeRunner(*calls) as runner:
+    with FakeRunner() as runner:
         code, out, _ = _cli(
             tmp_path, ["db", "restore", STACK, str(path), "--confirm", "box-1"], runner
         )
     verdict = _verdict(out)
-    assert verdict.steps[1].reason is not None
-    assert verdict.steps[1].reason.code == "db_restore:dump-drift"
+    assert verdict.steps[0].reason is not None
+    assert verdict.steps[0].reason.code == "stop_for_restore:dump-drift"
+    assert [s.status for s in verdict.steps[1:3]] == ["skipped", "skipped"]
     assert not verdict.report.incomplete
-    assert verdict.steps[3].verify == {"started": {STACK: ["app", "frontend"]}}
+    assert verdict.steps[3].verify == {"started": {}}
 
 
 # --- backup and the entries of the box ------------------------------------------

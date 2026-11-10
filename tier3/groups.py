@@ -49,12 +49,13 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_probe_DM_58_skin_version_switch_needs_no_rebuild", "b"),
     ("test_tier3_both_slots_from_one_brand_package_by_subpath", "b"),
     # c -- an install of its own: services, languages, a job, a stop for
-    # migrate, a dump and its restore, then destroy
+    # migrate, a dump and its restore, a reset, then destroy
     ("test_tier3_a_service_of_the_edition_goes_up_before_the_product", "c"),
     ("test_tier3_two_instances_with_their_own_languages", "c"),
     ("test_tier3_a_job_runs_before_its_dependent_on_every_deploy", "c"),
     ("test_tier3_services_stopped_for_migrate_come_back", "c"),
     ("test_tier3_a_dump_of_the_blank_restores_what_was_in_it", "c"),
+    ("test_tier3_a_reset_of_the_blank_makes_its_database_new", "c"),
     ("test_tier3_destroy_takes_the_blank_off_the_box", "c"),
     # d -- a clean box: the blank without its service, then with it
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),

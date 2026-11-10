@@ -41,9 +41,11 @@ KNOWN CEILING (DM-86, the keeping of dumps):
 
 import hashlib
 import json
+import re
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from pridem.events import Json
 from pridem.stacks.env import write_private
@@ -64,16 +66,44 @@ from pridem.steps.compose import (
     ComposeStack,
     config,
     current,
+    heads,
     mount_flag,
     out,
 )
-from pridem.steps.migrate import ALEMBIC, STOP_TIMEOUT_S, Stopped, running
+from pridem.steps.migrate import (
+    ALEMBIC,
+    IMAGE_CODES,
+    MIGRATE_VERB_CODES,
+    STOP_TIMEOUT_S,
+    Acting,
+    Stopped,
+    running,
+)
 from pridem.steps.tests import Database, database
 
 COMMAND: frozenset[Mode] = frozenset({"command"})
 BACKUPS = "backups"
 DUMP_TIMEOUT_S = 3600
 """``pg_dump`` and ``pg_restore`` of a stack's database: an hour."""
+
+
+class Wiping(Acting, Protocol):
+    """A step that writes over the entry's database: ``db_restore``,
+    ``db_reset`` -- what ``stop_for_restore`` stops for, after its ``check``:
+    a refusal of the step stops nothing (DM-86, pass 2)."""
+
+    compose: ComposeStack
+
+    def check(self, ctx: StepContext) -> CheckResult: ...
+
+
+RESET_CODES: dict[str, str] = {
+    "reset": "drop and make again the database of {stack}",
+    "no-migrate": "{stack} has no migrate to bring the schema back",
+    "database-name": "the database name {name} of {stack} is not a plain name",
+    "not-reset": "the database of {stack} is the same one after the reset",
+    "head-mismatch": "the database of {stack} is at {current}, the release at {head}",
+}
 
 
 def backups_dir(box_root: Path, run_id: str) -> Path:
@@ -233,7 +263,7 @@ class DbDump(Step):
             "stack": self.compose.stack.name,
             "entry": self.compose.entry,
             "release": self.compose.ref,
-            "commit": self.compose.commit,
+            "commit": release_commit(ctx, self.compose),  # a service's: not its tag
             "bytes": partial.stat().st_size,
             "sha256": sha256_of(partial),
             "toc": toc,
@@ -342,7 +372,8 @@ class DbRestore(Step):
 
 class StopForRestore(Step):
     """Every service of the entry but its database, stopped before
-    ``db_restore``: the app's connections would hold ``--clean``."""
+    ``db_restore`` or ``db_reset``: the app's connections would hold
+    ``--clean`` and ``DROP DATABASE``."""
 
     name = "stop_for_restore"
     order = 1
@@ -350,17 +381,21 @@ class StopForRestore(Step):
     rechecked = False  # ``start_restored`` brings them back by design
     codes: ClassVar[dict[str, str]] = {
         **{k: v for k, v in DbDump.codes.items() if k != "dump"},
+        # what db_restore's and db_reset's checks refuse with, run here first
+        **IMAGE_CODES,
+        **RESET_CODES,
         "stop": "stop {services} of {stack} for its restore",
         "stop-failed": "{services} of {stack} still run after stop",
     }
 
-    def __init__(self, restore: DbRestore, stopped: Stopped) -> None:
+    def __init__(self, restore: "Wiping", stopped: Stopped) -> None:
         self.restore = restore
         self.compose = restore.compose
         self.stopped = stopped
         self.services: list[str] = []
 
     def check(self, ctx: StepContext) -> CheckResult:
+        self.restore.check(ctx)  # its refusal before anything is stopped
         found, _, document = _found(ctx, self.compose)
         services = document.get("services")
         names = sorted(services) if isinstance(services, dict) else []
@@ -392,20 +427,25 @@ class StopForRestore(Step):
 
 
 class StartRestored(Step):
-    """What ``stop_for_restore`` stopped, started again after a green
-    ``db_restore``: the same containers, on the same release."""
+    """What ``stop_for_restore`` or ``stop_for_migrate`` stopped, started again
+    after a green ``db_restore``, ``db_reset`` or ``db_migrate``: the same
+    containers, on the same release -- ``compose start`` reads no override for
+    their configuration."""
 
     name = "start_restored"
     order = 3
     modes = COMMAND
     codes: ClassVar[dict[str, str]] = {
-        "start": "start {services} of {stack} on the restored database",
+        "start": "start {services} of {stack} again on its database",
         "start-failed": "{services} of {stack} do not run after start",
     }
 
-    def __init__(self, compose: ComposeStack, stopped: Stopped) -> None:
+    def __init__(
+        self, compose: ComposeStack, stopped: Stopped, *, order: int = 3
+    ) -> None:
         self.compose = compose
         self.stopped = stopped
+        self.order = order  # after db_migrate (12) in db migrate's ladder
 
     def _mine(self) -> list[str]:
         return [
@@ -461,6 +501,353 @@ class BackupScope(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         raise AssertionError("backup_scope never acts")
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        return Verified(dict(self.fact))
+
+
+# --- pass 2: the image of a one-off container, db reset, db migrate, seeds -----------
+
+SEED_TIMEOUT_S = 1800
+_PG_NAME = re.compile(r"[A-Za-z0-9_]+")
+
+
+def release_commit(ctx: StepContext, compose: ComposeStack) -> str:
+    """The commit of the release ``current`` names: its worktree's ``HEAD`` --
+    a service's release is named by its tag, not its commit (DM-86)."""
+    _, lines = out(
+        ctx,
+        ["git", "-C", str(compose.release), "rev-parse", "HEAD"],
+        timeout=COMMAND_TIMEOUT_S,
+        passed_on=False,
+    )
+    found = [line.strip() for line in lines if line.strip()]
+    return found[0] if found else ""
+
+
+def run_image(document: dict[str, Json], compose: ComposeStack, service: str) -> str:
+    """The image ``compose run <service>`` starts: the one ``config`` names,
+    else compose's own name for a built one, ``<project>-<service>``."""
+    services = document.get("services")
+    body = services.get(service) if isinstance(services, dict) else None
+    image = body.get("image") if isinstance(body, dict) else None
+    return image if isinstance(image, str) and image else f"{compose.project}-{service}"
+
+
+def image_is_current(
+    ctx: StepContext, compose: ComposeStack, document: dict[str, Json]
+) -> str:
+    """Outside a deploy, ``compose run --rm <app>`` takes the image by its name,
+    and after a red deploy of a new commit the name is the new build's: a
+    migration or a seed of the new code on the old release's database. The
+    image's ``pridem.commit`` against the current release's commit -- red
+    before anything is stopped (DM-86). Returns the commit."""
+    app = compose.app_service
+    if app is None:
+        raise StepFailed("no-app", {"stack": compose.entry})
+    image = run_image(document, compose, app)
+    label = '{{index .Config.Labels "pridem.commit"}}'
+    _, lines = out(
+        ctx,
+        ["docker", "image", "inspect", "-f", label, image],
+        timeout=COMMAND_TIMEOUT_S,
+        passed_on=False,
+    )
+    seen = next((line.strip() for line in lines if line.strip()), "")
+    if not seen or seen == "<no value>":
+        raise StepFailed("image-unread", {"stack": compose.entry, "image": image})
+    commit = release_commit(ctx, compose)
+    if seen != commit:
+        params: dict[str, Json] = {
+            "stack": compose.entry,
+            "image_commit": seen,
+            "release_commit": commit,
+        }
+        raise StepFailed("image-not-current", params)
+    return commit
+
+
+def _heads(ctx: StepContext, compose: ComposeStack) -> list[str]:
+    """``alembic heads`` of the release's code, in its app's image, no deps."""
+    app = compose.app_service or ""
+    _, lines = out(
+        ctx,
+        compose.argv("run", "--rm", "--no-deps", app, *ALEMBIC, "heads"),
+        timeout=COMMAND_TIMEOUT_S,
+    )
+    return heads_of(lines)
+
+
+def heads_of(lines: Sequence[str]) -> list[str]:
+    return heads(lines)
+
+
+def _psql(ctx: StepContext, compose: ComposeStack, db: Database, sql: str) -> list[str]:
+    _, lines = out(
+        ctx,
+        compose.argv(
+            "exec",
+            "-T",
+            db.service,
+            "psql",
+            "-U",
+            db.user,
+            "-d",
+            "postgres",
+            "-tAc",
+            sql,
+        ),  # fmt: skip
+        timeout=COMMAND_TIMEOUT_S,
+    )
+    return [line.strip() for line in lines if line.strip()]
+
+
+def _oid(ctx: StepContext, compose: ComposeStack, db: Database) -> str:
+    # the names are [A-Za-z0-9_] only: database() and _safe() refuse the rest
+    sql = f"SELECT oid FROM pg_database WHERE datname = '{db.live}'"  # noqa: S608
+    found = _psql(ctx, compose, db, sql)
+    return found[0] if found else ""
+
+
+def _safe(compose: ComposeStack, db: Database) -> None:
+    for name in (db.live, db.user):
+        if not _PG_NAME.fullmatch(name):
+            raise StepFailed("database-name", {"stack": compose.entry, "name": name})
+
+
+def _migrate_argv(compose: ComposeStack) -> list[str]:
+    stage = compose.stack.stacks[compose.entry]
+    if stage.migrate is None or compose.app_service is None:
+        raise StepFailed("no-migrate", {"stack": compose.entry})
+    return compose.argv("run", "--rm", compose.app_service, *shlex.split(stage.migrate))
+
+
+class DbReset(Step):
+    """The entry's database dropped and made again, then migrated to the head
+    of its release -- the point of no return of ``db reset``."""
+
+    name = "db_reset"
+    order = 2
+    modes = COMMAND
+    point_of_no_return = True
+    codes: ClassVar[dict[str, str]] = {
+        **{k: v for k, v in DbDump.codes.items() if k != "dump"},
+        **IMAGE_CODES,
+        **RESET_CODES,
+    }
+
+    def __init__(self, compose: ComposeStack) -> None:
+        self.compose = compose
+        self.acted = False
+        """``act`` began: what ``stop_for_restore`` stopped stays stopped."""
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        found, _, document = _found(ctx, self.compose)
+        _safe(self.compose, found)
+        _migrate_argv(self.compose)
+        image_is_current(ctx, self.compose, document)
+        data: dict[str, Json] = {
+            "service": found.service,
+            "user": found.user,
+            "live": found.live,
+            "oid": _oid(ctx, self.compose, found),
+            "head": _head(ctx, self.compose),
+        }
+        params: dict[str, Json] = {"stack": self.compose.entry}
+        return CheckResult(True, local_code("reset", params), data)
+
+    def _db(self, check: CheckResult) -> Database:
+        service, user, live = (str(check.data[k]) for k in ("service", "user", "live"))
+        return Database(service, user, live, "", "")
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        self.acted = True
+        db = self._db(check)
+        _psql(ctx, self.compose, db, f'DROP DATABASE "{db.live}" WITH (FORCE)')
+        _psql(ctx, self.compose, db, f'CREATE DATABASE "{db.live}" OWNER "{db.user}"')
+        out(ctx, _migrate_argv(self.compose), timeout=DUMP_TIMEOUT_S)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        db = self._db(check)
+        before, now = str(check.data.get("oid") or ""), _oid(ctx, self.compose, db)
+        if not now or now == before:
+            raise StepFailed("not-reset", {"stack": self.compose.entry})
+        head = check.data.get("head")
+        current = _head(ctx, self.compose)
+        if isinstance(head, str) and current != head:
+            params: dict[str, Json] = {
+                "stack": self.compose.entry,
+                "head": head,
+                "current": current or "none",
+            }
+            raise StepFailed("head-mismatch", params)
+        fact: dict[str, Json] = {
+            "stack": self.compose.entry,
+            "oid_before": before,
+            "oid_after": now,
+        }
+        if current is not None:
+            fact["alembic_head"] = current
+        return Verified(fact)
+
+
+class DbMigrate(Step):
+    """The entry's migrations on the image of its current release -- after a
+    ``db restore`` of an older dump; the point of no return of ``db
+    migrate``. Nothing to do when the database is at the code's head."""
+
+    name = "db_migrate"
+    order = 12
+    modes = COMMAND
+    point_of_no_return = True
+    codes: ClassVar[dict[str, str]] = {**IMAGE_CODES, **MIGRATE_VERB_CODES}
+
+    def __init__(self, compose: ComposeStack) -> None:
+        self.compose = compose
+        self.acted = False
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        _migrate_argv(self.compose)
+        image_is_current(ctx, self.compose, config(ctx, self.compose))
+        found = _heads(ctx, self.compose)
+        if len(found) != 1:
+            params: dict[str, Json] = {
+                "stack": self.compose.entry,
+                "count": len(found),
+                "heads": list[Json](found),
+            }
+            raise StepFailed("alembic-heads", params)
+        now = _head(ctx, self.compose)
+        data: dict[str, Json] = {"head": found[0]}
+        if now == found[0]:
+            return CheckResult(False, None, data)
+        params = {
+            "stack": self.compose.entry,
+            "current": now or "none",
+            "head": found[0],
+        }
+        return CheckResult(True, local_code("migrate", params), data)
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        self.acted = True
+        out(ctx, _migrate_argv(self.compose), timeout=DUMP_TIMEOUT_S)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        head = str(check.data.get("head"))
+        now = _head(ctx, self.compose)
+        if now != head:
+            params: dict[str, Json] = {
+                "stack": self.compose.entry,
+                "head": head,
+                "current": now or "none",
+            }
+            raise StepFailed("not-at-head", params)
+        return Verified({"stack": self.compose.entry, "alembic_head": head})
+
+
+def _seed_argv(compose: ComposeStack, run: str) -> list[str]:
+    app = compose.app_service or ""
+    return compose.argv("run", "--rm", app, *shlex.split(run))
+
+
+class Seeds(Step):
+    """The entry's seeds of ``when: install`` (contract 3 rule 17), on
+    ``install`` and ``reinstall`` -- a new database needs its bootstrap -- in
+    the order of ``primer.yaml``, after ``up``: a seed outside its ``roles``
+    is not run and is named (DM-86)."""
+
+    name = "seeds"
+    order = 15
+    modes: frozenset[Mode] = frozenset({"install", "reinstall"})
+
+    def __init__(self, compose: ComposeStack) -> None:
+        self.compose = compose
+        stage = compose.stack.stacks[compose.entry]
+        self.profiles = [
+            (name, seed) for name, seed in stage.seeds.items() if seed.when == "install"
+        ]
+
+    def _split(self, ctx: StepContext) -> tuple[list[str], list[str]]:
+        inside = [n for n, s in self.profiles if s.roles is None or ctx.role in s.roles]
+        outside = [n for n, _ in self.profiles if n not in inside]
+        return inside, outside
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        inside, _ = self._split(ctx)
+        if not inside:
+            return CheckResult(False, None, {})
+        params: dict[str, Json] = {
+            "stack": self.compose.entry,
+            "profiles": list[Json](inside),
+        }
+        return CheckResult(True, local_code("seed", params), {})
+
+    codes: ClassVar[dict[str, str]] = {"seed": "seed {stack} with {profiles}"}
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        inside, _ = self._split(ctx)
+        seeds = dict(self.profiles)
+        for name in inside:
+            out(ctx, _seed_argv(self.compose, seeds[name].run), timeout=SEED_TIMEOUT_S)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        inside, outside = self._split(ctx)
+        ran = inside if check.needed else []
+        return Verified(
+            {
+                "stack": self.compose.entry,
+                "ran": list[Json](ran),
+                "outside_role": list[Json](outside),
+            }
+        )
+
+
+class SeedRun(Step):
+    """One seed profile by the verb ``seed`` -- ``when: command`` -- in the
+    app of the current release (DM-86)."""
+
+    name = "seed"
+    order = 4
+    modes = COMMAND
+    codes: ClassVar[dict[str, str]] = {
+        **IMAGE_CODES,
+        "no-app": "{stack} has no app to seed in",
+        "seed": "seed {stack} with {profile}",
+    }
+
+    def __init__(self, compose: ComposeStack, profile: str, run: str) -> None:
+        self.compose = compose
+        self.profile = profile
+        self.run = run
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        image_is_current(ctx, self.compose, config(ctx, self.compose))
+        params: dict[str, Json] = {"stack": self.compose.entry, "profile": self.profile}
+        return CheckResult(True, local_code("seed", params), {})
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        out(ctx, _seed_argv(self.compose, self.run), timeout=SEED_TIMEOUT_S)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        return Verified({"stack": self.compose.entry, "profile": self.profile})
+
+
+class SeedPlan(Step):
+    """What ``seed`` would do without doing it: ``--dry-run`` (the command) and
+    ``--list`` (every entry's profiles) -- no command runs (DM-86)."""
+
+    order = 1
+    modes = COMMAND
+
+    def __init__(self, name: str, fact: dict[str, Json]) -> None:
+        self.name = name
+        self.fact = fact
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        return CheckResult(False, None, {})
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        raise AssertionError(f"{self.name} never acts")
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         return Verified(dict(self.fact))

@@ -14,6 +14,7 @@ it is allowed (protocol 1.11 to 8.2, the owner's word 10.11); ``backup``
 without the box's passport.
 """
 
+import shlex
 from pathlib import Path
 from typing import Literal
 
@@ -31,20 +32,24 @@ from pridem.steps.data import (
     BACKUPS,
     BackupScope,
     DbDump,
+    DbMigrate,
+    DbReset,
     DbRestore,
+    SeedPlan,
+    SeedRun,
     StartRestored,
     StopForRestore,
     backups_dir,
     read_manifest,
 )
 from pridem.steps.finalize import current_link
-from pridem.steps.migrate import StartStopped, Stopped
+from pridem.steps.migrate import StartStopped, StopForMigrate, Stopped
 from pridem.verbs.base import Context, NoArgs, Refused, Verb
 from pridem.verbs.run import Planned, Session, read_copy, run_plan_verb
 
 
 class DbArgs(Strict):
-    action: Literal["dump", "restore"]
+    action: Literal["dump", "restore", "reset", "migrate"]
     stack: Ident
     dump: str | None = None
     confirm: str | None = None
@@ -144,6 +149,10 @@ def _db(args: Strict, ctx: Context) -> int:
         raise TypeError("db takes DbArgs")
     compose = _target(ctx, args.stack)
     verb = f"db {args.action}"
+    if args.action == "reset":
+        return _reset(args, ctx, compose)
+    if args.action == "migrate":
+        return _migrate(args, ctx, compose)
     if args.action == "dump":
         if args.dump is not None or args.confirm is not None:
             raise Refused("db dump: takes the entry alone")
@@ -224,3 +233,177 @@ DB = Verb(
     options={"--confirm": ("confirm", "value")},
 )
 BACKUP = Verb("backup", NoArgs, _backup)
+
+
+def _role(ctx: Context, verb: str) -> str:
+    passport = read_copy(ctx).passport
+    if passport is None:
+        raise Refused(f"{verb}: the box has no passport to read its role")
+    return passport.server.role
+
+
+def _resettable(
+    ctx: Context, verb: str, compose: ComposeStack, confirm: str | None
+) -> None:
+    """``db reset``: on the role ``test`` only, the server named on any role
+    (protocol 1.11), an entry with ``migrate`` -- the schema comes back."""
+    if _role(ctx, verb) != "test":
+        raise Refused(f"{verb}: runs on the role test only")
+    _confirmed(ctx, verb, confirm)
+    if compose.stack.stacks[compose.entry].migrate is None:
+        raise Refused(
+            f"{verb}: {compose.entry} has no migrate to bring its schema back"
+        )
+
+
+def _reset_steps(compose: ComposeStack, stopped: Stopped) -> list[Step]:
+    reset = DbReset(compose)
+    return [StopForRestore(reset, stopped), reset, StartRestored(compose, stopped)]
+
+
+def _reset(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
+    if args.dump is not None:
+        raise Refused("db reset: takes the entry and --confirm alone")
+    _resettable(ctx, "db reset", compose, args.confirm)
+
+    def make(session: Session) -> Planned:
+        stopped = Stopped()
+        return Planned(
+            [StackSteps(compose.entry, _reset_steps(compose, stopped), root=True)],
+            finally_=[StackSteps("stopped", [StartStopped(stopped)])],
+        )
+
+    return run_plan_verb(
+        ctx, verb="db reset", mode="command", make=make, args=_given(args)
+    )
+
+
+def _migrate(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
+    if args.dump is not None or args.confirm is not None:
+        raise Refused("db migrate: takes the entry alone")
+    if compose.stack.stacks[compose.entry].migrate is None:
+        raise Refused(f"db migrate: {compose.entry} has no migrate")
+
+    def make(session: Session) -> Planned:
+        stopped = Stopped()
+        migrating = DbMigrate(compose)
+        steps: list[Step] = [
+            StopForMigrate(migrating, stopped),
+            migrating,
+            StartRestored(compose, stopped, order=13),
+        ]
+        return Planned(
+            [StackSteps(compose.entry, steps, root=True)],
+            finally_=[StackSteps("stopped", [StartStopped(stopped)])],
+        )
+
+    return run_plan_verb(
+        ctx, verb="db migrate", mode="command", make=make, args=_given(args)
+    )
+
+
+class SeedArgs(Strict):
+    stack: Ident | None = None
+    profile: Ident | None = None
+    list_: bool = False
+    dry_run: bool = False
+    reset: bool = False
+    confirm: str | None = None
+
+
+def _seed_list(ctx: Context) -> dict[str, Json]:
+    found: dict[str, Json] = {}
+    for _, made in box_entries(ctx):
+        for entry, stage in made.stacks.items():
+            found[entry] = [
+                {
+                    "profile": name,
+                    "when": seed.when,
+                    **({"roles": list[Json](seed.roles)} if seed.roles else {}),
+                }
+                for name, seed in stage.seeds.items()
+            ]
+    return found
+
+
+def _seed(args: Strict, ctx: Context) -> int:
+    """``seed --list``; ``seed <stack> --profile <n> [--dry-run | --reset
+    --confirm <server.name>]`` -- a profile of ``when: command`` (rule 17), in
+    its roles; refused before the run otherwise (DM-86)."""
+    if not isinstance(args, SeedArgs):
+        raise TypeError("seed takes SeedArgs")
+    if args.list_:
+        if args.stack or args.profile or args.dry_run or args.reset or args.confirm:
+            raise Refused("seed --list: takes nothing else")
+        listed = _seed_list(ctx)
+
+        def lists(session: Session) -> Planned:
+            step = SeedPlan("seed_list", {"entries": listed})
+            return Planned([StackSteps("seed", [step], root=True)])
+
+        return run_plan_verb(
+            ctx, verb="seed", mode="command", make=lists, args={"list": True}
+        )
+    if args.stack is None or args.profile is None:
+        raise Refused("seed: names the entry and --profile, or --list")
+    compose = _target(ctx, args.stack)
+    seed = compose.stack.stacks[compose.entry].seeds.get(args.profile)
+    if seed is None:
+        raise Refused(f"seed: {compose.entry} has no profile {args.profile}")
+    if seed.when != "command":
+        raise Refused(f"seed: {args.profile} runs at install only (when: install)")
+    role = _role(ctx, "seed")
+    if seed.roles is not None and role not in seed.roles:
+        raise Refused(f"seed: {args.profile} is not for the role {role}")
+    if args.dry_run and (args.reset or args.confirm):
+        raise Refused("seed --dry-run: runs nothing, so resets nothing")
+    given: dict[str, Json] = {"stack": compose.entry, "profile": args.profile}
+    if args.dry_run:
+        app = compose.app_service or ""
+        argv = compose.argv("run", "--rm", app, *shlex.split(seed.run))
+        fact: dict[str, Json] = {
+            "stack": compose.entry,
+            "profile": args.profile,
+            "service": app,
+            "argv": list[Json](argv),
+        }
+
+        def dry(session: Session) -> Planned:
+            step = SeedPlan("seed_dry_run", fact)
+            return Planned([StackSteps(compose.entry, [step], root=True)])
+
+        return run_plan_verb(
+            ctx, verb="seed", mode="command", make=dry, args={**given, "dry_run": True}
+        )
+    if args.reset:
+        _resettable(ctx, "seed --reset", compose, args.confirm)
+    elif args.confirm is not None:
+        raise Refused("seed: --confirm goes with --reset")
+    run = SeedRun(compose, args.profile, seed.run)
+
+    def make(session: Session) -> Planned:
+        stopped = Stopped()
+        steps: list[Step] = (
+            [*_reset_steps(compose, stopped), run] if args.reset else [run]
+        )
+        finals = [StackSteps("stopped", [StartStopped(stopped)])] if args.reset else []
+        return Planned([StackSteps(compose.entry, steps, root=True)], finally_=finals)
+
+    if args.reset:
+        given = {**given, "reset": True, "confirm": args.confirm or ""}
+    return run_plan_verb(ctx, verb="seed", mode="command", make=make, args=given)
+
+
+SEED = Verb(
+    "seed",
+    SeedArgs,
+    _seed,
+    positionals=("stack",),
+    options={
+        "--profile": ("profile", "value"),
+        "--list": ("list_", "flag"),
+        "--dry-run": ("dry_run", "flag"),
+        "--reset": ("reset", "flag"),
+        "--confirm": ("confirm", "value"),
+    },
+)

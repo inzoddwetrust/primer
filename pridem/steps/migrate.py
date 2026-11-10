@@ -229,11 +229,40 @@ def running(ctx: StepContext, compose: ComposeStack, services: list[str]) -> lis
     return sorted(found)
 
 
+IMAGE_CODES: dict[str, str] = {
+    "image-not-current": (
+        "the image {stack} runs one-off containers from is of {image_commit}, not of "
+        "the current release {release_commit}: a green deploy first"
+    ),
+    "image-unread": "the image {image} of {stack} has no commit label",
+}
+"""The refusals of a one-off container of a verb whose image is not the current
+release's (``steps/data.py``, DM-86)."""
+
+MIGRATE_VERB_CODES: dict[str, str] = {
+    "no-app": "{stack} has no app to run its migrations in",
+    "no-migrate": "{stack} has no migrate",
+    "migrate": "migrate {stack} from {current} to {head}",
+    "alembic-heads": "the migrations of {stack} have {count} heads: {heads}",
+    "not-at-head": "the database of {stack} is at {current}, not at {head}",
+}
+"""The codes of ``db_migrate`` (``steps/data.py``, DM-86)."""
+
+
 class Acting(Protocol):
     """The step services were stopped for: ``acted`` -- its ``act`` began
-    (``migrate``; ``db_restore`` of DM-86)."""
+    (``migrate``; ``db_restore``, ``db_reset``, ``db_migrate`` of DM-86)."""
 
     acted: bool
+
+
+class Migrating(Acting, Protocol):
+    """A migration ``stop_for_migrate`` stops for: its entry and its own
+    ``check`` -- ``migrate`` of a deploy, ``db_migrate`` of the verb (DM-86)."""
+
+    compose: ComposeStack
+
+    def check(self, ctx: StepContext) -> CheckResult: ...
 
 
 @dataclass
@@ -250,15 +279,20 @@ class StopForMigrate(Step):
 
     name = "stop_for_migrate"
     order = 11
-    modes = ALL_MODES
+    modes = ALL_MODES | {"command"}  # db migrate stops too (DM-86)
     rechecked = False  # ``up`` brings the stopped back: the final check would
     # read them running and call the step red (DM-22 FIX, tier 3)
     codes: ClassVar[dict[str, str]] = {
+        # what the check of the migration it reads may refuse with -- a
+        # refusal there is this step's (DM-86, pass 2: the codes were missing)
+        **Migrate.codes,
+        **IMAGE_CODES,
+        **MIGRATE_VERB_CODES,
         "stop": "stop {services} of {stack} for its migration",
         "stop-failed": "{services} of {stack} still run after stop",
     }
 
-    def __init__(self, migrate: Migrate, stopped: Stopped) -> None:
+    def __init__(self, migrate: Migrating, stopped: Stopped) -> None:
         self.migrate = migrate
         self.compose = migrate.compose
         stage = self.compose.stack.stacks[self.compose.entry]
