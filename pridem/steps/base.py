@@ -28,12 +28,13 @@ from pridem.interrupt import Interrupt
 from pridem.report.codes import LOCAL_CODE
 from pridem.runner import OnLine, Runner
 
-Mode = Literal["install", "deploy", "reinstall", "destroy", "gc", "renew"]
-"""The plans a step can belong to: the three of a deploy, ``destroy``, and the
-one-step plans of the verbs ``gc`` and ``ssl renew``."""
+Mode = Literal["install", "deploy", "reinstall", "destroy", "gc", "renew", "command"]
+"""The plans a step can belong to: the three of a deploy, ``destroy``, the
+one-step plans of the verbs ``gc`` and ``ssl renew``, and ``command`` -- the
+plans of the data verbs (``db``, ``backup``; DM-86)."""
 Role = Literal["test", "prod", "preview"]
 MODES: frozenset[Mode] = frozenset(
-    {"install", "deploy", "reinstall", "destroy", "gc", "renew"}
+    {"install", "deploy", "reinstall", "destroy", "gc", "renew", "command"}
 )
 
 NO_NETWORK = ("--network", "none")

@@ -2308,6 +2308,64 @@ def test_tier3_services_stopped_for_migrate_come_back(
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
 
+def _psql(sql: str) -> list[str]:
+    """``psql`` in the blank's database, its rows printed bare."""
+    pg = _container(STACK, "postgres")
+    return _stdout(
+        ["docker", "exec", pg, "psql", "-U", "blank", "-d", "blank", "-tAc", sql]
+    )
+
+
+def test_tier3_a_dump_of_the_blank_restores_what_was_in_it() -> None:
+    """DM-86, pass 1, on the box the earlier tests left: a row in
+    ``app_settings``; ``db dump`` -- the dump and its manifest under
+    ``/opt/pridem/backups/<run_id>/`` (0600), its table of contents read
+    back; the row deleted; ``db restore --confirm <server.name>`` -- the row
+    back, the app running, the head of the manifest. ``backup`` -- green, the
+    service without a database in its scope. Measured into the journal (par0
+    14.3): the modes of the dump's file and directory, the manifest."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    _psql("DELETE FROM app_settings WHERE key = 'dm86'")
+    _psql("INSERT INTO app_settings (key, value) VALUES ('dm86', 'kept')")
+    verdict, printed = _verdict_of("db", "dump", STACK)
+    assert verdict.result == "green", printed
+    [dump] = [s for s in verdict.steps if s.name == "db_dump"]
+    path = Path(str((dump.verify or {})["path"]))
+    manifest = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    print(
+        "DM-86 measure:",
+        {
+            "file": oct(path.stat().st_mode & 0o777),
+            "directory": oct(path.parent.stat().st_mode & 0o777),
+            "manifest": manifest,
+            "fact": dump.verify,
+        },
+    )
+    assert path.parent.parent == Path("/opt/pridem/backups"), path
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert int(manifest["toc"]) > 0 and manifest["entry"] == STACK, manifest
+
+    _psql("DELETE FROM app_settings WHERE key = 'dm86'")
+    assert _psql("SELECT value FROM app_settings WHERE key = 'dm86'") == []
+    verdict, printed = _verdict_of(
+        "db", "restore", STACK, str(path), "--confirm", "tier3-env"
+    )
+    assert verdict.result == "green", printed
+    assert _psql("SELECT value FROM app_settings WHERE key = 'dm86'") == ["kept"]
+    facts = {s.name: s.verify or {} for s in verdict.steps}
+    assert facts["db_restore"].get("alembic_head") == manifest.get("alembic_head")
+    assert facts["start_restored"]["started"] == ["app", "frontend"], facts
+    assert _container(STACK, "app")
+
+    verdict, printed = _verdict_of("backup")
+    assert verdict.result == "green", printed
+    [scope] = [s for s in verdict.steps if s.name == "backup_scope"]
+    assert scope.verify == {
+        "dumped": [STACK],
+        "no_database": ["primer-blank-service"],
+    }, scope.verify
+
+
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     """The last of the cycle (DM-45): ``pridem destroy`` -- every container,
     network, volume and image labelled ``pridem.stack`` gone (the blank has no

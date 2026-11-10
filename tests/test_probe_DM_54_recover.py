@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
+from data_support import blank_box
 from passport_support import passport_example, section, write_passport
 from state_support import header, run_id
 
@@ -39,8 +40,15 @@ ARGV = {
     "doctor": ["doctor", "--passport", PASSPORT],
     "reinstall": ["reinstall", "--passport", PASSPORT],
     "destroy": ["destroy"],
+    "db": ["db", "dump", "blank"],
+    "backup": ["backup"],
 }
 """The command line of each verb with a verdict."""
+ON_A_BOX = {"db", "backup"}
+"""DM-86: the data verbs refuse before the run without an entry the box runs
+and the passport's copy; the probe gives them a box that runs the blank
+(``data_support.blank_box``), and their steps' commands are refused here
+(``Refusing``) -- the probe is about what comes before."""
 PLANS = {"install", "update", "deploy", "doctor", "reinstall", "destroy"}
 """DM-45: the verbs of the box's plan; their steps run commands, which a
 runner refuses here (``Refusing``): the probe is about what comes before."""
@@ -72,8 +80,11 @@ verdict of a repository with no box -- no lock, no journal, nothing to recover
 def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
     """The pair of the probe: the verbs it runs are not an empty list,
     ``version`` (no verdict) is not among them, and the verbs without a box
-    are exactly ``check`` -- a new verb does not leave ``recover`` by a flag."""
-    assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS])
+    are exactly ``check`` -- a new verb does not leave ``recover`` by a flag.
+
+    Changed by DM-86: ``db`` and ``backup`` are verbs with a verdict on a box;
+    the list names them, and the probe runs them on a box with an entry."""
+    assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS, *ON_A_BOX])
     assert "version" in VERBS and not VERBS["version"].verdict
     assert {name for name, verb in VERBS.items() if not verb.box} == {"check"}
 
@@ -106,7 +117,9 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
     section(data, "server")["role"] = "test"
     file = write_passport(tmp_path, data)
     argv = [str(file) if word == PASSPORT else word for word in ARGV[name]]
-    if name in PLANS:
+    if name in ON_A_BOX:
+        blank_box(tmp_path)
+    if name in PLANS | ON_A_BOX:
         run(argv, root=root, out=out, err=err, runner=Refusing(), fs_root=tmp_path)
     else:
         with FakeRunner() as runner:  # no passport: the verbs' steps run nothing
@@ -120,5 +133,5 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
     assert (dead.verb, dead.result) == ("deploy", "red")
     assert dead.report.incomplete[0].code == "no-verdict"
     [own] = verdicts.values()
-    assert own.verb == " ".join(ARGV[name][:2] if name == "ssl" else [name])
+    assert own.verb == " ".join(ARGV[name][:2] if name in ("ssl", "db") else [name])
     assert order == ["recover", f"journal {own.verb}"]

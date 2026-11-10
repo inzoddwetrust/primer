@@ -51,7 +51,11 @@ def strings(value: Json) -> list[str]:
 
 Status = Literal["ok", "failed", "skipped"]
 Phase = Literal["main", "restore", "finally"]
-PlanMode = Literal["install", "deploy", "doctor", "reinstall", "destroy", "gc", "renew"]
+PlanMode = Literal[
+    "install", "deploy", "doctor", "reinstall", "destroy", "gc", "renew", "command"
+]
+"""``command`` -- the one-step plans of the data verbs (``db``, ``backup``,
+DM-86); ``gc`` and ``renew`` are those of ``gc`` and ``ssl renew``."""
 RunMode = PlanMode | Literal["status", "check"]
 """What a run is: a plan's mode, or a verb that runs no plan (``status``,
 ``check``)."""

@@ -34,7 +34,7 @@ import json
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from pridem.conformance.stack import observe
 from pridem.events import Json
@@ -215,7 +215,7 @@ STOP_TIMEOUT_S = COMMAND_TIMEOUT_S + 60
 """``compose stop`` waits each service's ``stop_grace_period``."""
 
 
-def _running(ctx: StepContext, compose: ComposeStack, services: list[str]) -> list[str]:
+def running(ctx: StepContext, compose: ComposeStack, services: list[str]) -> list[str]:
     """Those of ``services`` with a running container, sorted."""
     found: list[str] = []
     for service in services:
@@ -229,12 +229,20 @@ def _running(ctx: StepContext, compose: ComposeStack, services: list[str]) -> li
     return sorted(found)
 
 
+class Acting(Protocol):
+    """The step services were stopped for: ``acted`` -- its ``act`` began
+    (``migrate``; ``db_restore`` of DM-86)."""
+
+    acted: bool
+
+
 @dataclass
 class Stopped:
-    """What ``stop_for_migrate`` stopped in this run, entry by entry, with the
-    ``migrate`` it stopped them for: ``start_stopped`` reads it."""
+    """What ``stop_for_migrate`` (or ``stop_for_restore``, DM-86) stopped in
+    this run, entry by entry, with the step it stopped them for:
+    ``start_stopped`` reads it."""
 
-    entries: list[tuple[ComposeStack, list[str], Migrate]] = field(default_factory=list)
+    entries: list[tuple[ComposeStack, list[str], Acting]] = field(default_factory=list)
 
 
 class StopForMigrate(Step):
@@ -281,7 +289,7 @@ class StopForMigrate(Step):
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         if not check.data.get("stop"):
             return Verified({"stack": self.compose.entry, "stopped": []})
-        still = _running(ctx, self.compose, self.services)
+        still = running(ctx, self.compose, self.services)
         if still:
             params: dict[str, Json] = {
                 "stack": self.compose.entry,
@@ -313,9 +321,9 @@ class StartStopped(Step):
 
     name = "start_stopped"
     order = 1
-    modes = ALL_MODES
+    modes = ALL_MODES | {"command"}  # db restore stops too (DM-86)
     codes: ClassVar[dict[str, str]] = {
-        "start": "start {services} of {stack} again: its migrate never ran",
+        "start": "start {services} of {stack} again: what they stopped for never acted",
         "start-failed": "{services} of {stack} do not run after start",
     }
 
@@ -325,8 +333,8 @@ class StartStopped(Step):
     def _due(self) -> list[tuple[ComposeStack, list[str]]]:
         return [
             (compose, services)
-            for compose, services, migrate in self.stopped.entries
-            if not migrate.acted
+            for compose, services, step in self.stopped.entries
+            if not step.acted
         ]
 
     def check(self, ctx: StepContext) -> CheckResult:
@@ -346,7 +354,7 @@ class StartStopped(Step):
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         started: dict[str, Json] = {}
         for compose, services in self._due():
-            down = sorted(set(services) - set(_running(ctx, compose, services)))
+            down = sorted(set(services) - set(running(ctx, compose, services)))
             if down:
                 params: dict[str, Json] = {
                     "stack": compose.entry,
