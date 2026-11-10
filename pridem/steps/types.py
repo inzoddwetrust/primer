@@ -35,7 +35,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import ClassVar
 
-from pridem.conformance.stack import app_address, http_get
+from pridem.conformance.stack import BodyTooBig, app_address, http_get
 from pridem.events import Json
 from pridem.files import PathOutside, resolve_inside
 from pridem.stacks.schema import Product, Service
@@ -59,6 +59,10 @@ Generator = Callable[[bytes], bytes]
 """The OpenAPI document of the running app -> the text of ``types.out``."""
 
 
+OPENAPI_LIMIT = 16 * 1024 * 1024
+"""The most of the app's OpenAPI document read (DM-81), as of a junit."""
+
+
 class Types(Step):
     """The types of a stack: committed on test, checked elsewhere."""
 
@@ -71,6 +75,7 @@ class Types(Step):
         "generator-unknown": "no command generates the types of {stack}",
         "openapi-unreachable": "the app answers no {path}",
         "openapi-empty": "the app's {path} is empty",
+        "openapi-too-big": "the app's {path} is over {limit} bytes",
         "stale": "{path} of the release is not what the app's API gives",
         "more-than-types": "the types commit would change {paths}",
         "not-pushed": "{branch} of the repository is not at the types commit",
@@ -114,7 +119,18 @@ class Types(Step):
             raise StepFailed("openapi-unreachable", {"path": self.types.openapi})
         own = self.compose.product_argv()
         _, address = app_address(ctx, own, stage.app.service)
-        got = http_get(address, stage.app.port, self.types.openapi) if address else None
+        try:
+            got = (
+                http_get(
+                    address, stage.app.port, self.types.openapi, limit=OPENAPI_LIMIT
+                )
+                if address
+                else None
+            )
+        except BodyTooBig:
+            raise StepFailed(
+                "openapi-too-big", {"path": self.types.openapi, "limit": OPENAPI_LIMIT}
+            ) from None
         if got is None or got[0] != 200:
             raise StepFailed("openapi-unreachable", {"path": self.types.openapi})
         if not got[1].strip():

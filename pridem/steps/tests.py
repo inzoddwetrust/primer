@@ -13,7 +13,13 @@ The database service is brought up first by the same compose command as
 -- because on a first install nothing runs yet; with it, the services
 ``test.services`` names (rule 20: Redis, a queue), never the application or
 the frontend (the loader refuses those names, a name the compose does not
-have is ``test-service-unknown``); compose does not recreate a running one.
+have is ``test-service-unknown``). ``--no-recreate``: a container that is
+there stays as it is, even when the release changes its image or its
+configuration -- recreating the live database before ``migrate`` (the point
+of no return) restarts it, and a new major of Postgres on the old data
+directory would not start at all (DM-81). The tests then run against the
+database server that runs now; ``up``, after ``migrate``, puts it on the
+release's image. With no container (a first install) it is created.
 ``<live>_test`` is created when it is not there.
 
 The tests run from the build target ``test.target`` of the ``app`` service's
@@ -297,7 +303,8 @@ class Tests(Step):
     def _database_up(self, ctx: StepContext, found: Database) -> None:
         compose = self.compose
         wanted = [found.service, *(s for s in self.services if s != found.service)]
-        out(ctx, compose.argv("up", "-d", "--no-build", "--wait", *wanted))
+        up = ["up", "-d", "--no-build", "--no-recreate", "--wait"]
+        out(ctx, compose.argv(*up, *wanted))
         # the name is [a-z0-9_] only: database() refuses anything else
         sql = f"SELECT 1 FROM pg_database WHERE datname = '{found.test}'"  # noqa: S608
         _, lines = out(

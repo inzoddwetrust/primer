@@ -1600,7 +1600,15 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     # the blank at its pin: the service before the product, its profile
     _at_blank_commit(mirror)
     core = _passport(tmp_path, version=20)
+    database = _database_state()
     green, printed = _install(core, "update")
+    # DM-81: the database as the tests of this update left it -- a measure
+    # in the run's log (par0 14.3), not an assertion: the tests step brings
+    # it up with --no-recreate
+    warnings.warn(
+        f"DM-81 database before the update: {database}; after: {_database_state()}",
+        stacklevel=1,
+    )
     assert green.result == "green", printed
     order = [(s.stack, s.name) for s in green.steps if s.phase == "main"]
     for name in ("render_env", "build", "derive_env", "data_copy", "up"):
@@ -1610,11 +1618,14 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     assert isinstance(data, dict) and set(data) == {"profile"}, data
     copied = Path(str(data["profile"]))
     assert (copied / "ok").is_file() and copied.is_relative_to(f"/opt/{SERVICE}/data")
+    # DM-81: the copy is named by what it holds, and it is what the app mounts
+    assert copied.name.startswith("profile@"), copied
     assert facts[(SERVICE, "up")]["release"] == "v1.0.0", facts[(SERVICE, "up")]
     assert Path(f"/opt/{SERVICE}/current").resolve() == Path(
         f"/opt/{SERVICE}/releases/v1.0.0"
     )
     running = _container(SERVICE, "app")
+    assert _data_source(running) == str(copied)
     inside = _stdout(["docker", "exec", running, "ls", "/primer/data/profile"])
     assert "ok" in inside, inside
     env = _stdout(["docker", "exec", running, "printenv", "PROFILE_DIR"])
@@ -1636,6 +1647,10 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     assert _container(STACK, "app") == product
     inside = _stdout(["docker", "exec", running, "ls", "/primer/data/profile"])
     assert "ok" in inside, inside
+    # DM-81: the running service still mounts the copy it was validated on;
+    # the refused copy is there, bound by nothing that runs
+    assert _data_source(running) == str(copied)
+    assert (copied / "ok").is_file()
 
     # an edition without it: not touched, named as left
     _blank_without_service(tmp_path, mirror, step=3)
@@ -1648,6 +1663,34 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     assert _container(SERVICE, "app") == running
     diff, failed, doctor = _doctor(alone)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+
+def _data_source(container: str) -> str:
+    """The host directory ``container`` mounts at ``/primer/data/profile``."""
+    [mounts] = _stdout(["docker", "inspect", "-f", "{{json .Mounts}}", container])
+    found = [
+        str(m["Source"])
+        for m in json.loads(mounts)
+        if m.get("Destination") == "/primer/data/profile"
+    ]
+    assert len(found) == 1, mounts
+    return found[0]
+
+
+def _database_state() -> str:
+    """The blank's database container: its id, image and start time, or
+    ``none``."""
+    found = _stdout(
+        [
+            "docker", "ps", "-a", "-q", "--no-trunc",
+            "--filter", f"label=com.docker.compose.project={STACK}",
+            "--filter", "label=com.docker.compose.service=postgres",
+        ]
+    )  # fmt: skip
+    if not found:
+        return "none"
+    fmt = "{{.Id}} {{.Image}} {{.State.StartedAt}} {{.State.Status}}"
+    return " ".join(_stdout(["docker", "inspect", "-f", fmt, *found]))
 
 
 def _containers_of(project: str) -> list[str]:

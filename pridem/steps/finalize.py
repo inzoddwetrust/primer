@@ -12,7 +12,10 @@ commit, ``current``. A red gate anywhere before stops the plan before this
 step: ``current`` still names the release that ran. The final check runs
 before the switch: a release that did not pass it is never recorded as
 current (the containers it runs on are up; ``doctor`` shows ``current`` behind
-them).
+them). ``check`` acts whenever ``state.json`` is not the state this run
+would write -- the passport's version and ops commit too: a new passport on
+the same releases is applied by the run, and ``state.json`` says so (DM-81);
+``verify`` reads both back (``state-passport``).
 """
 
 import os
@@ -73,6 +76,8 @@ class Finalize(Step):
         "switch": "switch current of {stacks}",
         "not-switched": "current of {stack} names {found}, not {release}",
         "state": "state.json does not name {stack} at {release}",
+        "state-passport": "state.json does not name passport v{passport_version} "
+        "from {ops_commit}",
     }
 
     def __init__(
@@ -119,10 +124,23 @@ class Finalize(Step):
     def check(self, ctx: StepContext) -> CheckResult:
         behind = self._behind()
         state = self.box.read_state()
-        same = state is not None and (
-            state.composition,
-            state.current,
-        ) == (self.composition, self._wanted())
+        passport = self.fetched.passport
+        same = (
+            state is not None
+            and passport is not None
+            and (
+                state.composition,
+                state.current,
+                state.passport_version,
+                state.ops_commit,
+            )
+            == (
+                self.composition,
+                self._wanted(),
+                passport.version,
+                self.fetched.ops_commit,
+            )
+        )
         if not behind and same:
             return CheckResult(False)
         stacks: list[Json] = list[Json](behind or sorted(self.releases))
@@ -153,5 +171,23 @@ class Finalize(Step):
         for stack, name in wanted.items():
             if state is None or state.current.get(stack) != name:
                 raise StepFailed("state", {"stack": stack, "release": name})
+        passport = self.fetched.passport
+        if passport is None:
+            raise StepFailed("no-passport")
+        ops = self.fetched.ops_commit
+        if state is None or (state.passport_version, state.ops_commit) != (
+            passport.version,
+            ops,
+        ):
+            raise StepFailed(
+                "state-passport",
+                {"passport_version": passport.version, "ops_commit": ops or "none"},
+            )
         current: dict[str, Json] = dict[str, Json](wanted)
-        return Verified({"current": current, "state": "written"})
+        return Verified(
+            {
+                "current": current,
+                "state": "written",
+                "passport_version": passport.version,
+            }
+        )

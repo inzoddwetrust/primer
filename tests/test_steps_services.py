@@ -62,6 +62,7 @@ from pridem.steps.services import (
     SeamsVerify,
     data_binds,
     data_items,
+    digest,
     tree,
 )
 from pridem.steps.sources import source_steps
@@ -355,7 +356,7 @@ def _item(root: Path, kind: str = "profile") -> DataItem:
         kind,
         source,
         root / "aivis-release",
-        root / "opt" / "comms" / "data" / "aivis@v2" / kind,
+        root / "opt" / "comms" / "data" / "aivis@v2",
         "PROFILE_DIR",
         "comms validate --profile <dir>",
     )
@@ -419,14 +420,20 @@ def test_data_items_take_the_product_dir_and_the_package_section(
         root=root,
     )
     home = root / "opt" / "comms" / "data" / "aivis@v2"
-    assert [(i.kind, i.source, i.target, i.env) for i in items] == [
-        ("profile", release / "comms-profile", home / "profile", "PD"),
+    assert [(i.kind, i.source, i.home, i.env) for i in items] == [
+        ("profile", release / "comms-profile", home, "PD"),
         (
             "texts",
             root / "opt" / "aivis" / "releases" / "t@1.0.0" / "comms",
-            home / "texts",
+            home,
             "OV",
         ),
+    ]
+    # DM-81: the copy is named by what its source holds (nothing here yet)
+    empty = digest([])
+    assert [i.target for i in items] == [
+        home / f"profile@{empty}",
+        home / f"texts@{empty}",
     ]
     # the pair: a passport without the package has no section to copy
     root, fetched = box(tmp_path / "no", passport_data())
@@ -525,12 +532,19 @@ def test_an_unchanged_copy_on_a_service_on_its_configuration_needs_nothing(
     assert check.would is not None and check.would.code == "validate"
 
 
-def test_a_changed_copy_is_copied_again_and_validated(tmp_path: Path) -> None:
+def test_changed_data_is_a_new_copy_and_the_old_one_stays(tmp_path: Path) -> None:
     """Changed by DM-79: the validate of the data drops every capability and never
-    pulls the image of this run."""
+    pulls the image of this run.
+
+    Changed by DM-81 (was ``test_a_changed_copy_is_copied_again_and_validated``):
+    a copy is never replaced -- a running container mounts its inode, and one
+    replaced under it leaves the service on an empty directory. Changed data
+    is a new copy, named by what it holds, validated there; the old copy, which
+    the running service mounts, is as it was."""
     step, compose, item = _copy(tmp_path)
-    item.target.mkdir(parents=True)
-    (item.target / "kinds.yaml").write_text("kinds: [old]\n")
+    old = item.home / "profile@0123456789abcdef"
+    old.mkdir(parents=True)
+    (old / "kinds.yaml").write_text("kinds: [old]\n")
     labels = [
         word
         for key, value in compose.release_labels().items()
@@ -563,7 +577,9 @@ def test_a_changed_copy_is_copied_again_and_validated(tmp_path: Path) -> None:
         outcome, _ = run([step], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert (item.target / "kinds.yaml").read_text() == "kinds: [a]\n"
-    assert not item.target.with_name("profile.tmp").exists()
+    assert item.target != old and item.target.name.startswith("profile@")
+    assert (old / "kinds.yaml").read_text() == "kinds: [old]\n"
+    assert not item.target.with_name(item.target.name + ".tmp").exists()
 
 
 # --- seams_verify -----------------------------------------------------------------
@@ -721,7 +737,11 @@ def test_test_services_come_up_with_the_database(tmp_path: Path) -> None:
     document["services"]["redis"] = {"image": "redis"}
     config = FakeCall(config.argv, lines=stdout(json.dumps(document)))
     up = FakeCall(
-        tuple(compose.argv("up", "-d", "--no-build", "--wait", "postgres", "redis"))
+        tuple(
+            compose.argv(
+                "up", "-d", "--no-build", "--no-recreate", "--wait", "postgres", "redis"
+            )
+        )
     )
     exists = FakeCall(
         tuple(

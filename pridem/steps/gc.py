@@ -28,7 +28,10 @@ and the size of ``journal/`` -- and decides what ``act`` removes:
 - the product's data a service took (form D, ``steps/services.py``):
   ``/opt/<service>/data/<product>@<release>`` stays while a container mounts it
   or it is of the current or the previous release of the product, then the
-  newest by mtime up to ``keep_releases``; the rest is removed whole;
+  newest by mtime up to ``keep_releases``; the rest is removed whole. Inside
+  one that stays, a copy ``<kind>@<digest>`` stays while a container mounts it
+  or it is the newest of its kind by mtime (the copy of this run, validated
+  or not); the other copies of the kind are removed (DM-81);
 - journals: ``Box.evict_journals`` down to ``policies.gc.journal_budget``; the
   journal of the current run is never evicted;
 - volumes: never. ``gc`` runs no volume command, and fewer volumes after than
@@ -272,6 +275,25 @@ def _heads(verdict: Verdict) -> dict[tuple[str, str], str]:
 def _not_started(cause: str, command: str) -> CheckResult:
     """A check that failed before any removal: nothing is touched."""
     return CheckResult(False, data={"not_started": cause, "command": command})
+
+
+def _copies_gone(release: Path, mounts: Sequence[Path]) -> list[Path]:
+    """The copies ``<kind>@<digest>`` in ``release`` (a directory of one
+    release of the product) that no container mounts and that are not the
+    newest of their kind by mtime."""
+    kinds: dict[str, list[Path]] = {}
+    for path in sorted(release.iterdir()):
+        if path.is_dir() and not path.is_symlink() and not path.name.endswith(_TEMP):
+            kinds.setdefault(path.name.rpartition("@")[0], []).append(path)
+    gone: list[Path] = []
+    for copies in kinds.values():
+        copies.sort(key=lambda p: (-p.stat().st_mtime, p.name))
+        gone += [
+            p
+            for p in copies[1:]
+            if not any(m.is_relative_to(p) or p.is_relative_to(m) for m in mounts)
+        ]
+    return gone
 
 
 class Gc(Step):
@@ -524,10 +546,7 @@ class Gc(Step):
         names: list[Json] = [
             f"{r['stack']}/{Path(str(r['path'])).name}" for r in _dicts(removed)
         ]
-        names += [
-            f"{Path(str(p)).parent.parent.name}/data/{Path(str(p)).name}"
-            for p in copies
-        ]
+        names += [str(Path(str(p)).relative_to(self.root / "opt")) for p in copies]
         would = local_code(
             "clean",
             {
@@ -585,8 +604,10 @@ class Gc(Step):
         self, stack: str, policy: GcPolicy, known: _Known, mounts: Sequence[Path]
     ) -> list[Path]:
         """The copies of the product's data under ``/opt/<stack>/data`` to
-        remove: neither mounted nor of the product's current or previous
-        release, beyond the newest ``keep_releases``."""
+        remove: a release's directory neither mounted nor of the product's
+        current or previous release, beyond the newest ``keep_releases``; in
+        a directory that stays, a copy of a kind neither mounted nor the
+        newest of its kind."""
         home = self.root / "opt" / stack / "data"
         if not home.is_dir():
             return []
@@ -605,7 +626,7 @@ class Gc(Step):
             (stay if held or mounted else others).append(path)
         others.sort(key=lambda p: (-p.stat().st_mtime, p.name))
         room = max(policy.keep_releases - len(stay), 0)
-        return others[room:]
+        return [*others[room:], *(c for p in stay for c in _copies_gone(p, mounts))]
 
     def _journal_files(self) -> list[Path]:
         return [

@@ -30,7 +30,18 @@ The application is reached from the host at its address on the network
 stdlib HTTP; the output of those commands is kept by the check and never
 passed on -- the application's log is not the run's journal. ``check_stack``
 is a pure function of what was observed; a problem names what is wrong --
-a field, a line number, a route -- never a value the application printed.
+a field, a line number, a route. A name the application gave (its
+``service``, a check, a field it should not have) is shown cut: a string to
+``VALUE_LIMIT`` characters, a list to ``LIST_LIMIT`` names, anything but a
+string by its JSON type (``shown``) -- the verdict carries no more of the
+application than that (DM-81).
+
+What is read has a bound (DM-81): a line of a command's output longer than
+the runner's ``LINE_LIMIT`` comes in pieces and is joined back (``continued``),
+up to ``LINE_LIMIT_JOINED`` -- a log line over it is ``log-too-long``, never
+parsed; ``GET`` reads at most ``BODY_LIMIT`` bytes within ``HTTP_DEADLINE_S``
+-- a ``/health`` over it is ``health-too-big``, a body still coming at the
+deadline is nothing answered.
 
 The step that calls it (``up``, DM-18) turns a non-empty list into its own
 code, ``up:conformance``, with ``problems_param`` as its parameter.
@@ -43,6 +54,7 @@ import http.client
 import json
 import re
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -70,6 +82,16 @@ LOG_FIELDS = ("ts", "level", "service", "release", "request_id", "event", "msg")
 LOG_OPTIONAL = "ctx"
 LOG_TAIL = 50
 HTTP_TIMEOUT_S = 5.0
+HTTP_DEADLINE_S = 15.0
+"""The whole of one ``GET``, its body included: a body sent byte by byte
+inside each socket timeout ends here."""
+BODY_LIMIT = 65536
+"""The most of ``/health`` and ``/ready`` read: eleven fields and ``details``
+of at most ``FREE_LIMIT`` fit many times over."""
+LINE_LIMIT_JOINED = 1024 * 1024
+"""The longest line of a command's output joined back from its pieces."""
+VALUE_LIMIT = 64
+LIST_LIMIT = 8
 COMMAND_TIMEOUT_S = 120
 NETWORK = "pridem"
 _SIZE = re.compile(r"(\d+)([kKmMgG]?)")
@@ -79,9 +101,50 @@ MIB = 1024**2
 Stack = Product | Service
 
 
+def shown(value: Json) -> Json:
+    """What a problem carries of a value the application gave: a string cut
+    to ``VALUE_LIMIT`` characters (``...+<n>`` says how many more), a list
+    cut to ``LIST_LIMIT`` of them (each shown), anything else by its JSON
+    type, ``<object>`` and the like -- never more of it."""
+    if isinstance(value, str):
+        if len(value) <= VALUE_LIMIT:
+            return value
+        return f"{value[:VALUE_LIMIT]}...+{len(value) - VALUE_LIMIT}"
+    if isinstance(value, list):
+        head: list[Json] = [shown(item) for item in value[:LIST_LIMIT]]
+        if len(value) > LIST_LIMIT:
+            head.append(f"...+{len(value) - LIST_LIMIT}")
+        return head
+    return f"<{_json_type(value)}>"
+
+
+def _json_type(value: Json) -> str:
+    match value:
+        case bool():
+            return "boolean"
+        case int() | float():
+            return "number"
+        case dict():
+            return "object"
+        case None:
+            return "null"
+        case _:
+            return "value"
+
+
+class BodyTooBig(Exception):
+    """``GET`` answered ``status`` with a body over its limit."""
+
+    def __init__(self, status: int, limit: int) -> None:
+        super().__init__(status, limit)
+        self.status = status
+        self.limit = limit
+
+
 @dataclass(frozen=True)
 class Problem:
-    """What is wrong, by name; never a value the application printed."""
+    """What is wrong, by name; of a value the application gave, only what
+    ``shown`` leaves of it."""
 
     code: str
     params: Mapping[str, Json] = field(default_factory=dict)
@@ -104,6 +167,11 @@ class Observed:
     ready: int | None
     logs: Sequence[str]
     configs: Mapping[str, Json]
+    long_lines: frozenset[int] = frozenset()
+    """Numbers (from 1) of the lines of ``logs`` over ``LINE_LIMIT_JOINED``:
+    the line holds only its first piece."""
+    health_too_big: bool = False
+    """``/health`` answered over ``BODY_LIMIT``: ``health`` is ``None``."""
 
 
 def problems_param(problems: Sequence[Problem]) -> list[Json]:
@@ -160,12 +228,14 @@ def _type_ok(name: str, value: Json) -> bool:
 
 
 def check_health(
-    body: bytes | None, *, migrate: bool, stack_name: str
+    body: bytes | None, *, migrate: bool, stack_name: str, too_big: bool = False
 ) -> list[Problem]:
     """``/health`` against the form of protocol 9.1. ``service`` is the name of
     the stack (``stack_name``, not of its entry): another name is
     ``health-service``; a field missing or not a string stays ``health-field``
     -- one cause, one code."""
+    if too_big:
+        return [Problem("health-too-big", {"limit": BODY_LIMIT})]
     if body is None:
         return [Problem("health-unreachable")]
     try:
@@ -183,12 +253,15 @@ def check_health(
         elif name == "service" and document[name] != stack_name:
             out.append(
                 Problem(
-                    "health-service", {"service": document[name], "stack": stack_name}
+                    "health-service",
+                    {"service": shown(document[name]), "stack": stack_name},
                 )
             )
     for name in document:
         if name not in (*HEALTH_FIELDS, HEALTH_OPTIONAL):
-            out.append(Problem("health-field", {"field": name, "problem": "extra"}))
+            out.append(
+                Problem("health-field", {"field": shown(name), "problem": "extra"})
+            )
     if HEALTH_OPTIONAL in document:
         details = document[HEALTH_OPTIONAL]
         if not isinstance(details, dict):
@@ -218,7 +291,7 @@ def check_health(
     checks = document.get("checks")
     if document.get("status") == "degraded" and isinstance(checks, dict):
         failing = sorted(str(name) for name, state in checks.items() if state != "ok")
-        out.append(Problem("health-degraded", {"checks": list[Json](failing)}))
+        out.append(Problem("health-degraded", {"checks": shown(list[Json](failing))}))
     degraded = document.get("status") == "degraded"
     head = document.get("alembic_head", "<absent>")
     if migrate and head is None and not degraded:  # degraded: its head is not read
@@ -234,7 +307,9 @@ def check_ready(status: int | None) -> list[Problem]:
     return []
 
 
-def check_logs(lines: Sequence[str], *, stack_name: str) -> list[Problem]:
+def check_logs(
+    lines: Sequence[str], *, stack_name: str, long_lines: frozenset[int] = frozenset()
+) -> list[Problem]:
     """Every line a JSON object with the fields of protocol 9.4, ``ctx`` an
     object if it is there, ``service`` the name of the stack (``log-service``;
     a line without ``service`` stays ``log-fields``)."""
@@ -242,6 +317,11 @@ def check_logs(lines: Sequence[str], *, stack_name: str) -> list[Problem]:
         return [Problem("logs-empty")]
     out: list[Problem] = []
     for number, line in enumerate(lines, start=1):
+        if number in long_lines:
+            out.append(
+                Problem("log-too-long", {"line": number, "limit": LINE_LIMIT_JOINED})
+            )
+            continue
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
@@ -257,7 +337,7 @@ def check_logs(lines: Sequence[str], *, stack_name: str) -> list[Problem]:
         if LOG_OPTIONAL in record and not isinstance(record[LOG_OPTIONAL], dict):
             out.append(Problem("log-ctx", {"line": number}))
         if "service" in record and record["service"] != stack_name:
-            given: Json = record["service"]
+            given: Json = shown(record["service"])
             out.append(
                 Problem(
                     "log-service",
@@ -271,7 +351,7 @@ def check_logs(lines: Sequence[str], *, stack_name: str) -> list[Problem]:
                     {
                         "line": number,
                         "missing": list[Json](missing),
-                        "extra": list[Json](extra),
+                        "extra": shown(list[Json](extra)),
                     },
                 )
             )
@@ -346,11 +426,14 @@ def check_stack(stack: Stack, entry: str, observed: Observed) -> list[Problem]:
                 observed.health,
                 migrate=stage.migrate is not None,
                 stack_name=stack.name,
+                too_big=observed.health_too_big,
             )
             out += check_ready(observed.ready)
             out += check_max_body(stack, entry, observed.health)
         if observed.running:
-            out += check_logs(observed.logs, stack_name=stack.name)
+            out += check_logs(
+                observed.logs, stack_name=stack.name, long_lines=observed.long_lines
+            )
     out += check_compose(observed.configs)
     return out
 
@@ -360,23 +443,61 @@ def check_stack(stack: Stack, entry: str, observed: Observed) -> list[Problem]:
 
 def _out(ctx: StepContext, argv: list[str]) -> list[str]:
     """stdout of ``argv``, kept by the check: none of it reaches the sinks."""
+    return _read(ctx, argv)[0]
+
+
+def _read(ctx: StepContext, argv: list[str]) -> tuple[list[str], frozenset[int]]:
+    """stdout of ``argv`` by line, a line in pieces (``continued``) joined
+    back up to ``LINE_LIMIT_JOINED``; and the numbers (from 1) of the lines
+    over it, which keep only what fits."""
     lines: list[str] = []
+    long: set[int] = set()
+    joining = False
 
     def keep(stream: Stream, line: str, cut: bool) -> None:
-        if stream is Stream.STDOUT:
+        nonlocal joining
+        if stream is not Stream.STDOUT:
+            return
+        if joining and lines:
+            if len(lines) not in long:
+                if len(lines[-1]) + len(line) > LINE_LIMIT_JOINED:
+                    long.add(len(lines))
+                else:
+                    lines[-1] += line
+        else:
             lines.append(line)
+        joining = cut
 
     ctx.runner.run(argv, timeout=COMMAND_TIMEOUT_S, on_line=keep)
-    return lines
+    return lines, frozenset(long)
 
 
-def http_get(address: str, port: int, path: str) -> tuple[int, bytes] | None:
-    """``GET`` of the app at ``address``; ``None`` -- nothing answered."""
+def http_get(
+    address: str,
+    port: int,
+    path: str,
+    *,
+    limit: int,
+    deadline_s: float = HTTP_DEADLINE_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> tuple[int, bytes] | None:
+    """``GET`` of the app at ``address``; ``None`` -- nothing answered, or the
+    body still coming at ``deadline_s``. A body over ``limit`` bytes is
+    ``BodyTooBig``: at most ``limit + 1`` bytes are read."""
     connection = http.client.HTTPConnection(address, port, timeout=HTTP_TIMEOUT_S)
+    end = clock() + deadline_s
     try:
         connection.request("GET", path)
         response = connection.getresponse()
-        return response.status, response.read()
+        body = b""
+        while len(body) <= limit:
+            if clock() >= end:
+                return None
+            chunk = response.read1(min(65536, limit + 1 - len(body)))
+            if not chunk:
+                return response.status, body
+            body += chunk
+        raise BodyTooBig(response.status, limit)
     except (OSError, http.client.HTTPException):
         return None
     finally:
@@ -441,12 +562,19 @@ def observe(
     if not running:
         return Observed(False, None, None, None, [], configs)
     health = ready = None
+    too_big = False
     if address is not None:
-        got = http_get(address, app.port, app.health)
-        health = None if got is None else got[1]
-        answered = http_get(address, app.port, app.ready)
-        ready = None if answered is None else answered[0]
-    logs = _out(
+        try:
+            got = http_get(address, app.port, app.health, limit=BODY_LIMIT)
+            health = None if got is None else got[1]
+        except BodyTooBig:
+            too_big = True
+        try:
+            answered = http_get(address, app.port, app.ready, limit=BODY_LIMIT)
+            ready = None if answered is None else answered[0]
+        except BodyTooBig as error:
+            ready = error.status  # /ready is its status; the body is not read
+    logs, long_lines = _read(
         ctx,
         [
             *own,
@@ -458,7 +586,16 @@ def observe(
             app.service,
         ],
     )
-    return Observed(True, address, health, ready, logs, configs)
+    return Observed(
+        True,
+        address,
+        health,
+        ready,
+        logs,
+        configs,
+        long_lines=long_lines,
+        health_too_big=too_big,
+    )
 
 
 # --- selftest ---------------------------------------------------------------------
@@ -603,6 +740,9 @@ def _planted() -> list[tuple[str, Callable[[], list[Problem]]]]:
             "compose-logging",
             with_(replace(good, configs={"docker-compose.yml": logging_config})),
         ),
+        # DM-81: what is over its bound is named, never read
+        ("health-too-big", with_(replace(good, health=None, health_too_big=True))),
+        ("log-too-long", with_(replace(good, long_lines=frozenset({1})))),
         ("app-not-running", with_(replace(good, running=False))),
         ("app-not-on-network", with_(replace(good, address=None))),
     ]

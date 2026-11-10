@@ -9,6 +9,9 @@ override. The product's compose is never changed (contract 3 rule 9).
 The override is rendered from ``docker compose config --format json`` of the
 product's file and carries what the machine adds:
 
+- every entry of a service's ``volumes`` that reaches into the release (a
+  bind of it, a named volume bound to it), again with ``read_only: true``:
+  no container writes the release it runs from (DM-81);
 - labels ``pridem.stack``, ``pridem.release``, ``pridem.commit`` on every
   service (its containers) and on every ``build`` (its image, plus
   ``pridem.service``): ``gc`` cleans by them;
@@ -700,6 +703,38 @@ def _names(value: str, reference: str, variable: str) -> bool:
     return False
 
 
+def _release_binds(
+    body: Mapping[str, Json], document: Mapping[str, Json], release: Path
+) -> list[Json]:
+    """The entries of ``volumes`` of a service that reach into the release --
+    a bind of it, or a named volume whose ``driver_opts`` bind it -- and are
+    not read-only yet, each again with ``read_only: true``. compose merges
+    an override's entry with the file's by ``target``: the release is never
+    written from a container (TZ 7.3, immutable checkouts), so its files --
+    the compose, the ``Dockerfile``, the context, the data a service takes --
+    are the ones ``forbidden`` and ``drift`` read, not a container's (DM-81)."""
+    tops = _mapping(document.get("volumes"))
+    found: list[Json] = []
+    for entry in as_list(body.get("volumes")):
+        volume = _mapping(entry)
+        if volume.get("read_only") is True:
+            continue
+        kind = volume.get("type")
+        if kind == "bind":
+            inside = _within(str(volume.get("source", "")), release)
+        elif kind == "volume":
+            options = _mapping(
+                _mapping(tops.get(str(volume.get("source")))).get("driver_opts")
+            )
+            device = options.get("device")
+            inside = options.get("o") == "bind" and _within(str(device), release)
+        else:
+            inside = False
+        if inside:
+            found.append({**volume, "read_only": True})
+    return found
+
+
 def override_text(
     compose: ComposeStack,
     document: Mapping[str, Json],
@@ -754,9 +789,10 @@ def override_text(
         variables.update((environment or {}).get(name, {}))
         if variables:
             part["environment"] = variables
+        own = _release_binds(_mapping(body), document, compose.release)
         binds = (mounts or {}).get(name)
-        if binds:
-            part["volumes"] = list[Json](binds)
+        if own or binds:
+            part["volumes"] = [*own, *list[Json](binds or [])]
         services[name] = part
     volumes: dict[str, Json] = {
         name: {"labels": dict[str, Json](compose.stack_labels())}

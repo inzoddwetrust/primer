@@ -155,11 +155,13 @@ def run_git(
     expect: tuple[int, ...] = (0,),
     timeout: float = 600,
     env: Mapping[str, str] | None = None,
+    stderr: list[str] | None = None,
 ) -> tuple[int, list[str]]:
     """``git <args>`` with the machine's environment; its stdout lines.
 
     Pieces of a long line (``continued``) are joined back, so a file read with
-    ``git show`` comes back whole.
+    ``git show`` comes back whole. ``stderr``, when given, gets the lines of
+    stderr too, as they come (pieces not joined).
     """
     lines: list[str] = []
     joining = False
@@ -168,6 +170,8 @@ def run_git(
         nonlocal joining
         ctx.on_line(stream, line, cut)
         if stream is not Stream.STDOUT:
+            if stderr is not None:
+                stderr.append(line)
             return
         if joining and lines:
             lines[-1] += line

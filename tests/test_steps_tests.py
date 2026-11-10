@@ -143,7 +143,12 @@ def script(
     return [
         config,  # check
         config,  # act
-        FakeCall(tuple(cs.argv("up", "-d", "--no-build", "--wait", "postgres"))),
+        # DM-81: a running database is never recreated by the tests
+        FakeCall(
+            tuple(
+                cs.argv("up", "-d", "--no-build", "--no-recreate", "--wait", "postgres")
+            )
+        ),
         FakeCall(
             tuple(
                 cs.argv(

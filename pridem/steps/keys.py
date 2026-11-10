@@ -18,6 +18,15 @@ A key already in place with access and files already as drawn need no
 compares: the files are written by ``act`` and read back by ``verify``, so
 ``doctor`` changes nothing on disk. The private part is never in a fact, a log
 or a reason.
+
+``ls-remote`` is 128 both when the server refuses the key and when ssh never
+reached it; git's own line is the same (``Could not read from remote
+repository``). Only ssh's line tells: ssh prefixes its own failures --
+the name not resolved, the connection refused or timed out -- with ``ssh:``.
+Such a 128, in ``check``, ``act`` or any poll of the wait, is
+``unreachable`` at once: no key the owner adds can answer it, and waiting
+``KEY_WAIT_S`` under the box's lock for it would end in a false ``no-access``
+(DM-81). Any other 128 is the server's refusal: the ceremony waits.
 """
 
 import time
@@ -166,9 +175,24 @@ def write_ssh_config(root: Path, repos: Sequence[Repo]) -> None:
         atomic_write(path, drawn[path], 0o600)
 
 
+SSH_OWN = "ssh: "
+"""How ssh starts a line of its own failure (not the server's refusal)."""
+
+
 def has_access(ctx: StepContext, root: Path, found: Repo) -> bool:
-    """``git ls-remote`` answers: the key works (read access is enough)."""
-    code, _ = run_git(ctx, root, ["ls-remote", "--heads", found.url()], expect=(0, 128))
+    """``git ls-remote`` answers: the key works (read access is enough);
+    ``False`` -- the server refused it. ssh's own failure (``SSH_OWN``) is
+    ``unreachable``: the server never saw the key."""
+    errors: list[str] = []
+    code, _ = run_git(
+        ctx,
+        root,
+        ["ls-remote", "--heads", found.url()],
+        expect=(0, 128),
+        stderr=errors,
+    )
+    if code != 0 and any(line.startswith(SSH_OWN) for line in errors):
+        raise StepFailed("unreachable", {"repo": found.address})
     return code == 0
 
 
@@ -183,6 +207,7 @@ class DeployKey(Step):
         "ssh-config": "draw {repo} into {files}",
         "ssh-config-differs": "{path} is not as drawn after the write",
         "no-access": "no read access to {repo} with key {public_key} after {wait_s} s",
+        "unreachable": "ssh does not reach {repo}: no key can answer before it does",
     }
 
     def __init__(

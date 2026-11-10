@@ -572,9 +572,12 @@ def test_every_line_of_another_name_is_log_service() -> None:
 
 
 def test_selftest_catches_the_planted_names() -> None:
+    """Changed by DM-81: two defects more are planted -- a ``/health`` over
+    its bound and a log line over its bound."""
     planted = [code for code, _ in conformance._planted()]
     assert planted.count("health-service") == planted.count("log-service") == 1
-    assert len(planted) == 25 and conformance.selftest() == []
+    assert planted.count("health-too-big") == planted.count("log-too-long") == 1
+    assert len(planted) == 27 and conformance.selftest() == []
 
 
 NEAR = ["primer", "blank", "primer-blank-x"]

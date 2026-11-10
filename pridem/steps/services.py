@@ -13,13 +13,25 @@ directory of its release (``dependencies.<s>.data.<kind>``) or the section of a
 package (``packages.<slot>.mount`` with ``dependency: <s>``, the kind is the
 slot); the service takes the kind (``accepts.<kind>: {validate, env}``;
 ``seams_check`` refuses a kind it does not take). The directory is copied to
-``/opt/<service>/data/<product>@<release>/<kind>`` -- outside the service's
-release, a worktree ``sources`` resets -- in ``<kind>.tmp`` and renamed; the
+``/opt/<service>/data/<product>@<release>/<kind>@<digest>`` -- outside the
+service's release, a worktree ``sources`` resets; the
 service gets it read-only at ``/primer/data/<kind>``, the path under the
 variable ``env`` names, both by the machine's override (``build`` renders
 them). A directory that is not there is ``data-missing``; one with a symlink
-leading out of where it comes from is ``data-unsafe``, before anything is
-copied.
+leading out of where it comes from is ``data-unsafe``, one holding a FIFO, a
+socket or a device is ``data-special`` -- before anything is copied or opened.
+
+The copy's directory is named by what it holds: ``<kind>@<digest>``, the
+digest of ``tree`` of the source (DM-81). New data is a new directory, never
+a directory replaced: a running container mounts the directory's inode, so a
+directory replaced under it leaves the service on an empty, removed one and
+``up`` never restarts it (one path, one configuration hash). A new path is a
+new bind in the override, so ``up`` recreates the service on it -- and only
+after the green ``validate``, since the override is put in place only then.
+The copy goes to ``<kind>@<digest>.tmp`` and is renamed to a name not taken;
+a copy whose files are no longer the source's is not the machine's doing
+(it writes only that way): ``copy-drift``, red. ``gc`` removes the copies no
+container mounts but the newest of each kind.
 
 ``validate`` of the kind runs in a throwaway container of the service's new
 image, the copy mounted, with no network, no capability and no pull
@@ -30,7 +42,7 @@ as it was, so the running service stays on its old data and its old image,
 and the plan stops before the service and the product (protocol 4.5, 4.6:
 the machine joins no data). Green puts the override ``build`` rendered in
 place, as ``packages`` does for the product; ``up`` then restarts the service
-on it. A copy is validated when it is new or changed, and every copy when the
+on it. A copy is validated when it is new, and every copy when the
 service's application is not on its configuration (another image, another
 override): "the target image" of protocol 4.5. With nothing to copy the step
 only puts the override in place.
@@ -44,8 +56,10 @@ service, among the product's; a stack that takes a seam says
 
 import hashlib
 import json
+import os
 import shlex
 import shutil
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +97,8 @@ CONTAINER_DATA = "/primer/data"
 """Where a service finds the data of a kind: ``/primer/data/<kind>``."""
 VALIDATE_TIMEOUT_S = 600
 _TEMP = ".tmp"
+DIGEST_LENGTH = 16
+"""Hex digits of the copy's name ``<kind>@<digest>``."""
 
 
 def data_home(root: Path, service: str) -> Path:
@@ -99,9 +115,15 @@ class DataItem:
     """The directory copied: in the product's release or a package's."""
     base: Path
     """Where ``source`` comes from: a symlink in it must not lead out of it."""
-    target: Path
+    home: Path
+    """``/opt/<service>/data/<product>@<release>``: where the copies are."""
     env: str
     validate: str
+
+    @property
+    def target(self) -> Path:
+        """The copy of what ``source`` holds now: ``<home>/<kind>@<digest>``."""
+        return self.home / f"{self.kind}@{digest(tree(self.source))}"
 
     @property
     def container(self) -> str:
@@ -146,7 +168,7 @@ def data_items(
         if accepted is None:
             continue
         found.append(
-            DataItem(kind, source, base, home / kind, accepted.env, accepted.validate_)
+            DataItem(kind, source, base, home, accepted.env, accepted.validate_)
         )
     return found
 
@@ -165,18 +187,49 @@ def data_binds(
 
 
 def tree(path: Path) -> list[tuple[str, str, str]]:
-    """What a directory holds: every path, its kind, and its digest or link."""
+    """What a directory holds: every path, its kind, and its digest or link.
+
+    The kind is read by ``lstat`` and nothing but a regular file is opened:
+    a FIFO, a socket or a device is ``special`` (``data-special`` refuses
+    it), never read -- opening a FIFO waits for a writer forever. A file is
+    read in blocks by ``file_digest``, never whole into memory, and opened
+    with ``O_NOFOLLOW | O_NONBLOCK``: what is opened is the regular file
+    ``lstat`` saw (``fstat`` says so) or ``special``."""
     found: list[tuple[str, str, str]] = []
     for entry in sorted(path.rglob("*")):
         name = str(entry.relative_to(path))
-        if entry.is_symlink():
+        mode = entry.lstat().st_mode
+        if stat.S_ISLNK(mode):
             found.append((name, "link", str(entry.readlink())))
-        elif entry.is_dir():
+        elif stat.S_ISDIR(mode):
             found.append((name, "dir", ""))
+        elif stat.S_ISREG(mode):
+            found.append((name, *_file_digest(entry)))
         else:
-            digest = hashlib.sha256(entry.read_bytes()).hexdigest()
-            found.append((name, "file", digest))
+            found.append((name, "special", ""))
     return found
+
+
+def _file_digest(entry: Path) -> tuple[str, str]:
+    """``("file", sha256)`` of a regular file; ``("special", "")`` if what
+    opens is not one (swapped after ``lstat``)."""
+    fd = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as file:
+        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            return "special", ""
+        return "file", hashlib.file_digest(file, "sha256").hexdigest()
+
+
+def digest(found: list[tuple[str, str, str]]) -> str:
+    """The name of a copy holding ``found`` (``tree``): ``DIGEST_LENGTH`` hex
+    digits of the sha256 of its JSON."""
+    text = json.dumps(found, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()[:DIGEST_LENGTH]
+
+
+def special(found: list[tuple[str, str, str]]) -> list[str]:
+    """The paths of ``found`` that are neither file, directory nor link."""
+    return [name for name, kind, _ in found if kind == "special"]
 
 
 def _leaves(item: DataItem) -> list[str]:
@@ -190,16 +243,20 @@ def _leaves(item: DataItem) -> list[str]:
 
 
 def copy_tree(source: Path, target: Path) -> None:
-    """``target``: a copy of ``source`` written in ``<target>.tmp`` and renamed;
-    symlinks stay links (``data-unsafe`` refused those that lead out)."""
+    """``target``, a name not taken (``DataCopy`` copies only to a copy not
+    there; one there with other files is ``copy-drift``): a copy of
+    ``source`` written in ``<target>.tmp`` and renamed; symlinks stay links
+    (``data-unsafe`` refused those that lead out). Nothing in place is ever
+    replaced -- a directory a container mounts stays as it is. The copy's mtime is the
+    time of the copy (``copytree`` gives it the source's): ``gc`` keeps the
+    newest of a kind by it."""
     temp = target.with_name(target.name + _TEMP)
     if temp.exists():  # left by a run that died
         shutil.rmtree(temp)
     target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     shutil.copytree(source, temp, symlinks=True)
-    if target.exists():
-        shutil.rmtree(target)
     temp.rename(target)
+    os.utime(target)
 
 
 class DataCopy(Step):
@@ -216,6 +273,10 @@ class DataCopy(Step):
         "override-not-placed": "the override of {entry} is not the one build rendered",
         "data-missing": "{service}.{kind}: {path} is not in the product",
         "data-unsafe": "{service}.{kind}: {paths} lead out of {base}",
+        "data-special": "{service}.{kind}: {paths} are neither files, directories "
+        "nor links",
+        "copy-drift": "{service}.{kind}: {path} no longer holds what it was copied "
+        "from",
         "validate-failed": "{service} refuses {kind} of the product: exit code "
         "{exit_code}",
     }
@@ -243,7 +304,8 @@ class DataCopy(Step):
         return {"service": self.compose.name, "kind": item.kind}
 
     def _sound(self) -> None:
-        """Every source is there and stays inside where it comes from."""
+        """Every source is there, stays inside where it comes from and holds
+        no FIFO, socket or device; no copy has drifted."""
         for item in self.items:
             if not item.source.is_dir():
                 raise StepFailed(
@@ -259,13 +321,23 @@ class DataCopy(Step):
                         "base": str(item.base),
                     },
                 )
+            found = tree(item.source)
+            odd = special(found)
+            if odd:
+                raise StepFailed(
+                    "data-special", {**self._params(item), "paths": list[Json](odd)}
+                )
+            target = item.home / f"{item.kind}@{digest(found)}"
+            if os.path.lexists(target) and (
+                target.is_symlink() or not target.is_dir() or tree(target) != found
+            ):
+                raise StepFailed(
+                    "copy-drift", {**self._params(item), "path": str(target)}
+                )
 
     def _changed(self) -> list[DataItem]:
-        return [
-            item
-            for item in self.items
-            if not item.target.is_dir() or tree(item.target) != tree(item.source)
-        ]
+        """The items whose copy is not there yet."""
+        return [item for item in self.items if not item.target.is_dir()]
 
     def check(self, ctx: StepContext) -> CheckResult:
         self._sound()

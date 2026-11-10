@@ -6,12 +6,22 @@ is a worktree ``/opt/<stack>/releases/<id>`` -- ``<sha>`` for a branch (test),
 ``releases/`` and nothing here touches ``current``: ``finalize`` switches it
 after the gates. A release that drifted -- changed or untracked files, or a
 ``HEAD`` off the target (a moved tag) -- is reset to the target commit, and the
-discarded paths are the fact ``drift_discarded``.
+discarded paths are the fact ``drift_discarded``. A file ``.gitignore`` names
+is drift too (``status --ignored=matching``): a ``.env`` planted in a release
+is in it as soon as compose reads the release; the reset removes it with the
+nested repositories (``clean -ffdx``). A ``<release>.tmp`` a run left when it
+died is taken off whatever it is -- a worktree still locked ``initializing``
+(``worktree remove -f -f``) or a directory git does not know -- before the
+release is added again.
 
 The configuration is the target commit's: ``primer.yaml`` and ``primer.lock``
 are read with ``git show <commit>:<file>`` from the bare repository, never from
 a worktree. A ref missing on the remote is found by ``git ls-remote`` in
-``check``, before anything acts.
+``check``, before anything acts. That the commit has no such file is
+``git ls-tree <commit> -- <file>`` answering 0 with nothing; a repository that
+cannot answer -- ``ls-tree`` 128 (the commit's tree) or 1 (a tree on the way),
+or the file listed and ``show`` 128 -- is
+``repo-damaged``, never "no file" (DM-81: both are 128 for ``git show``).
 
 The steps of one stack ``sources``, in order: the root (``fetch_root``), the
 lock against ``primer.yaml`` and against the tags of the services the box uses
@@ -23,7 +33,9 @@ contract checked against the product's range before a worktree is made. They
 share what they read through one ``Resolved``.
 """
 
+import os
 import re
+import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +103,16 @@ class Target:
     @property
     def release(self) -> str:
         return self.ref if self.tag else self.commit
+
+
+class RepoDamaged(Exception):
+    """The bare repository cannot answer for ``path`` at a commit: a tree or a
+    blob is missing or broken. Each step that reads a file names it in its
+    own ``repo-damaged``."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.path = path
 
 
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -222,9 +244,19 @@ class Checkout:
         )
 
     def show(self, ctx: StepContext, commit: str, path: str) -> str | None:
-        """``git show <commit>:<path>``: the target commit's file, or ``None``."""
+        """``git show <commit>:<path>``: the target commit's file, or ``None``
+        when the commit has none; a repository that cannot say is
+        ``RepoDamaged``."""
+        # 1: a tree on the way to path is missing; 128: the commit's own tree
+        code, listed = self.git(ctx, "ls-tree", commit, "--", path, expect=(0, 1, 128))
+        if code != 0:
+            raise RepoDamaged(path)
+        if not [line for line in listed if line.strip()]:
+            return None
         code, lines = self.git(ctx, "show", f"{commit}:{path}", expect=(0, 128))
-        return "\n".join(lines) + "\n" if code == 0 else None
+        if code != 0:
+            raise RepoDamaged(path)
+        return "\n".join(lines) + "\n"
 
     def drift(self, ctx: StepContext, release: Path, commit: str) -> list[str] | None:
         """``None`` if the release is missing; else what differs from ``commit``."""
@@ -234,7 +266,14 @@ class Checkout:
         _, status = run_git(
             ctx,
             self.root,
-            ["-C", str(release), "status", "--porcelain", "--untracked-files=all"],
+            [
+                "-C",
+                str(release),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ],
         )
         paths = sorted({line[3:] for line in status if line.strip()})
         if head != [commit]:
@@ -244,12 +283,27 @@ class Checkout:
     def release_dir(self, target: Target) -> Path:
         return self.releases / target.release
 
+    def _take_off(self, ctx: StepContext, temp: Path) -> None:
+        """A ``.tmp`` a dead run left, removed whatever it is: a worktree of
+        the bare repository -- locked ``initializing`` when ``worktree add``
+        died, which only ``remove -f -f`` takes (DM-81) -- or anything else
+        git does not know as one, removed as a path. A worktree whose
+        directory is gone is still listed while it is locked, and ``worktree
+        add`` refuses its path: the list is read every time, not only when
+        the path is there."""
+        _, listed = self.git(ctx, "worktree", "list", "--porcelain")
+        if temp in _worktrees(listed):
+            self.git(ctx, "worktree", "remove", "-f", "-f", str(temp))
+        elif temp.is_dir() and not temp.is_symlink():
+            shutil.rmtree(temp)
+        elif os.path.lexists(temp):
+            temp.unlink()
+
     def materialize(self, ctx: StepContext, target: Target) -> None:
         """The release on ``target.commit``: added in ``.tmp`` and moved, or reset."""
         final = self.release_dir(target)
         temp = final.with_name(final.name + ".tmp")
-        if temp.exists():  # left by a run that died
-            self.git(ctx, "worktree", "remove", "--force", str(temp), expect=(0, 128))
+        self._take_off(ctx, temp)  # left by a run that died, if anything
         self.git(ctx, "worktree", "prune")
         if (final / ".git").exists():
             run_git(
@@ -257,13 +311,20 @@ class Checkout:
                 self.root,
                 ["-C", str(final), "reset", "--quiet", "--hard", target.commit],
             )
-            run_git(ctx, self.root, ["-C", str(final), "clean", "-q", "-fdx"])
+            run_git(ctx, self.root, ["-C", str(final), "clean", "-q", "-ffdx"])
             return
         self.releases.mkdir(parents=True, exist_ok=True)
         self.git(
             ctx, "worktree", "add", "--quiet", "--detach", str(temp), target.commit
         )
         self.git(ctx, "worktree", "move", str(temp), str(final))
+
+
+def _worktrees(lines: Sequence[str]) -> set[Path]:
+    """The paths of ``git worktree list --porcelain``."""
+    return {
+        Path(line[len("worktree ") :]) for line in lines if line.startswith("worktree ")
+    }
 
 
 def _verify_release(
@@ -315,6 +376,8 @@ class FetchRoot(_SourceStep):
         "fetch": "fetch {stack} at {ref}",
         "missing-ref": "{ref} is not on {repo}",
         "no-primer-yaml": "{ref} has no primer.yaml",
+        "repo-damaged": "the repository of {ref} cannot give {path}: a tree or a "
+        "blob is missing",
         "not-a-product": "primer.yaml of {ref} is not a product",
         "name-mismatch": "the repository {stack} names its product {name} in "
         "primer.yaml",
@@ -369,13 +432,21 @@ class FetchRoot(_SourceStep):
             {"drift": _j(drift or [])},
         )
 
+    def _show(self, ctx: StepContext, target: Target, path: str) -> str | None:
+        try:
+            return self.checkout.show(ctx, target.commit, path)
+        except RepoDamaged as error:
+            raise StepFailed(
+                "repo-damaged", {"ref": self.ref, "path": error.path}
+            ) from None
+
     def _read_config(self, ctx: StepContext, target: Target) -> None:
-        text = self.checkout.show(ctx, target.commit, "primer.yaml")
+        text = self._show(ctx, target, "primer.yaml")
         if text is None:
             raise StepFailed("no-primer-yaml", {"ref": self.ref})
         try:
             config = parse_primer_yaml(text, f"primer.yaml@{target.commit}")
-            lock_text = self.checkout.show(ctx, target.commit, "primer.lock")
+            lock_text = self._show(ctx, target, "primer.lock")
             lock = (
                 None
                 if lock_text is None
@@ -519,6 +590,8 @@ class FetchServices(_SourceStep):
         "fetch": "fetch {services}",
         "release-off-target": "{release} is not on the target commit after the reset",
         "no-primer-yaml": "{service}: {tag} has no primer.yaml",
+        "repo-damaged": "{service}: the repository of {tag} cannot give {path}: "
+        "a tree or a blob is missing",
         "not-a-service": "{service}: primer.yaml of {tag} is not a service",
         "invalid-config": "{service}: {file} of {tag} breaks its contract: {codes}",
         "name-mismatch": "the dependency {service} names itself {name} in primer.yaml",
@@ -543,7 +616,10 @@ class FetchServices(_SourceStep):
     def _read(self, ctx: StepContext, checkout: Checkout, target: Target) -> None:
         """``primer.yaml`` of the service at ``target``, from git."""
         params: dict[str, Json] = {"service": checkout.stack, "tag": target.ref}
-        text = checkout.show(ctx, target.commit, "primer.yaml")
+        try:
+            text = checkout.show(ctx, target.commit, "primer.yaml")
+        except RepoDamaged as error:
+            raise StepFailed("repo-damaged", {**params, "path": error.path}) from None
         if text is None:
             raise StepFailed("no-primer-yaml", params)
         try:
@@ -634,6 +710,8 @@ class FetchPackages(_SourceStep):
         "undeclared": "the product declares no package slot {slots}",
         "missing-tag": "{slot}: tag {tag} is not on {repo}",
         "dir-clash": "{slots} would share the release directory {release}",
+        "repo-damaged": "{slot}: the repository cannot give {path}: a tree or a "
+        "blob is missing",
         **PACKAGE_CODES,
     }
 
@@ -684,7 +762,12 @@ class FetchPackages(_SourceStep):
         self, ctx: StepContext, slot: str, checkout: Checkout, target: Target, path: str
     ) -> str:
         product = _known(self.resolved.product, "primer.yaml")
-        text = checkout.show(ctx, target.commit, path)
+        try:
+            text = checkout.show(ctx, target.commit, path)
+        except RepoDamaged as error:
+            raise StepFailed(
+                "repo-damaged", {"slot": slot, "path": error.path}
+            ) from None
         tag = f"v{target.ref.rsplit('@', 1)[1]}"
         return package_contract(product, slot, text, path, tag)
 

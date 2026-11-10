@@ -35,7 +35,9 @@ through, ``TCP_DENIED`` 403 -- and never a path, a query or a body.
 The step runs once per product, in its ladder after ``migrate`` -- the point of
 no return: a failed migration leaves the old code on the old list -- and before
 ``up``: the new application starts with its proxy ready. ``check`` compares the
-rendered files with those on disk, the running container with the pinned image;
+rendered files with those on disk, the running container with the pinned image
+and the config it reads with the rendered one -- what ``verify`` reads, so a
+proxy on a config of its own is acted on, never red with nothing to do (DM-81);
 ``act`` writes the files (``atomic_write``, 0644: squid reads its config as its
 own user) and recreates the container (``up -d --force-recreate``). With
 ``egress`` empty there is no proxy: ``act`` removes the one a previous release
@@ -359,7 +361,24 @@ class Egress(Step):
         image, expected = self._image(ctx, running[0])
         if not image or image != expected:
             return needed
+        if self._seen(ctx, running[0]) != config_text(self.hosts):
+            return needed  # the file is right, the proxy reads another (DM-81)
         return CheckResult(False)
+
+    def _seen(self, ctx: StepContext, container: str) -> str | None:
+        """The configuration the running proxy reads, as ``verify`` reads it;
+        ``None`` -- the container runs nothing to read it with (it restarts).
+        The file is bound by its inode: a file written again on the host is
+        not what a container made before reads."""
+        try:
+            _, seen = out(
+                ctx,
+                ["docker", "exec", container, "cat", CONTAINER_CONFIG],
+                passed_on=False,
+            )
+        except CommandFailed:
+            return None
+        return "\n".join(seen) + "\n"
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         if check.data.get("remove") is True:

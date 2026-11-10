@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from compose_support import CONFIG, ENTRY, REF, SHA, blank, run, stdout
+from env_support import context
 from passport_support import passport_example
 from test_probe_DM_57_check import _reason, _steps, _yaml, check, green_calls, repo
 
@@ -655,12 +656,32 @@ def test_first_proxy_is_written_started_and_read_back(tmp_path: Path) -> None:
 def test_the_same_list_running_needs_no_act(tmp_path: Path) -> None:
     write(tmp_path, ZOOM)
     proxy = Proxy(ZOOM)
-    script = [ps(PROXY), *image(), *verify_calls(ZOOM)]  # no up
+    # DM-81: check reads the config the proxy runs on too, as verify does
+    script = [ps(PROXY), *image(), seen(ZOOM), *verify_calls(ZOOM)]  # no up
     with FakeRunner(*script) as runner:
         outcome, _ = run([step(tmp_path, ZOOM, proxy)], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     # every host of egress is asked, not the first alone
     assert proxy.asked == [SENTINEL, *ZOOM]
+
+
+def test_a_proxy_on_a_config_of_its_own_is_recreated(tmp_path: Path) -> None:
+    """DM-81: the files on disk are the rendered ones, the running proxy reads
+    another config (its file was written again after it started, or by
+    someone else): ``check`` reads what ``verify`` reads and acts -- never a
+    red ``config-not-seen`` with nothing to do. The pair: a proxy whose
+    ``exec`` fails (it restarts) is acted on too; the same config -- no act
+    (``test_the_same_list_running_needs_no_act``)."""
+    write(tmp_path, ZOOM)
+    script = [ps(PROXY), *image(), seen(["claude.ai"]), up(tmp_path)]
+    with FakeRunner(*script, *verify_calls(ZOOM)) as runner:
+        outcome, _ = run([step(tmp_path, ZOOM, Proxy(ZOOM))], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    failing = call("docker", "exec", PROXY, "cat", CONTAINER_CONFIG, code=1)
+    with FakeRunner(ps(PROXY), *image(), failing) as runner:
+        check = step(tmp_path, ZOOM, Proxy(ZOOM)).check(context(runner))
+    assert check.needed and check.would is not None
+    assert check.would.code == "render"
 
 
 def test_another_list_rewrites_and_recreates_the_proxy(tmp_path: Path) -> None:
@@ -962,12 +983,12 @@ def test_verify_waits_for_the_log_line_and_is_red_without_it(tmp_path: Path) -> 
     open_ = f"{LOG_TAG} host={SENTINEL} port=443 status=200 result=TCP_TUNNEL"
     read = [ps(PROXY), *image(), seen(hosts), address()]
     late = [*read, logs(), logs(other), logs(LOGGED)]
-    with FakeRunner(ps(PROXY), *image(), *late) as runner:
+    with FakeRunner(ps(PROXY), *image(), seen(hosts), *late) as runner:
         outcome, _ = run([step(tmp_path, hosts, Proxy(hosts))], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert outcome.steps[0].verify["log"] == LOGGED
     never = [*read, logs(open_), *diagnosis()]
-    with FakeRunner(ps(PROXY), *image(), *never) as runner:
+    with FakeRunner(ps(PROXY), *image(), seen(hosts), *never) as runner:
         outcome, _ = run([step(tmp_path, hosts, Proxy(hosts), ready_s=0)], runner)
     assert outcome.steps[0].reason == Code("egress:log-missing", {"host": SENTINEL})
     assert outcome.steps[0].verify == DIAGNOSED  # DM-45 FIX
