@@ -1793,8 +1793,9 @@ def _service_with_a_point(tmp: Path) -> str:
     """A copy of the service at ``v1.0.0`` with a point of its own, consistent
     as a whole (par0 14.3): a second compose service ``point`` -- the same
     build, ``python -m http.server 7000`` -- the point ``probe`` on it in
-    ``expose``, its address ``POINT_ADDRESS`` in ``env`` and ``provides``.
-    Tagged ``POINT_TAG``; the commit back."""
+    ``expose``, its address ``POINT_ADDRESS`` in ``env`` and ``provides`` --
+    and in the app's environment and its ``/health.seams.provides``, as its
+    three seams are (DM-62 FIX). Tagged ``POINT_TAG``; the commit back."""
     copy = tmp / "service-point"
     _run(["git", "clone", "-q", str(SERVICE_MIRROR), str(copy)], env=GIT_ENV)
     _run(["git", "-C", str(copy), "checkout", "-q", "v1.0.0"], env=GIT_ENV)
@@ -1832,6 +1833,25 @@ def _service_with_a_point(tmp: Path) -> str:
         primer,
         "provides: [SERVICE_API_URL, SERVICE_TOKEN, SERVICE_KEY]",
         "provides: [SERVICE_API_URL, SERVICE_TOKEN, SERVICE_KEY, POINT_ADDRESS]",
+    )
+    # the service says the new seam of itself as of its three (par0 14.3:
+    # the copy consistent as a whole -- seams_verify reads /health.seams)
+    _replace_once(
+        copy / "docker-compose.yml",
+        "      PRODUCT_WEBHOOK_URL: ${PRODUCT_WEBHOOK_URL:?}\n",
+        "      PRODUCT_WEBHOOK_URL: ${PRODUCT_WEBHOOK_URL:?}\n"
+        "      POINT_ADDRESS: ${POINT_ADDRESS:?}\n",
+    )
+    _replace_once(
+        copy / "backend" / "app" / "config.py",
+        '    key: str = Field(validation_alias="SERVICE_KEY", default="")\n',
+        '    key: str = Field(validation_alias="SERVICE_KEY", default="")\n'
+        '    point: str = Field(validation_alias="POINT_ADDRESS", default="")\n',
+    )
+    _replace_once(
+        copy / "backend" / "app" / "main.py",
+        '    "SERVICE_KEY": "key",\n',
+        '    "SERVICE_KEY": "key",\n    "POINT_ADDRESS": "point",\n',
     )
     _git("-C", str(copy), "add", "-A")
     _git("-C", str(copy), "commit", "-q", "-m", "DM-62: a point")
