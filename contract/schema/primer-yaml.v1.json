@@ -25,9 +25,19 @@
     "Address": {
       "additionalProperties": false,
       "properties": {
+        "endpoint": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Endpoint",
+          "type": "string"
+        },
         "source": {
           "const": "address",
           "title": "Source",
+          "type": "string"
+        },
+        "stack": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Stack",
           "type": "string"
         },
         "when": {
@@ -215,6 +225,34 @@
         "when"
       ],
       "title": "EgressWhen",
+      "type": "object"
+    },
+    "Expose": {
+      "additionalProperties": false,
+      "description": "A point of the stack (protocol 4.4, contract 3 rule 22): a channel\nbeside its HTTP application -- a Redis stream, a store. ``scheme`` tells\nthe machine what the point is; it is no part of the address.",
+      "properties": {
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "scheme": {
+          "title": "Scheme",
+          "type": "string"
+        },
+        "service": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Service",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "port",
+        "scheme"
+      ],
+      "title": "Expose",
       "type": "object"
     },
     "Frontend": {
@@ -560,6 +598,9 @@
                 },
                 {
                   "$ref": "#/$defs/ProvideVerb"
+                },
+                {
+                  "$ref": "#/$defs/ProvideAddress"
                 }
               ]
             }
@@ -644,6 +685,28 @@
         }
       },
       "title": "ProductHost",
+      "type": "object"
+    },
+    "ProvideAddress": {
+      "additionalProperties": false,
+      "description": "The address of a point of an entry of the product, given to a service\n(DM-62: ``velo-storage`` for comms): ``<alias>:<port>``.",
+      "properties": {
+        "endpoint": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Endpoint",
+          "type": "string"
+        },
+        "stack": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Stack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stack",
+        "endpoint"
+      ],
+      "title": "ProvideAddress",
       "type": "object"
     },
     "ProvideUrl": {
@@ -960,6 +1023,16 @@
         "compose": {
           "title": "Compose",
           "type": "string"
+        },
+        "expose": {
+          "default": {},
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9_-]{0,62}$": {
+              "$ref": "#/$defs/Expose"
+            }
+          },
+          "title": "Expose",
+          "type": "object"
         },
         "frontend": {
           "$ref": "#/$defs/Frontend"

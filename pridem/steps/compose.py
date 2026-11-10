@@ -77,6 +77,7 @@ from pridem.files import PathOutside, atomic_write, resolve_inside
 from pridem.runner import Stream
 from pridem.stacks.routes import alias, routed_services
 from pridem.stacks.schema import PROXY_VARIABLES, Product, Service
+from pridem.stacks.seams import Pair
 from pridem.steps.base import StepContext, StepFailed
 
 NETWORK = "pridem"
@@ -641,6 +642,59 @@ def built_services(document: Mapping[str, Json]) -> list[str]:
     return sorted(name for name, body in services.items() if "build" in _mapping(body))
 
 
+_REFERENCE = "${{{}"
+
+
+def _pair_networks(
+    compose: ComposeStack, document: Mapping[str, Json], points: Sequence[Pair]
+) -> tuple[dict[str, dict[str, Json]], dict[str, Json]]:
+    """This entry's side of the pairs of the box (DM-62), by service and the
+    networks to declare. As the provider: the point's service joins each of
+    its pairs' networks under the one alias, and the entry declares them --
+    internal, labelled. As the consumer: each service whose ``environment``
+    names the pair's variable joins it; the network is the provider's
+    (``external``) unless this very entry provides it."""
+    joins: dict[str, dict[str, Json]] = {}
+    declared: dict[str, Json] = {}
+    own = compose.stack.name
+    for pair in points:
+        key = pair.network.removeprefix("pridem-")
+        if pair.provider == compose.entry:
+            joins.setdefault(pair.service, {})[key] = {"aliases": [pair.alias]}
+            declared[key] = {
+                "name": pair.network,
+                "internal": True,
+                "labels": {
+                    **compose.stack_labels(),
+                    "pridem.point": f"{pair.provider}/{pair.endpoint}",
+                    "pridem.consumer": pair.consumer,
+                },
+            }
+        if pair.consumer == own:
+            reference = _REFERENCE.format(pair.variable)
+            for name, body in _mapping(document.get("services")).items():
+                environment = _mapping(_mapping(body).get("environment"))
+                if any(
+                    isinstance(v, str) and _names(v, reference, pair.variable)
+                    for v in environment.values()
+                ):
+                    joins.setdefault(name, {}).setdefault(key, None)
+                    declared.setdefault(key, {"name": pair.network, "external": True})
+    return joins, declared
+
+
+def _names(value: str, reference: str, variable: str) -> bool:
+    """``value`` refers to ``${variable}`` exactly -- ``${VAR:?}`` or
+    ``${VAR}``, not ``${VAR_LONGER}``."""
+    at = value.find(reference)
+    while at >= 0:
+        after = value[at + len(reference) : at + len(reference) + 1]
+        if after in (":", "}"):
+            return True
+        at = value.find(reference, at + 1)
+    return False
+
+
 def override_text(
     compose: ComposeStack,
     document: Mapping[str, Json],
@@ -649,6 +703,7 @@ def override_text(
     environment: Mapping[str, Mapping[str, str]] | None = None,
     *,
     proxy: bool,
+    points: Sequence[Pair] = (),
 ) -> str:
     """The machine's override for the product's compose ``document``;
     ``mounts`` -- read-only binds of the instance's packages, and of the data a
@@ -660,6 +715,7 @@ def override_text(
     (``steps/packages.py``); ``proxy`` -- the product has a host of ``egress``
     open (``open_hosts``): every service gets the proxy's variables."""
     services: dict[str, Json] = {}
+    joins, networks_of_pairs = _pair_networks(compose, document, points)
     app = compose.app_service
     aliased = {app} if app is not None else set()
     product = isinstance(compose.stack, Product)
@@ -676,7 +732,7 @@ def override_text(
             extra = dict((builds or {}).get(name, {}))
             labels.update(_mapping(extra.pop("labels", None)))
             part["build"] = {**extra, "labels": labels}
-        if name in aliased or egress:
+        if name in aliased or egress or name in joins:
             networks: dict[str, Json] = dict(_mapping(_mapping(body).get("networks")))
             if not networks:
                 networks["default"] = None
@@ -684,6 +740,7 @@ def override_text(
                 networks[NETWORK] = {"aliases": [alias(compose.entry, name)]}
             if egress:
                 networks[EGRESS_NETWORK] = None
+            networks.update(joins.get(name, {}))  # the networks of its pairs
             part["networks"] = networks
         variables: dict[str, Json] = (
             {key: PROXY_URL for key in PROXY_VARIABLES} if egress else {}
@@ -711,6 +768,7 @@ def override_text(
             networks_top[name] = network
     if egress:
         networks_top[EGRESS_NETWORK] = {"external": True}
+    networks_top.update(networks_of_pairs)  # the points' own (DM-62)
     rendered: dict[str, Json] = {"services": services, "networks": networks_top}
     if volumes:
         rendered["volumes"] = volumes

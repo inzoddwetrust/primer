@@ -199,6 +199,14 @@ def address(stack: Stack) -> str:
     return f"http://{stack.name}-{entry.app.service}:{entry.app.port}"
 
 
+def point_address(stack: Stack, entry: str, endpoint: str) -> str:
+    """``<entry>-<service>:<port>`` of the point ``endpoint`` of ``entry``
+    (contract 3 rule 22): the alias on every network of its pairs, no scheme
+    -- the consumer builds its URL in its compose."""
+    point = stack.stacks[entry].expose[endpoint]
+    return f"{entry}-{point.service}:{point.port}"
+
+
 def _from_passport(
     stack: Stack,
     product: Product,
@@ -297,7 +305,11 @@ def resolve(
         elif isinstance(var, FromPassport):
             _from_passport(stack, product, key, var, passport, out)
         elif isinstance(var, Address):
-            out.values[key] = address(stack)
+            out.values[key] = (
+                address(stack)
+                if var.endpoint is None
+                else point_address(stack, var.stack or stack.name, var.endpoint)
+            )
         elif isinstance(var, Derived):
             out.derived[key] = var.run
             out.values[key] = ""  # its place in the order; filled by the step

@@ -26,6 +26,7 @@ the plan's seam memory -- after its health (TZ 7.1). ``check`` needs no
 """
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar
 
@@ -36,8 +37,9 @@ from pridem.conformance.stack import (
     problems_param,
 )
 from pridem.events import Json
+from pridem.runner import Stream
 from pridem.stacks.schema import Product, Service
-from pridem.stacks.seams import SeamMemory
+from pridem.stacks.seams import Pair, SeamMemory
 from pridem.steps.base import (
     CheckResult,
     Mode,
@@ -71,6 +73,24 @@ application without one -- a cold start of the server and its first
 connections, well inside two minutes (DM-80)."""
 
 
+INSPECT_FORMAT = "{{.Name}} {{len .Containers}}"
+
+
+def _lines(ctx: StepContext, argv: list[str]) -> list[str]:
+    found: list[str] = []
+
+    def keep(stream: Stream, line: str, cut: bool) -> None:
+        if stream is Stream.STDOUT and line.strip():
+            found.append(line.strip())
+
+    ctx.runner.run(argv, timeout=60, on_line=keep)
+    return found
+
+
+def _json_list(value: Json) -> list[Json]:
+    return list(value) if isinstance(value, list) else []
+
+
 def _document(seen: Observed) -> dict[str, Json]:
     if seen.health is None:
         return {}
@@ -92,6 +112,8 @@ class Up(Step):
         **NO_PASSPORT,
         **KEY_CODES,
         "up": "bring {stack} up at {commit}",
+        "pair-networks": "remove {networks}: networks of pairs of {stack} no more",
+        "pair-networks-left": "networks of pairs no more are still there: {networks}",
         "no-image": "no image of {service} at {commit}: build runs before up",
         "old-image": "{service} runs on {running}, not on {expected}",
         "old-config": "{service} runs on configuration {running}, not on {expected}",
@@ -115,8 +137,10 @@ class Up(Step):
         render: RenderEnv | None = None,
         fetched: Fetched | None = None,
         waiting: Waiting = READY,
+        points: Sequence[Pair] = (),
     ) -> None:
         self.compose = ComposeStack(stack, entry, release, ref, commit, root)
+        self.points = list(points)  # the pairs of the box (DM-62)
         self.fetched = fetched
         self.memory = memory
         self.render = render
@@ -168,12 +192,69 @@ class Up(Step):
         ]
         return problems, _document(seen)
 
+    def _gone_pairs(self, ctx: StepContext) -> list[str]:
+        """The networks of this provider's pairs that are no more: labelled
+        ``pridem.point`` with its ``pridem.stack``, not among its pairs now,
+        no container on them (DM-62). One still holding a container -- a
+        consumer leaving in this very run, started after its provider -- is
+        left to the next run. Only an entry that exposes points looks."""
+        if not self.compose.stack.stacks[self.compose.entry].expose:
+            return []
+        mine = f"label=pridem.stack={self.compose.stack_labels()['pridem.stack']}"
+        names = _lines(
+            ctx,
+            [
+                "docker", "network", "ls", "--filter", mine,
+                "--filter", "label=pridem.point", "--format", "{{.Name}}",
+            ],
+        )  # fmt: skip
+        now = {p.network for p in self.points if p.provider == self.compose.entry}
+        others = sorted(set(names) - now)
+        if not others:
+            return []
+        held = _lines(
+            ctx,
+            ["docker", "network", "inspect", "--format", INSPECT_FORMAT, *others],
+        )
+        empty = {
+            name
+            for name, _, count in (line.partition(" ") for line in held)
+            if count == "0"
+        }
+        return [name for name in others if name in empty]
+
+    def _taken(self, ctx: StepContext, check: CheckResult) -> dict[str, Json]:
+        """The networks ``act`` took, read back: none of them is still there;
+        the fact says how many (``par0`` §10)."""
+        gone = _json_list(check.data.get("gone"))
+        if not gone:
+            return {}
+        left = self._gone_pairs(ctx)
+        if left:
+            raise StepFailed("pair-networks-left", {"networks": list[Json](left)})
+        return {"pair_networks_removed": len(gone)}
+
     def check(self, ctx: StepContext) -> CheckResult:
         params: dict[str, Json] = {
             "stack": self.compose.entry,
             "commit": self.compose.commit,
         }
-        needed = CheckResult(True, local_code("up", params))
+        gone = self._gone_pairs(ctx)
+        needed = CheckResult(True, local_code("up", params), {"gone": list[Json](gone)})
+        result = self._check(ctx, needed)
+        if result.needed or not gone:
+            return result
+        pairs_only: dict[str, Json] = {
+            "stack": self.compose.entry,
+            "networks": list[Json](gone),
+        }
+        return CheckResult(
+            True,
+            local_code("pair-networks", pairs_only),
+            {"gone": list[Json](gone), "up": False},
+        )
+
+    def _check(self, ctx: StepContext, needed: CheckResult) -> CheckResult:
         for service in self._watched(ctx):
             expected = self._expected(ctx, service)
             if (
@@ -213,16 +294,20 @@ class Up(Step):
         )
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        out(
-            ctx,
-            self.compose.argv(
-                "up", "-d", "--no-build", "--wait", "--wait-timeout", str(UP_WAIT_S)
-            ),
-            timeout=UP_WAIT_S + 60,
-        )
+        if check.data.get("up", True):
+            out(
+                ctx,
+                self.compose.argv(
+                    "up", "-d", "--no-build", "--wait", "--wait-timeout", str(UP_WAIT_S)
+                ),
+                timeout=UP_WAIT_S + 60,
+            )
+        gone = [str(name) for name in _json_list(check.data.get("gone"))]
+        if gone:  # exactly the ones check found (DM-62)
+            out(ctx, ["docker", "network", "rm", *gone])
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        fact: dict[str, Json] = {"stack": self.compose.entry}
+        fact: dict[str, Json] = {"stack": self.compose.entry, **self._taken(ctx, check)}
         app = self.compose.app_service
         built: dict[str, Json] = {}
         for service in self._watched(ctx):

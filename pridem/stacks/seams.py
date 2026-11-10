@@ -18,11 +18,22 @@ for a service (form D, ``given_kinds``) the service does not accept
 (``routes_on_co_located``).
 """
 
-from collections.abc import Collection, Mapping
+import hashlib
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 
 from pridem.stacks.options import off
 from pridem.stacks.passport import Passport
-from pridem.stacks.schema import Product, ProvideUrl, ProvideVerb, Seam, Service
+from pridem.stacks.schema import (
+    Address,
+    Expose,
+    Product,
+    ProvideAddress,
+    ProvideUrl,
+    ProvideVerb,
+    Seam,
+    Service,
+)
 
 PRODUCT = "product"
 """The name a service's ``seam`` uses for the product."""
@@ -203,9 +214,96 @@ def seams_under_option(
     return out
 
 
+@dataclass(frozen=True)
+class Pair:
+    """A point and one stack that takes its address (protocol 4.4, DM-62).
+
+    ``provider`` -- the compose project of the point (the service's name, an
+    entry of the product); ``consumer`` -- the stack whose ``env`` holds the
+    address in ``variable`` (the product as a whole, or a service). The point
+    is on a network of the pair alone, not on ``pridem``: a stack that did
+    not declare it does not reach it."""
+
+    provider: str
+    endpoint: str
+    service: str
+    consumer: str
+    variable: str
+
+    @property
+    def alias(self) -> str:
+        """The point's name on every network of its pairs: one name, so a link
+        signed by one consumer is reached by another (protocol 4.4)."""
+        return f"{self.provider}-{self.service}"
+
+    @property
+    def network(self) -> str:
+        key = f"{self.provider}/{self.endpoint}/{self.consumer}"
+        return f"pridem-pt-{hashlib.sha256(key.encode()).hexdigest()[:8]}"
+
+
+def pairs(
+    product: Product,
+    services: Mapping[str, Service],
+    edition: str | None,
+    *,
+    on: Collection[str],
+) -> list[Pair]:
+    """Every pair of the box: the product takes a point of a service (a seam
+    whose provider's variable is an address with ``endpoint``) or of its own
+    entry (``address`` with ``stack``); a service takes a point of an entry
+    of the product (``ProvideAddress``). A variable of an option off, a
+    service not installed -- no pair, no network."""
+    here = set(installed(product, edition, on=on))
+    out: list[Pair] = []
+
+    def point(stack: Product | Service, entry: str, endpoint: str) -> Expose:
+        return stack.stacks[entry].expose[endpoint]
+
+    for key, var in product.env.items():
+        if off(var.when, on):
+            continue
+        if isinstance(var, Address) and var.endpoint is not None and var.stack:
+            found = point(product, var.stack, var.endpoint)
+            out.append(Pair(var.stack, var.endpoint, found.service, product.name, key))
+        if isinstance(var, Seam) and var.from_ in here:
+            given = services[var.from_].env.get(key)
+            if isinstance(given, Address) and given.endpoint is not None:
+                if off(given.when, on):
+                    continue
+                found = point(services[var.from_], var.from_, given.endpoint)
+                out.append(
+                    Pair(var.from_, given.endpoint, found.service, product.name, key)
+                )
+    for name in sorted(here):
+        for key, var in services[name].env.items():
+            offer = product.provides.get(key)
+            if isinstance(var, Seam) and isinstance(offer, ProvideAddress):
+                if off(var.when, on):
+                    continue
+                found = point(product, offer.stack, offer.endpoint)
+                out.append(Pair(offer.stack, offer.endpoint, found.service, name, key))
+    return out
+
+
+def network_collisions(found: Sequence[Pair]) -> list[str]:
+    """Two pairs with one network name (8 hex of a hash): refused before any
+    act -- they would share a network (``seams_check:point-network``)."""
+    seen: dict[str, tuple[str, str, str]] = {}
+    out: list[str] = []
+    for pair in found:
+        key = (pair.provider, pair.endpoint, pair.consumer)
+        if seen.setdefault(pair.network, key) != key:
+            out.append(pair.network)
+    return sorted(set(out))
+
+
 def product_value(product: Product, passport: Passport, name: str) -> str:
     """The value of the product's ``provides`` ``name``: a URL from the passport."""
     offer = product.provides[name]
+    if isinstance(offer, ProvideAddress):  # a point of an entry (DM-62)
+        point = product.stacks[offer.stack].expose[offer.endpoint]
+        return f"{offer.stack}-{point.service}:{point.port}"
     if not isinstance(offer, ProvideUrl):
         raise ValueError(f"{name} is a verb of the product, not a value")
     domain = offer.from_.removeprefix("domains.")

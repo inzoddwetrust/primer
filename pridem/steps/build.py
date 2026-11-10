@@ -64,6 +64,7 @@ from pridem.stacks.egress import UNLISTED, unlisted
 from pridem.stacks.options import open_hosts, switched_on
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Product, Service
+from pridem.stacks.seams import Pair
 from pridem.steps.base import (
     CheckResult,
     Mode,
@@ -168,6 +169,7 @@ class Build(Step):
         root: Path = Path("/"),
         fetched: Fetched | None = None,
         data: Sequence[DataItem] = (),
+        points: Sequence[Pair] = (),
     ) -> None:
         """``data`` -- what the product gives this entry of a service (form D):
         its binds and variables go into the override (``data_copy``)."""
@@ -175,6 +177,7 @@ class Build(Step):
         self.handoff = handoff
         self.fetched = fetched
         self.data = list(data)
+        self.points = list(points)  # the pairs of the box (DM-62)
         self.app_image: str | None = None
         """The ``app`` image of this commit, once one was found (see above)."""
         self.app_built: bool | None = None
@@ -289,7 +292,13 @@ class Build(Step):
         for service, more in data_mounts.items():
             binds[service] = [*binds.get(service, []), *more]
         text = override_text(
-            compose, document, binds, builds, data_env, proxy=self._proxied()
+            compose,
+            document,
+            binds,
+            builds,
+            data_env,
+            proxy=self._proxied(),
+            points=self.points,
         )
         return Rendered(built_services(document), text, contexts)
 

@@ -79,7 +79,9 @@ from pridem.stacks.seams import (
     SeamMemory,
     half_seams,
     installed,
+    network_collisions,
     outside_edition,
+    pairs,
     provider_order,
     routes_on_co_located,
     seams_under_option,
@@ -154,6 +156,7 @@ class SeamsCheck(Step):
         "option-required-off": "the product needs {options}, the passport has them off",
         "seam-option": "seams of a variable under an option the product takes "
         "without it: {seams}",
+        "point-network": "two pairs of points would share the network {networks}",
     }
 
     def __init__(
@@ -184,6 +187,9 @@ class SeamsCheck(Step):
         under = seams_under_option(self.product, self.services, edition, on=on)
         if under:
             raise StepFailed("seam-option", {"seams": list[Json](under)})
+        shared = network_collisions(pairs(self.product, self.services, edition, on=on))
+        if shared:  # 8 hex of a hash: two pairs, one network (DM-62)
+            raise StepFailed("point-network", {"networks": list[Json](shared)})
         outside = outside_edition(self.product, edition, on=on)
         if outside:
             raise StepFailed("seam-outside-edition", {"seams": list[Json](outside)})

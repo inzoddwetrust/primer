@@ -66,7 +66,7 @@ from pridem.stacks.env import own_entry
 from pridem.stacks.options import switched_on
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Derived, Product, Service
-from pridem.stacks.seams import SeamMemory, installed
+from pridem.stacks.seams import Pair, SeamMemory, installed, pairs
 from pridem.steps.base import Step
 from pridem.steps.build import Build
 from pridem.steps.compose import ComposeStack, OverrideHandoff
@@ -375,6 +375,7 @@ def deploy_plan(
                 handoff=known.handoff,
                 fetched=fetched,
                 data=mine,
+                points=points(product),
             )
             steps: list[Step] = [render] if index == 0 else []
             steps.append(build)
@@ -415,10 +416,20 @@ def deploy_plan(
                     memory=known.memory,
                     render=render,
                     fetched=fetched,
+                    points=points(product),
                 )
             )
             made.append(StackSteps(entry, steps))
         return made
+
+    def points(product: Product) -> list[Pair]:
+        """The pairs of the box (DM-62): each ``build`` puts its side of them
+        into its override."""
+        passport, resolved = _passport(fetched), known.resolved
+        if passport is None or resolved is None:
+            return []
+        on = switched_on(passport)
+        return pairs(product, resolved.services, passport.edition, on=on)
 
     def target() -> tuple[Product, Path, str, str] | None:
         """The product, its release, ref and commit, once ``fetch_root`` read
@@ -460,6 +471,7 @@ def deploy_plan(
                 root=root,
                 handoff=known.handoff,
                 fetched=fetched,
+                points=points(product),
             )
             steps: list[Step] = []
             if index == 0:
@@ -518,6 +530,7 @@ def deploy_plan(
                     memory=known.memory,
                     render=render,
                     fetched=fetched,
+                    points=points(product),
                 )
             )
             made.append(StackSteps(entry, steps))

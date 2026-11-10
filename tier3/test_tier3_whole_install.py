@@ -75,6 +75,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from conftest import SERVICE_MIRROR, SERVICE_PINS
 from groups import NEEDS_BOX
 
 from pridem.conformance.stack import check_health, check_logs
@@ -1726,8 +1727,7 @@ def test_tier3_two_instances_with_their_own_languages(
 def _blank_with_an_option(tmp: Path, mirror: Path) -> None:
     """The blank with an option of its own, consistent as a whole (par0 14.3):
     ``options: [probe]``, a variable ``PROBE_URL`` under ``when: probe`` in
-    ``env`` and in the compose of ``app``, and the host of ``egress`` agreed
-    for the blank -- ``api.github.com`` -- under the same option."""
+    ``env`` and in the compose of ``app``; no host of ``egress`` (DM-62)."""
     copy = _copy_of_blank(tmp, mirror, "options")
     primer = copy / "primer.yaml"
     _replace_once(
@@ -1736,11 +1736,7 @@ def _blank_with_an_option(tmp: Path, mirror: Path) -> None:
         "  PROBE_URL:         { source: param, when: probe }\n  SERVICE_API_URL:",
     )
     text = primer.read_text(encoding="utf-8")
-    primer.write_text(
-        text
-        + "options: [probe]\negress:\n  - { host: api.github.com, when: [probe] }\n",
-        encoding="utf-8",
-    )
+    primer.write_text(text + "options: [probe]\n", encoding="utf-8")
     _replace_once(
         copy / "docker-compose.yml",
         "      SERVICE_API_URL: ${SERVICE_API_URL:?}\n",
@@ -1750,14 +1746,19 @@ def _blank_with_an_option(tmp: Path, mirror: Path) -> None:
     _push(copy, mirror, "DM-69: the blank with an option")
 
 
-def test_tier3_an_option_off_is_the_literal_and_its_host_closed(
+def test_tier3_an_option_off_is_the_literal_and_on_the_value(
     tmp_path: Path, mirror: Path
 ) -> None:
     """DM-69 on the box the earlier tests left: a copy of the blank with the
     option ``probe``. The passport without it -- ``PROBE_URL`` is the literal
-    in ``.env`` and in the app's container, no proxy, no ``HTTPS_PROXY``; with
-    it -- the value, the proxy lets ``api.github.com`` through. ``doctor`` is
-    empty on each green box."""
+    in ``.env`` and in the app's container; with it -- the value. ``doctor``
+    is empty on each green box.
+
+    Changed by DM-62 (by the owner's word, 09.11): no host of ``egress`` --
+    on some runners ``api.github.com`` inside a container is ``127.0.0.2``
+    and the proxy refuses it, rightly (DM-84). The proxy on tier 3 is held by
+    the probe of DM-64, a host opened by an option -- by tier 1
+    (``open_hosts``)."""
     assert (OPT / "current").is_symlink(), "the whole install runs first"
     _blank_with_an_option(tmp_path, mirror)
     off = _passport(tmp_path, version=50)
@@ -1766,10 +1767,6 @@ def test_tier3_an_option_off_is_the_literal_and_its_host_closed(
     assert _env()["PROBE_URL"] == "primer-switched-off", printed
     held = _stdout(["docker", "exec", _app(), "printenv", "PROBE_URL"])
     assert held == ["primer-switched-off"]
-    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
-    assert facts[(STACK, "egress")] == {"hosts": [], "proxy": "absent"}, facts
-    assert _proxies() == []
-    assert _reach()["HTTPS_PROXY"] is None
     diff, failed, doctor = _doctor(off)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
@@ -1781,11 +1778,144 @@ def test_tier3_an_option_off_is_the_literal_and_its_host_closed(
     verdict, printed = _install(on, "update")
     assert verdict.result == "green", printed
     assert _env()["PROBE_URL"] == value
-    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
-    assert facts[(STACK, "egress")]["hosts"] == ["api.github.com"], facts
-    assert len(_proxies()) == 1
-    assert _reach()["via_allowed"] == "reached"
+    held = _stdout(["docker", "exec", _app(), "printenv", "PROBE_URL"])
+    assert held == [value]
     diff, failed, doctor = _doctor(on)
+    assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+
+POINT_TAG = "v1.1.0"
+"""The tag of the copy of the service with a point (DM-62): pushed to the
+service's mirror beside ``v1.0.0``, which stays."""
+
+
+def _service_with_a_point(tmp: Path) -> str:
+    """A copy of the service at ``v1.0.0`` with a point of its own, consistent
+    as a whole (par0 14.3): a second compose service ``point`` -- the same
+    build, ``python -m http.server 7000`` -- the point ``probe`` on it in
+    ``expose``, its address ``POINT_ADDRESS`` in ``env`` and ``provides``.
+    Tagged ``POINT_TAG``; the commit back."""
+    copy = tmp / "service-point"
+    _run(["git", "clone", "-q", str(SERVICE_MIRROR), str(copy)], env=GIT_ENV)
+    _run(["git", "-C", str(copy), "checkout", "-q", "v1.0.0"], env=GIT_ENV)
+    compose = copy / "docker-compose.yml"
+    compose.write_text(
+        compose.read_text(encoding="utf-8") + "  point:\n"
+        "    build:\n"
+        "      context: ./backend\n"
+        "      target: runtime\n"
+        '    command: ["python", "-m", "http.server", "7000"]\n'
+        "    healthcheck:\n"
+        '      test: ["CMD", "python", "-c", "import urllib.request; '
+        "urllib.request.urlopen('http://127.0.0.1:7000/', timeout=3)\"]\n"
+        "      interval: 10s\n"
+        "      timeout: 5s\n"
+        "      retries: 3\n"
+        "      start_period: 5s\n"
+        "    restart: unless-stopped\n",
+        encoding="utf-8",
+    )
+    primer = copy / "primer.yaml"
+    _replace_once(
+        primer,
+        "    app: { service: app, port: 8000, health: /health, ready: /ready }\n",
+        "    app: { service: app, port: 8000, health: /health, ready: /ready }\n"
+        "    expose: { probe: { service: point, port: 7000, scheme: http } }\n",
+    )
+    _replace_once(
+        primer,
+        "  PRODUCT_WEBHOOK_URL: { source: seam, from: product }\n",
+        "  PRODUCT_WEBHOOK_URL: { source: seam, from: product }\n"
+        "  POINT_ADDRESS:       { source: address, endpoint: probe }\n",
+    )
+    _replace_once(
+        primer,
+        "provides: [SERVICE_API_URL, SERVICE_TOKEN, SERVICE_KEY]",
+        "provides: [SERVICE_API_URL, SERVICE_TOKEN, SERVICE_KEY, POINT_ADDRESS]",
+    )
+    _git("-C", str(copy), "add", "-A")
+    _git("-C", str(copy), "commit", "-q", "-m", "DM-62: a point")
+    _git("-C", str(copy), "tag", "-f", POINT_TAG)
+    _git(
+        "-C",
+        str(copy),
+        "push",
+        "-q",
+        "--force",
+        str(SERVICE_MIRROR),
+        f"refs/tags/{POINT_TAG}",
+    )
+    return _stdout(["git", "-C", str(copy), "rev-parse", "HEAD"])[0]
+
+
+def _blank_taking_the_point(tmp: Path, mirror: Path, commit: str) -> None:
+    """The blank takes the point's address by a seam, gives it to ``app``,
+    and locks the service at ``POINT_TAG``."""
+    copy = _copy_of_blank(tmp, mirror, "point")
+    _replace_once(
+        copy / "primer.yaml",
+        "  SERVICE_API_URL:   { source: seam, from: primer-blank-service }",
+        "  POINT_ADDRESS:     { source: seam, from: primer-blank-service }\n"
+        "  SERVICE_API_URL:   { source: seam, from: primer-blank-service }",
+    )
+    _replace_once(
+        copy / "docker-compose.yml",
+        "      SERVICE_API_URL: ${SERVICE_API_URL:?}\n",
+        "      SERVICE_API_URL: ${SERVICE_API_URL:?}\n"
+        "      POINT_ADDRESS: ${POINT_ADDRESS:?}\n",
+    )
+    _replace_once(
+        copy / "primer.lock",
+        f'{{ version: "1.0.0", tag: v1.0.0, commit: {SERVICE_PINS["v1.0.0"]} }}',
+        f'{{ version: "1.1.0", tag: {POINT_TAG}, commit: {commit} }}',
+    )
+    _push(copy, mirror, "DM-62: the blank takes the point")
+
+
+REACH_POINT = (
+    "import sys, urllib.request; "
+    "urllib.request.urlopen('http://' + sys.argv[1] + '/', timeout=5); print('reached')"
+)
+
+
+def test_tier3_only_the_declared_consumer_reaches_a_point(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-62 on the box the earlier tests left: the service opens a point on a
+    second compose service, the blank takes its address by a seam. The app
+    reaches it by ``<alias>:<port>``; a container on ``pridem`` -- any stack
+    that declared nothing -- does not; the point's service is on no network
+    but its pair's and its own. ``doctor`` is empty."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    commit = _service_with_a_point(tmp_path)
+    _blank_taking_the_point(tmp_path, mirror, commit)
+    passport = _passport(tmp_path, version=60)
+    verdict, printed = _install(passport, "update")
+    assert verdict.result == "green", printed
+    address = _env()["POINT_ADDRESS"]
+    assert address == f"{SERVICE}-point:7000", address
+    reached = _stdout(["docker", "exec", _app(), "python", "-c", REACH_POINT, address])
+    assert reached == ["reached"]
+    image = _stdout(["docker", "inspect", "--format", "{{.Image}}", _app()])[0]
+    outsider = SubprocessRunner().run(
+        [
+            "docker", "run", "--rm", "--network", "pridem",
+            "--label", "pridem.probe=dm-62", image,
+            "python", "-c", REACH_POINT, address,
+        ],
+        expect=(0, 1),
+        timeout=120,
+        on_line=lambda stream, line, cut: None,  # the code says it all
+    )  # fmt: skip
+    assert outsider.code == 1, "a stack that declared nothing reached the point"
+    point = _container(SERVICE, "point")
+    networks = _stdout(
+        ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", point]
+    )
+    attached = set(json.loads(networks[0]))
+    assert "pridem" not in attached, attached
+    assert any(name.startswith("pridem-pt-") for name in attached), attached
+    diff, failed, doctor = _doctor(passport)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
 

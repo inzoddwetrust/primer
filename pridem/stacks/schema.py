@@ -167,6 +167,11 @@ RULES = {
         "a key of env is none docker, compose, the process or the machine reads",
     ),
     "S.alias-collision": (0, "two entries of the product give one alias on pridem"),
+    "S.expose-app": (
+        0,
+        "a point is not on the app nor a service a route goes to: they are on pridem",
+    ),
+    "S.endpoint-unknown": (0, "an address names a point its entry does not expose"),
     "S.command": (0, "a command is one or more words shlex can split"),
     "S.option-duplicate": (0, "an option is named once"),
     "S.egress-env": (
@@ -362,6 +367,25 @@ class Types(Strict):
     commit_as: Name
 
 
+_SCHEME = re.compile(r"[a-z][a-z0-9+.-]*")
+
+
+def _scheme(value: str) -> str:
+    if not _SCHEME.fullmatch(value):
+        raise _rule_error("S.name", "a scheme is ^[a-z][a-z0-9+.-]*$")
+    return value
+
+
+class Expose(Strict):
+    """A point of the stack (protocol 4.4, contract 3 rule 22): a channel
+    beside its HTTP application -- a Redis stream, a store. ``scheme`` tells
+    the machine what the point is; it is no part of the address."""
+
+    service: Ident
+    port: Annotated[int, Field(ge=1, le=65535)]
+    scheme: Annotated[str, AfterValidator(_scheme)]
+
+
 class Stack(Strict):
     compose: RepoPath
     app: App | None = None
@@ -376,6 +400,8 @@ class Stack(Strict):
     ] = {}
     repo: Name | None = None
     persistent: bool = False
+    expose: dict[Ident, Expose] = {}
+    """The points of this entry, seen only by the pairs that declare them."""
 
 
 class _Var(Strict):
@@ -416,9 +442,14 @@ class Seam(_Var):
 
 
 # The stack's own application on the network ``pridem``:
-# ``http://<stack>-<app.service>:<app.port>`` (TZ 7.3); not a secret.
+# ``http://<stack>-<app.service>:<app.port>`` (TZ 7.3); not a secret. With
+# ``endpoint`` -- a point of ``expose``: ``<alias>:<port>``, no scheme (rule
+# 22); of the stack's own entry, or with ``stack`` of another entry of the
+# product (DM-62).
 class Address(_Var):
     source: Literal["address"]
+    endpoint: Ident | None = None
+    stack: Ident | None = None
 
 
 def _no_values(value: object) -> object:
@@ -473,6 +504,14 @@ class ProvideUrl(Strict):
 
 class ProvideVerb(Strict):
     verb: Ident
+
+
+class ProvideAddress(Strict):
+    """The address of a point of an entry of the product, given to a service
+    (DM-62: ``velo-storage`` for comms): ``<alias>:<port>``."""
+
+    stack: Ident
+    endpoint: Ident
 
 
 class Mount(Strict):
@@ -599,7 +638,7 @@ class Product(_Stack):
     kind: Literal["product"]
     dependencies: dict[Ident, DependencyEntry] = {}
     editions: dict[Ident, Edition] = {}
-    provides: dict[EnvKey, ProvideUrl | ProvideVerb] = {}
+    provides: dict[EnvKey, ProvideUrl | ProvideVerb | ProvideAddress] = {}
     replay: dict[Ident, Command] = {}
     packages: dict[Ident, Package] = {}
     host: ProductHost | None = None
@@ -910,6 +949,46 @@ def _env_reserved(stack: Product | Service) -> list[Problem]:
     ]
 
 
+def _points(stack: Product | Service) -> list[Problem]:
+    """``expose`` and the addresses of points (DM-62): a point is not on the
+    app nor on a service a route of its entry goes to -- they are on
+    ``pridem``, any stack reaches them; an address and ``ProvideAddress``
+    name a point the entry exposes; ``stack`` -- an entry of the product."""
+    out: list[Problem] = []
+    routed = (
+        {r.to.partition(":")[0] for r in stack.host.routes.values()}
+        if isinstance(stack, Product) and stack.host is not None
+        else set()
+    )
+    for entry, stage in stack.stacks.items():
+        on_pridem = {stage.app.service} if stage.app is not None else set()
+        for name, point in stage.expose.items():
+            if point.service in on_pridem or point.service in routed:
+                at = ("stacks", entry, "expose", name)
+                out.append(problem_at(at, "S.expose-app", repr(point.service)))
+
+    def known(entry: str | None, endpoint: str) -> bool:
+        stage = stack.stacks.get(entry if entry is not None else stack.name)
+        return stage is not None and endpoint in stage.expose
+
+    for key, var in stack.env.items():
+        if not isinstance(var, Address):
+            continue
+        if var.stack is not None and (
+            not isinstance(stack, Product) or var.endpoint is None
+        ):
+            out.append(problem_at(("env", key, "stack"), "S.endpoint-unknown", key))
+        elif var.endpoint is not None and not known(var.stack, var.endpoint):
+            out.append(problem_at(("env", key), "S.endpoint-unknown", key))
+    if isinstance(stack, Product):
+        for key, offer in stack.provides.items():
+            if isinstance(offer, ProvideAddress) and not known(
+                offer.stack, offer.endpoint
+            ):
+                out.append(problem_at(("provides", key), "S.endpoint-unknown", key))
+    return out
+
+
 def _aliases(stack: Product | Service) -> list[Problem]:
     """``<entry>-<service>`` of the app and the frontend of every entry is a
     name on the network ``pridem``: two pairs giving one name -- ``a-b`` +
@@ -919,7 +998,8 @@ def _aliases(stack: Product | Service) -> list[Problem]:
     seen: dict[str, tuple[str, str]] = {}
     out: list[Problem] = []
     for entry, stage in stack.stacks.items():
-        for part in (stage.app, stage.frontend):
+        parts = [stage.app, stage.frontend, *stage.expose.values()]
+        for part in parts:
             if part is None:
                 continue
             pair = (entry, part.service)
@@ -1021,6 +1101,7 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _s_egress,
     _env_reserved,
     _aliases,
+    _points,
     _options,
     _s_entries,
     _r20_test_services,
