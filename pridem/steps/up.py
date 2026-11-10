@@ -29,11 +29,14 @@ An entry with ``jobs`` (contract 3 rule 24, DM-22) comes up in the order of
 needs (all it depends on, through any but jobs) ``up --no-deps --wait``, then
 the job ``run --rm --no-deps`` -- its output goes to the journal, a code but 0
 is red and nothing after it runs; last, every service but the jobs ``up
---no-deps --wait``. ``--no-deps`` keeps compose from running a job again as a
-dependency of a service. A job runs whenever ``up`` of its entry acts: every
-service carries ``pridem.commit`` in its configuration, so a new commit, a new
-passport or package acts; an update with nothing changed does not, and
-``doctor`` -- which ``stale`` leaves the jobs out of -- has nothing to say.
+--no-deps --wait``. No service depends on a job in compose (``forbidden``):
+the order is the machine's, and compose would run the job again as a
+dependency -- under ``--no-deps`` too, and in ``run --rm <app>`` of
+``migrate`` (DM-22 FIX, measured on tier 3). A job runs whenever ``up`` of
+its entry acts: every service carries ``pridem.commit`` in its configuration,
+so a new commit, a new passport or package acts; an update with nothing
+changed does not, and ``doctor`` -- which ``stale`` leaves the jobs out of --
+has nothing to say.
 """
 
 import json

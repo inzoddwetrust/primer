@@ -241,6 +241,8 @@ class StopForMigrate(Step):
     name = "stop_for_migrate"
     order = 11
     modes = ALL_MODES
+    rechecked = False  # ``up`` brings the stopped back: the final check would
+    # read them running and call the step red (DM-22 FIX, tier 3)
     codes: ClassVar[dict[str, str]] = {
         "stop": "stop {services} of {stack} for its migration",
         "stop-failed": "{services} of {stack} still run after stop",

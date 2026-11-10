@@ -2111,10 +2111,12 @@ JOB_RUN = (
 
 def _blank_with_a_job(tmp: Path, mirror: Path, name: str, run: str) -> None:
     """The blank with a job, consistent as a whole (par0 14.3): a service
-    ``init`` of the app's image, no healthcheck, on ``postgres`` healthy; the
-    app after it (``service_completed_successfully``); ``jobs: {init}`` in
-    the entry; the job's volume at ``/tmp`` -- the image's ``/tmp`` is 1777,
-    so the user ``blank`` writes there."""
+    ``init`` of the app's image, no healthcheck, no ``restart``, on
+    ``postgres`` healthy; no service depends on it in compose -- the machine
+    runs it before them (DM-22 FIX: ``depends_on`` on it made compose run it
+    again, measured); ``jobs: {init}`` in the entry; the job's volume at
+    ``/tmp`` -- the image's ``/tmp`` is 1777, so the user ``blank`` writes
+    there."""
     copy = _copy_of_blank(tmp, mirror, name)
     _replace_once(
         copy / "primer.yaml",
@@ -2123,12 +2125,6 @@ def _blank_with_a_job(tmp: Path, mirror: Path, name: str, run: str) -> None:
         "    jobs:     { init: { service: init } }\n",
     )
     compose = copy / "docker-compose.yml"
-    _replace_once(
-        compose,
-        "    depends_on:\n      postgres: { condition: service_healthy }\n",
-        "    depends_on:\n      postgres: { condition: service_healthy }\n"
-        "      init: { condition: service_completed_successfully }\n",
-    )
     _replace_once(
         compose,
         "\n  postgres:\n",
@@ -2155,6 +2151,21 @@ def _runs() -> list[str]:
         ["docker", "run", "--rm", "--network", "none", "-v",
          f"{STACK}_jobs:/v", image, "cat", "/v/runs"]
     )  # fmt: skip
+
+
+def _job_containers() -> list[str]:
+    """Every container compose made for ``init``, running or not: name,
+    ``oneoff``, restart policy -- measured into the journal (DM-22 FIX)."""
+    found = _stdout(
+        ["docker", "ps", "-a", "-q", "--no-trunc",
+         "--filter", f"label=com.docker.compose.project={STACK}",
+         "--filter", "label=com.docker.compose.service=init"]
+    )  # fmt: skip
+    form = (
+        '{{.Name}} oneoff={{index .Config.Labels "com.docker.compose.oneoff"}} '
+        "restart={{.HostConfig.RestartPolicy.Name}} state={{.State.Status}}"
+    )
+    return _stdout(["docker", "inspect", "-f", form, *found]) if found else []
 
 
 def _started(service: str) -> str:
@@ -2188,7 +2199,8 @@ def test_tier3_a_job_runs_before_its_dependent_on_every_deploy(
     assert verdict.result == "green", printed
     runs = _runs()
     print("DM-22 measure:", {"postgres": _started("postgres"), "job": runs,
-                             "app": _started("app")})  # fmt: skip
+                             "app": _started("app"),
+                             "job containers": _job_containers()})  # fmt: skip
     assert _up_fact(verdict).get("jobs") == ["init"], verdict.steps
     assert len(runs) == 1, runs
     diff, failed, doctor = _doctor(first)

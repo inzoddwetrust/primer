@@ -517,6 +517,32 @@ def _health_checked(body: Mapping[str, Json]) -> bool:
     return not (test == ["NONE"] or test == "NONE")
 
 
+def _job_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[str]:
+    """A job is in compose; no service but a job depends on it -- the machine
+    runs it before the rest (contract 3 rule 24), and compose would run it
+    again as a dependency, under ``--no-deps`` and in ``run --rm <app>`` of
+    ``migrate`` alike (DM-22 FIX, measured on tier 3); and it has no
+    ``restart`` but ``no``."""
+    jobs = compose.stack.stacks[compose.entry].jobs
+    by_service = {part.service: name for name, part in jobs.items()}
+    found: list[str] = []
+    for job, part in jobs.items():
+        body = services.get(part.service)
+        if body is None:
+            found.append(f"jobs.{job}: no service {part.service}")
+            continue
+        policy = _mapping(body).get("restart")
+        if policy is not None and policy != "no":
+            found.append(f"jobs.{job}: restart {policy}")
+    for name, body in services.items():
+        if name in by_service:
+            continue
+        for needed in _mapping(_mapping(body).get("depends_on")):
+            if needed in by_service:
+                found.append(f"{name}: depends on job {by_service[needed]}")
+    return found
+
+
 def depended(services: Mapping[str, Json], start: str) -> set[str]:
     """Every service ``start`` depends on in ``config``, through any of them."""
     seen: set[str] = set()
@@ -561,9 +587,7 @@ def forbidden(compose: ComposeStack, document: Mapping[str, Json]) -> list[str]:
         if name not in jobs and not _health_checked(_mapping(body)):
             problems.append("no healthcheck")  # protocol 3.4 (DM-22)
         found += [f"{name}: {problem}" for problem in problems]
-    for job, part in stack.stacks[compose.entry].jobs.items():
-        if part.service not in services:
-            found.append(f"jobs.{job}: no service {part.service}")
+    found += _job_problems(compose, services)
     found += _stop_problems(compose, services)
     top = [key for key in document if not key.startswith("x-")]
     found += [f"compose: {key}" for key in sorted(top) if key not in TOP_KEYS]

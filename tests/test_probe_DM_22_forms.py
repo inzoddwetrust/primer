@@ -55,7 +55,14 @@ from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
 from pridem.stacks.env import MINT_ALPHABET, mint
 from pridem.stacks.schema import PRIMER_YAML, Product, rule_problems
-from pridem.steps.base import Step, Waiting
+from pridem.steps.base import (
+    CheckResult,
+    Step,
+    StepContext,
+    StepFailed,
+    Verified,
+    Waiting,
+)
 from pridem.steps.compose import ComposeStack, forbidden, stale
 from pridem.steps.migrate import Migrate, StartStopped, StopForMigrate, Stopped
 from pridem.steps.up import Up, job_order, needed_by
@@ -113,7 +120,8 @@ def jobbed(port: int = 8000) -> Product:
 
 
 JOBBED: dict[str, Json] = copy.deepcopy(CONFIG)
-"""``CONFIG`` with the job ``init``: it needs ``postgres``, ``app`` needs it."""
+"""``CONFIG`` with the job ``init``: it needs ``postgres``; no service depends
+on it in compose (DM-22 FIX: ``forbidden`` refuses that)."""
 _services = JOBBED["services"]
 assert isinstance(_services, dict)
 _services["init"] = {
@@ -121,9 +129,6 @@ _services["init"] = {
     "depends_on": {"postgres": {"condition": "service_healthy"}},
     "networks": {"default": None},
 }
-_app = _services["app"]
-assert isinstance(_app, dict)
-_app["depends_on"] = {"init": {"condition": "service_completed_successfully"}}
 JOB_HASHES = {**HASHES, "init": "1" * 64}
 
 
@@ -827,3 +832,111 @@ def test_stop_for_migrate_names_a_service_compose_has_and_migrate_does_not_need(
     ]
     green = made(data(stop_for_migrate=["worker"]))
     assert forbidden(_released(tmp_path, green), document) == []
+
+
+# --- FIX: no service depends on a job, a job does not restart; the final check ----
+
+
+def test_a_service_that_depends_on_a_job_is_named(tmp_path: Path) -> None:
+    """DM-22 FIX (tier 3: the job ran three times): compose runs a job again
+    as a dependency -- under ``--no-deps`` and in ``run --rm <app>`` of
+    ``migrate`` -- so no service but a job depends on one; the machine keeps
+    the order. The pair: the same document without it; a job on a job is
+    the machine's order too, and passes."""
+    healthy: dict[str, Json] = {"image": "a@sha256:x", "healthcheck": HEALTHCHECK}
+    job: dict[str, Json] = {"image": "j@sha256:x"}
+    on_job: dict[str, Json] = {**healthy, "depends_on": {"init": {}}}
+    cs = _released(tmp_path, jobbed())
+    assert forbidden(cs, {"services": {"app": on_job, "init": job}}) == [
+        "app: depends on job init"
+    ]
+    assert forbidden(cs, {"services": {"app": healthy, "init": job}}) == []
+    two = made(data(jobs={"init": {"service": "init"}, "seed": {"service": "seed"}}))
+    seed: dict[str, Json] = {**job, "depends_on": {"init": {}}}
+    document: dict[str, Json] = {
+        "services": {"app": healthy, "init": job, "seed": seed}
+    }
+    assert forbidden(_released(tmp_path, two), document) == []
+
+
+@pytest.mark.parametrize(
+    ("policy", "found"),
+    [
+        (None, []),
+        ("no", []),
+        ("always", ["jobs.init: restart always"]),
+        ("unless-stopped", ["jobs.init: restart unless-stopped"]),
+        ("on-failure", ["jobs.init: restart on-failure"]),
+    ],
+)
+def test_a_job_has_no_restart_but_no(
+    tmp_path: Path, policy: str | None, found: list[str]
+) -> None:
+    healthy: dict[str, Json] = {"image": "a@sha256:x", "healthcheck": HEALTHCHECK}
+    job: dict[str, Json] = {"image": "j@sha256:x"}
+    if policy is not None:
+        job["restart"] = policy
+    document: dict[str, Json] = {"services": {"app": healthy, "init": job}}
+    assert forbidden(_released(tmp_path, jobbed()), document) == found
+
+
+class _Undone(Step):
+    """Green the first time ``verify`` is called, red the second: what
+    ``stop_for_migrate`` looks like to the final check once ``up`` brought
+    its services back."""
+
+    name = "stop_for_migrate"
+    order = 11
+    modes = frozenset({"install"})
+
+    def __init__(self, rechecked: bool) -> None:
+        self.rechecked = rechecked
+        self.calls = 0
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        return CheckResult(False, None, {})
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        raise AssertionError("no act")
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        self.calls += 1
+        if self.calls > 1:
+            raise StepFailed("stop-failed", {"stack": "blank", "services": ["w"]})
+        return Verified({"stack": "blank", "stopped": ["w"]})
+
+
+def test_the_final_check_leaves_a_step_a_later_step_undoes() -> None:
+    """DM-22 FIX: ``stop_for_migrate`` is not ``rechecked`` -- the final check
+    does not read it again, its fact stays. The pair: the same step
+    ``rechecked`` -- the final check is red by it."""
+    from pridem.steps.finalize import FinalCheck
+
+    assert StopForMigrate.rechecked is False and Migrate.rechecked is True
+    for rechecked in (False, True):
+        step = _Undone(rechecked)
+        built = Plan(
+            [
+                StackSteps("blank", [step], root=False),
+                StackSteps("finalize", [FinalCheck()], root=True),
+            ],
+            mode="install",
+            role="test",
+            runner=FakeRunner(),
+            sink=ListSink(),
+        )
+        outcome = built.run()
+        if not rechecked:
+            assert outcome.code is ExitCode.OK, outcome.steps
+            assert outcome.steps[0].verify == {"stack": "blank", "stopped": ["w"]}
+            assert outcome.steps[1].verify == {"verified": 0}
+            assert step.calls == 1
+        else:
+            assert outcome.steps[1].reason == Code(
+                "final_check:red",
+                {
+                    "stack": "blank",
+                    "step": "stop_for_migrate",
+                    "reason": "stop_for_migrate:stop-failed",
+                },
+            )

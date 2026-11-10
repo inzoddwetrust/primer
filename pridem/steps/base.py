@@ -111,7 +111,11 @@ class Step(ABC):
     the start of its ``act`` makes the plan irreversible; ``roles`` -- the
     roles it runs on, ``None`` for all; ``final_check`` -- the plan's final
     check (TZ 7.3): the plan itself calls ``verify`` of every green step of the
-    run again in its place, and the step's own methods are never called.
+    run again in its place, and the step's own methods are never called;
+    ``rechecked`` -- the final check calls this step's ``verify`` again: a step
+    whose ``act`` a later step undoes by design (``stop_for_migrate``, whose
+    stopped services ``up`` brings back) is ``False`` -- its fact stays in the
+    verdict as it was read (DM-22 FIX).
     """
 
     name: str
@@ -122,6 +126,7 @@ class Step(ABC):
     point_of_no_return: bool = False
     roles: frozenset[Role] | None = None
     final_check: bool = False
+    rechecked: bool = True
 
     @abstractmethod
     def check(self, ctx: StepContext) -> CheckResult:

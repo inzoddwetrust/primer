@@ -8,7 +8,8 @@ external service has a service as its root). Inside a stack, steps run by
 
 A step marked ``final_check`` is the final check of TZ 7.3: in its place the plan
 calls ``verify`` of every green step of ``main`` once more, with the check it
-was run with; one red fails it by the step's name and code, and the steps after
+was run with -- but a step not ``rechecked``, whose ``act`` a later step undoes
+by design (DM-22 FIX); one red fails it by the step's name and code, and the steps after
 it (``finalize``) do not run.
 
 In every mode but ``doctor`` -- ``install``, ``deploy``, ``reinstall``,
@@ -613,7 +614,8 @@ class Plan:
         """``verify`` of every green step of ``main`` once more, with the check
         it was run with; the first red one fails the final check by name."""
         state = self._run
-        for stack, step, check in state.green:
+        again = [(s, step, c) for s, step, c in state.green if step.rechecked]
+        for stack, step, check in again:
             try:
                 step.verify(self._context("main", stack, step), check)
             except StepFailed as error:
@@ -626,7 +628,7 @@ class Plan:
                     "red",
                     {"stack": stack, "step": step.name, "reason": type(error).__name__},
                 ) from None
-        return {"verified": len(state.green)}
+        return {"verified": len(again)}
 
     def _doctor(self) -> PlanOutcome:
         state = self._run
