@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [a, b, c, d, e]
+        group: [a, b, c, d, e, f]
     defaults:
       run:
         working-directory: ${{ github.workspace }}

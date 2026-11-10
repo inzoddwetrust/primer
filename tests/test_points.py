@@ -219,15 +219,51 @@ def test_a_variable_of_an_option_off_makes_no_pair() -> None:
     assert "STORAGE_ADDRESS" in {p.variable for p in on}
 
 
-def test_two_pairs_with_one_network_name_are_found() -> None:
-    class Same(Pair):
-        @property
-        def network(self) -> str:
-            return "pridem-pt-00000000"
+class _Same(Pair):
+    """A pair whose network name is planted: one name for every pair."""
 
-    one, two = Same("a", "p", "s", "x", "V"), Same("b", "p", "s", "x", "V")
-    assert network_collisions([one, two]) == ["pridem-pt-00000000"]
-    assert network_collisions([one, one]) == []
+    @property
+    def network(self) -> str:
+        return "pridem-pt-00000000"
+
+
+_ONE = _Same("a", "p", "s", "x", "V")
+
+
+@pytest.mark.parametrize(
+    "two",
+    [
+        _Same("b", "p", "s", "x", "V"),
+        _Same("a", "q", "s", "x", "V"),
+        _Same("a", "p", "s", "y", "V"),
+    ],
+    ids=["provider", "endpoint", "consumer"],
+)
+def test_two_pairs_with_one_network_name_are_found(two: Pair) -> None:
+    """Two pairs that differ in one part of the key alone -- the provider,
+    the point or the consumer -- and share a network name: found; a pair
+    with itself is not.
+
+    Changed by DM-85: the pairs differed only by the provider, and a key
+    without the consumer passed (the acceptance of DM-62); each part of the
+    key is a case of its own now, the provider's as it was."""
+    assert network_collisions([_ONE, two]) == ["pridem-pt-00000000"]
+    assert network_collisions([_ONE, _ONE]) == []
+
+
+def test_one_key_by_two_variables_is_one_network_not_a_collision() -> None:
+    """A consumer that takes one point by two variables (two of the
+    provider's addresses with one ``endpoint``) is two pairs of one key: one
+    network -- the real name, equal for both -- and no refusal. No pair or
+    one is none; three pairs on one name name it once (DM-85)."""
+    one = Pair("comms", "events", "comms-redis", "aivis", "COMMS_EVENTS_ADDRESS")
+    two = Pair("comms", "events", "comms-redis", "aivis", "COMMS_EVENTS_BACKUP")
+    assert one.network == two.network
+    assert network_collisions([one, two]) == []
+    assert network_collisions([]) == []
+    assert network_collisions([one]) == []
+    three = [_ONE, _Same("b", "p", "s", "x", "V"), _Same("a", "p", "s", "y", "V")]
+    assert network_collisions(three) == ["pridem-pt-00000000"]
 
 
 # --- the override: the probe --------------------------------------------------

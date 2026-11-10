@@ -491,7 +491,7 @@ def _group_box(
     mirror: Path,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """Groups ``c`` and ``e`` start with the blank installed (DM-73)."""
+    """The groups of ``NEEDS_BOX`` start with the blank installed (DM-73)."""
     group = request.config.getoption("--tier3-group")
     if group in NEEDS_BOX and not (OPT / "current").is_symlink():
         _install_at_pin(tmp_path_factory.mktemp("group-box"))

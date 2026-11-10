@@ -48,20 +48,22 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_probe_DM_64_product_reaches_only_its_egress_hosts", "b"),
     ("test_probe_DM_58_skin_version_switch_needs_no_rebuild", "b"),
     ("test_tier3_both_slots_from_one_brand_package_by_subpath", "b"),
-    # c -- an install of its own: services, languages, options, then destroy
+    # c -- an install of its own: services, languages, then destroy
     ("test_tier3_a_service_of_the_edition_goes_up_before_the_product", "c"),
     ("test_tier3_two_instances_with_their_own_languages", "c"),
-    ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "c"),
-    ("test_tier3_product_derive_reaches_nothing", "c"),
-    ("test_tier3_only_the_declared_consumer_reaches_a_point", "c"),
     ("test_tier3_destroy_takes_the_blank_off_the_box", "c"),
     # d -- a clean box: the blank without its service, then with it
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),
     # e -- an install of its own: the build mode of packages
     ("test_tier3_build_mode_of_the_blank", "e"),
+    # f -- an install of its own: options, derive, points (out of c, DM-85:
+    # the longest group is the time of tier 3; the order of the file kept)
+    ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "f"),
+    ("test_tier3_product_derive_reaches_nothing", "f"),
+    ("test_tier3_only_the_declared_consumer_reaches_a_point", "f"),
 )
 
-NEEDS_BOX = frozenset({"c", "e"})
+NEEDS_BOX = frozenset({"c", "e", "f"})
 """Groups whose tests need the blank installed by a fixture first."""
 
 

@@ -99,12 +99,17 @@ def test_a_group_with_no_test_is_a_usage_error() -> None:
 
 def test_the_table_is_whole_and_its_selftest_catches_each_defect() -> None:
     """The table against the files and the matrix of tier3.yml, and the five
-    planted defects -- the step of CI, here too."""
+    planted defects -- the step of CI, here too.
+
+    Changed by DM-85: group ``c`` is cut in two, ``f`` with an install of its
+    own -- six groups; the groups the fixture installs the blank for are named
+    by equality, not as a subset of the matrix: ``f`` left out of
+    ``NEEDS_BOX`` is red here, not first on tier 3."""
     assert groups.check() == 0
     assert groups.selftest() == 0
     assert (
         set(groups.matrix())
         == {g for _, g in groups.GROUPS}
-        == {"a", "b", "c", "d", "e"}
+        == {"a", "b", "c", "d", "e", "f"}
     )
-    assert groups.NEEDS_BOX <= set(groups.matrix())
+    assert groups.NEEDS_BOX == {"c", "e", "f"}
