@@ -138,8 +138,8 @@ def _validate_call(compose: ComposeStack, item: DataItem, code: int) -> FakeCall
             "--pull",
             "never",
             *labels,
-            "-v",
-            item.volume,
+            "--mount",  # never -v: it splits at a colon (DM-86 FIX)
+            f"type=bind,source={item.target},target={item.container},readonly",
             "-e",
             f"PROFILE_DIR={item.container}",
             "sha256:" + "c" * 64,

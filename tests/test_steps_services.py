@@ -365,7 +365,16 @@ def _item(root: Path, kind: str = "profile") -> DataItem:
 def test_the_override_carries_a_services_data_on_its_app(tmp_path: Path) -> None:
     item = _item(tmp_path)
     mounts, env = data_binds([item], "comms-app")
-    assert mounts == {"comms-app": [f"{item.target}:/primer/data/profile:ro"]}
+    assert mounts == {  # compose's long form (DM-86 FIX)
+        "comms-app": [
+            {
+                "type": "bind",
+                "source": str(item.target),
+                "target": "/primer/data/profile",
+                "read_only": True,
+            }
+        ]
+    }
     assert env == {"comms-app": {"PROFILE_DIR": "/primer/data/profile"}}
     comms = _service(tmp_path)
     compose = ComposeStack(
@@ -568,8 +577,8 @@ def test_changed_data_is_a_new_copy_and_the_old_one_stays(tmp_path: Path) -> Non
             "--pull",
             "never",
             *labels,
-            "-v",
-            item.volume,
+            "--mount",  # never -v: it splits at a colon (DM-86 FIX)
+            f"type=bind,source={item.target},target={item.container},readonly",
             "-e",
             "PROFILE_DIR=/primer/data/profile",
             IMAGE,
@@ -907,8 +916,8 @@ def test_an_empty_directory_is_copied_too(tmp_path: Path) -> None:
             "--pull",
             "never",
             *labels,
-            "-v",
-            item.volume,
+            "--mount",  # never -v: it splits at a colon (DM-86 FIX)
+            f"type=bind,source={item.target},target={item.container},readonly",
             "-e",
             "PROFILE_DIR=/primer/data/profile",
             IMAGE,

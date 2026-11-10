@@ -59,7 +59,14 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.compose import COMMAND_TIMEOUT_S, ComposeStack, config, current, out
+from pridem.steps.compose import (
+    COMMAND_TIMEOUT_S,
+    ComposeStack,
+    config,
+    current,
+    mount_flag,
+    out,
+)
 from pridem.steps.migrate import ALEMBIC, STOP_TIMEOUT_S, Stopped, running
 from pridem.steps.tests import Database, database
 
@@ -126,8 +133,7 @@ def _toc(ctx: StepContext, path: Path, image: str) -> int:
             *NO_NETWORK,
             *THROWAWAY,
             *NO_PULL,
-            "-v",
-            f"{path}:/primer/db.dump:ro",
+            *mount_flag(path, "/primer/db.dump"),  # a run_id holds colons
             image,
             "pg_restore",
             "--list",

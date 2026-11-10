@@ -112,9 +112,11 @@ class Effects(FakeRunner):
             self.env_files.append(
                 Path(words[words.index("--env-file") + 1]).read_text()
             )
-            host = [w for w in words if w.endswith(":/tmp/out")]
+            # the junit bind is a --mount (DM-86 FIX): source=<host>,target=...
+            host = [w for w in words if w.endswith(",target=/tmp/out")]
             if host and self.junit is not None:
-                (Path(host[0].split(":")[0]) / "junit.xml").write_text(self.junit)
+                source = host[0].split(",")[1].removeprefix("source=")
+                (Path(source) / "junit.xml").write_text(self.junit)
         return super().run(
             argv, expect=expect, timeout=timeout, cwd=cwd, env=env, on_line=on_line
         )
@@ -209,8 +211,8 @@ def script(
                 "blank_default",
                 "--env-file",
                 str(home / "test.env"),
-                "-v",
-                f"{home / 'junit'}:/tmp/out",
+                "--mount",  # never -v (DM-86 FIX)
+                f"type=bind,source={home / 'junit'},target=/tmp/out",
                 IID,
                 "python",
                 "-m",

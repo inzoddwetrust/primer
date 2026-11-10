@@ -68,6 +68,7 @@ from pridem.steps.compose import (
     REFUSAL_CODES,
     ComposeStack,
     config,
+    mount_flag,
     out,
 )
 from pridem.steps.packages import KEY_CODES, context_dir, image_key
@@ -406,7 +407,8 @@ class Tests(Step):
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(f"DATABASE_URL={found.test_url}\n")
         target = junit_dir(self.run)
-        mount = ["-v", f"{junit_host}:{target}"] if target is not None else []
+        # --mount, not -v: the product's junit path may hold a colon (DM-86 FIX)
+        mount = mount_flag(junit_host, target, read_only=False) if target else []
         labels = [
             w
             for k, v in {

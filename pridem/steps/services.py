@@ -86,7 +86,9 @@ from pridem.steps.base import (
 from pridem.steps.compose import (
     ComposeStack,
     OverrideHandoff,
+    bind,
     image_of,
+    mount_flag,
     out,
     stale,
     write_override,
@@ -131,8 +133,14 @@ class DataItem:
         return f"{CONTAINER_DATA}/{self.kind}"
 
     @property
-    def volume(self) -> str:
-        return f"{self.target}:{self.container}:ro"
+    def volume(self) -> dict[str, Json]:
+        """The override's bind, compose's long form (DM-86 FIX)."""
+        return bind(self.target, self.container)
+
+    @property
+    def mount(self) -> list[str]:
+        """The same bind for ``docker run`` (``--mount``, DM-86 FIX)."""
+        return mount_flag(self.target, self.container)
 
 
 def data_items(
@@ -176,7 +184,7 @@ def data_items(
 
 def data_binds(
     items: Sequence[DataItem], service: str | None
-) -> tuple[dict[str, list[str]], dict[str, dict[str, str]]]:
+) -> tuple[dict[str, list[Json]], dict[str, dict[str, str]]]:
     """The override's binds and variables of ``items`` on ``service`` (the
     service's ``app``)."""
     if service is None or not items:
@@ -403,8 +411,7 @@ class DataCopy(Step):
                         *THROWAWAY,
                         *NO_PULL,  # the image build verified in this run
                         *labels,
-                        "-v",
-                        item.volume,
+                        *item.mount,
                         "-e",
                         f"{item.env}={item.container}",
                         images[0],

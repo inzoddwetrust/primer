@@ -213,6 +213,30 @@ class ComposeStack:
         }
 
 
+def _csv_field(field: str) -> str:
+    """One field of ``--mount``: docker reads the value as CSV, so a field with
+    a comma or a quote is quoted, its quotes doubled."""
+    if "," in field or '"' in field:
+        return '"' + field.replace('"', '""') + '"'
+    return field
+
+
+def mount_flag(source: Path | str, target: str, *, read_only: bool = True) -> list[str]:
+    """A bind of ``docker run`` as ``--mount``, never ``-v``: ``-v`` splits its
+    spec at every colon, and a path of the box can hold one -- a ``run_id``
+    always does (DM-86 FIX)."""
+    fields = ["type=bind", f"source={source}", f"target={target}"]
+    if read_only:
+        fields.append("readonly")
+    return ["--mount", ",".join(_csv_field(field) for field in fields)]
+
+
+def bind(source: Path | str, target: str) -> dict[str, Json]:
+    """A read-only bind of the override in compose's long form: no part of it
+    is split at a colon (DM-86 FIX)."""
+    return {"type": "bind", "source": str(source), "target": target, "read_only": True}
+
+
 def out(
     ctx: StepContext,
     argv: Sequence[str],
@@ -823,7 +847,7 @@ def _release_binds(
 def override_text(
     compose: ComposeStack,
     document: Mapping[str, Json],
-    mounts: Mapping[str, Sequence[str]] | None = None,
+    mounts: Mapping[str, Sequence[Json]] | None = None,
     builds: Mapping[str, Mapping[str, Json]] | None = None,
     environment: Mapping[str, Mapping[str, str]] | None = None,
     *,

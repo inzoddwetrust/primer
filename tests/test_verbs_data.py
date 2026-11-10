@@ -142,8 +142,8 @@ def dump_calls(
                 "ALL",
                 "--pull",
                 "never",
-                "-v",
-                f"{partial}:/primer/db.dump:ro",
+                "--mount",
+                f"type=bind,source={partial},target=/primer/db.dump,readonly",
                 IMAGE,
                 "pg_restore",
                 "--list",
@@ -674,3 +674,29 @@ def test_backup_scope_says_what_it_was_given() -> None:
             "dumped": [STACK],
             "no_database": [],
         }
+
+
+# --- FIX: a path of the box goes to docker as --mount, never -v -----------------------
+
+
+def test_a_bind_goes_to_docker_as_mount_whatever_its_path_holds() -> None:
+    """DM-86 FIX (tier 3: ``-v`` split ``<run_id>`` at its colons, ``too many
+    colons``): ``--mount`` takes the path whole; a comma or a quote is quoted
+    the CSV way docker reads it. The pair: ``readonly`` only when asked."""
+    from pridem.steps.compose import bind, mount_flag
+
+    path = Path("/opt/pridem/backups/2026-11-10T22:27:14Z-b05b/primer-blank.dump")
+    assert mount_flag(path, "/primer/db.dump") == [
+        "--mount",
+        f"type=bind,source={path},target=/primer/db.dump,readonly",
+    ]
+    assert mount_flag("/a,b", '/c"d', read_only=False) == [
+        "--mount",
+        'type=bind,"source=/a,b","target=/c""d"',
+    ]
+    assert bind("/a:b", "/c:d") == {
+        "type": "bind",
+        "source": "/a:b",
+        "target": "/c:d",
+        "read_only": True,
+    }

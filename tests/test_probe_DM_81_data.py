@@ -41,8 +41,8 @@ def _validate(compose: ComposeStack, item: DataItem, code: int) -> FakeCall:
             "--pull",
             "never",
             *labels,
-            "-v",
-            item.volume,
+            "--mount",  # never -v: it splits at a colon (DM-86 FIX)
+            f"type=bind,source={item.target},target={item.container},readonly",
             "-e",
             "PROFILE_DIR=/primer/data/profile",
             IMAGE,

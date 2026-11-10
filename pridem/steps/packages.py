@@ -76,8 +76,10 @@ from pridem.steps.compose import (
     REFUSAL_CODES,
     ComposeStack,
     OverrideHandoff,
+    bind,
     config,
     image_of,
+    mount_flag,
     out,
     stale,
     write_override,
@@ -101,8 +103,14 @@ class PackageMount:
     package: Path
 
     @property
-    def volume(self) -> str:
-        return f"{self.source}:{self.path}:ro"
+    def volume(self) -> dict[str, Json]:
+        """The override's bind, compose's long form (DM-86 FIX)."""
+        return bind(self.source, self.path)
+
+    @property
+    def mount(self) -> list[str]:
+        """The same bind for ``docker run`` (``--mount``, DM-86 FIX)."""
+        return mount_flag(self.source, self.path)
 
 
 @dataclass(frozen=True)
@@ -273,9 +281,9 @@ def package_mounts(
     return out_
 
 
-def volumes(mounts: list[PackageMount]) -> dict[str, list[str]]:
+def volumes(mounts: list[PackageMount]) -> dict[str, list[Json]]:
     """The override's ``volumes`` by service."""
-    found: dict[str, list[str]] = {}
+    found: dict[str, list[Json]] = {}
     for mount in mounts:
         found.setdefault(mount.service, []).append(mount.volume)
     return found
@@ -416,7 +424,7 @@ class Packages(Step):
             if validate is None:
                 raise RuntimeError("apply: runtime has validate (rule 10)")
             command = shlex.split(validate.replace("<dir>", first.path))
-            binds = [word for mount in same for word in ("-v", mount.volume)]
+            binds = [word for mount in same for word in mount.mount]
             image, ours = self._image(ctx, first, known)
             # the product's image has no network (protocol 4.1) and no
             # capability; one of this run is never pulled

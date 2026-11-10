@@ -152,8 +152,13 @@ def test_probe_DM_19_package_mount_rejects_paths_outside_release(
     rendered = json.loads(
         override_text(cs, CONFIG, volumes(mounts), proxy=False, references=CONFIG)
     )
-    assert rendered["services"]["frontend"]["volumes"] == [
-        f"{package2 / 'css'}:/srv/skin:ro"
+    assert rendered["services"]["frontend"]["volumes"] == [  # long form, DM-86 FIX
+        {
+            "type": "bind",
+            "source": str(package2 / "css"),
+            "target": "/srv/skin",
+            "read_only": True,
+        }
     ]
 
 
@@ -181,8 +186,8 @@ def test_red_validate_stops_before_anything_is_switched(tmp_path: Path) -> None:
             "--rm",
             *("--network", "none", "--cap-drop", "ALL", "--pull", "never"),
             *labels,
-            "-v",
-            f"{package / 'css'}:/srv/skin:ro",
+            "--mount",  # never -v (DM-86 FIX)
+            f"type=bind,source={package / 'css'},target=/srv/skin,readonly",
             FRONT_IMAGE,
             "validate-skin",
             "/srv/skin",
@@ -259,7 +264,10 @@ def test_an_image_named_in_compose_is_used_only_without_build(
             *("--network", "none", "--cap-drop", "ALL"),
             *("--label", "pridem.stack=blank", "--label", "pridem.release=main"),
             *("--label", f"pridem.commit={SHA}"),
-            *("-v", f"{package / 'css'}:/srv/skin:ro"),
+            *(
+                "--mount",
+                f"type=bind,source={package / 'css'},target=/srv/skin,readonly",
+            ),
             *("front:1", "validate-skin", "/srv/skin"),
         )
         calls += [FakeCall(validate, code=3)]
@@ -522,8 +530,8 @@ def _validate(package: Path, code: int) -> FakeCall:
             "--rm",
             *("--network", "none", "--cap-drop", "ALL", "--pull", "never"),
             *labels,
-            "-v",
-            f"{package / 'css'}:/srv/skin:ro",
+            "--mount",  # never -v (DM-86 FIX)
+            f"type=bind,source={package / 'css'},target=/srv/skin,readonly",
             FRONT_IMAGE,
             "validate-skin",
             "/srv/skin",
