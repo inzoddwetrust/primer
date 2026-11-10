@@ -8,6 +8,7 @@ DM-15 reaches it at the address ``docker inspect`` reports.
 import json
 import threading
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from itertools import count
@@ -134,7 +135,7 @@ def blank(port: int = 8000) -> Product:
 
 def compose(root: Path, port: int = 8000, commit: str = SHA) -> ComposeStack:
     return ComposeStack(
-        blank(port), ENTRY, root / "release", REF, commit, root, staged_env=True
+        blank(port), ENTRY, root / "release", REF, commit, root, staged=True
     )
 
 
@@ -197,7 +198,7 @@ def build_call(cs: ComposeStack, code: int = 0) -> FakeCall:
     """DM-45: the build runs on the candidate override (``<entry>.next.yml``)."""
     return FakeCall(
         tuple(
-            cs.candidate().argv(
+            cs.argv(
                 "build",
                 "--build-arg",
                 f"PRIMER_RELEASE={cs.ref}",
@@ -417,9 +418,14 @@ def run(
 
 
 def placed(cs: ComposeStack) -> None:
-    """The candidate override put in place, as ``packages`` does after a green
-    ``validate`` (DM-45): for a test whose plan has ``build`` alone and runs
-    it again on a box where the run went green."""
-    candidate = cs.candidate().override
-    cs.override.write_text(candidate.read_text())
-    candidate.unlink()
+    """The deploy's override put in place, as ``finalize`` does at the end of
+    a green plan: for a test whose plan has ``build`` alone and runs it again
+    on a box where the run went green.
+
+    Changed by DM-89 (by the dispatcher's word, before the change): it was
+    ``packages`` that put the candidate in place and removed it (DM-45); now
+    ``finalize`` copies the deploy's ``<entry>.next.yml`` to ``<entry>.yml``
+    and the deploy's stays, for the next run's ``build`` to compare."""
+    running = replace(cs, staged=False)
+    running.override.parent.mkdir(parents=True, exist_ok=True)
+    running.override.write_text(cs.override.read_text())

@@ -40,7 +40,7 @@ from pridem.runner import FakeCall, FakeRunner, OnLine, Result
 from pridem.stacks.seams import SeamMemory
 from pridem.steps.base import Waiting
 from pridem.steps.build import Build
-from pridem.steps.compose import NETWORK, ComposeStack, OverrideHandoff, override_text
+from pridem.steps.compose import NETWORK, ComposeStack, override_text
 from pridem.steps.migrate import Migrate
 from pridem.steps.up import Up
 
@@ -160,7 +160,7 @@ def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
         "root": tmp_path,
     }
     ladder = [
-        Build(cs.stack, cs.entry, **parts, handoff=OverrideHandoff()),  # type: ignore[arg-type]
+        Build(cs.stack, cs.entry, **parts),  # type: ignore[arg-type]
         Migrate(cs.stack, cs.entry, **parts),  # type: ignore[arg-type]
         Up(cs.stack, cs.entry, **parts),  # type: ignore[arg-type]
     ]

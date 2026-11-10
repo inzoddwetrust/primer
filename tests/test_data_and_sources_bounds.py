@@ -146,26 +146,28 @@ def test_a_copy_that_drifted_is_red(tmp_path: Path) -> None:
 
 
 def test_a_red_validate_is_validated_again_on_the_next_run(tmp_path: Path) -> None:
-    """The copy a red ``validate`` left is there; the override was not put in
-    place, so the next run's ``build`` renders it again and the service is off
-    the candidate's configuration: ``validate`` again, never green on a copy
-    no one validated. The pair: the service on that configuration -- the
-    copy was validated (it is what runs), nothing to do."""
+    """The copy a red ``validate`` left is there, and so is the deploy's
+    override that binds it; the service is off that configuration, so the next
+    run's ``data_copy`` validates again, never green on a copy no one
+    validated. The pair: the service on that configuration -- the copy was
+    validated (it is what runs), nothing to do.
+
+    Changed by DM-89: no text is handed from ``build`` any more and nothing
+    is put in place here (``finalize`` does it); with the service on the
+    configuration there is nothing at all to do, not an ``override`` to
+    place."""
     step, compose, item = _copy(tmp_path)
-    step.handoff.texts[compose.entry] = "{}\n"
     script = [image_call(compose, "comms-app", IMAGE), _validate(compose, item, 1)]
     with FakeRunner(*script) as runner:
         outcome, _ = run([step], runner)
     assert outcome.code is ExitCode.FAILED
     assert item.target.is_dir()
-    step.handoff.texts[compose.entry] = "{}\n"
-    with FakeRunner(*_hashes(compose.candidate(), "b" * 64)) as runner:
+    with FakeRunner(*_hashes(compose, "b" * 64)) as runner:
         check = step.check(context(runner))
     assert check.needed and check.data == {"validate": True}
-    with FakeRunner(*_hashes(compose.candidate(), "a" * 64)) as runner:
+    with FakeRunner(*_hashes(compose, "a" * 64)) as runner:
         check = step.check(context(runner))
-    assert check.needed and check.would is not None
-    assert check.would.code == "override"
+    assert not check.needed
 
 
 def test_every_kind_new_is_copied_not_the_first_alone(tmp_path: Path) -> None:
@@ -553,7 +555,7 @@ def test_the_override_binds_the_release_read_only(tmp_path: Path) -> None:
     release = tmp_path / "rel"
     release.mkdir()
     compose = ComposeStack(
-        made, "aivis", release, "main", "c" * 40, tmp_path, staged_env=True
+        made, "aivis", release, "main", "c" * 40, tmp_path, staged=True
     )
     rw: dict[str, Json] = {
         "type": "bind",

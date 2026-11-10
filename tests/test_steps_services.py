@@ -49,7 +49,6 @@ from pridem.steps.build import Build
 from pridem.steps.compose import (
     RUNNING_HASH_FORMAT,
     ComposeStack,
-    OverrideHandoff,
     override_text,
 )
 from pridem.steps.env import SeamsCheck
@@ -378,7 +377,7 @@ def test_the_override_carries_a_services_data_on_its_app(tmp_path: Path) -> None
     assert env == {"comms-app": {"PROFILE_DIR": "/primer/data/profile"}}
     comms = _service(tmp_path)
     compose = ComposeStack(
-        comms, "comms", tmp_path / "r", "v1.0.0", SHA, tmp_path, staged_env=True
+        comms, "comms", tmp_path / "r", "v1.0.0", SHA, tmp_path, staged=True
     )
     document: dict[str, Json] = {
         "services": {"comms-app": {"image": "x"}, "comms-redis": {"image": "r"}}
@@ -471,7 +470,6 @@ def _copy(tmp: Path) -> tuple[DataCopy, ComposeStack, DataItem]:
     item = _item(tmp)
     item.source.mkdir(parents=True)
     (item.source / "kinds.yaml").write_text("kinds: [a]\n")
-    handoff = OverrideHandoff()
     step = DataCopy(
         comms,
         "comms",
@@ -479,12 +477,11 @@ def _copy(tmp: Path) -> tuple[DataCopy, ComposeStack, DataItem]:
         ref="v1.0.0",
         commit=SHA,
         items=[item],
-        handoff=handoff,
         root=root,
     )
     return (
         step,
-        ComposeStack(comms, "comms", release, "v1.0.0", SHA, root, staged_env=True),
+        ComposeStack(comms, "comms", release, "v1.0.0", SHA, root, staged=True),
         item,
     )
 
@@ -632,10 +629,10 @@ def _verify(
     root = tmp / "box"
     stacks_of = {
         "aivis": ComposeStack(
-            made, "aivis", root / "a", "main", SHA, root, staged_env=True
+            made, "aivis", root / "a", "main", SHA, root, staged=True
         ),
         "comms": ComposeStack(
-            comms, "comms", root / "c", "v1.0.0", SHA, root, staged_env=True
+            comms, "comms", root / "c", "v1.0.0", SHA, root, staged=True
         ),
     }
     step = SeamsVerify(made, {"comms": comms}, stacks_of)
@@ -740,9 +737,7 @@ def test_test_services_come_up_with_the_database(tmp_path: Path) -> None:
         secrets=Secrets(()),
         root=root,
     )
-    compose = ComposeStack(
-        made, "aivis", root / "r", "main", SHA, root, staged_env=True
-    )
+    compose = ComposeStack(made, "aivis", root / "r", "main", SHA, root, staged=True)
     document = json.loads(json.dumps(CONFIG))
     document["services"]["app"]["environment"] = {
         "DATABASE_URL": "postgresql://u:p@postgres:5432/aivis"
@@ -934,7 +929,7 @@ def test_an_empty_directory_is_copied_too(tmp_path: Path) -> None:
 
 
 def test_build_puts_a_services_data_into_the_override(tmp_path: Path) -> None:
-    """The bind of the copy and its variable go into the candidate override of
+    """The bind of the copy and its variable go into the deploy's override of
     the entry's ``app``; the pair: without data, the override of before."""
     cs = compose(tmp_path)
     item = _item(tmp_path)
@@ -945,17 +940,16 @@ def test_build_puts_a_services_data_into_the_override(tmp_path: Path) -> None:
         ref=cs.ref,
         commit=cs.commit,
         root=tmp_path,
-        handoff=OverrideHandoff(),
         data=[item],
     )
     with FakeRunner(*green_build(tmp_path)) as runner:
         outcome, _ = run([build], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     mounts, env = data_binds([item], "app")
-    assert cs.candidate().override.read_text() == override_text(
+    assert cs.override.read_text() == override_text(
         cs, CONFIG, mounts, None, env, proxy=False, references=CONFIG
     )
-    assert cs.candidate().override.read_text() != override_text(
+    assert cs.override.read_text() != override_text(
         cs, CONFIG, proxy=False, references=CONFIG
     )
 

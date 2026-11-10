@@ -2,6 +2,7 @@
 package, ``validate`` on the new image before ``up``, the front's 200."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ from compose_support import (
 from compose_support import config_call as compose_config
 from compose_support import raw_config_call as compose_raw_config
 from edge_support import DOMAINS, Mixed, exec_call, passport, product
-from env_support import box, passport_data
+from env_support import box, context, passport_data
 from plan_support import ListSink
 
 from pridem.events import Code, Json, PlanOutcome
@@ -32,7 +33,6 @@ from pridem.steps.base import Step, Waiting
 from pridem.steps.build import Build
 from pridem.steps.compose import (
     ComposeStack,
-    OverrideHandoff,
     override_text,
     package_places,
 )
@@ -99,12 +99,11 @@ def packages(root: Path, fetched: Fetched, stack: Product) -> Packages:
         commit=SHA,
         fetched=fetched,
         root=root,
-        handoff=OverrideHandoff(),
     )
 
 
 def config_call(root: Path, stack: Product) -> FakeCall:
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged=True)
     return FakeCall(
         tuple(cs.product_argv("config", "--format", "json")),
         lines=stdout(json.dumps(CONFIG)),
@@ -148,7 +147,7 @@ def test_probe_DM_19_package_mount_rejects_paths_outside_release(
     root2, fetched2, package2 = skin_box(tmp_path / "ok")
     assert fetched2.passport is not None
     mounts = package_mounts(stack, ENTRY, fetched2.passport, root2)
-    cs = ComposeStack(stack, ENTRY, root2 / "release", REF, SHA, root2, staged_env=True)
+    cs = ComposeStack(stack, ENTRY, root2 / "release", REF, SHA, root2, staged=True)
     rendered = json.loads(
         override_text(cs, CONFIG, volumes(mounts), proxy=False, references=CONFIG)
     )
@@ -170,7 +169,7 @@ def test_red_validate_stops_before_anything_is_switched(tmp_path: Path) -> None:
     capability; the image of this run is never pulled."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, package = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged=True)
     labels = (
         "--label",
         "pridem.stack=blank",
@@ -233,7 +232,7 @@ def test_an_image_named_in_compose_is_used_only_without_build(
     network and no capability but no ``--pull never`` -- no step pulls it."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, package = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged=True)
     front: dict[str, Json] = {"image": "front:1", "networks": {"default": None}}
     if build:
         front["build"] = {"context": "/r/frontend", "dockerfile": "Dockerfile"}
@@ -292,7 +291,7 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
     anything is built. The pair: with the service, the package is no finding."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, _ = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged=True)
     services = CONFIG["services"]
     assert isinstance(services, dict)
     lacking = {
@@ -307,7 +306,6 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
         commit=SHA,
         root=root,
         fetched=fetched,
-        handoff=OverrideHandoff(),
     )
     script = [compose_raw_config(cs, lacking), compose_config(cs, lacking)]
     with FakeRunner(*script) as runner:  # nothing is built
@@ -428,7 +426,7 @@ def test_a_package_is_mounted_from_the_stack_dir_not_the_entry(tmp_path: Path) -
     assert fetched.passport is not None
     given = fetched.passport.packages["skin"]
     assert package == package_dir(root, "blank", given)  # fetch_packages' place
-    cs = ComposeStack(stack, "web", root / "release", REF, SHA, root, staged_env=True)
+    cs = ComposeStack(stack, "web", root / "release", REF, SHA, root, staged=True)
     step = Packages(
         stack,
         "web",
@@ -437,7 +435,6 @@ def test_a_package_is_mounted_from_the_stack_dir_not_the_entry(tmp_path: Path) -
         commit=SHA,
         fetched=fetched,
         root=root,
-        handoff=OverrideHandoff(),
     )
     config = FakeCall(
         tuple(cs.product_argv("config", "--format", "json")),
@@ -481,7 +478,7 @@ def test_packages_validate_only_when_a_service_they_mount_into_is_behind(
     business."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, _ = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged=True)
     step = packages(root, fetched, stack)
     config = config_call(root, stack)
     assert _doctor(step, config, *hash_calls(cs)) == []
@@ -560,23 +557,26 @@ def _image() -> FakeCall:
 
 
 @pytest.mark.parametrize("green", [False, True])
-def test_the_override_of_this_run_goes_in_place_only_after_a_green_validate(
+def test_packages_validate_the_deploys_override_and_put_nothing_in_place(
     tmp_path: Path, green: bool
 ) -> None:
-    """``build`` left its override as the candidate and handed its text over;
-    ``packages`` reads the candidate (``stale``) and puts the text in place
-    after ``validate`` -- red: the override on disk is the old one and the
-    candidate is gone; the pair, green: the new one is in place.
+    """``packages`` reads the deploy's override (``stale``) and validates;
+    red or green, the override of the running release is the old one and the
+    deploy's stays for ``finalize``.
 
     Changed by DM-79: the product's validate has no network and no
-    capability; the image of this run is never pulled."""
+    capability; the image of this run is never pulled.
+
+    Changed by DM-89 (was ``…_goes_in_place_only_after_a_green_validate``):
+    the override goes in place in ``finalize`` with ``current`` and
+    ``.env``, never in ``packages``."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, package = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged=True)
+    running = replace(cs, staged=False)
     cs.override.parent.mkdir(parents=True, exist_ok=True)
-    cs.override.write_text("old\n")
-    cs.candidate().override.write_text("new\n")
-    handoff = OverrideHandoff({ENTRY: "new\n"})
+    running.override.write_text("old\n")
+    cs.override.write_text("new\n")
     step = Packages(
         stack,
         ENTRY,
@@ -585,12 +585,11 @@ def test_the_override_of_this_run_goes_in_place_only_after_a_green_validate(
         commit=SHA,
         fetched=fetched,
         root=root,
-        handoff=handoff,
     )
     later = config_call(root, stack)
     script = [
         later,
-        *hash_calls(cs.candidate(), running={}),
+        *hash_calls(cs, running={}),
         later,
         _image(),
         _validate(package, 0 if green else 3),
@@ -599,27 +598,31 @@ def test_the_override_of_this_run_goes_in_place_only_after_a_green_validate(
         script += [later]  # verify reads the mounts back
     with FakeRunner(*script) as runner:
         outcome = run([step], runner)
-    assert not cs.candidate().override.exists()
+    assert running.override.read_text() == "old\n"
+    assert cs.override.read_text() == "new\n"
     if green:
         assert outcome.code is ExitCode.OK, outcome.steps
-        assert cs.override.read_text() == "new\n"
-        assert outcome.steps[0].verify["override"] == str(cs.override)
+        assert "override" not in outcome.steps[0].verify
     else:
         assert outcome.steps[0].reason is not None
         assert outcome.steps[0].reason.code == "command-failed"
-        assert cs.override.read_text() == "old\n"
 
 
-def test_a_candidate_left_by_another_run_is_never_put_in_place(tmp_path: Path) -> None:
-    """A red run left its candidate on disk; this run's ``build`` had nothing
-    to do (no text handed over): ``packages`` does not put it in place --
-    the pair: it does put this run's text in place."""
+def test_a_candidate_a_red_run_left_is_validated_again(tmp_path: Path) -> None:
+    """A red run left the deploy's override on disk, never validated green;
+    the services it mounts into are not on it, so the next run's
+    ``packages`` validates it again -- it goes in place only through a green
+    plan. The pair: after a green deploy the services run on it, and nothing
+    is validated.
+
+    Changed by DM-89 (was ``test_a_candidate_left_by_another_run_is_never_
+    put_in_place``): the handoff of ``build``'s text is gone; the ladder holds
+    the same guarantee, and this is its test."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, _ = skin_box(tmp_path)
-    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged_env=True)
+    cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged=True)
     cs.override.parent.mkdir(parents=True, exist_ok=True)
-    cs.override.write_text("old\n")
-    cs.candidate().override.write_text("unvalidated\n")
+    cs.override.write_text("unvalidated\n")
     step = Packages(
         stack,
         ENTRY,
@@ -628,21 +631,14 @@ def test_a_candidate_left_by_another_run_is_never_put_in_place(tmp_path: Path) -
         commit=SHA,
         fetched=fetched,
         root=root,
-        handoff=OverrideHandoff(),
     )
     later = config_call(root, stack)
-    with FakeRunner(later, *hash_calls(cs), later) as runner:  # all on it
-        outcome = run([step], runner)
-    assert outcome.code is ExitCode.OK, outcome.steps
-    assert cs.override.read_text() == "old\n"
-    # the pair: this run's text goes in place
-    step.handoff.texts[ENTRY] = "mine\n"
-    cs.candidate().override.write_text("mine\n")
-    with FakeRunner(later, *hash_calls(cs.candidate()), later) as runner:
-        outcome = run([step], runner)
-    assert outcome.code is ExitCode.OK, outcome.steps
-    assert cs.override.read_text() == "mine\n"
-    assert not cs.candidate().override.exists()
+    with FakeRunner(later, *hash_calls(cs, running={})) as runner:
+        check = step.check(context(runner))
+    assert check.needed and check.data == {"validate": True}
+    with FakeRunner(later, *hash_calls(cs)) as runner:  # all on it
+        check = step.check(context(runner))
+    assert not check.needed
 
 
 def test_a_front_still_starting_is_asked_again_until_200(tmp_path: Path) -> None:

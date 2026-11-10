@@ -126,7 +126,7 @@ def script(cs: ComposeStack, env_dir: Path) -> list[FakeCall]:
         config_call(cs, CONFIG),
         FakeCall(
             tuple(
-                cs.candidate().argv(
+                cs.argv(
                     "build",
                     "--build-arg",
                     f"PRIMER_RELEASE={cs.ref}",

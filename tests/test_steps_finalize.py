@@ -16,6 +16,7 @@ from pridem.report.codes import ExitCode
 from pridem.stacks.env import env_file, write_private
 from pridem.state import Box
 from pridem.steps.base import CheckResult, Step, StepContext, StepFailed, Verified
+from pridem.steps.compose import override_file
 from pridem.steps.finalize import FinalCheck, Finalize, current_link
 from pridem.steps.passport import Fetched
 
@@ -41,12 +42,17 @@ def fetched_passport(tmp: Path) -> Fetched:
 
 def finalize(tmp: Path, box: Box) -> tuple[Finalize, Path]:
     """``finalize`` of the stack ``blank``, its release made and the deploy's
-    environment written, as ``render_env`` of the plan writes it (DM-68)."""
+    environment and override written, as ``render_env`` and ``build`` of the
+    plan write them (DM-68, DM-89)."""
     release = tmp / "opt" / "blank" / "releases" / ("c" * 40)
     release.mkdir(parents=True)
     write_private(env_file(tmp, "blank", staged=True), "A='new'\n")
+    staged = override_file(tmp, "blank", "blank", staged=True)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text("services: {new: {}}\n")
     step = Finalize(
         releases={"blank": release},
+        entries={"blank": ["blank"]},
         composition={"blank": "c" * 40, "pridem": "0.0.0"},
         box=box,
         fetched=fetched_passport(tmp),

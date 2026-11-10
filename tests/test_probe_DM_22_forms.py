@@ -133,9 +133,7 @@ JOB_HASHES = {**HASHES, "init": "1" * 64}
 
 
 def cs_of(stack: Product, root: Path, commit: str = SHA) -> ComposeStack:
-    return ComposeStack(
-        stack, ENTRY, root / "release", REF, commit, root, staged_env=True
-    )
+    return ComposeStack(stack, ENTRY, root / "release", REF, commit, root, staged=True)
 
 
 def up_of(stack: Product, root: Path, commit: str = SHA) -> Up:

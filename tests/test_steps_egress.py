@@ -44,7 +44,6 @@ from pridem.steps.compose import (
     PROXY_ALIAS,
     PROXY_URL,
     ComposeStack,
-    OverrideHandoff,
     override_text,
 )
 from pridem.steps.egress import (
@@ -206,7 +205,6 @@ def test_build_refuses_an_unlisted_host_before_any_command(tmp_path: Path) -> No
         ref=REF,
         commit=SHA,
         root=tmp_path,
-        handoff=OverrideHandoff(),
     )
     with FakeRunner() as runner:  # nothing runs
         outcome, _ = run([step], runner)
@@ -224,7 +222,6 @@ def test_build_refuses_an_unlisted_host_before_any_command(tmp_path: Path) -> No
         ref=REF,
         commit=SHA,
         root=tmp_path,
-        handoff=OverrideHandoff(),
     )
     # (the strict runner names the unplanned command when the plan is over)
     with pytest.raises(AssertionError, match="'config'"), FakeRunner() as runner:
@@ -264,9 +261,7 @@ def test_check_names_an_unlisted_host_by_the_same_function(tmp_path: Path) -> No
 def rendered(
     stack: Product | Service, document: Mapping[str, Json] = CONFIG
 ) -> dict[str, Json]:
-    cs = ComposeStack(
-        stack, ENTRY, Path("/release"), REF, SHA, Path("/"), staged_env=True
-    )
+    cs = ComposeStack(stack, ENTRY, Path("/release"), REF, SHA, Path("/"), staged=True)
     proxy = isinstance(stack, Product) and bool(stack.egress)  # every host open
     loaded = json.loads(override_text(cs, document, proxy=proxy, references=document))
     assert isinstance(loaded, dict)

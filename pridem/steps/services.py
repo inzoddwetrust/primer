@@ -27,8 +27,8 @@ digest of ``tree`` of the source (DM-81). New data is a new directory, never
 a directory replaced: a running container mounts the directory's inode, so a
 directory replaced under it leaves the service on an empty, removed one and
 ``up`` never restarts it (one path, one configuration hash). A new path is a
-new bind in the override, so ``up`` recreates the service on it -- and only
-after the green ``validate``, since the override is put in place only then.
+new bind in the deploy's override, so ``up`` recreates the service on it --
+after the green ``validate``, which comes first in the ladder.
 The copy goes to ``<kind>@<digest>.tmp`` and is renamed to a name not taken;
 a copy whose files are no longer the source's is not the machine's doing
 (it writes only that way): ``copy-drift``, red. ``gc`` removes the copies no
@@ -38,15 +38,16 @@ container mounts but the newest of each kind.
 image, the copy mounted, with no network, no capability and no pull
 (``--network none --cap-drop ALL --pull never``) -- before the service's
 ``migrate``,
-the point of no return: red (``validate-failed``) leaves the override on disk
-as it was, so the running service stays on its old data and its old image,
-and the plan stops before the service and the product (protocol 4.5, 4.6:
-the machine joins no data). Green puts the override ``build`` rendered in
-place, as ``packages`` does for the product; ``up`` then restarts the service
-on it. A copy is validated when it is new, and every copy when the
-service's application is not on its configuration (another image, another
-override): "the target image" of protocol 4.5. With nothing to copy the step
-only puts the override in place.
+the point of no return: red (``validate-failed``) stops the plan before the
+service and the product, and the running service stays on its old data and
+its old image (protocol 4.5, 4.6: the machine joins no data). Green lets the
+ladder go on to ``up``, which restarts the service on the deploy's override
+(``<entry>.next.yml``, ``build``'s). The override of the release ``current``
+names changes only in ``finalize`` (DM-89), as for the product's packages. A
+copy is validated when it is new, and every copy when the service's
+application is not on the deploy's configuration (another image, another
+override): "the target image" of protocol 4.5. With nothing to copy and
+nothing behind the step has nothing to do.
 
 ``seams_verify`` -- after the product's ``up``: every seam is held by the live
 provider, not by a file. For a seam of the product from a service, the name is
@@ -85,13 +86,11 @@ from pridem.steps.base import (
 )
 from pridem.steps.compose import (
     ComposeStack,
-    OverrideHandoff,
     bind,
     image_of,
     mount_flag,
     out,
     stale,
-    write_override,
 )
 from pridem.steps.sources import package_dir
 
@@ -278,8 +277,6 @@ class DataCopy(Step):
     codes: ClassVar[dict[str, str]] = {
         "copy": "copy {kinds} of the product to {service} and validate them",
         "validate": "validate {kinds} of the product with the new {service}",
-        "override": "put the override of {entry} in place",
-        "override-not-placed": "the override of {entry} is not the one build rendered",
         "data-missing": "{service}.{kind}: {path} is not in the product",
         "data-unsafe": "{service}.{kind}: {paths} lead out of {base}",
         "data-special": "{service}.{kind}: {paths} are neither files, directories "
@@ -299,17 +296,12 @@ class DataCopy(Step):
         ref: str,
         commit: str,
         items: Sequence[DataItem],
-        handoff: OverrideHandoff,
         root: Path = Path("/"),
     ) -> None:
         self.compose = ComposeStack(
-            service, entry, release, ref, commit, root, staged_env=True
+            service, entry, release, ref, commit, root, staged=True
         )
         self.items = list(items)
-        self.handoff = handoff
-
-    def _pending(self) -> str | None:
-        return self.handoff.texts.get(self.compose.entry)
 
     def _params(self, item: DataItem) -> dict[str, Json]:
         return {"service": self.compose.name, "kind": item.kind}
@@ -352,7 +344,6 @@ class DataCopy(Step):
 
     def check(self, ctx: StepContext) -> CheckResult:
         self._sound()
-        pending = self._pending()
         changed = self._changed()
         kinds: list[Json] = list[Json](item.kind for item in self.items)
         if changed:
@@ -363,28 +354,17 @@ class DataCopy(Step):
             return CheckResult(True, local_code("copy", params), {"validate": True})
         if self.items:
             app = self.compose.app_service
-            view = self.compose if pending is None else self.compose.candidate()
-            if app is not None and app in stale(ctx, view):
+            if app is not None and app in stale(ctx, self.compose):
                 params = {"kinds": kinds, "service": self.compose.name}
                 code = local_code("validate", params)
                 return CheckResult(True, code, {"validate": True})
-        if pending is not None:
-            code = local_code("override", {"entry": self.compose.entry})
-            return CheckResult(True, code)
         return CheckResult(False)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        pending = self._pending()
-        try:
-            for item in self._changed():
-                copy_tree(item.source, item.target)
-            if check.data.get("validate") is True:
-                self._validate(ctx)
-        finally:
-            if pending is not None:
-                self.compose.candidate().override.unlink(missing_ok=True)
-        if pending is not None:  # every validate green: the override in place
-            write_override(self.compose, pending)
+        for item in self._changed():
+            copy_tree(item.source, item.target)
+        if check.data.get("validate") is True:
+            self._validate(ctx)
 
     def _validate(self, ctx: StepContext) -> None:
         app = self.compose.app_service
@@ -434,13 +414,6 @@ class DataCopy(Step):
             )
         found: dict[str, Json] = {item.kind: str(item.target) for item in self.items}
         fact: dict[str, Json] = {"data": found} if found else {"data": "none"}
-        pending = self._pending()
-        if pending is not None:
-            path = self.compose.override
-            text = path.read_text(encoding="utf-8") if path.exists() else None
-            if text != pending or self.compose.candidate().override.exists():
-                raise StepFailed("override-not-placed", {"entry": self.compose.entry})
-            fact["override"] = str(path)
         return Verified(fact)
 
 

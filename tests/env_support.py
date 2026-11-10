@@ -207,7 +207,7 @@ def derive(
         "v1.0.0",
         RELEASE_SHA,
         root,
-        staged_env=True,
+        staged=True,
     )
     return DeriveEnv(render, Built(compose, image, built))
 

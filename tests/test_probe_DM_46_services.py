@@ -1,6 +1,7 @@
 """The probes of DM-46: services in the plan (protocol 4, 4.3-4.6; contract 3
 rules 11, 13)."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
@@ -18,7 +19,7 @@ from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
 from pridem.stacks.seams import SeamMemory
 from pridem.steps.base import StepFailed
-from pridem.steps.compose import ComposeStack, OverrideHandoff, write_override
+from pridem.steps.compose import ComposeStack, write_override
 from pridem.steps.env import RenderEnv
 from pridem.steps.services import DataCopy, DataItem
 
@@ -86,7 +87,7 @@ def test_probe_DM_46_product_waits_for_all_provides(tmp_path: Path) -> None:
 # --- data_copy -----------------------------------------------------------------
 
 
-def _data_copy(tmp: Path) -> tuple[DataCopy, ComposeStack, DataItem, OverrideHandoff]:
+def _data_copy(tmp: Path) -> tuple[DataCopy, ComposeStack, DataItem]:
     comms = service_stack(tmp, {})
     root = tmp / "box"
     release = root / "opt" / "comms" / "releases" / "v1.0.0"
@@ -102,7 +103,6 @@ def _data_copy(tmp: Path) -> tuple[DataCopy, ComposeStack, DataItem, OverrideHan
         "PROFILE_DIR",
         "comms validate --profile <dir>",
     )
-    handoff = OverrideHandoff()
     step = DataCopy(
         comms,
         "comms",
@@ -110,16 +110,13 @@ def _data_copy(tmp: Path) -> tuple[DataCopy, ComposeStack, DataItem, OverrideHan
         ref="v1.0.0",
         commit=SHA,
         items=[item],
-        handoff=handoff,
         root=root,
     )
-    compose = ComposeStack(
-        comms, "comms", release, "v1.0.0", SHA, root, staged_env=True
-    )
-    write_override(compose, "old\n")  # the override the running service is on
-    handoff.texts["comms"] = "new\n"  # build's of this run
-    write_override(compose.candidate(), "new\n")
-    return step, compose, item, handoff
+    compose = ComposeStack(comms, "comms", release, "v1.0.0", SHA, root, staged=True)
+    # the override the running service is on; the deploy's, build's of this run
+    write_override(replace(compose, staged=False), "old\n")
+    write_override(compose, "new\n")
+    return step, compose, item
 
 
 def _validate_call(compose: ComposeStack, item: DataItem, code: int) -> FakeCall:
@@ -171,14 +168,19 @@ def test_probe_DM_46_overlay_validate_failure_leaves_old_running(
     tmp_path: Path, code: int
 ) -> None:
     """A red ``validate`` of the new profile by the new image: the override on
-    disk stays the one the running service is on, the candidate is gone, the
-    service is not restarted (``up`` never runs); the pair -- green: the
-    override of this run in place, the ladder goes on.
+    disk stays the one the running service is on, the service is not
+    restarted (``up`` never runs); the pair -- green: the ladder goes on to
+    ``up``, on the deploy's override.
+
+    Changed by DM-89 (by the dispatcher's word, before the change): the
+    override goes in place in ``finalize`` with ``current`` and ``.env``, not
+    in ``data_copy``; the deploy's (``<entry>.next.yml``) is what ``up`` reads,
+    and it stays for ``finalize``.
 
     Changed by DM-79 (``_validate_call``; by the dispatcher's word, before the change):
     throwaway containers drop every capability; an image of this run is never
     pulled."""
-    step, compose, item, _ = _data_copy(tmp_path)
+    step, compose, item = _data_copy(tmp_path)
     runner = FakeRunner(
         image_call(compose, "comms-app", "sha256:" + "c" * 64),
         _validate_call(compose, item, code),
@@ -188,11 +190,11 @@ def test_probe_DM_46_overlay_validate_failure_leaves_old_running(
     outcome = _plan(step, runner, up).run()
     runner.assert_consumed()
     by = {record.name: record for record in outcome.steps}
-    assert not compose.candidate().override.exists()
+    running = replace(compose, staged=False)
+    assert running.override.read_text() == "old\n"  # red or green: finalize's
     if code:
         assert by["data_copy"].reason is not None
         assert by["data_copy"].reason.code == "data_copy:validate-failed"
-        assert compose.override.read_text() == "old\n"
         assert by["up"].status == "skipped" and journal == []
     else:
         assert outcome.code is ExitCode.OK, outcome.steps

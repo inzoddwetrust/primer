@@ -17,20 +17,22 @@ would write -- the passport's version and ops commit too: a new passport on
 the same releases is applied by the run, and ``state.json`` says so (DM-81);
 ``verify`` reads both back (``state-passport``).
 
-With ``current`` goes the environment (DM-68): a deploy's steps run on
-``env/next.env``, the release that runs keeps ``env/.env`` until this step
-copies the first over the second, stack by stack, right after its
-``current``. ``check`` acts when ``.env`` is not ``next.env``; ``verify``
-reads it back (``env``).
+With ``current`` go the environment (DM-68) and the overrides (DM-89): a
+deploy's steps run on ``env/next.env`` and ``compose/<entry>.next.yml``, the
+release that runs keeps ``env/.env`` and ``compose/<entry>.yml`` until this
+step copies the deploy's over them, stack by stack, right after its
+``current`` -- every entry of the stack's ``primer.yaml`` (``entries``), no
+file found by name. ``check`` acts when one of them is not the deploy's;
+``verify`` reads them back (``env``, ``override``).
 """
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
-from pridem.files import fsync_dir
+from pridem.files import atomic_write, fsync_dir
 from pridem.stacks.env import env_file, write_private
 from pridem.state import Box, BoxState
 from pridem.steps.base import (
@@ -42,6 +44,7 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
+from pridem.steps.compose import override_file
 from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
@@ -86,18 +89,23 @@ class Finalize(Step):
         "state-passport": "state.json does not name passport v{passport_version} "
         "from {ops_commit}",
         "env": "env/.env of {stack} is not the environment of its release",
+        "override": "the override of {stack} {entry} is not the one of its release",
     }
 
     def __init__(
         self,
         *,
         releases: Mapping[str, Path],
+        entries: Mapping[str, Sequence[str]],
         composition: Mapping[str, str],
         box: Box,
         fetched: Fetched,
         root: Path = Path("/"),
     ) -> None:
         self.releases = dict(releases)
+        self.entries = {stack: list(entries[stack]) for stack in releases}
+        """The entries of each stack's ``primer.yaml``: their overrides go
+        with ``current``."""
         self.composition = dict(composition)
         self.box = box
         self.fetched = fetched
@@ -142,8 +150,23 @@ class Finalize(Step):
                 behind.append(stack)
         return behind
 
+    def _overrides_behind(self) -> list[tuple[str, str]]:
+        """The entries whose override is not the deploy's -- or is missing,
+        or has none to be."""
+        behind = []
+        for stack in sorted(self.releases):
+            for entry in self.entries[stack]:
+                staged = override_file(self.root, stack, entry, staged=True)
+                running = override_file(self.root, stack, entry, staged=False)
+                if not (staged.is_file() and running.is_file()) or (
+                    staged.read_bytes() != running.read_bytes()
+                ):
+                    behind.append((stack, entry))
+        return behind
+
     def check(self, ctx: StepContext) -> CheckResult:
-        behind = sorted({*self._behind(), *self._env_behind()})
+        overrides = {stack for stack, _ in self._overrides_behind()}
+        behind = sorted({*self._behind(), *self._env_behind(), *overrides})
         state = self.box.read_state()
         passport = self.fetched.passport
         same = (
@@ -176,23 +199,31 @@ class Finalize(Step):
             os.symlink(release, temp)
             os.replace(temp, link)  # never a moment without current
             fsync_dir(link.parent)  # the switch survives a power loss
-            # KNOWN CEILING (DM-68): current and .env are two names, switched
-            # one after the other.
-            # 1. A run cut between the two leaves the new release under
-            #    current with the old release's .env: a variable it lacks
-            #    fails loudly on ${VAR:?}, one it changed runs silently old
-            #    on the next compose command of current, until the next run.
+            # KNOWN CEILING (DM-68, DM-89): current, .env and the overrides
+            # are several names, switched one after another, in this order.
+            # 1. A run cut between them leaves the new release under current
+            #    with the old release's .env or overrides: a variable it lacks
+            #    fails loudly on ${VAR:?}; a value it changed, an old bind of
+            #    a package or of a service's data, an old label run silently
+            #    old on the next compose command of current, until the next
+            #    run.
             # 2. Status: acknowledged by design.
-            # 3. Task: none -- a window of two writes on one disk, which the
-            #    next run closes (``check``: .env behind -> act).
-            # 4. Trigger: a run seen with the old environment after a cut
-            #    finalize.
-            # 5. Fix agreed: the pair switched at once, behind one symlink.
-            # 6. Rejected: .env before current -- the old release on the new
-            #    values, the very defect of DM-68.
+            # 3. Task: none -- a window of a few writes on one disk, which the
+            #    next run closes (``check``: .env or an override behind ->
+            #    act).
+            # 4. Trigger: a run seen with the old environment or override
+            #    after a cut finalize.
+            # 5. Fix agreed: the files switched at once, behind one symlink.
+            # 6. Rejected: .env or an override before current -- the old
+            #    release on the new values, the very defect of DM-68 and
+            #    DM-89.
             staged = env_file(self.root, stack, staged=True)
             running = env_file(self.root, stack, staged=False)
             write_private(running, staged.read_text(encoding="utf-8"))
+            for entry in self.entries[stack]:
+                staged = override_file(self.root, stack, entry, staged=True)
+                running = override_file(self.root, stack, entry, staged=False)
+                atomic_write(running, staged.read_bytes(), 0o644)
         self.box.write_state(self._state())
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
@@ -207,6 +238,10 @@ class Finalize(Step):
         env = self._env_behind()
         if env:
             raise StepFailed("env", {"stack": env[0]})
+        overrides = self._overrides_behind()
+        if overrides:
+            stack, entry = overrides[0]
+            raise StepFailed("override", {"stack": stack, "entry": entry})
         state = self.box.read_state()
         wanted = self._wanted()
         for stack, name in wanted.items():
@@ -231,5 +266,10 @@ class Finalize(Step):
                 "state": "written",
                 "passport_version": passport.version,
                 "env": list[Json](sorted(self.releases)),
+                "override": [
+                    f"{stack}/{entry}"
+                    for stack in sorted(self.releases)
+                    for entry in self.entries[stack]
+                ],
             }
         )

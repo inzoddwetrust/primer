@@ -6,6 +6,10 @@ only in ``finalize``, with ``current``. A new value of the passport on the same
 commit -- the same release, the same name -- and a red step before the point
 of no return: a compose command of the running release gets its old
 environment. The pair: a green deploy -- the new release has the new one.
+
+Changed by DM-89 (setup only, the assertions as they were): ``finalize``
+takes the entries whose overrides go with ``current``, and the deploy's
+override is written as ``build`` of the plan writes it.
 """
 
 from pathlib import Path
@@ -18,7 +22,7 @@ from pridem.report.codes import ExitCode
 from pridem.stacks.env import parse_env
 from pridem.state import Box
 from pridem.steps.base import StepFailed
-from pridem.steps.compose import ComposeStack
+from pridem.steps.compose import ComposeStack, write_override
 from pridem.steps.finalize import FinalCheck, Finalize, current_link
 
 COMMIT = "c" * 40
@@ -41,8 +45,12 @@ def _deploy(tmp: Path, value: str, *, red: bool) -> tuple[ExitCode, ComposeStack
         if red
         else ScriptedStep("tests", 10, journal, fact={"tests": "ok"})
     )
+    write_override(
+        ComposeStack(made, "aivis", release, "main", COMMIT, root, staged=True), "{}\n"
+    )
     finalize = Finalize(
         releases={"aivis": release},
+        entries={"aivis": list(made.stacks)},
         composition={"aivis": COMMIT, "pridem": "0.0.0"},
         box=pridem,
         fetched=fetched,

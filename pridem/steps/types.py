@@ -99,7 +99,7 @@ class Types(Step):
         env: Mapping[str, str] | None = None,
     ) -> None:
         self.compose = ComposeStack(
-            stack, entry, release, ref, commit, root, staged_env=True
+            stack, entry, release, ref, commit, root, staged=True
         )
         self.types = stack.stacks[entry].types
         self.role = role

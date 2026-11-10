@@ -203,7 +203,7 @@ class Up(Step):
         points: Sequence[Pair] = (),
     ) -> None:
         self.compose = ComposeStack(
-            stack, entry, release, ref, commit, root, staged_env=True
+            stack, entry, release, ref, commit, root, staged=True
         )
         self.points = list(points)  # the pairs of the box (DM-62)
         self.fetched = fetched

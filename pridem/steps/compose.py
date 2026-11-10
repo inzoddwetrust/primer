@@ -1,13 +1,16 @@
 """Compose of one entry of ``stacks`` as the machine runs it (TZ 7.3).
 
 Every command is ``docker compose -p <entry> --env-file /opt/<name>/env/<file>
--f <release>/<compose> -f /opt/<name>/compose/<entry>.yml``: the project name
-is the machine's, the env is the rendered one (DM-14) -- ``next.env``, the
-deploy's, for the steps of a deploy (``staged_env``), ``.env``, the release's
-``current`` names, for any other command (DM-68; ``stacks.env.env_file``) --
-the product's compose
-is read from the immutable release, and the second file is the machine's own
-override. The product's compose is never changed (contract 3 rule 9).
+-f <release>/<compose> -f /opt/<name>/compose/<entry><suffix>``: the project
+name is the machine's, the env is the rendered one (DM-14), the product's
+compose is read from the immutable release, and the second file is the
+machine's own override. The product's compose is never changed (contract 3
+rule 9). A step of a deploy runs on the deploy's two files (``staged``):
+``env/next.env`` and ``compose/<entry>.next.yml``, which ``build`` renders;
+any other command runs on those of the release ``current`` names --
+``env/.env`` and ``compose/<entry>.yml``, which only ``finalize`` writes, with
+``current`` (DM-68, DM-89). A step red before the point of no return leaves
+the running release its environment and its override.
 
 The override is rendered from ``docker compose config --format json`` of the
 product's file and carries what the machine adds:
@@ -73,7 +76,7 @@ import json
 import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -110,6 +113,15 @@ _CURRENT = re.compile(r"^([0-9A-Za-z_]+)(?: \(head\))?$")
 Stack = Product | Service
 
 
+def override_file(root: Path, name: str, entry: str, *, staged: bool) -> Path:
+    """The machine's override of ``entry`` of stack ``name``: the deploy's
+    ``<entry>.next.yml`` (``staged``) or ``<entry>.yml`` of the release
+    ``current`` names -- the one function every reader and writer of either
+    goes by."""
+    suffix = ".next.yml" if staged else ".yml"
+    return root / "opt" / name / "compose" / f"{entry}{suffix}"
+
+
 @dataclass(frozen=True)
 class ComposeStack:
     """One entry of ``stacks`` at one release of its repository."""
@@ -120,22 +132,17 @@ class ComposeStack:
     ref: str
     commit: str
     root: Path = Path("/")
-    next: bool = False
-    """The candidate override (``build``'s of this run) in place of the one on
-    disk: ``override`` names ``<entry>.next.yml``."""
-    staged_env: bool = False
-    """The deploy's environment (``env/next.env``) in place of the one of the
-    release ``current`` names (``env/.env``): what a step of a deploy runs on.
-    The default is the running release's -- a command that does not ask for
-    the deploy's never reads a value no gate passed yet (DM-68)."""
+    staged: bool = False
+    """The deploy's files -- ``env/next.env`` and ``compose/<entry>.next.yml``
+    -- in place of those of the release ``current`` names (``env/.env``,
+    ``compose/<entry>.yml``): what a step of a deploy runs on, both together,
+    never one of them. The default is the running release's: a command that
+    does not ask for the deploy's never reads what no gate passed yet (DM-68,
+    DM-89)."""
 
     @property
     def name(self) -> str:
         return self.stack.name
-
-    def candidate(self) -> "ComposeStack":
-        """The same entry with the candidate override."""
-        return replace(self, next=True)
 
     @property
     def project(self) -> str:
@@ -143,7 +150,7 @@ class ComposeStack:
 
     @property
     def env_file(self) -> Path:
-        return env_file(self.root, self.name, staged=self.staged_env)
+        return env_file(self.root, self.name, staged=self.staged)
 
     @property
     def compose_file(self) -> Path:
@@ -151,8 +158,7 @@ class ComposeStack:
 
     @property
     def override(self) -> Path:
-        suffix = ".next.yml" if self.next else ".yml"
-        return self.root / "opt" / self.name / "compose" / f"{self.entry}{suffix}"
+        return override_file(self.root, self.name, self.entry, staged=self.staged)
 
     @property
     def app_service(self) -> str | None:
@@ -924,16 +930,6 @@ def override_text(
     if volumes:
         rendered["volumes"] = volumes
     return json.dumps(rendered, indent=2, sort_keys=True) + "\n"
-
-
-@dataclass
-class OverrideHandoff:
-    """The override ``build`` rendered in this run, by entry: it waits as the
-    candidate (``ComposeStack.candidate``) until ``packages`` puts it in place
-    after a green ``validate``. Kept in memory only: a candidate a red run
-    left on disk is never put in place by a later run."""
-
-    texts: dict[str, str] = field(default_factory=dict)
 
 
 def write_override(compose: ComposeStack, text: str) -> None:

@@ -113,7 +113,7 @@ class Migrate(Step):
         fetched: Fetched | None = None,
     ) -> None:
         self.compose = ComposeStack(
-            stack, entry, release, ref, commit, root, staged_env=True
+            stack, entry, release, ref, commit, root, staged=True
         )
         self.fetched = fetched
         stage = stack.stacks[entry]

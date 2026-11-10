@@ -19,12 +19,13 @@ with ``dependency`` -- the section of a package a service takes -- is not a
 bind of the product: ``data_copy`` of that service copies it (form D,
 ``steps/services.py``).
 
-The override ``build`` rendered in this run (``OverrideHandoff``) waits as
-the candidate until here: ``check`` and ``validate`` read the candidate, and
-``act`` puts it in place (``write_override``) only after every ``validate`` is
-green -- with no runtime package, at once. A red ``validate`` leaves the
-override that was on disk and removes the candidate; a candidate of another
-run is never put in place, the text comes from this run's ``build`` alone.
+``check`` and ``validate`` read the deploy's override (``<entry>.next.yml``,
+``build``'s). Nothing here puts it in place: ``finalize`` does, with
+``current`` and ``.env``, at the end of a plan in which every ``validate`` its
+services needed was green (DM-89). A red ``validate`` stops the plan; the
+override of the release that runs is as it was. A candidate a red run left
+is validated again by the next: its services are not on its configuration
+until ``up`` of a green run puts them there.
 
 ``check`` refuses, before anything is run: a directory that resolves out of
 the package (a symlink of the package's repository), a package not on the box.
@@ -75,14 +76,12 @@ from pridem.steps.base import (
 from pridem.steps.compose import (
     REFUSAL_CODES,
     ComposeStack,
-    OverrideHandoff,
     bind,
     config,
     image_of,
     mount_flag,
     out,
     stale,
-    write_override,
 )
 from pridem.steps.passport import NO_PASSPORT, Fetched
 from pridem.steps.sources import package_dir, package_release
@@ -300,8 +299,6 @@ class Packages(Step):
         **NO_PASSPORT,
         **KEY_CODES,
         "validate": "validate the packages {slots}",
-        "override": "put the override of {entry} in place",
-        "override-not-placed": "the override of {entry} is not the one build rendered",
         "path-outside": "{slot}: mount from {from} leaves the package",
         "missing-release": "{slot}: {path} is not on the box",
         "no-image": "{slot}: no image of {service} at {commit}",
@@ -316,20 +313,14 @@ class Packages(Step):
         ref: str,
         commit: str,
         fetched: Fetched,
-        handoff: OverrideHandoff,
         root: Path = Path("/"),
     ) -> None:
         self.product = product
         self.compose = ComposeStack(
-            product, entry, release, ref, commit, root, staged_env=True
+            product, entry, release, ref, commit, root, staged=True
         )
         self.fetched = fetched
-        self.handoff = handoff
         self.root = root
-
-    def _pending(self) -> str | None:
-        """The override ``build`` rendered in this run, not yet in place."""
-        return self.handoff.texts.get(self.compose.entry)
 
     def _mounts(self, ctx: StepContext) -> tuple[list[PackageMount], dict[str, Json]]:
         passport = self.fetched.passport
@@ -358,20 +349,16 @@ class Packages(Step):
         package's release, so another version -- or no container at all --
         is another hash. On a box whose containers already run on these
         packages there is nothing to validate and ``doctor`` stays empty.
-        With an override of this run's ``build`` pending, the configuration
-        is the candidate's, and putting it in place is needed in any case."""
-        pending = self._pending()
-        place = CheckResult(True, local_code("override", {"entry": self.compose.entry}))
+        The configuration is the deploy's: its override and environment."""
         mounts, _ = self._mounts(ctx)
         if mounts:
-            view = self.compose if pending is None else self.compose.candidate()
-            behind = stale(ctx, view)
+            behind = stale(ctx, self.compose)
             if any(mount.service in behind for mount in mounts):
                 # act validates every mounted package, the unchanged ones too
                 slots: list[Json] = list[Json](sorted({m.slot for m in mounts}))
                 code = local_code("validate", {"slots": slots})
                 return CheckResult(True, code, {"validate": True})
-        return place if pending is not None else CheckResult(False)
+        return CheckResult(False)
 
     def _image(
         self, ctx: StepContext, mount: PackageMount, known: dict[str, Json]
@@ -399,15 +386,8 @@ class Packages(Step):
         )
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        pending = self._pending()
-        try:
-            if check.data.get("validate") is True:
-                self._validate(ctx)
-        finally:
-            if pending is not None:
-                self.compose.candidate().override.unlink(missing_ok=True)
-        if pending is not None:  # every validate green: the override in place
-            write_override(self.compose, pending)
+        if check.data.get("validate") is True:
+            self._validate(ctx)
 
     def _validate(self, ctx: StepContext) -> None:
         mounts, known = self._mounts(ctx)
@@ -449,11 +429,4 @@ class Packages(Step):
         mounts, _ = self._mounts(ctx)
         found: dict[str, Json] = {mount.slot: mount.release for mount in mounts}
         fact: dict[str, Json] = {"packages": found} if found else {"packages": "none"}
-        pending = self._pending()
-        if pending is not None:
-            path = self.compose.override
-            text = path.read_text(encoding="utf-8") if path.exists() else None
-            if text != pending or self.compose.candidate().override.exists():
-                raise StepFailed("override-not-placed", {"entry": self.compose.entry})
-            fact["override"] = str(path)
         return Verified(fact)

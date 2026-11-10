@@ -184,7 +184,7 @@ def types(
     return (
         step,
         remote,
-        ComposeStack(made, ENTRY, release, REF, commit, tmp, staged_env=True),
+        ComposeStack(made, ENTRY, release, REF, commit, tmp, staged=True),
     )
 
 
@@ -262,7 +262,7 @@ def test_the_same_types_need_no_commit(tmp_path: Path, openapi: int) -> None:
         generator=generate,
         env=GIT_ENV,
     )
-    cs = ComposeStack(made, ENTRY, release, REF, commit, tmp_path, staged_env=True)
+    cs = ComposeStack(made, ENTRY, release, REF, commit, tmp_path, staged=True)
     with RealGit(*app_calls(openapi, cs, 1)) as runner:
         outcome = run(step, runner)
     assert outcome.steps[0].verify == {"types": "current", "path": OUT}

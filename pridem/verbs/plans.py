@@ -71,7 +71,7 @@ from pridem.stacks.schema import Derived, Product, Service
 from pridem.stacks.seams import Pair, SeamMemory, installed, pairs
 from pridem.steps.base import Step
 from pridem.steps.build import Build
-from pridem.steps.compose import ComposeStack, OverrideHandoff
+from pridem.steps.compose import ComposeStack
 from pridem.steps.destroy import STACK as DESTROY_STACK
 from pridem.steps.destroy import destroy_steps
 from pridem.steps.egress import Egress
@@ -182,7 +182,6 @@ class _Known:
     the dependencies' keys."""
     product: Product | None = None
     memory: SeamMemory = field(default_factory=SeamMemory)
-    handoff: OverrideHandoff = field(default_factory=OverrideHandoff)
     stopped: Stopped = field(default_factory=Stopped)
     """What ``stop_for_migrate`` stopped; ``start_stopped`` reads it (DM-22)."""
 
@@ -377,7 +376,6 @@ def deploy_plan(
                 ref=tag,
                 commit=commit,
                 root=root,
-                handoff=known.handoff,
                 fetched=fetched,
                 data=mine,
                 points=points(product),
@@ -394,7 +392,6 @@ def deploy_plan(
                     ref=tag,
                     commit=commit,
                     items=mine,
-                    handoff=known.handoff,
                     root=root,
                 ),
             ]
@@ -473,7 +470,6 @@ def deploy_plan(
                 ref=ref,
                 commit=commit,
                 root=root,
-                handoff=known.handoff,
                 fetched=fetched,
                 points=points(product),
             )
@@ -492,7 +488,6 @@ def deploy_plan(
                     commit=commit,
                     root=root,
                     fetched=fetched,
-                    handoff=known.handoff,
                 ),
             ]
             if stage.test is not None and stage.app is not None:
@@ -550,7 +545,7 @@ def deploy_plan(
         on = frozenset[str]() if passport is None else switched_on(passport)
         stacks = {
             product.name: ComposeStack(
-                product, own_entry(product), release, ref, commit, root, staged_env=True
+                product, own_entry(product), release, ref, commit, root, staged=True
             )
         }
         services: dict[str, Service] = {}
@@ -565,7 +560,7 @@ def deploy_plan(
                     lock.dependencies[name].tag if lock else "",
                     resolved.commits[name],
                     root,
-                    staged_env=True,
+                    staged=True,
                 )
         return SeamsVerify(product, services, stacks)
 
@@ -627,10 +622,12 @@ def deploy_plan(
         edition = None if passport is None else passport.edition
         on = frozenset[str]() if passport is None else switched_on(passport)
         releases = {known.fetch_root.stack: release}
+        entries = {known.fetch_root.stack: list(product.stacks)}
         composition = {known.fetch_root.stack: known.fetch_root.target.release}
         for name in installed(product, edition, on=on):
             if resolved is not None and name in resolved.releases:
                 releases[name] = resolved.releases[name]
+                entries[name] = list(resolved.services[name].stacks)
                 composition[name] = resolved.releases[name].name
         composition["pridem"] = __version__
         return [
@@ -640,6 +637,7 @@ def deploy_plan(
                     FinalCheck(),
                     Finalize(
                         releases=releases,
+                        entries=entries,
                         composition=composition,
                         box=box,
                         fetched=fetched,

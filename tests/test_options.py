@@ -38,7 +38,6 @@ from pridem.stacks.seams import (
 )
 from pridem.steps.base import StepFailed
 from pridem.steps.build import Build
-from pridem.steps.compose import OverrideHandoff
 from pridem.steps.egress import Egress
 from pridem.steps.env import SeamsCheck
 from pridem.steps.passport import Fetched
@@ -418,7 +417,6 @@ def test_the_proxy_opens_the_hosts_of_options_on(
         ref="main",
         commit="0" * 40,
         root=tmp_path,
-        handoff=OverrideHandoff(),
         fetched=fetched,
     )
     assert build._proxied() is proxied

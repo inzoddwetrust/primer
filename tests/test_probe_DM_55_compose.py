@@ -47,7 +47,6 @@ from pridem.steps.compose import (
     TOP_VOLUME_KEYS,
     VOLUME_KEYS,
     ComposeStack,
-    OverrideHandoff,
     env_files,
     forbidden,
     package_places,
@@ -67,7 +66,6 @@ def build(root: Path) -> Build:
         ref=REF,
         commit=SHA,
         root=root,
-        handoff=OverrideHandoff(),
     )
 
 
@@ -106,7 +104,7 @@ def comms(root: Path, ports: list[dict[str, object]]) -> ComposeStack:
     assert isinstance(stack, Service)
     release = root / "comms-release"
     release.mkdir(parents=True, exist_ok=True)
-    return ComposeStack(stack, "comms", release, "v1.0.0", SHA, root, staged_env=True)
+    return ComposeStack(stack, "comms", release, "v1.0.0", SHA, root, staged=True)
 
 
 # --- probe ----------------------------------------------------------------------

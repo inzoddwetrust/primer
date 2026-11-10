@@ -46,7 +46,6 @@ from pridem.steps.base import Step, StepContext
 from pridem.steps.build import Build, copied_dockerfile
 from pridem.steps.compose import (
     ComposeStack,
-    OverrideHandoff,
     forbidden,
     package_places,
     refusal,
@@ -148,7 +147,7 @@ def skin_box(
 
 
 def compose(root: Path, stack: Product, entry: str = ENTRY) -> ComposeStack:
-    return ComposeStack(stack, entry, root / "release", REF, SHA, root, staged_env=True)
+    return ComposeStack(stack, entry, root / "release", REF, SHA, root, staged=True)
 
 
 def config_call(
@@ -177,7 +176,7 @@ def image_call(
 
 def build_call(cs: ComposeStack, code: int = 0) -> FakeCall:
     """DM-45: the build runs on the candidate override."""
-    argv = cs.candidate().argv(
+    argv = cs.argv(
         "build",
         "--build-arg",
         f"PRIMER_RELEASE={cs.ref}",
@@ -224,7 +223,6 @@ def build(root: Path, stack: Product, fetched: Fetched, entry: str = ENTRY) -> B
         commit=SHA,
         root=root,
         fetched=fetched,
-        handoff=OverrideHandoff(),
     )
 
 
@@ -241,7 +239,7 @@ def run(steps: list[Step], runner: FakeRunner) -> PlanOutcome:
 def override(cs: ComposeStack) -> dict[str, Json]:
     """What build wrote: the candidate override (DM-45: ``packages`` puts it
     in place)."""
-    loaded = json.loads(cs.candidate().override.read_text())
+    loaded = json.loads(cs.override.read_text())
     assert isinstance(loaded, dict)
     return loaded
 

@@ -42,7 +42,7 @@ def test_the_env_path_is_one_function(tmp_path: Path) -> None:
     made = product(tmp_path, {"PLAIN": {"source": "param"}})
     running = ComposeStack(made, "aivis", root / "r", "main", "c" * 40, root)
     deploy = ComposeStack(
-        made, "aivis", root / "r", "main", "c" * 40, root, staged_env=True
+        made, "aivis", root / "r", "main", "c" * 40, root, staged=True
     )
     assert running.env_file == env_file(root, "aivis", staged=False)
     assert running.env_file.name == ".env"
@@ -141,4 +141,4 @@ def test_every_compose_of_a_deploys_steps_is_on_the_deploys_env(
     for wanted in ("comms.build", "comms.data_copy", "comms.migrate", "comms.up"):
         assert wanted in names, sorted(names)
     assert {"seams.comms", "seams.aivis"} <= names, sorted(names)
-    assert [name for name, c in found if not c.staged_env] == []
+    assert [name for name, c in found if not c.staged] == []
