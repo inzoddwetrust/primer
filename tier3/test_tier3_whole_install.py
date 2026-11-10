@@ -2186,11 +2186,13 @@ def test_tier3_a_job_runs_before_its_dependent_on_every_deploy(
     """DM-22, contract 3 rule 24, on the box the earlier tests left: a copy of
     the blank with the job ``init``. A deploy that acts runs it once, after
     ``postgres`` and before the app -- a line in its volume, ``up`` names it,
-    ``doctor`` is empty; the next deploy (another passport) runs it again;
-    an update with nothing changed -- not (the reading of "every deploy" at
-    the gate). The pair: the job exits 1 -- red ``up``, the app the same
-    container. Measured into the journal of the run (par0 14.3): when
-    ``postgres``, the job and the app started -- compose 2.40 under
+    ``doctor`` is empty; the next deploy -- a new commit of the copy -- runs
+    it again; an update with nothing changed -- not (the reading of "every
+    deploy" at the gate: a deploy that changes the entry -- commit,
+    environment, data, package -- and not the passport's number alone, FIX
+    2). The pair: the job exits 1 -- red ``up``, the app the same container.
+    Measured into the journal of the run (par0 14.3): when ``postgres``, the
+    job and the app started -- compose 2.40 under
     ``--no-deps --wait`` and ``run --rm``."""
     assert (OPT / "current").is_symlink(), "the whole install runs first"
     _blank_with_a_job(tmp_path, mirror, "job", JOB_RUN)
@@ -2206,6 +2208,9 @@ def test_tier3_a_job_runs_before_its_dependent_on_every_deploy(
     diff, failed, doctor = _doctor(first)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
+    # FIX 2: a new commit of the copy (the same files, a commit of its own);
+    # the passport's number alone changes nothing in the entry
+    _blank_with_a_job(tmp_path, mirror, "job-again", JOB_RUN)
     second = _passport(tmp_path, version=41)
     verdict, printed = _install(second, "update")
     assert verdict.result == "green", printed

@@ -940,3 +940,56 @@ def test_the_final_check_leaves_a_step_a_later_step_undoes() -> None:
                     "reason": "stop_for_migrate:stop-failed",
                 },
             )
+
+
+# --- FIX 2: what "every deploy" is -------------------------------------------------
+
+
+def test_a_value_the_passport_puts_in_env_changes_it_its_number_alone_does_not(
+    tmp_path: Path,
+) -> None:
+    """FIX 2: a job runs when ``up`` of its entry acts -- on a deploy that
+    changes the entry: commit, environment, data, package. The passport's
+    number alone writes nothing new into the stack's ``.env`` (so its
+    configuration hash stays and the job does not run); a value of the
+    passport in the stack's env changes the file."""
+    stack = product(tmp_path, {"SUPPORT_LANGUAGE": {"source": "param"}})
+    texts: list[bytes] = []
+    for number, value in ((1, "en"), (2, "en"), (3, "ru")):
+        passport = passport_data(params={stack.name: {"SUPPORT_LANGUAGE": value}})
+        passport["version"] = number
+        place = tmp_path / f"v{number}"
+        place.mkdir()
+        root, fetched = box(place, passport)
+        outcome, _ = run_env([render(stack, root, fetched)], FakeRunner())
+        assert outcome.code is ExitCode.OK, outcome.steps
+        texts.append((root / "opt" / stack.name / "env" / ".env").read_bytes())
+    assert texts[0] == texts[1]  # the number alone
+    assert texts[1] != texts[2]  # a value the passport puts in env
+
+
+def test_a_service_on_another_configuration_acts_and_the_job_runs(
+    tmp_path: Path, app: LiveApp
+) -> None:
+    """The pair of ``..._nothing_changed_runs_no_job...``: the app runs on a
+    configuration hash the entry no longer has (another env, a new commit) --
+    ``up`` acts and the job runs; the same hash -- no act, no job."""
+    stack = jobbed(app.port)
+    cs = cs_of(stack, tmp_path)
+    behind = {**HASHES, "app": "9" * 64}
+    script = [
+        image_call(cs, "app", APP_IMAGE),
+        ps_call(cs, CONTAINER),
+        inspect_image_call(CONTAINER, APP_IMAGE),
+        *hash_calls(cs, running=behind, expected=JOB_HASHES),  # stale: act
+        config_call(cs, JOBBED),
+        FakeCall(up_argv(cs, "postgres")),
+        FakeCall(run_argv(cs, "init")),
+        FakeCall(up_argv(cs, "app", "frontend", "postgres")),
+        *verifying(cs),
+    ]
+    with FakeRunner(*script) as runner:
+        outcome, _ = run([up_of(stack, tmp_path)], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert outcome.steps[0].verify is not None
+    assert outcome.steps[0].verify["jobs"] == ["init"]

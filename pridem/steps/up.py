@@ -33,10 +33,12 @@ is red and nothing after it runs; last, every service but the jobs ``up
 the order is the machine's, and compose would run the job again as a
 dependency -- under ``--no-deps`` too, and in ``run --rm <app>`` of
 ``migrate`` (DM-22 FIX, measured on tier 3). A job runs whenever ``up`` of
-its entry acts: every service carries ``pridem.commit`` in its configuration,
-so a new commit, a new passport or package acts; an update with nothing
-changed does not, and ``doctor`` -- which ``stale`` leaves the jobs out of --
-has nothing to say.
+its entry acts -- on a deploy that changes the entry: every service carries
+``pridem.commit`` in its configuration, so a new commit acts, and so does a
+changed environment (a value the passport puts in it), new data or a package;
+the passport's number alone changes nothing in the entry (FIX 2). An update
+with nothing changed does not act, and ``doctor`` -- which ``stale`` leaves
+the jobs out of -- has nothing to say.
 """
 
 import json
