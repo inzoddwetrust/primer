@@ -135,7 +135,9 @@ def test_the_same_commit_again_needs_no_build(tmp_path: Path) -> None:
         outcome, _ = run([steps(tmp_path)[0]], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     # DM-45: build writes the candidate; the override on disk waits for packages
-    assert cs.candidate().override.read_text() == override_text(cs, CONFIG, proxy=False)
+    assert cs.candidate().override.read_text() == override_text(
+        cs, CONFIG, proxy=False, references=CONFIG
+    )
     assert cs.override.read_text() == "{}\n"
 
 
@@ -298,3 +300,62 @@ def test_an_app_without_build_has_no_image_for_derive(tmp_path: Path) -> None:
 def test_build_comes_before_derive_env_in_a_stack() -> None:
     assert Build.order < DeriveEnv.order < min(Packages.order, DataCopy.order)
     assert RenderEnv.order < Build.order
+
+
+def test_build_finds_a_consumer_of_a_point_by_the_uninterpolated_document(
+    tmp_path: Path,
+) -> None:
+    """DM-62 FIX 2: on the box ``config`` gives the value of ``${POINT_ADDRESS}``
+    in its interpolated document; only ``--no-interpolate`` still names the
+    variable. ``build`` gives the override that one to find the consumers of
+    a pair by: ``app``, whose environment names the point's variable, joins
+    the pair's network."""
+    from compose_support import blank
+
+    from pridem.stacks.schema import Param
+    from pridem.stacks.seams import Pair
+
+    made = blank()
+    made = made.model_copy(
+        update={"env": {**made.env, "POINT_ADDRESS": Param(source="param")}}
+    )
+    base = compose(tmp_path)
+    cs = type(base)(made, base.entry, base.release, base.ref, base.commit, tmp_path)
+    pair = Pair("svc", "probe", "point", "blank", "POINT_ADDRESS")
+
+    def with_app_env(value: str) -> dict[str, Json]:
+        document = copy.deepcopy(CONFIG)
+        services = document["services"]
+        assert isinstance(services, dict)
+        app = services["app"]
+        assert isinstance(app, dict)
+        app["environment"] = {"POINT_ADDRESS": value}
+        return document
+
+    raw = with_app_env("${POINT_ADDRESS:?}")  # config --no-interpolate
+    interpolated = with_app_env("svc-point:7000")  # config, on the box
+    calls = [
+        raw_config_call(cs, raw),
+        config_call(cs, interpolated),
+        raw_config_call(cs, raw),
+        config_call(cs, interpolated),
+        build_call(cs),
+        raw_config_call(cs, raw),
+        config_call(cs, interpolated),
+        image_call(cs, "app", APP_IMAGE),
+        image_call(cs, "frontend", FRONT_IMAGE),
+    ]
+    parts = {
+        "release": cs.release,
+        "ref": cs.ref,
+        "commit": cs.commit,
+        "root": tmp_path,
+    }
+    step = Build(made, cs.entry, **parts, handoff=OverrideHandoff(), points=[pair])  # type: ignore[arg-type]
+    with FakeRunner(*calls) as runner:
+        outcome, _ = run([step], runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
+    rendered = json.loads(cs.candidate().override.read_text())
+    key = pair.network.removeprefix("pridem-")
+    assert key in rendered["services"]["app"]["networks"]
+    assert rendered["networks"][key] == {"name": pair.network, "external": True}

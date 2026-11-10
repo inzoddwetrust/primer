@@ -1893,9 +1893,55 @@ def _blank_taking_the_point(tmp: Path, mirror: Path, commit: str) -> None:
 
 
 REACH_POINT = (
-    "import sys, urllib.request; "
-    "urllib.request.urlopen('http://' + sys.argv[1] + '/', timeout=5); print('reached')"
+    "import sys, urllib.request\n"
+    "try:\n"
+    "    urllib.request.urlopen('http://' + sys.argv[1] + '/', timeout=5)\n"
+    "    print('reached')\n"
+    "except Exception as error:\n"
+    "    print(type(error).__name__ + ': ' + str(error))\n"
 )
+"""Prints ``reached`` or the class and the text of what stopped it -- the
+assertion reads what is printed, ``docker exec`` does not fail (DM-62 FIX 2)."""
+
+
+def _point_diagnosis(address: str) -> None:
+    """Into the run's log when the app does not reach the point (par0 14.3,
+    as DM-58 and DM-59): the networks and aliases of ``app`` and ``point``,
+    the state and the tail of the log of ``point``, the name resolved from
+    inside ``app``."""
+    point = _container(SERVICE, "point")
+    seen: list[str] = []
+    for name in (_app(), point):
+        networks = _stdout(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{json .NetworkSettings.Networks}}",
+                name,
+            ]
+        )
+        seen.append(f"{name} networks: {networks}")
+    state = _stdout(["docker", "inspect", "--format", "{{json .State}}", point])
+    logs = SubprocessRunner().run(
+        ["docker", "logs", "--tail", "40", point],
+        expect=(0, 1),
+        timeout=60,
+        on_line=lambda stream, line, cut: seen.append(f"point log: {line}"),
+    )
+    host = address.partition(":")[0]
+    resolved = SubprocessRunner().run(
+        ["docker", "exec", _app(), "getent", "hosts", host],
+        expect=(0, 1, 2),
+        timeout=60,
+        on_line=lambda stream, line, cut: seen.append(f"getent {host}: {line}"),
+    )
+    seen += [
+        f"point state: {state}",
+        f"logs exit {logs.code}",
+        f"getent exit {resolved.code}",
+    ]
+    warnings.warn("\n".join(seen), stacklevel=2)
 
 
 def test_tier3_only_the_declared_consumer_reaches_a_point(
@@ -1915,19 +1961,19 @@ def test_tier3_only_the_declared_consumer_reaches_a_point(
     address = _env()["POINT_ADDRESS"]
     assert address == f"{SERVICE}-point:7000", address
     reached = _stdout(["docker", "exec", _app(), "python", "-c", REACH_POINT, address])
+    if reached != ["reached"]:
+        _point_diagnosis(address)
     assert reached == ["reached"]
     image = _stdout(["docker", "inspect", "--format", "{{.Image}}", _app()])[0]
-    outsider = SubprocessRunner().run(
+    outsider = _stdout(
         [
             "docker", "run", "--rm", "--network", "pridem",
             "--label", "pridem.probe=dm-62", image,
             "python", "-c", REACH_POINT, address,
-        ],
-        expect=(0, 1),
-        timeout=120,
-        on_line=lambda stream, line, cut: None,  # the code says it all
+        ]
     )  # fmt: skip
-    assert outsider.code == 1, "a stack that declared nothing reached the point"
+    # read by what it printed, as the app (DM-62 FIX 2): not reached
+    assert outsider and outsider != ["reached"], outsider
     point = _container(SERVICE, "point")
     networks = _stdout(
         ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", point]

@@ -299,6 +299,7 @@ class Build(Step):
             data_env,
             proxy=self._proxied(),
             points=self.points,
+            references=raw,  # ${VAR} lives in --no-interpolate only (DM-62 FIX 2)
         )
         return Rendered(built_services(document), text, contexts)
 

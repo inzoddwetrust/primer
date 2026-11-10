@@ -646,14 +646,19 @@ _REFERENCE = "${{{}"
 
 
 def _pair_networks(
-    compose: ComposeStack, document: Mapping[str, Json], points: Sequence[Pair]
+    compose: ComposeStack, references: Mapping[str, Json], points: Sequence[Pair]
 ) -> tuple[dict[str, dict[str, Json]], dict[str, Json]]:
     """This entry's side of the pairs of the box (DM-62), by service and the
     networks to declare. As the provider: the point's service joins each of
     its pairs' networks under the one alias, and the entry declares them --
     internal, labelled. As the consumer: each service whose ``environment``
     names the pair's variable joins it; the network is the provider's
-    (``external``) unless this very entry provides it."""
+    (``external``) unless this very entry provides it.
+
+    ``references`` is the product's ``config --no-interpolate``: there a
+    variable is ``${VAR:?}``; in the interpolated document its value already
+    stands in its place, and no consumer would be found (DM-62 FIX 2, par0
+    14.4: DM-57)."""
     joins: dict[str, dict[str, Json]] = {}
     declared: dict[str, Json] = {}
     own = compose.stack.name
@@ -672,7 +677,7 @@ def _pair_networks(
             }
         if pair.consumer == own:
             reference = _REFERENCE.format(pair.variable)
-            for name, body in _mapping(document.get("services")).items():
+            for name, body in _mapping(references.get("services")).items():
                 environment = _mapping(_mapping(body).get("environment"))
                 if any(
                     isinstance(v, str) and _names(v, reference, pair.variable)
@@ -704,6 +709,7 @@ def override_text(
     *,
     proxy: bool,
     points: Sequence[Pair] = (),
+    references: Mapping[str, Json],
 ) -> str:
     """The machine's override for the product's compose ``document``;
     ``mounts`` -- read-only binds of the instance's packages, and of the data a
@@ -715,7 +721,7 @@ def override_text(
     (``steps/packages.py``); ``proxy`` -- the product has a host of ``egress``
     open (``open_hosts``): every service gets the proxy's variables."""
     services: dict[str, Json] = {}
-    joins, networks_of_pairs = _pair_networks(compose, document, points)
+    joins, networks_of_pairs = _pair_networks(compose, references, points)
     app = compose.app_service
     aliased = {app} if app is not None else set()
     product = isinstance(compose.stack, Product)

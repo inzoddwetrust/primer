@@ -4,6 +4,7 @@ pair on a network of its own -- not on ``pridem``, so a stack that did not
 declare the point does not reach it."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -236,11 +237,34 @@ def _compose(stack: Product | Service, entry: str, root: Path) -> ComposeStack:
     return ComposeStack(stack, entry, root / "release", "main", SHA, root)
 
 
+_ADDRESS = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::\?[^}]*)?\}")
+
+
+def _interpolated(services: dict[str, Json], values: dict[str, str]) -> dict[str, Json]:
+    """``services`` as ``config`` with interpolation gives them on the box:
+    every ``${VAR:?}`` already its value (DM-62 FIX 2)."""
+    text = json.dumps(services)
+    out = _ADDRESS.sub(lambda m: values.get(m.group("name"), "value"), text)
+    loaded = json.loads(out)
+    assert isinstance(loaded, dict)
+    return loaded
+
+
 def _override(
     cs: ComposeStack, services: dict[str, Json], points: list[Pair]
 ) -> dict[str, Json]:
-    document: dict[str, Json] = {"services": services, "networks": {"default": {}}}
-    loaded = json.loads(override_text(cs, document, proxy=False, points=points))
+    """The override as ``build`` renders it on the box: the document
+    interpolated, the references -- ``config --no-interpolate``."""
+    values = {p.variable: f"{p.alias}:1" for p in points}
+    raw: dict[str, Json] = {"services": services, "networks": {"default": {}}}
+    document: dict[str, Json] = {
+        "services": _interpolated(services, values),
+        "networks": {"default": {}},
+    }
+    assert "${" not in json.dumps(document)  # the form the machine gets
+    loaded = json.loads(
+        override_text(cs, document, proxy=False, points=points, references=raw)
+    )
     assert isinstance(loaded, dict)
     return loaded
 

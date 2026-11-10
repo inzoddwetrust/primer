@@ -372,7 +372,9 @@ def test_the_override_carries_a_services_data_on_its_app(tmp_path: Path) -> None
         "services": {"comms-app": {"image": "x"}, "comms-redis": {"image": "r"}}
     }
     rendered = json.loads(
-        override_text(compose, document, mounts, None, env, proxy=False)
+        override_text(
+            compose, document, mounts, None, env, proxy=False, references=document
+        )
     )
     app = rendered["services"]["comms-app"]
     assert app["volumes"] == mounts["comms-app"]
@@ -885,9 +887,11 @@ def test_build_puts_a_services_data_into_the_override(tmp_path: Path) -> None:
     assert outcome.code is ExitCode.OK, outcome.steps
     mounts, env = data_binds([item], "app")
     assert cs.candidate().override.read_text() == override_text(
-        cs, CONFIG, mounts, None, env, proxy=False
+        cs, CONFIG, mounts, None, env, proxy=False, references=CONFIG
     )
-    assert cs.candidate().override.read_text() != override_text(cs, CONFIG, proxy=False)
+    assert cs.candidate().override.read_text() != override_text(
+        cs, CONFIG, proxy=False, references=CONFIG
+    )
 
 
 def test_finalize_makes_the_services_current_with_the_product(tmp_path: Path) -> None:

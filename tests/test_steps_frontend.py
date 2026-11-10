@@ -149,7 +149,9 @@ def test_probe_DM_19_package_mount_rejects_paths_outside_release(
     assert fetched2.passport is not None
     mounts = package_mounts(stack, ENTRY, fetched2.passport, root2)
     cs = ComposeStack(stack, ENTRY, root2 / "release", REF, SHA, root2)
-    rendered = json.loads(override_text(cs, CONFIG, volumes(mounts), proxy=False))
+    rendered = json.loads(
+        override_text(cs, CONFIG, volumes(mounts), proxy=False, references=CONFIG)
+    )
     assert rendered["services"]["frontend"]["volumes"] == [
         f"{package2 / 'css'}:/srv/skin:ro"
     ]

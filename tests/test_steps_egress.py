@@ -265,7 +265,7 @@ def rendered(
 ) -> dict[str, Json]:
     cs = ComposeStack(stack, ENTRY, Path("/release"), REF, SHA, Path("/"))
     proxy = isinstance(stack, Product) and bool(stack.egress)  # every host open
-    loaded = json.loads(override_text(cs, document, proxy=proxy))
+    loaded = json.loads(override_text(cs, document, proxy=proxy, references=document))
     assert isinstance(loaded, dict)
     return loaded
 
