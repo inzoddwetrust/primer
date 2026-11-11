@@ -23,11 +23,12 @@ import yaml
 from pridem.contract import Strict
 from pridem.events import Json
 from pridem.plan import StackSteps
+from pridem.stacks.env import MINTED_FILE, read_minted
 from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import Ident, Product, Service, load_primer_yaml
 from pridem.state import Box
-from pridem.steps.base import Step
-from pridem.steps.compose import ComposeStack
+from pridem.steps.base import Step, StepFailed
+from pridem.steps.compose import ComposeStack, verb_service
 from pridem.steps.data import (
     BACKUPS,
     BackupScope,
@@ -35,6 +36,7 @@ from pridem.steps.data import (
     DbMigrate,
     DbReset,
     DbRestore,
+    ProjectVerb,
     SeedPlan,
     SeedRun,
     StartRestored,
@@ -44,6 +46,7 @@ from pridem.steps.data import (
 )
 from pridem.steps.finalize import current_link
 from pridem.steps.migrate import StartStopped, StopForMigrate, Stopped
+from pridem.steps.passport import passport_secrets
 from pridem.verbs.base import Context, NoArgs, Refused, Verb
 from pridem.verbs.run import Planned, Session, read_copy, run_plan_verb
 
@@ -406,4 +409,106 @@ SEED = Verb(
         "--reset": ("reset", "flag"),
         "--confirm": ("confirm", "value"),
     },
+)
+
+
+# --- pass 3: a verb of the project ------------------------------------------------
+
+
+class VerbArgs(Strict):
+    name: Ident
+    pairs: list[str] = []
+    confirm: str | None = None
+
+
+def box_secrets(ctx: Context) -> list[str]:
+    """The known secrets of the box (contract 3 rule 7): ``asked`` and ``tls``
+    of the passport, ``minted`` of every stack the box runs."""
+    found: list[str] = []
+    passport = read_copy(ctx).passport
+    if passport is not None:
+        found += [secret.get_secret_value() for secret in passport_secrets(passport)]
+    state = Box(ctx.root).read_state()
+    for stack in sorted(state.current if state is not None else ()):
+        path = ctx.fs_root / "opt" / stack / "env" / MINTED_FILE
+        try:
+            found += list(read_minted(path).values())
+        except (StepFailed, OSError):
+            raise Refused(
+                f"verb: the minted secrets of {stack} cannot be read"
+            ) from None
+    return [secret for secret in found if secret.strip()]
+
+
+def _values(verb: str, declared: list[str], pairs: list[str]) -> dict[str, str]:
+    """``<arg>=<value>`` of each declared argument, once, none other, none
+    empty -- refused before the run otherwise."""
+    given: dict[str, str] = {}
+    for pair in pairs:
+        name, sep, value = pair.partition("=")
+        if not sep:
+            raise Refused(f"verb {verb}: {pair!r} is not <arg>=<value>")
+        if name not in declared:
+            raise Refused(f"verb {verb}: no argument {name}")
+        if name in given:
+            raise Refused(f"verb {verb}: {name} is given twice")
+        if not value:
+            raise Refused(f"verb {verb}: {name} is empty")
+        given[name] = value
+    missing = [name for name in declared if name not in given]
+    if missing:
+        raise Refused(f"verb {verb}: {', '.join(missing)} not given")
+    return given
+
+
+def _verb(args: Strict, ctx: Context) -> int:
+    """``verb <name> [<arg>=<value> ...] [--confirm <server.name>]``: a verb of
+    the product, refused before the run when its name, arguments, role or
+    confirmation do not hold, or an argument is a secret of the box (DM-86)."""
+    if not isinstance(args, VerbArgs):
+        raise TypeError("verb takes VerbArgs")
+    products = [(stack, m) for stack, m in box_entries(ctx) if isinstance(m, Product)]
+    if not products:
+        raise Refused("verb: the box runs no product")
+    stack, made = products[0]
+    declared = made.verbs.get(args.name)
+    if declared is None:
+        raise Refused(f"verb: the product has no verb {args.name}")
+    values = _values(args.name, list(declared.args), args.pairs)
+    role = _role(ctx, "verb")
+    if declared.roles is not None and role not in declared.roles:
+        raise Refused(f"verb {args.name}: not for the role {role}")
+    if declared.destructive:
+        _confirmed(ctx, f"verb {args.name}", args.confirm)
+    elif args.confirm is not None:
+        raise Refused(f"verb {args.name}: --confirm is for a destructive verb")
+    secrets = set(box_secrets(ctx))
+    for name, value in values.items():
+        if value in secrets or value.strip() in secrets:
+            raise Refused(f"verb {args.name}: {name} is a secret of the box")
+    service = verb_service(made, args.name)
+    if service is None or made.name not in made.stacks:
+        raise Refused(f"verb {args.name}: no service of the product's own entry")
+    compose = compose_of(ctx, stack, made, made.name)
+    argv = [*shlex.split(declared.run), *(values[name] for name in declared.args)]
+    step = ProjectVerb(compose, verb=args.name, service=service, argv=argv)
+
+    def make(session: Session) -> Planned:
+        return Planned([StackSteps(made.name, [step], root=True)])
+
+    given: dict[str, Json] = {"name": args.name}
+    if values:
+        given["args"] = dict[str, Json](values)
+    if args.confirm is not None:
+        given["confirm"] = args.confirm
+    return run_plan_verb(ctx, verb="verb", mode="command", make=make, args=given)
+
+
+VERB = Verb(
+    "verb",
+    VerbArgs,
+    _verb,
+    positionals=("name",),
+    rest="pairs",
+    options={"--confirm": ("confirm", "value")},
 )

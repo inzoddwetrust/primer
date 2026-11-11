@@ -866,3 +866,53 @@ class SeedPlan(Step):
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         return Verified(dict(self.fact))
+
+
+# --- pass 3: a verb of the project ------------------------------------------------
+
+VERB_TIMEOUT_S = 3600
+"""A verb of the project: an hour -- the machine does not know what it does."""
+
+
+class ProjectVerb(Step):
+    """A verb of ``verbs`` (contract 3 rule 7, protocol 8.2): ``exec`` in the
+    running container of its service -- the declared one, by default the
+    app; the live container is the current release's, so no question of an
+    image arises. Its code 0 is the fact: the machine runs it, knowing
+    nothing of what it does (DM-86)."""
+
+    name = "project_verb"
+    order = 1
+    modes = COMMAND
+    codes: ClassVar[dict[str, str]] = {
+        "verb": "run the verb {verb} in {service} of {stack}",
+        "service-down": ("{service} of {stack} does not run; the verb {verb} needs it"),
+    }
+
+    def __init__(
+        self, compose: ComposeStack, *, verb: str, service: str, argv: Sequence[str]
+    ) -> None:
+        self.compose = compose
+        self.verb = verb
+        self.service = service
+        self.argv = list(argv)
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        params: dict[str, Json] = {
+            "stack": self.compose.entry,
+            "service": self.service,
+            "verb": self.verb,
+        }
+        if not running(ctx, self.compose, [self.service]):
+            raise StepFailed("service-down", params)
+        return CheckResult(True, local_code("verb", params), {})
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        out(
+            ctx,
+            self.compose.argv("exec", "-T", self.service, *self.argv),
+            timeout=VERB_TIMEOUT_S,
+        )
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        return Verified({"verb": self.verb, "service": self.service, "exit_code": 0})

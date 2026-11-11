@@ -179,6 +179,11 @@ RULES = {
         "a job is a one-off service of its entry: not the app, the frontend, a "
         "point, a route's or a test's service, nor another job's",
     ),
+    "S.verb-service": (
+        0,
+        "a verb runs in a running service of the stack's own entry: not a job, "
+        "and the app when it names none",
+    ),
     "S.stop-service": (
         0,
         "stop_for_migrate is for an entry with migrate and an app, each service once",
@@ -622,10 +627,17 @@ class ServiceHost(Strict):
 
 
 class Verb(Strict):
+    """A verb of the project (contract 3 rule 7, protocol 8.2): run by the
+    machine in ``service`` of the stack's own entry -- by default its
+    ``app`` -- with its ``args`` in their order; ``roles`` -- the roles it
+    runs on; ``destructive`` -- it asks ``--confirm <server.name>`` on any
+    role (protocol 1.11)."""
+
     run: Command
     args: list[Ident] = []
     roles: Roles | None = None
     destructive: bool = False
+    service: Ident | None = None
 
 
 class UpdateWindow(Strict):
@@ -786,6 +798,27 @@ def _s_jobs(stack: Product | Service) -> list[Problem]:
             elif job.service in stage.stop_for_migrate:
                 detail = f"{job.service!r} is stopped for migrate: a job does not run"
                 out.append(problem_at(at, "S.job-service", detail))
+    return out
+
+
+def _s_verbs(stack: Product | Service) -> list[Problem]:
+    """A verb runs in a service of the stack's own entry that keeps running:
+    not a job; without ``service`` -- the entry's app, which it must have
+    (DM-86)."""
+    out: list[Problem] = []
+    if not isinstance(stack, Product):
+        return out  # a service declares no verbs (contract 3 section 2)
+    own = stack.stacks.get(stack.name)
+    for name, verb in stack.verbs.items():
+        at = ("verbs", name)
+        if own is None:
+            continue  # the verb verb refuses it: the product has no own entry
+        if verb.service is None and own.app is None:
+            out.append(problem_at(at, "S.verb-service", "no service and no app"))
+        jobs = {job.service for job in own.jobs.values()}
+        if verb.service is not None and verb.service in jobs:
+            detail = f"{verb.service!r} is a job"
+            out.append(problem_at((*at, "service"), "S.verb-service", detail))
     return out
 
 
@@ -1202,6 +1235,7 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r20_test_services,
     _s_jobs,
     _s_stop,
+    _s_verbs,
 )
 
 

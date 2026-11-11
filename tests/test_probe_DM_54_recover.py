@@ -43,9 +43,10 @@ ARGV = {
     "db": ["db", "dump", "blank"],
     "backup": ["backup"],
     "seed": ["seed", "--list"],
+    "verb": ["verb", "count-settings"],
 }
 """The command line of each verb with a verdict."""
-ON_A_BOX = {"db", "backup", "seed"}
+ON_A_BOX = {"db", "backup", "seed", "verb"}
 """DM-86: the data verbs refuse before the run without an entry the box runs
 and the passport's copy; the probe gives them a box that runs the blank
 (``data_support.blank_box``), and their steps' commands are refused here
@@ -83,9 +84,9 @@ def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
     ``version`` (no verdict) is not among them, and the verbs without a box
     are exactly ``check`` -- a new verb does not leave ``recover`` by a flag.
 
-    Changed by DM-86: ``db``, ``backup`` and (pass 2) ``seed`` are verbs with
-    a verdict on a box; the list names them, and the probe runs them on a box
-    with an entry."""
+    Changed by DM-86: ``db``, ``backup``, (pass 2) ``seed`` and (pass 3)
+    ``verb`` are verbs with a verdict on a box; the list names them, and the
+    probe runs them on a box with an entry."""
     assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS, *ON_A_BOX])
     assert "version" in VERBS and not VERBS["version"].verdict
     assert {name for name, verb in VERBS.items() if not verb.box} == {"check"}
@@ -119,7 +120,11 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
     section(data, "server")["role"] = "test"
     file = write_passport(tmp_path, data)
     argv = [str(file) if word == PASSPORT else word for word in ARGV[name]]
-    if name in ON_A_BOX:
+    if name == "verb":  # a box whose product has the verb (pass 3)
+        from test_verbs_project import _box
+
+        _box(tmp_path)
+    elif name in ON_A_BOX:
         blank_box(tmp_path)
     if name in PLANS | ON_A_BOX:
         run(argv, root=root, out=out, err=err, runner=Refusing(), fs_root=tmp_path)

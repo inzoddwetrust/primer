@@ -591,6 +591,29 @@ def _job_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[s
     return found
 
 
+def verb_service(stack: Product, name: str) -> str | None:
+    """The service a verb runs in: its ``service``, else the app of the
+    product's own entry (DM-86)."""
+    verb = stack.verbs[name]
+    own = stack.stacks.get(stack.name)
+    if verb.service is not None:
+        return verb.service
+    return own.app.service if own is not None and own.app is not None else None
+
+
+def _verb_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[str]:
+    """Every verb's service is a service of the own entry's compose (DM-86)."""
+    stack = compose.stack
+    if not isinstance(stack, Product) or compose.entry != stack.name:
+        return []
+    found: list[str] = []
+    for name in stack.verbs:
+        service = verb_service(stack, name)
+        if service is not None and service not in services:
+            found.append(f"verbs.{name}: no service {service}")
+    return found
+
+
 def depended(services: Mapping[str, Json], start: str) -> set[str]:
     """Every service ``start`` depends on in ``config``, through any of them."""
     seen: set[str] = set()
@@ -637,6 +660,7 @@ def forbidden(compose: ComposeStack, document: Mapping[str, Json]) -> list[str]:
         found += [f"{name}: {problem}" for problem in problems]
     found += _job_problems(compose, services)
     found += _stop_problems(compose, services)
+    found += _verb_problems(compose, services)
     top = [key for key in document if not key.startswith("x-")]
     found += [f"compose: {key}" for key in sorted(top) if key not in TOP_KEYS]
     project = compose.project
