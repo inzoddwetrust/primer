@@ -21,6 +21,18 @@ product's file and carries what the machine adds:
 - labels ``pridem.stack``, ``pridem.release``, ``pridem.commit`` on every
   service (its containers) and on every ``build`` (its image, plus
   ``pridem.service``): ``gc`` cleans by them;
+- on every service with a ``build``, the name of the release's image
+  (``release_image``: ``<entry>-<service>:<commit12>``, with ``-<key12>`` for
+  an image keyed by an edition and packages built into it) and
+  ``pull_policy: never`` (DM-90). compose's own name, ``<entry>-<service>``,
+  is the same for every commit: the build of a new commit took it before the
+  green gate, and a command of the running release made its container of the
+  new code. A release's name is its own -- the deploy's override names the
+  new commit's, the running release's override its own -- and a name that is
+  gone is never pulled from a registry, where anyone may own it: ``up
+  --no-build`` refuses; ``run`` builds it again from the files it is given
+  (compose 2.40.3 has no ``run --no-build``) -- the same release's code;
+  a service of a registry image keeps its ``image`` and gets neither;
 - the label ``pridem.stack`` alone on the project's volumes and on its
   network ``default``: they outlive releases, and a release label would put a
   database volume under the clean-up of old releases;
@@ -72,6 +84,7 @@ alone); ``config`` inlines it into ``environment``, so it is read from
 ``config --no-interpolate`` (``env_files``), where it is still named.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -846,6 +859,26 @@ def _release_binds(
     return found
 
 
+COMMIT_IN_TAG = 12
+"""Hex digits of the commit in the tag of a release's image, as in the test
+image's name (``steps/tests.py``)."""
+KEY_IN_TAG = 12
+"""Hex digits of the key's digest in the tag."""
+
+
+def release_image(compose: ComposeStack, service: str, key: Mapping[str, Json]) -> str:
+    """The name of the image of ``service`` (one with a ``build``) of the
+    release ``compose`` is at: ``<entry>-<service>:<commit12>`` -- and, for an
+    image keyed beyond its commit (``steps.packages.image_key``: the edition
+    and the packages built into it), ``-<key12>``, the sha256 of the key's
+    labels, so a new package version on the same commit is another name."""
+    tag = compose.commit[:COMMIT_IN_TAG]
+    if key:
+        text = json.dumps(dict(key), sort_keys=True, separators=(",", ":"))
+        tag += "-" + hashlib.sha256(text.encode()).hexdigest()[:KEY_IN_TAG]
+    return f"{compose.project}-{service}:{tag}"
+
+
 def override_text(
     compose: ComposeStack,
     document: Mapping[str, Json],
@@ -882,8 +915,11 @@ def override_text(
                 "pridem.service": name,
             }
             extra = dict((builds or {}).get(name, {}))
-            labels.update(_mapping(extra.pop("labels", None)))
+            key = _mapping(extra.pop("labels", None))
+            labels.update(key)
             part["build"] = {**extra, "labels": labels}
+            part["image"] = release_image(compose, name, key)
+            part["pull_policy"] = "never"
         if name in aliased or egress or name in joins:
             networks: dict[str, Json] = dict(_mapping(_mapping(body).get("networks")))
             if not networks:

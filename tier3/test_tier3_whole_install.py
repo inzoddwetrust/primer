@@ -2235,6 +2235,33 @@ def test_tier3_a_job_runs_before_its_dependent_on_every_deploy(
     assert failed_step.reason.code == "command-failed", failed_step.reason
     assert "init" in failed_step.reason.model_dump()["argv"], failed_step.reason
     assert _container(STACK, "app") == app
+    # DM-90: the new commit was built before the red step; a compose command of
+    # the release current names takes the image of its own commit, by the name
+    # its override gives it -- never the new build's, never pulled
+    current = (OPT / "current").resolve()
+    config = json.loads(
+        "\n".join(
+            _stdout(
+                [
+                    "docker", "compose", "-p", STACK, "--env-file", str(ENV),
+                    "-f", str(current / "docker-compose.yml"),
+                    "-f", f"{OPT}/compose/{STACK}.yml",
+                    "config", "--format", "json",
+                ]
+            )
+        )
+    )  # fmt: skip
+    body = config["services"]["app"]
+    label = '{{index .Config.Labels "pridem.commit"}}'
+    [commit] = _stdout(["docker", "image", "inspect", "-f", label, body["image"]])
+    warnings.warn(
+        f"DM-90 current {current.name[:12]}: app image {body['image']}, "
+        f"pull_policy {body.get('pull_policy')}, its commit {commit[:12]}",
+        stacklevel=1,
+    )
+    assert body["image"] == f"{STACK}-app:{current.name[:12]}", body["image"]
+    assert body.get("pull_policy") == "never", body
+    assert commit == current.name, (commit, current.name)
 
 
 REVISION = """\"\"\"dm22 probe

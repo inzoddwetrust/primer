@@ -1,6 +1,7 @@
 """A box that runs the blank -- ``state.json`` with its ``current``, the
 release on disk, the passport's copy -- for the data verbs (DM-86)."""
 
+import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,8 @@ from pridem.steps.passport import PASSPORT_COPY
 
 FIXTURE = Path(__file__).parent / "fixtures" / "check" / "blank"
 SHA = "0e82be562d186afc933b8779d91dddcae4278cea"
+APP_IMAGE = "blank-app:0e82be562d18"
+"""The name the release's override gives the app's image, literally."""
 STACK = "blank"
 
 
@@ -28,6 +31,11 @@ def blank_box(
     release = fs_root / "opt" / STACK / "releases" / SHA
     shutil.copytree(FIXTURE, release)
     (fs_root / "opt" / STACK / "current").symlink_to(release)
+    # the override of the release, as finalize put it in place: the app's
+    # image by the release's name (DM-90)
+    override = fs_root / "opt" / STACK / "compose" / f"{STACK}.yml"
+    override.parent.mkdir(parents=True)
+    override.write_text(json.dumps({"services": {"app": {"image": APP_IMAGE}}}))
     box = Box(fs_root / "opt" / "pridem")
     box.root.mkdir(parents=True, exist_ok=True)
     with box.lock("setup"):

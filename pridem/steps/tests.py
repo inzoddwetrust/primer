@@ -25,7 +25,8 @@ release's image. With no container (a first install) it is created.
 The tests run from the build target ``test.target`` of the ``app`` service's
 Dockerfile, built here with the release's two build arguments, the machine's
 labels and the machine's name ``<project>-<app>-test:<commit12>`` beside the
-names compose gives the working images: the working image carries no tests
+names the machine gives the working images (``<project>-<service>:<commit12>``,
+``steps.compose.release_image``, DM-90): the working image carries no tests
 (rule 20). The
 container gets the test database's ``DATABASE_URL`` through an env file
 (0600) -- the password is a secret, never in argv -- and writes its junit to
@@ -254,8 +255,8 @@ class Tests(Step):
 
     @property
     def image_name(self) -> str:
-        """The machine's name of the test image, beside the names compose gives:
-        ``<project>-<app>-test:<commit12>``."""
+        """The machine's name of the test image, beside the working images'
+        (``release_image``): ``<project>-<app>-test:<commit12>``."""
         return f"{self.compose.project}-{self.app}-test:{self.compose.commit[:12]}"
 
     @property

@@ -526,22 +526,37 @@ def release_commit(ctx: StepContext, compose: ComposeStack) -> str:
 
 
 def run_image(document: dict[str, Json], compose: ComposeStack, service: str) -> str:
-    """The image ``compose run <service>`` starts: the one ``config`` names,
-    else compose's own name for a built one, ``<project>-<service>``."""
-    services = document.get("services")
-    body = services.get(service) if isinstance(services, dict) else None
-    image = body.get("image") if isinstance(body, dict) else None
-    return image if isinstance(image, str) and image else f"{compose.project}-{service}"
+    """The image ``compose run <service>`` starts. Of a built service, the
+    name the machine's override of the release gives it -- the override wins
+    the merge, and its ``image`` is ``steps.compose.release_image``'s (DM-90);
+    of any other, the one the product's ``config`` (``document``) names."""
+    for found in (_override_services(compose), document.get("services")):
+        body = found.get(service) if isinstance(found, dict) else None
+        image = body.get("image") if isinstance(body, dict) else None
+        if isinstance(image, str) and image:
+            return image
+    raise StepFailed("image-unread", {"stack": compose.entry, "image": service})
+
+
+def _override_services(compose: ComposeStack) -> Json:
+    """``services`` of the override ``compose`` reads (its JSON text)."""
+    if not compose.override.is_file():
+        return None
+    document: Json = json.loads(compose.override.read_text(encoding="utf-8"))
+    return document.get("services") if isinstance(document, dict) else None
 
 
 def image_is_current(
     ctx: StepContext, compose: ComposeStack, document: dict[str, Json]
 ) -> str:
-    """Outside a deploy, ``compose run --rm <app>`` takes the image by its name,
-    and after a red deploy of a new commit the name is the new build's: a
-    migration or a seed of the new code on the old release's database. The
-    image's ``pridem.commit`` against the current release's commit -- red
-    before anything is stopped (DM-86). Returns the commit."""
+    """Outside a deploy, ``compose run --rm <app>`` takes the image by its name:
+    the release's own since DM-90 (``steps.compose.release_image``), which a
+    deploy of a new commit no longer takes over. A name is still a name --
+    any ``docker tag`` or ``compose build`` outside the machine moves it --
+    and a migration or a seed of other code on the release's database is what
+    this refuses: the image's ``pridem.commit``, the fact, against the current
+    release's commit -- red before anything is stopped (DM-86). A name with no
+    image under it is ``image-unread``. Returns the commit."""
     app = compose.app_service
     if app is None:
         raise StepFailed("no-app", {"stack": compose.entry})

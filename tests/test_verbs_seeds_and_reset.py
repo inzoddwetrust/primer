@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from data_support import SHA, STACK, blank_box
+from data_support import APP_IMAGE, SHA, STACK, blank_box
 from plan_support import ListSink
 from test_verbs_data import (
     _cli,
@@ -38,9 +38,10 @@ OID, NEW_OID = "16384", "16999"
 
 
 def image_calls(cs: ComposeStack, commit: str = SHA) -> list[FakeCall]:
-    """The image ``compose run app`` starts (``<project>-app``: built) and the
+    """The image ``compose run app`` starts -- the name the release's override
+    gives it (DM-90; it was compose's own, ``<project>-app``) -- and the
     commit of the current release."""
-    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, f"{cs.project}-app")
+    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, APP_IMAGE)
     return [FakeCall(inspect, lines=lines(commit)), git_call(cs)]
 
 
@@ -197,7 +198,7 @@ def test_an_image_not_of_the_current_release_is_refused_before_anything_stops(
     way out. Each side of the comparison has its case."""
     blank_box(tmp_path, name="box-1")
     cs = compose(tmp_path)
-    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, f"{cs.project}-app")
+    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, APP_IMAGE)
     calls = [
         config_call(cs),
         FakeCall(inspect, lines=lines(image_commit)),
@@ -602,7 +603,7 @@ def test_an_image_with_no_commit_label_is_refused(tmp_path: Path) -> None:
     build: ``image-unread``, nothing stopped."""
     blank_box(tmp_path, name="box-1")
     cs = compose(tmp_path)
-    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, f"{cs.project}-app")
+    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, APP_IMAGE)
     calls = [config_call(cs), FakeCall(inspect, lines=lines("<no value>"))]
     with FakeRunner(*calls) as runner:
         code, out, _ = _cli(tmp_path, RESET, runner)
