@@ -4,15 +4,17 @@ repository, by the machine's own functions, with no box and nothing written.
 The repository is ``fixtures/check/blank`` -- ``primer.yaml`` and the compose
 file of ``primer-blank@0e82be5`` -- copied per test. ``docker compose`` is a
 strict ``FakeRunner``: ``version``, then ``config --no-interpolate`` and
-``config``, each with no ``--env-file``, in an environment of ``PATH``,
-``HOME``, ``COMPOSE_DISABLE_ENV_FILE`` and a stand-in for every key of
-``env``; their output is the measured one of the blank
+``config``, each with no ``--env-file``, in the runner's clean environment
+(``HOME`` and ``DOCKER_CONFIG`` by ``passwd``, DM-88),
+``COMPOSE_DISABLE_ENV_FILE`` and a stand-in for every key of ``env``; their
+output is the measured one of the blank
 (``fixtures/compose/blank-config*.json``, paths ``/r/...`` in the repository).
 """
 
 import io
 import json
 import os
+import pwd
 import shutil
 from pathlib import Path
 
@@ -47,9 +49,17 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _env(keys: tuple[str, ...] = ENV_KEYS) -> dict[str, str]:
+    """The environment of ``config`` -- the same clean environment of the
+    runner, ``HOME`` and ``DOCKER_CONFIG`` by ``passwd`` (DM-88) -- written
+    out here, so that ``config`` on the process's own environment is red.
+    Changed by the dispatcher's word: the probe's assertions are the same."""
+    home = pwd.getpwuid(os.getuid()).pw_dir
     return {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": os.environ.get("HOME", ""),
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "HOME": home,
+        "DOCKER_CONFIG": f"{home}/.docker",
         "COMPOSE_DISABLE_ENV_FILE": "true",
         **dict.fromkeys(keys, "1"),
     }

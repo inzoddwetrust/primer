@@ -83,7 +83,7 @@ import yaml
 
 from pridem.events import Json, as_list
 from pridem.files import PathOutside, atomic_write, resolve_inside
-from pridem.runner import Stream
+from pridem.runner import Stream, clean_env
 from pridem.stacks.env import env_file
 from pridem.stacks.routes import alias, routed_services
 from pridem.stacks.schema import PROXY_VARIABLES, Product, Service
@@ -306,8 +306,9 @@ def config(
     ``interpolate`` -- ``--no-interpolate``, where ``env_file`` and the
     variables are still as written. ``values`` -- the check of a repository
     (``pridem check``): no env file is read or written, the values are the
-    environment of compose alone (``PATH``, ``HOME`` and them), and compose's
-    own ``.env`` of the directory is off (``COMPOSE_DISABLE_ENV_FILE``)."""
+    environment of compose alone -- the runner's ``clean_env()``, the same
+    docker as every command of the check sees, and them -- and compose's own
+    ``.env`` of the directory is off (``COMPOSE_DISABLE_ENV_FILE``)."""
     found = unfolded(compose)
     if found:  # before compose reads a file of the host for them (DM-78)
         raise StepFailed(
@@ -319,12 +320,7 @@ def config(
     if values is None:
         _, lines = out(ctx, compose.product_argv(*args), passed_on=False)
     else:
-        env = {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": os.environ.get("HOME", ""),
-            "COMPOSE_DISABLE_ENV_FILE": "true",
-            **values,
-        }
+        env = {**clean_env(), "COMPOSE_DISABLE_ENV_FILE": "true", **values}
         _, lines = out(ctx, compose.checked_argv(*args), passed_on=False, env=env)
     document = json.loads("\n".join(lines))
     if not isinstance(document, dict):

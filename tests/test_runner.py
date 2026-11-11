@@ -3,6 +3,7 @@
 import contextlib
 import json
 import os
+import pwd
 import shlex
 import signal
 import sys
@@ -293,15 +294,31 @@ def test_cwd_and_env_are_passed(tmp_path: Path) -> None:
     assert lines.of(Stream.STDOUT) == [str(tmp_path), "y", "False"]
 
 
-CLEAN = {
+CONSTANT = {
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    "HOME": "/root",
-    "DOCKER_CONFIG": "/root/.docker",
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
 }
-"""What a command run with no ``env`` sees, written out here: a key missing
-from ``CLEAN_ENV`` or another value in it is red (DM-79)."""
+"""The constants a command run with no ``env`` sees, written out here: a key
+missing from ``CONSTANT_ENV`` or another value in it is red (DM-79)."""
+
+
+def clean(home: str) -> dict[str, str]:
+    """What a command run with no ``env`` sees for a user whose home is
+    ``home`` in ``passwd`` (DM-88)."""
+    return {**CONSTANT, "HOME": home, "DOCKER_CONFIG": f"{home}/.docker"}
+
+
+def environment_seen() -> dict[str, str]:
+    """The whole environment of a command run with no ``env``."""
+    lines = Lines()
+    SubprocessRunner().run(
+        [PY, "-c", "import json, os; print(json.dumps(dict(os.environ)))"],
+        timeout=TIMEOUT,
+        on_line=lines,
+    )
+    seen: dict[str, str] = json.loads(lines.of(Stream.STDOUT)[0])
+    return seen
 
 
 def test_no_env_is_the_clean_minimum_not_the_process_one(
@@ -311,7 +328,11 @@ def test_no_env_is_the_clean_minimum_not_the_process_one(
     variable never reaches a command run with no ``env``, and a process with
     no ``HOME`` (the timer's) gives the same environment: exactly the clean
     minimum. The pair -- an explicit ``env`` is passed as it is -- is
-    ``test_cwd_and_env_are_passed``."""
+    ``test_cwd_and_env_are_passed``.
+
+    The home expected is the running user's in ``passwd``, not ``/root``
+    (DM-88): tier 1 runs as the runner's user, the sandbox as root, and the
+    test is the same in both."""
     monkeypatch.setenv("DOCKER_HOST", "tcp://elsewhere:2375")
     monkeypatch.setenv("COMPOSE_PROJECT_NAME", "other")
     monkeypatch.setenv("POSTGRES_PASSWORD", "from-the-session")
@@ -321,14 +342,56 @@ def test_no_env_is_the_clean_minimum_not_the_process_one(
             monkeypatch.delenv("HOME", raising=False)
         else:
             monkeypatch.setenv("HOME", home)
-        lines = Lines()
-        SubprocessRunner().run(
-            [PY, "-c", "import json, os; print(json.dumps(dict(os.environ)))"],
-            timeout=TIMEOUT,
-            on_line=lines,
-        )
-        seen.append(json.loads(lines.of(Stream.STDOUT)[0]))
-    assert seen == [CLEAN, CLEAN]
+        seen.append(environment_seen())
+    expected = clean(pwd.getpwuid(os.getuid()).pw_dir)
+    assert seen == [expected, expected]
+
+
+def test_no_env_is_one_for_two_sessions_of_one_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DM-88, repeat: two sessions of one user -- the timer's, with no
+    ``HOME`` and an empty ``DOCKER_CONFIG``, and an ssh one with another
+    ``HOME`` and ``DOCKER_CONFIG`` -- give one environment, the clean one of
+    the user in ``passwd``; neither ``DOCKER_CONFIG`` of the process is in it."""
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setenv("DOCKER_CONFIG", "")
+    timer = environment_seen()
+    monkeypatch.setenv("HOME", "/home/somebody")
+    monkeypatch.setenv("DOCKER_CONFIG", "/home/somebody/.docker-elsewhere")
+    session = environment_seen()
+    home = pwd.getpwuid(os.getuid()).pw_dir
+    assert timer == session == clean(home)
+    assert timer["DOCKER_CONFIG"] == f"{home}/.docker"
+
+
+def test_no_env_with_no_passwd_entry_is_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DM-88, a uid with no entry in ``passwd`` (a CI job's ``--user N``):
+    there is no home to give, so a command with no ``env`` is not started
+    and says why; the pair -- the same uid with an explicit ``env`` runs."""
+    uid = 4242
+    real = pwd.getpwuid
+
+    def entry(asked: int) -> pwd.struct_passwd:
+        if asked == uid:
+            raise KeyError(f"getpwuid(): uid not found: {asked}")
+        return real(asked)
+
+    monkeypatch.setattr(os, "getuid", lambda: uid)
+    monkeypatch.setattr(pwd, "getpwuid", entry)
+    with pytest.raises(CommandNotStarted) as raised:
+        SubprocessRunner().run([PY, "-c", "pass"], timeout=TIMEOUT, on_line=Lines())
+    assert raised.value.reason == f"no passwd entry for uid {uid}"
+    lines = Lines()
+    SubprocessRunner().run(
+        [PY, "-c", "print('ran')"],
+        timeout=TIMEOUT,
+        env={"PATH": "/usr/bin:/bin"},
+        on_line=lines,
+    )
+    assert lines.of(Stream.STDOUT) == ["ran"]
 
 
 def test_no_env_finds_a_program_on_the_clean_path_alone(

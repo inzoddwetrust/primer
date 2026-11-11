@@ -15,12 +15,15 @@ the box meanwhile. A signal that the command's ``Interrupt`` says stops it
 (``pridem/interrupt.py``) stops the command's group as a timeout does and
 raises ``Interrupted``.
 
-A command run with no ``env`` gets ``CLEAN_ENV``, never the environment of
+A command run with no ``env`` gets ``clean_env()``, never the environment of
 ``pridem``'s own process: a ``DOCKER_HOST``, a ``COMPOSE_*`` or a product's
 variable of an ssh session would reach docker and compose (an exported
 variable beats ``--env-file`` in compose's interpolation), and a run from the
-timer and one from an ssh session would hash one configuration two ways. A
-caller that passes ``env`` gives the whole environment itself.
+timer and one from an ssh session would hash one configuration two ways. Its
+``HOME`` is the home of the running user in ``passwd``, not the process's
+``HOME``: root on a box, the runner's user in a product's CI, where
+``pridem check`` runs. A caller that passes ``env`` gives the whole
+environment itself.
 
 ``FakeRunner`` is a strict script for tests: calls must arrive in the scripted
 order, an unplanned call fails at the moment it is made, and an expectation
@@ -36,6 +39,7 @@ cannot carry the output into a reason, and a reason lives in the verdict.
 import codecs
 import errno
 import os
+import pwd
 import re
 import selectors
 import shlex
@@ -80,18 +84,42 @@ _POLL_SECONDS = 0.05
 _LOOK_SECONDS = 0.1
 """The longest a command runs between two looks at the interrupt."""
 
-CLEAN_ENV: Mapping[str, str] = MappingProxyType(
+CONSTANT_ENV: Mapping[str, str] = MappingProxyType(
     {
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        "HOME": "/root",
-        "DOCKER_CONFIG": "/root/.docker",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
     }
 )
-"""The whole environment of a command run with no ``env``: constants, the
-same from the timer and from any session -- none of them is read from the
-process."""
+"""The constants of ``clean_env()``: none of them is read from the process."""
+
+
+class NoPasswdEntry(Exception):
+    """The running uid has no entry in ``passwd``: there is no home to give."""
+
+    def __init__(self, uid: int) -> None:
+        self.uid = uid
+        super().__init__(f"no passwd entry for uid {uid}")
+
+
+def clean_env() -> dict[str, str]:
+    """The whole environment of a command run with no ``env``.
+
+    ``CONSTANT_ENV``, and ``HOME`` -- the home of the running uid in
+    ``passwd`` (DM-88) -- with ``DOCKER_CONFIG`` at ``$HOME/.docker``. The
+    same from the timer, from any ssh session and under ``sudo -E``: neither
+    the process's ``HOME`` nor its ``DOCKER_CONFIG`` is read. Root gets
+    ``/root``; another user gets their own home, where docker finds its
+    plugins: with a ``DOCKER_CONFIG`` the user cannot read docker loses every
+    plugin, the system's ``compose`` too.
+    """
+    uid = os.getuid()
+    try:
+        home = pwd.getpwuid(uid).pw_dir
+    except KeyError:
+        raise NoPasswdEntry(uid) from None
+    return {**CONSTANT_ENV, "HOME": home, "DOCKER_CONFIG": f"{home}/.docker"}
+
 
 SETPRIV = "/usr/bin/setpriv"
 """util-linux on Ubuntu 24.04: ``--pdeathsig KILL`` -- the command's leader dies
@@ -259,7 +287,10 @@ class SubprocessRunner:
             tail.append((stream, line))
             on_line(stream, line, continued)
 
-        environment = dict(CLEAN_ENV if env is None else env)
+        try:
+            environment = clean_env() if env is None else dict(env)
+        except NoPasswdEntry as error:
+            raise CommandNotStarted(command, str(error)) from None
         try:
             program = _program(command[0], cwd, environment)
             process = subprocess.Popen(
