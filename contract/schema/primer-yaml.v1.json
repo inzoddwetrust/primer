@@ -1228,6 +1228,7 @@
     },
     "Verb": {
       "additionalProperties": false,
+      "description": "A verb of the project (contract 3 rule 7, protocol 8.2): run by the\nmachine in ``service`` of the stack's own entry -- by default its\n``app`` -- with its ``args`` in their order; ``roles`` -- the roles it\nruns on; ``destructive`` -- it asks ``--confirm <server.name>`` on any\nrole (protocol 1.11).",
       "properties": {
         "args": {
           "default": [],
@@ -1259,6 +1260,11 @@
         "run": {
           "minLength": 1,
           "title": "Run",
+          "type": "string"
+        },
+        "service": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Service",
           "type": "string"
         }
       },
