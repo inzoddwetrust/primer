@@ -2404,7 +2404,12 @@ def test_tier3_a_reset_of_the_blank_makes_its_database_new() -> None:
     <server.name>`` -- another database (OID), at the same head, the app
     running, the seeded and the test's rows gone. ``seed --list`` -- green;
     ``seed --profile bootstrap`` -- refused, it runs at install only; ``db
-    migrate`` -- green, nothing to do."""
+    migrate`` -- green, nothing to do.
+
+    Changed by DM-90 FIX (by the dispatcher's word, before the change): the
+    image of the measure is the one ``config --images`` of the release names,
+    ``<entry>-app:<commit12>`` since DM-90 -- not compose's own name of
+    before, ``<entry>-app``, which no image has any more."""
     assert (OPT / "current").is_symlink(), "the whole install runs first"
     assert _psql("SELECT key FROM app_settings WHERE key = 'installed_at'") == [
         "installed_at"
@@ -2417,7 +2422,8 @@ def test_tier3_a_reset_of_the_blank_makes_its_database_new() -> None:
     ]
     images = _stdout([*project, "config", "--images"])
     label = '{{index .Config.Labels "pridem.commit"}}'
-    [built] = _stdout(["docker", "image", "inspect", "-f", label, f"{STACK}-app"])
+    [app] = [image for image in images if image.startswith(f"{STACK}-app:")]
+    [built] = _stdout(["docker", "image", "inspect", "-f", label, app])
     [head] = _stdout(["git", "-C", str(OPT / "current"), "rev-parse", "HEAD"])
     print("DM-86 measure:", {"config --images": images, "app image commit": built,
                              "current": head})  # fmt: skip
