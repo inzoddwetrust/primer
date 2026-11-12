@@ -360,6 +360,34 @@
       "title": "Interrupted",
       "type": "object"
     },
+    "JournalCut": {
+      "additionalProperties": false,
+      "description": "The run's output past ``limit`` bytes is not in its journal (DM-24).",
+      "properties": {
+        "code": {
+          "const": "cut",
+          "title": "Code",
+          "type": "string"
+        },
+        "limit": {
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "what": {
+          "const": "journal",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code",
+        "limit"
+      ],
+      "title": "JournalCut",
+      "type": "object"
+    },
     "JournalDamaged": {
       "additionalProperties": false,
       "properties": {
@@ -604,6 +632,9 @@
               },
               {
                 "$ref": "#/$defs/JournalQuarantined"
+              },
+              {
+                "$ref": "#/$defs/JournalCut"
               },
               {
                 "$ref": "#/$defs/StateQuarantined"

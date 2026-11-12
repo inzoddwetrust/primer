@@ -171,7 +171,10 @@ def _db(args: Strict, ctx: Context) -> int:
     if args.dump is None:
         raise Refused("db restore: names the dump to restore")
     path, manifest = _dump(ctx, compose, args.dump)
-    _confirmed(ctx, verb, args.confirm)
+    confirm = args.confirm
+
+    def confirmed(box: Box) -> None:
+        _confirmed(ctx, verb, confirm)  # the copy read under the lock (DM-24)
 
     def restore(session: Session) -> Planned:
         stopped = Stopped()
@@ -187,7 +190,12 @@ def _db(args: Strict, ctx: Context) -> int:
         )
 
     return run_plan_verb(
-        ctx, verb=verb, mode="command", make=restore, args=_given(args)
+        ctx,
+        verb=verb,
+        mode="command",
+        make=restore,
+        args=_given(args),
+        before=confirmed,
     )
 
 
@@ -267,7 +275,10 @@ def _reset_steps(compose: ComposeStack, stopped: Stopped) -> list[Step]:
 def _reset(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
     if args.dump is not None:
         raise Refused("db reset: takes the entry and --confirm alone")
-    _resettable(ctx, "db reset", compose, args.confirm)
+    confirm = args.confirm
+
+    def resettable(box: Box) -> None:
+        _resettable(ctx, "db reset", compose, confirm)  # under the lock (DM-24)
 
     def make(session: Session) -> Planned:
         stopped = Stopped()
@@ -277,7 +288,12 @@ def _reset(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
         )
 
     return run_plan_verb(
-        ctx, verb="db reset", mode="command", make=make, args=_given(args)
+        ctx,
+        verb="db reset",
+        mode="command",
+        make=make,
+        args=_given(args),
+        before=resettable,
     )
 
 
@@ -355,12 +371,19 @@ def _seed(args: Strict, ctx: Context) -> int:
         raise Refused(f"seed: {compose.entry} has no profile {args.profile}")
     if seed.when != "command":
         raise Refused(f"seed: {args.profile} runs at install only (when: install)")
-    role = _role(ctx, "seed")
-    if seed.roles is not None and role not in seed.roles:
-        raise Refused(f"seed: {args.profile} is not for the role {role}")
     if args.dry_run and (args.reset or args.confirm):
         raise Refused("seed --dry-run: runs nothing, so resets nothing")
     given: dict[str, Json] = {"stack": compose.entry, "profile": args.profile}
+    reset, confirm, profile, roles = args.reset, args.confirm, args.profile, seed.roles
+
+    def seedable(box: Box) -> None:
+        """The role and the confirmation under the lock (DM-24)."""
+        role = _role(ctx, "seed")
+        if roles is not None and role not in roles:
+            raise Refused(f"seed: {profile} is not for the role {role}")
+        if reset:
+            _resettable(ctx, "seed --reset", compose, confirm)
+
     if args.dry_run:
         app = compose.app_service or ""
         argv = compose.argv("run", "--rm", app, *shlex.split(seed.run))
@@ -376,11 +399,14 @@ def _seed(args: Strict, ctx: Context) -> int:
             return Planned([StackSteps(compose.entry, [step], root=True)])
 
         return run_plan_verb(
-            ctx, verb="seed", mode="command", make=dry, args={**given, "dry_run": True}
+            ctx,
+            verb="seed",
+            mode="command",
+            make=dry,
+            args={**given, "dry_run": True},
+            before=seedable,
         )
-    if args.reset:
-        _resettable(ctx, "seed --reset", compose, args.confirm)
-    elif args.confirm is not None:
+    if not args.reset and args.confirm is not None:
         raise Refused("seed: --confirm goes with --reset")
     run = SeedRun(compose, args.profile, seed.run)
 
@@ -394,7 +420,9 @@ def _seed(args: Strict, ctx: Context) -> int:
 
     if args.reset:
         given = {**given, "reset": True, "confirm": args.confirm or ""}
-    return run_plan_verb(ctx, verb="seed", mode="command", make=make, args=given)
+    return run_plan_verb(
+        ctx, verb="seed", mode="command", make=make, args=given, before=seedable
+    )
 
 
 SEED = Verb(
@@ -475,17 +503,23 @@ def _verb(args: Strict, ctx: Context) -> int:
     if declared is None:
         raise Refused(f"verb: the product has no verb {args.name}")
     values = _values(args.name, list(declared.args), args.pairs)
-    role = _role(ctx, "verb")
-    if declared.roles is not None and role not in declared.roles:
-        raise Refused(f"verb {args.name}: not for the role {role}")
-    if declared.destructive:
-        _confirmed(ctx, f"verb {args.name}", args.confirm)
-    elif args.confirm is not None:
+    if not declared.destructive and args.confirm is not None:
         raise Refused(f"verb {args.name}: --confirm is for a destructive verb")
-    secrets = set(box_secrets(ctx))
-    for name, value in values.items():
-        if value in secrets or value.strip() in secrets:
-            raise Refused(f"verb {args.name}: {name} is a secret of the box")
+    name, confirm = args.name, args.confirm
+
+    def allowed(box: Box) -> None:
+        """The role, the confirmation and the box's secrets under the lock
+        (DM-24): the copy and the minted files read now."""
+        role = _role(ctx, "verb")
+        if declared.roles is not None and role not in declared.roles:
+            raise Refused(f"verb {name}: not for the role {role}")
+        if declared.destructive:
+            _confirmed(ctx, f"verb {name}", confirm)
+        secrets = set(box_secrets(ctx))
+        for key, value in values.items():
+            if value in secrets or value.strip() in secrets:
+                raise Refused(f"verb {name}: {key} is a secret of the box")
+
     service = verb_service(made, args.name)
     if service is None or made.name not in made.stacks:
         raise Refused(f"verb {args.name}: no service of the product's own entry")
@@ -501,7 +535,9 @@ def _verb(args: Strict, ctx: Context) -> int:
         given["args"] = dict[str, Json](values)
     if args.confirm is not None:
         given["confirm"] = args.confirm
-    return run_plan_verb(ctx, verb="verb", mode="command", make=make, args=given)
+    return run_plan_verb(
+        ctx, verb="verb", mode="command", make=make, args=given, before=allowed
+    )
 
 
 VERB = Verb(

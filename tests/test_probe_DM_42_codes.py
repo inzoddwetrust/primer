@@ -3,8 +3,9 @@ catalog (contract 2 v1.6).
 
 The scenarios below make the machine write every code it can write today --
 every reason, every incomplete entry but ``journal/quarantined`` (its writer is
-the CLI, DM-16), a step's own codes and a doctor entry -- through the plan, the
-builder and the box's recovery, never by hand. Each entry of each verdict must
+the CLI, DM-16) and ``journal/cut`` (the CLI too, DM-24), a step's own codes
+and a doctor entry -- through the plan, the builder and the box's recovery,
+never by hand. Each entry of each verdict must
 be exactly a listed code with exactly its parameters, or a step's code; the pair
 renders each entry into words. The second probe swaps the catalog and finds the
 report, ``--llm`` and the console speak it while the data stays the same.
@@ -81,7 +82,10 @@ NAMES = (
     "c",
 )
 CATALOG = with_steps(ENGLISH, ((name, ScriptedStep.codes) for name in NAMES))
-NOT_WRITTEN_HERE = {"journal/quarantined"}  # written by the CLI (DM-16)
+NOT_WRITTEN_HERE = {
+    "journal/quarantined",  # written by the CLI (DM-16)
+    "journal/cut",  # written by the CLI (DM-24, on the dispatcher's word)
+}
 
 
 class _FullOnce(ListSink):
@@ -385,6 +389,7 @@ def test_every_machine_code_has_a_text_for_every_parameter() -> None:
         "ended_at": None,
         "line": 3,
         "run_id": run_id(1),
+        "limit": 209715200,  # journal/cut (DM-24, on the dispatcher's word)
     }
     for key, params in {**REASON_CODES, **INCOMPLETE_CODES}.items():
         fields = {f for _, f, _, _ in Formatter().parse(ENGLISH[key]) if f}

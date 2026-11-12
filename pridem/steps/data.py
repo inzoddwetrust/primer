@@ -78,6 +78,7 @@ from pridem.steps.migrate import (
     Acting,
     Stopped,
     running,
+    unknown_head,
 )
 from pridem.steps.tests import Database, database
 
@@ -736,6 +737,10 @@ class DbMigrate(Step):
         data: dict[str, Json] = {"head": found[0]}
         if now == found[0]:
             return CheckResult(False, None, data)
+        app = self.compose.app_service or ""
+        show = self.compose.argv("run", "--rm", "--no-deps", app, *ALEMBIC, "show")
+        if now is not None and unknown_head(ctx, [*show, now], now):
+            raise StepFailed("db-ahead", {"entry": self.compose.entry, "head": now})
         params = {
             "stack": self.compose.entry,
             "current": now or "none",

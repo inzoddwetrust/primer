@@ -229,6 +229,39 @@ def alembic_call(cs: ComposeStack, what: str, *lines: str, deps: bool) -> FakeCa
     )
 
 
+def show_call(
+    cs: ComposeStack, image: str, head: str, *, known: bool = True
+) -> FakeCall:
+    """``alembic show <head>`` in the image of the release (DM-24): its code
+    knows ``head`` (exit 0) or not (exit 255, alembic's line, measured)."""
+    labels = (
+        "--label",
+        f"pridem.stack={cs.entry}",
+        "--label",
+        f"pridem.release={cs.ref}",
+        "--label",
+        f"pridem.commit={cs.commit}",
+    )
+    argv = (
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        *labels,
+        image,
+        "python",
+        "-m",
+        "alembic",
+        "show",
+        head,
+    )
+    if known:
+        return FakeCall(argv, lines=stdout(f"Rev: {head}"))
+    missing = f"FAILED: Can't locate revision identified by '{head}'"
+    return FakeCall(argv, code=255, lines=stdout(missing))
+
+
 def heads_call(cs: ComposeStack, image: str, *lines: str) -> FakeCall:
     labels = (
         "--label",

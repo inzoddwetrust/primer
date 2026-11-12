@@ -12,11 +12,13 @@ plan's code. Who reads the flag:
   current step (``watch``), outside a shield. The runner stops the command's
   group and raises ``Interrupted``; the step fails with ``interrupted``.
 
-``finally`` runs under ``shield``: nothing stops its commands or its waits,
-the clean-up goes to its end, and a signal received meanwhile is only counted
-(the plan writes it to the journal). A process killed outright (SIGKILL) runs
-no handler: the runner's ``pdeathsig`` and the box lock held by the command's
-processes cover that case.
+``finally`` runs under ``shield``: the first signal of the command is only
+counted (the plan writes it to the journal), so the clean-up goes on; every
+signal after it -- a person pressing Ctrl-C again -- stops the step of
+``finally`` that runs then, and only it: the steps after it still run
+(DM-24). A process killed outright (SIGKILL) runs no handler: the runner's
+``pdeathsig`` and the box lock held by the command's processes cover that
+case.
 """
 
 import signal
@@ -27,6 +29,10 @@ from types import FrameType
 
 SIGNALS = (signal.SIGINT, signal.SIGTERM)
 """The signals that interrupt a command."""
+
+ESCALATION = 2
+"""The signal of a command that stops a step of ``finally``: every one from
+the second on."""
 
 SLICE_S = 0.1
 """The longest a wait sleeps before it looks at the flag again."""
@@ -66,7 +72,8 @@ class Interrupt:
 
     @contextmanager
     def shield(self) -> Iterator[None]:
-        """Nothing that runs inside is stopped by a signal (``finally``)."""
+        """Inside, only a signal after the command's first stops what runs
+        (``finally``): the first is counted and the clean-up goes on."""
         before = self._shielded
         self._shielded = True
         try:
@@ -75,8 +82,11 @@ class Interrupt:
             self._shielded = before
 
     def stops(self) -> bool:
-        """A signal came since ``watch``, outside a shield."""
-        return not self._shielded and self.count > self._watched
+        """A signal came since ``watch`` -- under a shield, one that is not
+        the command's first."""
+        if self._shielded and self.count < ESCALATION:
+            return False
+        return self.count > self._watched
 
     def check(self) -> None:
         """Raise ``Interrupted`` when ``stops``."""

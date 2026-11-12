@@ -39,6 +39,7 @@ ENGLISH: Catalog = {
         "the journal stopped being written; the plan reached finally"
     ),
     "journal/quarantined": "journal {run_id} is in quarantine",
+    "journal/cut": "the run's output past {limit} bytes is not in its journal",
     "state/quarantined": "state.json was damaged and is in quarantine",
     "restore/needed": "past the point of no return: restore from backup is needed",
     "@at": "{phase} {stack} · {name}",

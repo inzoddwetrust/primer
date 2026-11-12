@@ -35,7 +35,8 @@ interrupt while a command or a wait of a step runs stops it there: that step
 fails with ``interrupted`` and the rest is skipped after it. ``restore`` stops
 on an interrupt during it. ``finally`` is shielded: it runs to its last step,
 and an interrupt during one of its steps is a line of that step in the
-journal.
+journal; the command's first is only that, a later one stops the step of
+``finally`` it lands in (``interrupted``), and the steps after it still run.
 
 A sink never crashes a plan either: its first failure is ``{what: journal,
 code: write-failed}`` in the outcome and the sink is not called again.
@@ -92,7 +93,7 @@ from pridem.events import (
     cut_ctx,
     role_skip,
 )
-from pridem.interrupt import Interrupt, Interrupted
+from pridem.interrupt import ESCALATION, Interrupt, Interrupted
 from pridem.report.catalog import ENGLISH, Catalog, with_steps
 from pridem.report.codes import ExitCode, worst
 from pridem.runner import (
@@ -548,7 +549,9 @@ class Plan:
 
     def _finally_ladder(self) -> list[StepRecord]:
         """``finally``, shielded: every step runs; a signal received during one
-        is a line of that step in the journal."""
+        is a line of that step in the journal. The shield yields to a signal
+        after the command's first (``Interrupt.stops``): the step running then
+        is ``interrupted``, the steps after it still run (DM-24)."""
         records: list[StepRecord] = []
         with self._interrupt.shield():
             for stack, step in self._finally:
@@ -558,10 +561,17 @@ class Plan:
                     )
                     continue
                 before = self._interrupt.count
+                self._interrupt.watch()
                 records.append(self._execute("finally", stack, step))
-                for signum in self._interrupt.received[before:]:
-                    name = signal.Signals(signum).name
-                    line = f"pridem: {name} during finally; the clean-up goes on"
+                received = self._interrupt.received
+                for at in range(before, len(received)):
+                    name = signal.Signals(received[at]).name
+                    line = (
+                        f"pridem: {name} during finally; the clean-up goes on"
+                        if at + 1 < ESCALATION
+                        else f"pridem: {name} again during finally; this step stops, "
+                        "the clean-up goes on after it"
+                    )
                     self._emit(
                         LogLine("finally", stack, step.name, Stream.STDERR, line)
                     )

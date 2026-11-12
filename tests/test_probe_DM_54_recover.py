@@ -118,9 +118,12 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
         order.append("recover")
         return real_recover(self, secrets, machine_version, catalog)
 
-    def open_journal(self: Box, head: JournalHeader, secrets: Secrets) -> JournalSink:
+    def open_journal(
+        self: Box, head: JournalHeader, secrets: Secrets, limit: int | None = None
+    ) -> JournalSink:
+        # DM-24, on the dispatcher's word: the journal takes the run's limit
         order.append(f"journal {head.verb}")
-        return real_open(self, head, secrets)
+        return real_open(self, head, secrets, limit)
 
     monkeypatch.setattr(Box, "recover", recover)
     monkeypatch.setattr(Box, "open_journal", open_journal)

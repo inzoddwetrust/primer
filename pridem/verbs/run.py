@@ -52,7 +52,7 @@ from pridem.report.codes import ExitCode, worst
 from pridem.report.render import render_json, summary_line, words
 from pridem.report.schema import Actor, Verdict, build_verdict
 from pridem.runner import Holding, Stream
-from pridem.stacks.passport import load_passport
+from pridem.stacks.passport import load_passport, size_bytes
 from pridem.state import Box, BoxBusy, JournalHeader, JournalSink, Recovery
 from pridem.steps.base import Role, Step
 from pridem.steps.passport import PASSPORT_COPY, Fetched, passport_secrets
@@ -226,7 +226,9 @@ def _verdict(
     if passport is not None:  # absent without a passport, never null
         fields["passport_version"] = passport.version
     header = JournalHeader.model_validate(fields)
-    journal = box.open_journal(header, secrets)
+    budget = passport.policies.gc.journal_budget if passport is not None else None
+    limit = size_bytes(budget) if budget is not None else None  # DM-24
+    journal = box.open_journal(header, secrets, limit)
     if box.lock_fd is not None and isinstance(ctx.runner, Holding):
         ctx.runner.hold(box.lock_fd)
     lost: tuple[Incomplete, ...] = ()
@@ -260,7 +262,12 @@ def _verdict(
     finally:
         finished = finished_at(started, journal)
         lost = close_journal(journal)
-    outcome = with_incomplete(outcome, (*found_on_box(box, recovery), *lost))
+    cut = (
+        (Incomplete("journal", Code("cut", {"limit": journal.cut})),)
+        if journal.cut is not None
+        else ()
+    )
+    outcome = with_incomplete(outcome, (*found_on_box(box, recovery), *lost, *cut))
     read_passport = planned.fetched.passport if planned.fetched else None
     shown = read_passport if read_passport is not None else passport
     after_state = box.read_state()

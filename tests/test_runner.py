@@ -592,7 +592,12 @@ def _signal_after(interrupt: Interrupt, seconds: float) -> threading.Thread:
 def test_a_signal_stops_the_command_mid_way_unless_shielded() -> None:
     """A signal while a command runs stops its group there: ``Interrupted``
     long before the command would end; the pair: under the shield of
-    ``finally`` the command runs to its end."""
+    ``finally`` the command's first signal lets the command run to its end.
+
+    Changed by DM-24 (the gate of pass 2, Р1): under the shield a signal after
+    the command's first stops the command too -- here the first came outside
+    the shield, so a second one under it stops ``sleep 20``; the first alone
+    under the shield is a fresh ``Interrupt``."""
     interrupt = Interrupt()
     runner = SubprocessRunner(interrupt)
     interrupt.watch()
@@ -602,11 +607,23 @@ def test_a_signal_stops_the_command_mid_way_unless_shielded() -> None:
         runner.run(["sleep", "20"], timeout=60, on_line=lambda *_: None)
     assert time.monotonic() - began < 10
     thread.join()
-    with interrupt.shield():
-        thread = _signal_after(interrupt, 0.1)
-        result = runner.run(["sleep", "0.6"], timeout=60, on_line=lambda *_: None)
+    with interrupt.shield():  # the second signal of the command: it stops
+        interrupt.watch()
+        thread = _signal_after(interrupt, 0.3)
+        began = time.monotonic()
+        with pytest.raises(Interrupted):
+            runner.run(["sleep", "20"], timeout=60, on_line=lambda *_: None)
+        assert time.monotonic() - began < 10
         thread.join()
-    assert result.code == 0
+    first = Interrupt()  # the first signal of a command, under the shield
+    with first.shield():
+        first.watch()
+        thread = _signal_after(first, 0.1)
+        result = SubprocessRunner(first).run(
+            ["sleep", "0.6"], timeout=60, on_line=lambda *_: None
+        )
+        thread.join()
+    assert result.code == 0 and first.count == 1
 
 
 def test_the_box_lock_is_handed_to_the_command(tmp_path: Path) -> None:

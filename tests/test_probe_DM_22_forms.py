@@ -35,6 +35,7 @@ from compose_support import (
     observe_calls,
     ps_call,
     run,
+    show_call,
     stdout,
 )
 from env_support import (
@@ -618,12 +619,20 @@ def run_with_finally(
     ).run()
 
 
-def migrate_check(cs: ComposeStack) -> list[FakeCall]:
-    """``check`` of ``migrate``: the image's head, the running app's."""
+def migrate_check(cs: ComposeStack, behind: str | None = None) -> list[FakeCall]:
+    """``check`` of ``migrate``: the image's head, the running app's; a
+    running app ``behind`` the head -- is it a head the code knows (DM-24:
+    ``alembic show`` in the image, before the point of no return)."""
+    known = (
+        [image_call(cs, "app", APP_IMAGE), show_call(cs, APP_IMAGE, behind)]
+        if behind is not None
+        else []
+    )
     return [
         image_call(cs, "app", APP_IMAGE),
         heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs),
+        *known,
     ]
 
 
@@ -649,11 +658,11 @@ def test_stop_for_migrate_stops_before_the_migration_and_up_is_left_the_rest(
     stop, migrate, start, _ = ladder(stack, tmp_path)
     cs = cs_of(stack, tmp_path)
     script = [
-        *migrate_check(cs),
+        *migrate_check(cs, "0000"),
         stop_call(cs, "worker", "app"),
         running_call(cs, "worker"),
         running_call(cs, "app"),
-        *migrate_check(cs),
+        *migrate_check(cs, "0000"),
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
@@ -663,6 +672,32 @@ def test_stop_for_migrate_stops_before_the_migration_and_up_is_left_the_rest(
     assert [r.name for r in outcome.steps] == ["stop_for_migrate", "migrate"]
     assert outcome.steps[0].verify == {"stack": "blank", "stopped": ["worker", "app"]}
     assert outcome.finally_[0].status == "ok"
+
+
+def test_a_database_ahead_of_the_code_stops_nothing(
+    tmp_path: Path, app: LiveApp
+) -> None:
+    """DM-24: the running app is at 0002, which the image's code does not know
+    -- ``stop_for_migrate`` reads the check of ``migrate`` first and is red with
+    its code before it stops anything (the strict script has no ``stop``); the
+    point of no return is not crossed."""
+    app.health = health(alembic_head="0002")
+    stack = stopping(app.port, "worker")
+    stop, migrate, start, _ = ladder(stack, tmp_path)
+    cs = cs_of(stack, tmp_path)
+    script = [
+        image_call(cs, "app", APP_IMAGE),
+        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *observe_calls(cs),
+        image_call(cs, "app", APP_IMAGE),
+        show_call(cs, APP_IMAGE, "0002", known=False),
+    ]
+    with FakeRunner(*script) as runner:
+        outcome = run_with_finally([stop, migrate], [start], runner)
+    first = outcome.steps[0]
+    assert first.reason is not None
+    assert first.reason.code == "stop_for_migrate:db-ahead"
+    assert not outcome.needs_restore
 
 
 def test_nothing_is_stopped_when_migrate_has_nothing_to_do(
@@ -699,7 +734,7 @@ def test_a_red_stop_crosses_no_point_and_finally_starts_what_it_stopped(
     stop, migrate, start, _ = ladder(stack, tmp_path)
     cs = cs_of(stack, tmp_path)
     script = [
-        *migrate_check(cs),
+        *migrate_check(cs, "0000"),
         stop_call(cs, "worker", code=1),
         FakeCall(tuple(cs.argv("start", "worker"))),
         running_call(cs, "worker", "c-worker"),
@@ -725,7 +760,7 @@ def test_a_service_that_still_runs_after_stop_is_red_before_the_point(
     stop, migrate, start, _ = ladder(stack, tmp_path)
     cs = cs_of(stack, tmp_path)
     script = [
-        *migrate_check(cs),
+        *migrate_check(cs, "0000"),
         stop_call(cs, "worker"),
         running_call(cs, "worker", "c-worker"),
         FakeCall(tuple(cs.argv("start", "worker"))),
@@ -748,10 +783,10 @@ def test_a_red_migrate_leaves_the_stopped_stopped(tmp_path: Path, app: LiveApp) 
     stop, migrate, start, _ = ladder(stack, tmp_path)
     cs = cs_of(stack, tmp_path)
     script = [
-        *migrate_check(cs),
+        *migrate_check(cs, "0000"),
         stop_call(cs, "worker"),
         running_call(cs, "worker"),
-        *migrate_check(cs),
+        *migrate_check(cs, "0000"),
         migrate_call(cs, code=1),
     ]
     with FakeRunner(*script) as runner:

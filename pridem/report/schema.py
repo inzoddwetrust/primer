@@ -377,6 +377,14 @@ class JournalQuarantined(Strict):
     run_id: RunId
 
 
+class JournalCut(Strict):
+    """The run's output past ``limit`` bytes is not in its journal (DM-24)."""
+
+    what: Literal["journal"]
+    code: Literal["cut"]
+    limit: Annotated[int, Field(ge=1)]
+
+
 class StateQuarantined(Strict):
     what: Literal["state"]
     code: Literal["quarantined"]
@@ -413,6 +421,7 @@ IncompleteEntry = Annotated[
     | Annotated[JournalDamaged, Tag("run/journal-damaged")]
     | Annotated[JournalWriteFailed, Tag("journal/write-failed")]
     | Annotated[JournalQuarantined, Tag("journal/quarantined")]
+    | Annotated[JournalCut, Tag("journal/cut")]
     | Annotated[StateQuarantined, Tag("state/quarantined")]
     | Annotated[RestoreNeeded, Tag("restore/needed")]
     | Annotated[StepIncomplete, Tag("step")],
@@ -423,6 +432,7 @@ INCOMPLETE_MODELS: dict[str, type[Strict]] = {
     "run/journal-damaged": JournalDamaged,
     "journal/write-failed": JournalWriteFailed,
     "journal/quarantined": JournalQuarantined,
+    "journal/cut": JournalCut,
     "state/quarantined": StateQuarantined,
     "restore/needed": RestoreNeeded,
 }

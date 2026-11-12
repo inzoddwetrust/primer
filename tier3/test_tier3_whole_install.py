@@ -2636,3 +2636,101 @@ def test_probe_DM_59_product_gets_the_seams_of_its_service_after_health(
     }
     for key in SEAMS:  # the values never reach the console or the verdict
         assert theirs[key] not in printed, key
+
+
+HOOK = """#!/bin/sh
+# DM-24: a git hook that leaves a process with the box lock's descriptor
+[ "$1" = committed ] || exit 0
+setsid sleep 20 </dev/null >/dev/null 2>&1 &
+echo $! > "{held}"
+touch "{marker}"
+sleep 20
+"""
+
+KILLED = """
+"$1" install --passport "$2" >"$3/install.out" 2>&1 &
+pid=$!
+for _ in $(seq 1800); do [ -e "$3/marker" ] && break; sleep 0.1; done
+if [ ! -e "$3/marker" ]; then
+  echo "hook: not called"; kill -9 $pid; exit 0
+fi
+echo "hook: called"
+kill -9 $pid
+wait $pid 2>/dev/null
+"$1" status >"$3/busy.out" 2>&1
+echo "busy exit: $?"
+cat "$3/busy.out"
+"""
+
+
+def test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-24 (05.11): ``pridem`` killed outright (SIGKILL) while a command of
+    it runs -- ``git fetch`` of ``fetch_root``, whose hook left a process with
+    the box lock's descriptor. The command's leader dies with ``pridem``
+    (``pdeathsig``); what it left holds the box: the next command is refused,
+    ``BoxBusy`` naming the processes. Once they are gone the next command
+    runs, and ``recover`` gives the killed run its red verdict
+    (``run/no-verdict``). The last of group ``a``: it leaves the box half
+    installed. Measured into the run's output (par0 14.3): that git called
+    the hook, the refusal as printed, the holders."""
+    bare = OPT / "git"
+    work = tmp_path / "dm24"
+    hooks = work / "hooks"
+    hooks.mkdir(parents=True)
+    held, marker = work / "held", work / "marker"
+    hook = hooks / "reference-transaction"
+    hook.write_text(HOOK.format(held=held, marker=marker), encoding="utf-8")
+    hook.chmod(0o755)
+    if not (bare / "HEAD").is_file():  # the bare repository DM-10 left, or a new one
+        _run(["git", "init", "--quiet", "--bare", str(bare)], env=GIT_ENV)
+        _run(
+            [
+                "git",
+                "--git-dir",
+                str(bare),
+                "remote",
+                "add",
+                "origin",
+                f"file://{mirror}",
+            ]
+        )
+    _run(
+        ["git", "--git-dir", str(bare), "update-ref", "-d", "refs/heads/main"],
+        expect=(0, 1),
+    )
+    try:
+        _run(["git", "--git-dir", str(bare), "config", "core.hooksPath", str(hooks)])
+        seen = _run(
+            ["sh", "-c", KILLED, "scene", PRIDEM, str(_passport(tmp_path)), str(work)],
+            timeout=1200,
+        )
+        print("DM-24 measure:", seen)
+        assert seen[0] == "hook: called", seen
+        assert "busy exit: 1" in seen, seen
+        refusal = "\n".join(seen)
+        assert "the box is busy" in refusal and "held by pid" in refusal, seen
+        left = int(held.read_text().strip())
+        assert f"pid {left} (sleep)" in refusal, seen
+        deadline_at = time.monotonic() + 60
+        while True:  # the processes left end by themselves (20 s)
+            code, _, err = _pridem("status")
+            if code != 1 or time.monotonic() > deadline_at:
+                break
+            time.sleep(2)
+        assert code in (0, 2), err
+    finally:
+        _run(
+            ["git", "--git-dir", str(bare), "config", "--unset", "core.hooksPath"],
+            expect=(0, 5),
+        )
+    history = sorted(Path("/opt/pridem/history").glob("*.json"))
+    killed = [
+        Verdict.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in history
+    ]
+    [install] = [v for v in killed if v.verb == "install"]
+    assert install.result == "red"
+    [entry] = install.report.incomplete
+    assert (entry.what, entry.code) == ("run", "no-verdict"), entry

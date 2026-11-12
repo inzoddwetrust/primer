@@ -52,6 +52,7 @@ INCOMPLETE_CODES: dict[str, tuple[str, ...]] = {
     "run/journal-damaged": ("line",),
     "journal/write-failed": (),
     "journal/quarantined": ("run_id",),
+    "journal/cut": ("limit",),
     "state/quarantined": (),
     "restore/needed": (),
 }

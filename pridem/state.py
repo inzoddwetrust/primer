@@ -3,10 +3,15 @@
 ``<root>/`` (``/opt/pridem`` on a box) holds:
 
 - ``lock`` -- one active command per box: ``flock(LOCK_EX | LOCK_NB)``; a second
-  command is refused with ``BoxBusy`` naming the holder, it never waits. The
-  kernel drops the lock when the last process holding its descriptor ends:
-  the runner hands the descriptor (``lock_fd``) to every command, so the box
-  stays held while any process of the command lives, ``pridem`` dead or not.
+  command is refused with ``BoxBusy`` naming the holder -- the command written
+  into the lock file and the processes that hold the lock now (``/proc``) --
+  it never waits. The kernel drops the lock when the last descriptor of its
+  open file is closed: the runner hands the descriptor (``lock_fd``) to every
+  command, and ``pridem`` only closes its own at the end, never ``LOCK_UN``
+  (which drops the lock for every holder of the open file at once, a process
+  the command left behind too -- measured, DM-24): the box stays held while
+  any process of the command lives, ``pridem`` gone by its end or by
+  ``SIGKILL``.
   Every write below requires the lock; it is checked, not hoped for. One hold
   of the lock is one session: it opens one journal, a second is
   ``JournalTaken`` before anything is written.
@@ -104,11 +109,46 @@ JournalEvent = StepStarted | StepFinished | LogLine
 
 
 class BoxBusy(Exception):
-    """Another command holds the box."""
+    """Another command holds the box: ``holder`` -- the command that took it
+    (the lock file); ``processes`` -- ``pid N (comm)`` of each process that
+    holds its descriptor now, a process a command left behind among them."""
 
-    def __init__(self, holder: str) -> None:
+    def __init__(self, holder: str, processes: tuple[str, ...] = ()) -> None:
         self.holder = holder
-        super().__init__(f"the box is busy: {holder or 'a command is starting'}")
+        self.processes = processes
+        held = f"; held by {', '.join(processes)}" if processes else ""
+        super().__init__(f"the box is busy: {holder or 'a command is starting'}{held}")
+
+
+def holders(path: Path) -> tuple[str, ...]:
+    """``pid N (comm)`` of every other process with ``path`` open, read from
+    ``/proc``; a process whose ``fd`` cannot be read (gone, another user) is
+    left out."""
+    try:
+        inode = path.stat()
+    except OSError:
+        return ()
+    found: list[str] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            fds = list((entry / "fd").iterdir())
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = fd.stat()
+            except OSError:
+                continue
+            if (target.st_dev, target.st_ino) == (inode.st_dev, inode.st_ino):
+                try:
+                    comm = (entry / "comm").read_text(encoding="utf-8").strip()
+                except OSError:
+                    comm = "?"
+                found.append(f"pid {entry.name} ({comm})")
+                break
+    return tuple(sorted(found, key=lambda text: int(text.split()[1])))
 
 
 class NotLocked(RuntimeError):
@@ -324,9 +364,13 @@ class JournalSink:
     by a timeout or an interrupt) and at ``close``: nothing is lost.
     """
 
-    def __init__(self, path: Path, secrets: Secrets) -> None:
+    def __init__(self, path: Path, secrets: Secrets, limit: int | None = None) -> None:
         self._secrets = secrets
         self._held: dict[_LineKey, str] = {}
+        self._limit = limit
+        self._logged = 0
+        self.cut: int | None = None
+        """The limit the run's output reached (its later lines not written)."""
         # the journal exists (open_journal created it, 0600); never create one here
         fd = os.open(path, os.O_WRONLY | os.O_APPEND)
         self._handle: TextIO = os.fdopen(fd, "a", encoding="utf-8")
@@ -356,7 +400,19 @@ class JournalSink:
         self._handle.close()
 
     def _write(self, event: JournalEvent) -> None:
-        self._handle.write(_event_line(event, self._secrets))
+        line = _event_line(event, self._secrets)
+        if isinstance(event, LogLine) and self._limit is not None:
+            if self.cut is not None:
+                return
+            size = len(line.encode("utf-8"))
+            if self._logged + size > self._limit:
+                self.cut = self._limit
+                text = f"output-cut {self._limit} bytes: the journal is at its limit"
+                cut = LogLine(event.phase, event.stack, event.name, event.stream, text)
+                self._handle.write(_event_line(cut, self._secrets))
+                return
+            self._logged += size
+        self._handle.write(line)
 
     def _log(self, event: LogLine) -> None:
         key = (event.phase, event.stack, event.name, event.stream)
@@ -446,7 +502,7 @@ class Box:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 held = os.pread(fd, 4096, 0).decode("utf-8", "replace")
-                raise BoxBusy(held) from None
+                raise BoxBusy(held, holders(self.root / LOCK)) from None
             os.ftruncate(fd, 0)
             os.pwrite(fd, holder.encode("utf-8"), 0)
             os.fsync(fd)
@@ -460,7 +516,8 @@ class Box:
             finally:
                 self._locked = False
                 self.lock_fd = None
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                # no LOCK_UN: it would drop the lock for a process the command
+                # left holding the descriptor too; closing drops it with the last
         finally:
             os.close(fd)
 
@@ -561,10 +618,15 @@ class Box:
                 return run_id
         raise RunIdTaken(f"{now:%Y-%m-%dT%H:%M:%SZ}")
 
-    def open_journal(self, header: JournalHeader, secrets: Secrets) -> JournalSink:
+    def open_journal(
+        self, header: JournalHeader, secrets: Secrets, limit: int | None = None
+    ) -> JournalSink:
         """Create the journal of a run with its header line; return its sink.
 
         One per hold of the lock: a second is ``JournalTaken``, nothing written.
+        ``limit`` -- the bytes of output lines the run may write (DM-24): past
+        it one line ``output-cut <limit> bytes`` and no more output; the events
+        of its steps are written whatever the limit.
         """
         self._require_lock()
         if self._journal_opened:
@@ -575,7 +637,7 @@ class Box:
         raw["args"] = secrets.value(raw["args"])
         line = json.dumps({"event": "header", **raw}, ensure_ascii=False) + "\n"
         atomic_write(final, line, _FILE_MODE, exclusive=True)
-        return JournalSink(final, secrets)
+        return JournalSink(final, secrets, limit)
 
     def read_journal(self, run_id: str) -> Journal | None:
         """The journal of ``run_id``, or ``None`` when it was evicted."""
@@ -618,8 +680,11 @@ class Box:
     ) -> Recovery:
         """Write a red verdict for every journal that has none (contract 2 rule 4).
 
-        A journal whose header is damaged is renamed ``<run_id>.jsonl.damaged``
-        and listed in the result; recovery goes on with the next journal.
+        A journal whose header is damaged, or from which no verdict can be
+        built (``build_verdict`` refuses it: a code without a text in
+        ``catalog``, as after an update of the machine that removed a step), is
+        renamed ``<run_id>.jsonl.damaged`` and listed in the result; recovery
+        goes on with the next journal.
         ``state.json`` is read once, before the journals: a damaged one is
         quarantined then, and every verdict written here carries
         ``{what: state, code: quarantined}`` after its ``run`` entry -- its
@@ -627,7 +692,7 @@ class Box:
         ``run`` entry is ``{what: run, code: no-verdict, ended_at}`` (the last
         step the journal reached, ``null`` before the first) or ``{what: run,
         code: journal-damaged, line}``. A code without a text in ``catalog`` is
-        refused, as ``build_verdict`` refuses it.
+        refused, as ``build_verdict`` refuses it -- and the journal quarantined.
         """
         self._require_lock()
         state = self.read_state()
@@ -638,14 +703,18 @@ class Box:
                 continue
             try:
                 journal = read_journal(path)
-            except JournalDamaged:
+                verdict = self._orphan_verdict(
+                    journal, state, secrets, machine_version, catalog
+                )
+            except (JournalDamaged, ValueError):
+                # a damaged header, or a verdict this machine cannot build from
+                # the journal -- a code its catalog no longer has (a step another
+                # release removed): quarantined, never a box every command fails
+                # on (DM-24)
                 path.rename(path.with_name(path.name + _QUARANTINE_SUFFIX))
                 fsync_dir(self.journals)
                 quarantined.append(path.stem)
                 continue
-            verdict = self._orphan_verdict(
-                journal, state, secrets, machine_version, catalog
-            )
             self.write_verdict(verdict)
             verdicts.append(verdict)
         return Recovery(tuple(verdicts), tuple(quarantined), self.state_quarantined)

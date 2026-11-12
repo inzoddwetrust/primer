@@ -32,12 +32,14 @@ service does.
 
 import json
 import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Protocol
 
 from pridem.conformance.stack import observe
 from pridem.events import Json
+from pridem.runner import TAIL_LINES, CommandFailed, Stream
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
     CheckResult,
@@ -84,6 +86,36 @@ def running_head(ctx: StepContext, compose: ComposeStack) -> str | None:
     return head if isinstance(head, str) else None
 
 
+UNKNOWN_EXIT = 255
+"""The exit of ``alembic`` that refused (``FAILED: ...``)."""
+
+UNKNOWN_HEAD = "FAILED: Can't locate revision identified by '{head}'"
+"""What ``alembic show <head>`` prints, exit 255, for a revision its scripts do
+not hold (alembic 1.20, measured): the machine's only reading of a database
+ahead of the code -- another text is a failed command, never an ``act``."""
+
+DB_AHEAD = (
+    "the database of {entry} is at {head}, which the code of this release does "
+    "not know: it is ahead of the code -- deploy code that holds {head}, or "
+    "restore a dump"
+)
+
+
+def unknown_head(ctx: StepContext, argv: Sequence[str], head: str) -> bool:
+    """``alembic show <head>`` (``argv``) in the image of the code to run:
+    ``True`` -- the code does not know ``head`` (exit 255 and alembic's line);
+    ``False`` -- it does (exit 0). Exit 255 with another text is
+    ``CommandFailed``: a form the machine cannot read is red before any
+    ``act`` (DM-24)."""
+    code, lines = out(ctx, argv, expect=(0, UNKNOWN_EXIT))
+    if code == 0:
+        return False
+    if UNKNOWN_HEAD.format(head=head) in (line.strip() for line in lines):
+        return True
+    tail = tuple((Stream.STDOUT, line) for line in lines[-TAIL_LINES:])
+    raise CommandFailed(tuple(argv), code, (0,), tail)
+
+
 class Migrate(Step):
     """The stack's migrations, once, on the image of the new commit."""
 
@@ -92,6 +124,7 @@ class Migrate(Step):
     modes = ALL_MODES
     point_of_no_return = True
     codes: ClassVar[dict[str, str]] = {
+        "db-ahead": DB_AHEAD,
         **NO_PASSPORT,
         **KEY_CODES,
         "migrate": "migrate {stack} to {head}",
@@ -127,6 +160,11 @@ class Migrate(Step):
 
     def _heads(self, ctx: StepContext) -> tuple[list[str], int]:
         """Heads of the built image, by ``docker run`` on it; and the line count."""
+        _, lines = out(ctx, self._alembic(ctx, "heads"), timeout=COMMAND_TIMEOUT_S)
+        return heads(lines), len(lines)
+
+    def _alembic(self, ctx: StepContext, *args: str) -> list[str]:
+        """``alembic <args>`` in the built image of the release, no network."""
         passport = None if self.fetched is None else self.fetched.passport
         key = image_key(self.compose.stack, self.app, passport)
         images = image_of(ctx, self.compose, self.app, key)
@@ -139,22 +177,17 @@ class Migrate(Step):
             for key, value in self.compose.release_labels().items()
             for word in ("--label", f"{key}={value}")
         ]
-        _, lines = out(
-            ctx,
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                *labels,
-                images[0],
-                *ALEMBIC,
-                "heads",
-            ],
-            timeout=COMMAND_TIMEOUT_S,
-        )
-        return heads(lines), len(lines)
+        return [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            *labels,
+            images[0],
+            *ALEMBIC,
+            *args,
+        ]
 
     def _current(self, ctx: StepContext) -> list[str]:
         _, lines = out(
@@ -184,8 +217,13 @@ class Migrate(Step):
     def check(self, ctx: StepContext) -> CheckResult:
         head = self.target_head(ctx)
         data: dict[str, Json] = {"head": head}
-        if running_head(ctx, self.compose) == head:
+        live = running_head(ctx, self.compose)
+        if live == head:
             return CheckResult(False, None, data)
+        if live is not None and unknown_head(
+            ctx, self._alembic(ctx, "show", live), live
+        ):
+            raise StepFailed("db-ahead", {"entry": self.compose.entry, "head": live})
         params: dict[str, Json] = {"stack": self.compose.entry, "head": head}
         return CheckResult(True, local_code("migrate", params), data)
 
@@ -245,6 +283,7 @@ IMAGE_CODES: dict[str, str] = {
 release's (``steps/data.py``, DM-86)."""
 
 MIGRATE_VERB_CODES: dict[str, str] = {
+    "db-ahead": DB_AHEAD,
     "no-app": "{stack} has no app to run its migrations in",
     "no-migrate": "{stack} has no migrate",
     "migrate": "migrate {stack} from {current} to {head}",

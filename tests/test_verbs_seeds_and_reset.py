@@ -230,11 +230,17 @@ def migrate_check(cs: ComposeStack, current: str) -> list[FakeCall]:
     heads = cs.argv(
         "run", "--rm", "--no-deps", "app", "python", "-m", "alembic", "heads"
     )
+    show = cs.argv(
+        "run", "--rm", "--no-deps", "app", "python", "-m", "alembic", "show", current
+    )
+    known = [FakeCall(tuple(show), lines=lines(f"Rev: {current}"))]
     return [
         config_call(cs),
         *image_calls(cs),
         FakeCall(tuple(heads), lines=lines("0002 (head)")),
         head_call(cs, current),
+        # a database behind the head: is its head one the code knows (DM-24)
+        *(known if current != "0002" else []),
     ]
 
 
@@ -265,6 +271,41 @@ def test_db_migrate_brings_the_database_to_the_head_of_its_code(tmp_path: Path) 
     with FakeRunner(*same) as runner:
         code, out, _ = _cli(tmp_path, ["db", "migrate", STACK], runner)
     assert code == 0, _verdict(out).steps
+
+
+def test_db_migrate_on_a_database_ahead_of_its_code_is_red_before_it_acts(
+    tmp_path: Path,
+) -> None:
+    """DM-24: the database is at 0003, which the release's code does not know
+    (``alembic show`` exits 255 with alembic's line) -- ``db_migrate:db-ahead``
+    before the point of no return: no ``upgrade`` in the script."""
+    blank_box(tmp_path)
+    cs = compose(tmp_path)
+    heads = cs.argv(
+        "run", "--rm", "--no-deps", "app", "python", "-m", "alembic", "heads"
+    )
+    show = cs.argv(
+        "run", "--rm", "--no-deps", "app", "python", "-m", "alembic", "show", "0003"
+    )
+    missing = "FAILED: Can't locate revision identified by '0003'"
+    calls = [
+        config_call(cs),
+        *image_calls(cs),
+        FakeCall(tuple(heads), lines=lines("0002 (head)")),
+        head_call(cs, "0003"),
+        FakeCall(tuple(show), code=255, lines=lines(missing)),
+    ]
+    with FakeRunner(*calls) as runner:
+        code, out, _ = _cli(tmp_path, ["db", "migrate", STACK], runner)
+    verdict = _verdict(out)
+    reason = verdict.steps[1].reason
+    assert code == 1 and reason is not None
+    assert reason.model_dump() == {
+        "code": "db_migrate:db-ahead",
+        "entry": STACK,
+        "head": "0003",
+    }
+    assert verdict.report.incomplete == []  # no point crossed, no restore
 
 
 def test_db_migrate_with_two_heads_is_red_before_it_acts(tmp_path: Path) -> None:

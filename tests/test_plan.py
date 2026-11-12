@@ -8,6 +8,7 @@ from env_support import run as run_env
 from plan_support import NOW, Journal, ListSink, ScriptedStep, plan, red
 
 from pridem.events import (
+    INTERRUPTED,
     Code,
     Incomplete,
     PlanFinished,
@@ -539,11 +540,13 @@ def test_command_not_started_reason_is_the_runner_text() -> None:
 
 
 def test_interrupt_inside_finally_stops_the_rest_of_finally() -> None:
-    """DM-45 (gate Q4): ``finally`` is shielded -- a signal inside a clean-up
-    step no longer stops it or the rest of finally; it is a line of that step
-    in the journal. What the old test held -- the plan ends with every
-    clean-up step recorded and the run interrupted -- still holds, more of it
-    now runs."""
+    """DM-45 (gate Q4): ``finally`` is shielded. Changed by DM-24 (the gate of
+    pass 2, Р1): the shield yields to a signal after the command's first --
+    here the first stops ``up`` and the second lands in ``gc``: ``gc`` is
+    ``interrupted``, ``timers`` after it still runs, and the line of ``gc`` says
+    the step stops. What the old test held -- every clean-up step recorded, the
+    run interrupted -- still holds; the first signal inside ``finally`` alone
+    is ``test_the_first_signal_inside_finally_is_only_counted``."""
     journal = Journal()
     run, sink = plan(
         _root(ScriptedStep("up", 1, journal, signal_in="act")),
@@ -560,17 +563,48 @@ def test_interrupt_inside_finally_stops_the_rest_of_finally() -> None:
     outcome = run.run()
     assert outcome.interrupted and outcome.code is ExitCode.FAILED
     assert [(r.name, r.status) for r in outcome.finally_] == [
-        ("gc", "ok"),
+        ("gc", "failed"),
         ("timers", "ok"),
     ]
-    assert "aivis/gc:verify" in journal and "aivis/timers:verify" in journal
+    assert outcome.finally_[0].reason == INTERRUPTED
+    assert "aivis/gc:verify" not in journal and "aivis/timers:verify" in journal
     noted = [line for line in sink.lines() if line.name == "gc"]
     assert [(line.phase, line.stream, line.line) for line in noted] == [
         (
             "finally",
             Stream.STDERR,
-            "pridem: SIGTERM during finally; the clean-up goes on",
+            "pridem: SIGTERM again during finally; this step stops, "
+            "the clean-up goes on after it",
         )
+    ]
+
+
+def test_the_first_signal_inside_finally_is_only_counted() -> None:
+    """DM-24: the command's first signal lands in ``finally``: ``gc`` goes to
+    its end, a line of it says the clean-up goes on, the run is interrupted."""
+    journal = Journal()
+    run, sink = plan(
+        _root(ScriptedStep("up", 1, journal)),
+        finally_=[
+            StackSteps(
+                "aivis",
+                [
+                    ScriptedStep("gc", 1, journal, signal_in="act"),
+                    ScriptedStep("timers", 2, journal),
+                ],
+            )
+        ],
+    )
+    outcome = run.run()
+    assert outcome.interrupted
+    assert [(r.name, r.status) for r in outcome.finally_] == [
+        ("gc", "ok"),
+        ("timers", "ok"),
+    ]
+    assert "aivis/gc:verify" in journal and "aivis/timers:verify" in journal
+    noted = [line for line in sink.lines() if line.name == "gc"]
+    assert [line.line for line in noted] == [
+        "pridem: SIGTERM during finally; the clean-up goes on"
     ]
 
 

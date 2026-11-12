@@ -19,11 +19,13 @@ from compose_support import (
     migrate_call,
     observe_calls,
     run,
+    show_call,
+    stdout,
 )
 from plan_support import Journal, ScriptedStep
 
 from pridem.events import Code
-from pridem.runner import FakeRunner
+from pridem.runner import FakeCall, FakeRunner
 from pridem.steps.base import StepFailed
 from pridem.steps.migrate import Migrate
 
@@ -112,12 +114,63 @@ def test_the_running_head_is_the_new_head_no_act(tmp_path: Path, app: LiveApp) -
         image_call(cs, "app", APP_IMAGE),
         heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs),
+        image_call(cs, "app", APP_IMAGE),
+        show_call(cs, APP_IMAGE, "0000"),  # a head the code knows (DM-24)
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
     with FakeRunner(*behind) as runner:
         outcome, _ = run([migrate(tmp_path, app.port), red_after], runner)
     assert outcome.needs_restore
+
+
+def test_a_database_ahead_of_the_code_is_red_before_act(
+    tmp_path: Path, app: LiveApp
+) -> None:
+    """DM-24 (tier 3 of DM-86: ``upgrade head`` on a database at 0002 with code
+    at 0001 failed past the point of no return): the running app says a head
+    the image's ``alembic show`` does not know -- ``migrate:db-ahead`` before
+    any ``act``, no restore needed. The pair: a head it knows acts (the test
+    above)."""
+    cs = compose(tmp_path, app.port)
+    app.health = health(alembic_head="0002")
+    ahead = [
+        image_call(cs, "app", APP_IMAGE),
+        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *observe_calls(cs),
+        image_call(cs, "app", APP_IMAGE),
+        show_call(cs, APP_IMAGE, "0002", known=False),
+    ]
+    with FakeRunner(*ahead) as runner:  # no migrate in the script
+        outcome, _ = run([migrate(tmp_path, app.port)], runner)
+    [record] = outcome.steps
+    assert record.reason == Code("migrate:db-ahead", {"entry": "blank", "head": "0002"})
+    assert not outcome.needs_restore
+
+
+def test_another_refusal_of_alembic_show_is_a_failed_command(
+    tmp_path: Path, app: LiveApp
+) -> None:
+    """Exit 255 without alembic's line: a form the machine cannot read is a
+    failed command before any ``act`` -- never a migration, never
+    ``db-ahead``."""
+    cs = compose(tmp_path, app.port)
+    app.health = health(alembic_head="0002")
+    show = show_call(cs, APP_IMAGE, "0002", known=False)
+    other = FakeCall(show.argv, code=255, lines=stdout("FAILED: No config file"))
+    script = [
+        image_call(cs, "app", APP_IMAGE),
+        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *observe_calls(cs),
+        image_call(cs, "app", APP_IMAGE),
+        other,
+    ]
+    with FakeRunner(*script) as runner:
+        outcome, _ = run([migrate(tmp_path, app.port)], runner)
+    [record] = outcome.steps
+    assert record.reason is not None
+    assert record.reason.code == "command-failed"
+    assert not outcome.needs_restore
 
 
 def test_no_head_read_is_red_before_act(tmp_path: Path) -> None:

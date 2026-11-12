@@ -126,8 +126,14 @@ def _plan_verb(name: str, mode: PlanMode) -> Callable[[Strict, Context], int]:
         )
         ref = args.ref if isinstance(args, DeployArgs) else None
         new_secrets = False
+        before: Callable[[Box], None] | None = None
         if isinstance(args, ReinstallArgs):
-            _confirmed(copy.passport or preread, name, args.confirm)
+            confirm = args.confirm
+
+            def before(box: Box) -> None:
+                """The role under the lock (DM-24): the copy read now."""
+                _confirmed(read_copy(ctx).passport or preread, name, confirm)
+
             new_secrets = args.new_secrets
         wanted = Wanted(
             mode=name if name in ("install", "reinstall", "doctor") else "deploy",
@@ -148,6 +154,7 @@ def _plan_verb(name: str, mode: PlanMode) -> Callable[[Strict, Context], int]:
             args=_given(args),
             ladder=True,
             copy=copy,
+            before=before,
         )
 
     return run
@@ -219,7 +226,11 @@ def _destroy(args: Strict, ctx: Context) -> int:
     if not isinstance(args, DestroyArgs):
         raise TypeError("destroy takes DestroyArgs")
     copy = read_copy(ctx)
-    _confirmed(copy.passport, "destroy", args.confirm)
+    confirm = args.confirm
+
+    def before(box: Box) -> None:
+        """The role under the lock (DM-24): the copy read now."""
+        _confirmed(read_copy(ctx).passport, "destroy", confirm)
 
     def make(session: Session) -> Planned:
         return destroy_plan(session, ctx.fs_root)
@@ -232,6 +243,7 @@ def _destroy(args: Strict, ctx: Context) -> int:
         args=_given(args),
         ladder=True,
         copy=copy,
+        before=before,
     )
 
 
