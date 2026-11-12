@@ -99,7 +99,11 @@ OPT = Path(f"/opt/{STACK}")
 MIRROR = Path(f"/srv/tier3/{STACK}.git")
 """The blank's ``file://`` mirror the passport names: the machine fetches from
 it with no key of CI, and names the product's directory by it -- ``primer-blank``."""
-BLANK_COMMIT = "47f4e7c9a1092c17ef3fdc1b4658b05aa0b690d6"
+BLANK_COMMIT = "754f8562c35495d97f3916d096034860adb9c346"
+FILES = "primer-blank-files"
+"""The persistent entry of the blank (DM-86): its volume outlives destroy."""
+FILES_VOLUME = f"{FILES}_files"
+MARK = "dm86-persistent"
 # the blank's service (DM-59): its file:// mirror is made by tier3/conftest.py
 # before the first test of the session -- every plan of the blank reads its lock
 SERVICE = "primer-blank-service"
@@ -1431,6 +1435,28 @@ def test_tier3_both_slots_from_one_brand_package_by_subpath(
     assert _doctor(file)[:2] == ([], [])
 
 
+def test_tier3_reinstall_keeps_the_persistent_volume(tmp_path: Path) -> None:
+    """DM-86, pass 3, last of group b: a mark on the volume of the persistent
+    entry ``primer-blank-files``; ``reinstall`` -- green, its ``destroy``
+    names the volume kept, and the stack comes up again on it: the mark is
+    there. The database of the blank's own entry is new (not persistent):
+    its test rows are gone, the seed of ``install`` is back."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    files = _container(FILES, "files")
+    _stdout(["docker", "exec", files, "sh", "-c", f"echo {MARK} > /srv/files/mark"])
+    _psql("INSERT INTO app_settings (key, value) VALUES ('dm86-gone', 'x')")
+    verdict, printed = _install(_passport(tmp_path, version=15), "reinstall")
+    assert verdict.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    assert facts[("destroy", "remove_objects")]["kept_volumes"] == [FILES_VOLUME]
+    files = _container(FILES, "files")
+    assert _stdout(["docker", "exec", files, "cat", "/srv/files/mark"]) == [MARK]
+    assert _psql("SELECT value FROM app_settings WHERE key = 'dm86-gone'") == []
+    assert _psql("SELECT key FROM app_settings WHERE key = 'installed_at'") == [
+        "installed_at"
+    ]
+
+
 def _check(directory: Path) -> tuple[int, dict[str, object]]:
     """``pridem --json check`` of ``directory``: its exit code and verdict."""
     out: list[str] = []
@@ -2448,24 +2474,86 @@ def test_tier3_a_reset_of_the_blank_makes_its_database_new() -> None:
     assert migrate.verify == {"stack": STACK, "alembic_head": reset["alembic_head"]}
 
 
+def test_tier3_a_project_verb_runs_in_its_service(tmp_path: Path, mirror: Path) -> None:
+    """DM-86, pass 3, on the box the earlier tests left: ``set-setting`` --
+    destructive -- without ``--confirm`` is refused and writes nothing; with
+    the box's name it writes its row, in ``app``; ``count-settings`` runs in
+    ``postgres`` (``exec`` in the live container), its output in the
+    journal. The pair: a copy of the blank whose ``count-settings`` is for
+    ``prod`` alone -- refused on this box of ``test``. Measured into the
+    journal (par0 14.3): the lines ``count-settings`` printed."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    _psql("DELETE FROM app_settings WHERE key = 'dm86-verb'")
+    code, out, err = _pridem("verb", "set-setting", "key=dm86-verb", "value=v")
+    assert code == 1 and "--confirm" in "\n".join(err), (out, err)
+    assert _psql("SELECT value FROM app_settings WHERE key = 'dm86-verb'") == []
+    verdict, printed = _verdict_of(
+        "verb", "set-setting", "key=dm86-verb", "value=v", "--confirm", "tier3-env"
+    )
+    assert verdict.result == "green", printed
+    assert _psql("SELECT value FROM app_settings WHERE key = 'dm86-verb'") == ["v"]
+    assert verdict.steps[0].verify == {
+        "verb": "set-setting",
+        "service": "app",
+        "exit_code": 0,
+    }
+    verdict, printed = _verdict_of("verb", "count-settings")
+    assert verdict.result == "green", printed
+    [count] = _psql("SELECT count(*) FROM app_settings")
+    journal = Path("/opt/pridem") / str(verdict.log_ref)
+    said = [
+        json.loads(line).get("line")
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if '"project_verb"' in line and '"log"' in line
+    ]
+    print("DM-86 measure:", {"count-settings said": said, "count": count})
+    assert verdict.steps[0].verify == {
+        "verb": "count-settings",
+        "service": "postgres",
+        "exit_code": 0,
+    }
+    assert count in said, said
+
+    copy = _copy_of_blank(tmp_path, mirror, "verb-role")
+    _replace_once(copy / "primer.yaml", "    roles: [test]\n", "    roles: [prod]\n")
+    _push(copy, mirror, "DM-86: count-settings for prod alone")
+    verdict, printed = _install(_passport(tmp_path, version=45), "update")
+    assert verdict.result == "green", printed
+    code, out, err = _pridem("verb", "count-settings")
+    assert code == 1 and "not for the role test" in "\n".join(err), (out, err)
+
+
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     """The last of the cycle (DM-45): ``pridem destroy`` -- every container,
-    network, volume and image labelled ``pridem.stack`` gone (the blank has no
-    persistent entry), ``/opt/primer-blank`` down to its mark and
-    ``minted.yaml``, the edge's and the proxy's directories gone, the timers
-    gone, ``state.json`` gone; ``history/`` and the passport's copy stay. The
-    pair: ``destroy`` again has nothing to do and is green.
+    network, volume and image labelled ``pridem.stack`` gone but the volume of
+    the persistent entry ``primer-blank-files``, which stays with what it
+    held, ``/opt/primer-blank`` down to its mark and ``minted.yaml``, the
+    edge's and the proxy's directories gone, the timers gone, ``state.json``
+    gone; ``history/`` and the passport's copy stay. The pair: ``destroy``
+    again has nothing to do and is green.
 
     Changed by DM-76 (by the dispatcher's word, before the change): the
-    machine's mark stays while the directory holds its secret."""
+    machine's mark stays while the directory holds its secret.
+
+    Changed by DM-86, pass 3 (by the dispatcher's word, before the change):
+    the blank has a persistent stack -- ``kept_volumes`` names its volume, and
+    a mark written on it before ``destroy`` is read from it after."""
     assert (OPT / "current").is_symlink(), "the install runs first"
+    files = _container(FILES, "files")
+    [image] = _stdout(["docker", "inspect", "-f", "{{.Config.Image}}", files])
+    _stdout(["docker", "exec", files, "sh", "-c", f"echo {MARK} > /srv/files/mark"])
     verdict, printed = _verdict_of("destroy")
     assert verdict.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
-    assert facts[("destroy", "remove_objects")]["kept_volumes"] == [], facts
+    kept = facts[("destroy", "remove_objects")]["kept_volumes"]
+    assert kept == [FILES_VOLUME], facts
     for kind in ("ps -aq", "network ls -q", "volume ls -q", "image ls -q"):
         left = _stdout(["docker", *kind.split(), "--filter", "label=pridem.stack"])
-        assert left == [], (kind, left)
+        assert left == ([FILES_VOLUME] if kind == "volume ls -q" else []), (kind, left)
+    read = ["docker", "run", "--rm", "--network", "none",
+            "--mount", f"type=volume,source={FILES_VOLUME},target=/v", image,
+            "cat", "/v/mark"]  # fmt: skip
+    assert _stdout(read) == [MARK]
     assert sorted(str(p) for p in OPT.rglob("*")) == [
         str(OPT / ".pridem"),
         str(OPT / "env"),

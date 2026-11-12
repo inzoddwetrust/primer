@@ -373,3 +373,31 @@ def test_probe_DM_22_persistent_volumes_survive_destroy_and_reinstall(
     assert outcome.steps[0].verify["kept_volumes"] == ["files"]
     kept = json.loads((box.root / "kept-volumes.json").read_text())
     assert kept["volumes"] == {"files": "storage"}
+
+
+@pytest.mark.parametrize(
+    ("text", "mode"),
+    [
+        (f"POSTGRES_PASSWORD: {MINTED}\n", 0o644),
+        ("POSTGRES_PASSWORD: short\n", 0o600),
+        ("POSTGRES_PASSWORD: [not, a, value\n", 0o600),
+    ],
+    ids=["mode-0644", "damaged-value", "damaged-yaml"],
+)
+def test_a_minted_file_that_cannot_be_read_refuses_the_verb_before_it_runs(
+    tmp_path: Path, text: str, mode: int
+) -> None:
+    """The secrets of the box are not known when a stack's ``minted.yaml`` is
+    not 0600 or is damaged: the verb is refused before the run -- an empty
+    script, no verdict -- rather than run with a secret unchecked (the
+    dispatcher's mutation of pass 3: "an unreadable one is skipped"). The
+    pair: the probes above, with a readable file."""
+    _box(tmp_path)
+    minted = tmp_path / "opt" / STACK / "env" / "minted.yaml"
+    minted.write_text(text)
+    minted.chmod(mode)
+    argv = ["verb", "set-setting", "key=k", "value=v", "--confirm", "box-1"]
+    with FakeRunner() as runner:
+        code, out, err = _cli(tmp_path, argv, runner)
+    assert (code, out) == (1, "")
+    assert f"the minted secrets of {STACK} cannot be read" in err
