@@ -5,7 +5,7 @@ One function makes the plan of ``install``, ``update``, ``deploy``,
 (``destroy_plan``). The order is protocol 6's, the same for every product;
 ``primer.yaml`` has no steps of its own.
 
-    host -> passport -> [destroy: reinstall] -> timers -> sources ->
+    host -> passport -> [destroy: reinstall] -> network -> timers -> sources ->
     dependencies -> services -> <the product's entries> -> types -> edge ->
     frontend -> finalize
     finally: stopped (what stop_for_migrate stopped, when migrate never
@@ -81,7 +81,7 @@ from pridem.steps.finalize import FinalCheck, Finalize
 from pridem.steps.frontend import Frontend
 from pridem.steps.gc import GC_STACK, gc_steps
 from pridem.steps.git import repo
-from pridem.steps.host import host_steps
+from pridem.steps.host import EnsureNetwork, host_steps
 from pridem.steps.keys import DeployKey
 from pridem.steps.migrate import Migrate, StartStopped, StopForMigrate, Stopped
 from pridem.steps.nginx import Nginx
@@ -234,7 +234,7 @@ def deploy_plan(
     root, box, secrets = fs_root, session.box, session.secrets
     report = TestReport()
     known = _Known()
-    host, final = host_steps(root, domains=_domains(preread))
+    host, final = host_steps(root, domains=_domains(preread), network=False)
     source = wanted.source
     fetched, first = passport_steps(
         root,
@@ -733,6 +733,9 @@ def deploy_plan(
             )
         )
     stacks += [
+        # what destroy undoes stands after it: the machine's networks, the
+        # timers (DM-86 FIX -- ensure_network stood in host, before destroy)
+        StackSteps("network", [EnsureNetwork(root)]),
         StackSteps("timers", timer_steps(root, fetched=fetched)),
         Deferred("sources", sources, after="fetch_passport"),
         Deferred("dependencies", dependencies, after="fetch_root"),

@@ -387,7 +387,12 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
 
     Changed by DM-22: ``finally`` starts with ``stopped`` -- what
     ``stop_for_migrate`` stopped, started again where ``migrate`` never acted
-    -- before the host's timers come back."""
+    -- before the host's timers come back.
+
+    Changed by DM-86 FIX: ``network`` (``ensure_network``) is a stack of its
+    own after where ``destroy`` stands, not a step of ``host`` -- ``destroy``
+    removes the machine's networks, and ``reinstall`` could not bring a stack
+    up after it."""
     box = Box(tmp_path / "opt" / "pridem")
     wanted = Wanted(mode=mode, source=Source(file=tmp_path / "x"))
     planned = deploy_plan(
@@ -399,6 +404,7 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
         "host",
         "passport",
         *middle,
+        "network",
         "timers",
         "sources",
         "dependencies",
@@ -422,3 +428,44 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
         "frontend",
         "finalize",
     }
+
+
+ALLOWED_BEFORE_DESTROY = {
+    "preflight": "reads the host",
+    "wait_host_quiet": "pauses the timers; remove_timers takes their units, "
+    "restore_timers of finally gives back what it paused",
+    "provision_host": "apt packages: destroy does not remove them",
+    "daemon_json": "/etc/docker/daemon.json: destroy does not remove it",
+    "locale": "update-locale: destroy does not touch it",
+    "fetch_passport": "the passport's copy: destroy keeps it",
+}
+"""Every step that stands before ``destroy`` in ``reinstall``, and why
+``destroy`` does not undo what it made (DM-86 FIX)."""
+
+
+def test_nothing_before_destroy_in_reinstall_makes_what_destroy_removes(
+    tmp_path: Path,
+) -> None:
+    """DM-86 FIX (tier 3: ``reinstall`` could not bring a stack up -- its
+    ``destroy`` removed the networks ``host`` had made in the same plan):
+    every step before ``destroy`` is one of a list whose reason is named; a
+    new step of ``host`` or ``passport`` turns this red until its relation to
+    ``destroy`` is decided. ``ensure_network`` and ``timers`` stand after."""
+    box = Box(tmp_path / "opt" / "pridem")
+    wanted = Wanted(mode="reinstall", source=Source(file=tmp_path / "x"))
+    planned = deploy_plan(
+        Session(box, "r1", Fetched(), NO_SECRETS), tmp_path, wanted, None
+    )
+    names = [stack.name for stack in planned.stacks]
+    at = names.index("destroy")
+    before = [
+        step.name
+        for stack in planned.stacks[:at]
+        if isinstance(stack, StackSteps)
+        for step in stack.steps
+    ]
+    assert before and set(before) <= set(ALLOWED_BEFORE_DESTROY), before
+    assert at < names.index("network") < names.index("timers")
+    [network] = [s for s in planned.stacks if s.name == "network"]
+    assert isinstance(network, StackSteps)
+    assert [step.name for step in network.steps] == ["ensure_network"]

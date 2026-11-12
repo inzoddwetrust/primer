@@ -2480,7 +2480,8 @@ def test_tier3_a_project_verb_runs_in_its_service(tmp_path: Path, mirror: Path) 
     the box's name it writes its row, in ``app``; ``count-settings`` runs in
     ``postgres`` (``exec`` in the live container), its output in the
     journal. The pair: a copy of the blank whose ``count-settings`` is for
-    ``prod`` alone -- refused on this box of ``test``. Measured into the
+    ``prod`` alone -- refused on this box of ``test``; the copy carries the
+    revision 0002 the box's database is at (FIX). Measured into the
     journal (par0 14.3): the lines ``count-settings`` printed."""
     assert (OPT / "current").is_symlink(), "the whole install runs first"
     _psql("DELETE FROM app_settings WHERE key = 'dm86-verb'")
@@ -2514,7 +2515,12 @@ def test_tier3_a_project_verb_runs_in_its_service(tmp_path: Path, mirror: Path) 
     }
     assert count in said, said
 
+    # FIX: the copy carries the migrations of the box's release -- its
+    # database is at 0002 (the stop for migrate put it there): a copy at 0001
+    # alone is code older than its database, and migrate is red, rightly
     copy = _copy_of_blank(tmp_path, mirror, "verb-role")
+    versions = copy / "backend" / "migrations" / "versions"
+    (versions / "2026_11_10_0002_dm22.py").write_text(REVISION, encoding="utf-8")
     _replace_once(copy / "primer.yaml", "    roles: [test]\n", "    roles: [prod]\n")
     _push(copy, mirror, "DM-86: count-settings for prod alone")
     verdict, printed = _install(_passport(tmp_path, version=45), "update")

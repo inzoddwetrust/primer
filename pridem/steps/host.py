@@ -674,14 +674,20 @@ def host_steps(
     min_free_gib: float = MIN_FREE_DISK_GIB,
     lock_timeout_s: int = APT_LOCK_TIMEOUT_S,
     quiet_timeout_s: float = QUIET_TIMEOUT_S,
+    network: bool = True,
 ) -> tuple[list[_Step], list[_Step]]:
-    """The host ladder and its ``finally``: what a plan builder puts first."""
+    """The host ladder and its ``finally``: what a plan builder puts first.
+
+    ``network=False`` leaves ``ensure_network`` out: the deploy plans put it in
+    a stack of its own after where ``destroy`` stands -- ``destroy`` removes
+    the machine's networks, and in ``reinstall`` it runs after the host's
+    ladder in one plan (DM-86 FIX: the stack after it could not come up)."""
     main: list[_Step] = [
         Preflight(root, domains=domains, min_free_gib=min_free_gib),
         WaitHostQuiet(root, timeout_s=quiet_timeout_s),
         ProvisionHost(root, lock_timeout_s=lock_timeout_s),
         DaemonJson(root),
-        EnsureNetwork(root),
+        *([EnsureNetwork(root)] if network else []),
         Locale(root),
     ]
     return main, [RestoreTimers(root)]
