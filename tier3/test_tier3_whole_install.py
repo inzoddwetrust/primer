@@ -2655,6 +2655,7 @@ if [ ! -e "$3/marker" ]; then
   echo "hook: not called"; kill -9 $pid; exit 0
 fi
 echo "hook: called"
+echo "journal: $(tail -n 1 "$(ls -t /opt/pridem/journal/*.jsonl | head -n 1)")"
 kill -9 $pid
 wait $pid 2>/dev/null
 "$1" status >"$3/busy.out" 2>&1
@@ -2673,8 +2674,14 @@ def test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild(
     ``BoxBusy`` naming the processes. Once they are gone the next command
     runs, and ``recover`` gives the killed run its red verdict
     (``run/no-verdict``). The last of group ``a``: it leaves the box half
-    installed. Measured into the run's output (par0 14.3): that git called
-    the hook, the refusal as printed, the holders."""
+    installed and the mirror's ``main`` on a commit of its own -- the order
+    matters, no test of the group runs after it. Measured into the run's output
+    (par0 14.3): that git called the hook, the journal's last line then (the
+    step in progress), the refusal as printed, the holders.
+
+    FIX: ``fetch_root`` fetches only a commit whose release the box has not --
+    the probe of DM-10, earlier in group ``a``, leaves ``BLANK_COMMIT`` there,
+    so the probe deploys a commit of its own the box has not fetched."""
     bare = OPT / "git"
     work = tmp_path / "dm24"
     hooks = work / "hooks"
@@ -2696,10 +2703,10 @@ def test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild(
                 f"file://{mirror}",
             ]
         )
-    _run(
-        ["git", "--git-dir", str(bare), "update-ref", "-d", "refs/heads/main"],
-        expect=(0, 1),
-    )
+    # a commit the box has not fetched: fetch_root acts, git fetch moves a ref
+    copy = _copy_of_blank(tmp_path, mirror, "dm24-unfetched")
+    _git("-C", str(copy), "commit", "-q", "--allow-empty", "-m", "DM-24: unfetched")
+    _git("-C", str(copy), "push", "-q", "--force", str(mirror), "HEAD:refs/heads/main")
     try:
         _run(["git", "--git-dir", str(bare), "config", "core.hooksPath", str(hooks)])
         seen = _run(
@@ -2708,6 +2715,7 @@ def test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild(
         )
         print("DM-24 measure:", seen)
         assert seen[0] == "hook: called", seen
+        assert seen[1].startswith("journal: ") and '"fetch_root"' in seen[1], seen
         assert "busy exit: 1" in seen, seen
         refusal = "\n".join(seen)
         assert "the box is busy" in refusal and "held by pid" in refusal, seen
