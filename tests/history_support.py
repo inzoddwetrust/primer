@@ -75,7 +75,7 @@ def deploy_verdict(
                 "stack": "sources",
                 "name": "stand",
                 "phase": "main",
-                "order": 2,
+                "order": 3,
                 "status": "failed",
                 "reason": refused,
             }

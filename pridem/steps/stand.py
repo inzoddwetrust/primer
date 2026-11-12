@@ -71,7 +71,9 @@ class Stand(Step):
     """A red stand refuses a deploy of another task (TZ 9.3)."""
 
     name = STAND
-    order = 2  # the phase of fetch_root, right after it in its stack
+    order = 3
+    """After ``fetch_root`` (2) and before ``fetch_packages`` (5) in ``sources``:
+    an order is unique in its stack (``plan.ladder``), so not ``fetch_root``'s."""
     modes = DEPLOY
     codes: ClassVar[dict[str, str]] = {
         "blocked": "the stand is red by {task} at {sha}: a deploy of another "
