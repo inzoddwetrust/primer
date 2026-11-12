@@ -729,7 +729,9 @@ def deploy_plan(
         stacks.append(
             StackSteps(
                 DESTROY_STACK,
-                destroy_steps(root, box=box, new_secrets=wanted.new_secrets),
+                destroy_steps(
+                    root, box=box, new_secrets=wanted.new_secrets, rechecked=False
+                ),
             )
         )
     stacks += [

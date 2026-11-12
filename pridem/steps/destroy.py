@@ -401,11 +401,23 @@ class ForgetState(Step):
         return Verified({"state": "absent"})
 
 
-def destroy_steps(root: Path, *, box: Box, new_secrets: bool = False) -> list[Step]:
-    """The ``destroy`` ladder, as stack ``STACK``."""
-    return [
+def destroy_steps(
+    root: Path, *, box: Box, new_secrets: bool = False, rechecked: bool = True
+) -> list[Step]:
+    """The ``destroy`` ladder, as stack ``STACK``.
+
+    ``rechecked=False`` -- the ``destroy`` of ``reinstall``: the install after
+    it in the same plan makes again, by design, what each of its steps took
+    away -- the objects, the files, the timers, ``state.json`` -- so the final
+    check does not read them again; their facts stay as they were read (DM-86
+    FIX 2, the class of ``stop_for_migrate``). A ``destroy`` alone keeps them
+    read again: nothing after it undoes them."""
+    steps: list[Step] = [
         RemoveObjects(box=box, root=root, new_secrets=new_secrets),
         RemoveFiles(root=root, new_secrets=new_secrets),
         RemoveTimers(root=root),
         ForgetState(box=box),
     ]
+    for step in steps:
+        step.rechecked = rechecked
+    return steps

@@ -469,3 +469,33 @@ def test_nothing_before_destroy_in_reinstall_makes_what_destroy_removes(
     [network] = [s for s in planned.stacks if s.name == "network"]
     assert isinstance(network, StackSteps)
     assert [step.name for step in network.steps] == ["ensure_network"]
+
+
+@pytest.mark.parametrize("mode", ["reinstall", "destroy"])
+def test_the_destroy_of_reinstall_is_not_read_again_by_the_final_check(
+    tmp_path: Path, mode: str
+) -> None:
+    """DM-86 FIX 2 (tier 3: ``reinstall`` came through and was red at
+    ``final_check`` -- ``remove_objects:left``): in ``reinstall`` the install
+    after ``destroy`` makes again what each of its four steps took away, so
+    none of them is ``rechecked``. The pair: ``destroy`` alone -- every step
+    is read again, nothing after it undoes it."""
+    from pridem.verbs.plans import destroy_plan
+
+    box = Box(tmp_path / "opt" / "pridem")
+    session = Session(box, "r1", Fetched(), NO_SECRETS)
+    if mode == "reinstall":
+        wanted = Wanted(mode=mode, source=Source(file=tmp_path / "x"))
+        planned = deploy_plan(session, tmp_path, wanted, None)
+    else:
+        planned = destroy_plan(session, tmp_path)
+    [destroy] = [s for s in planned.stacks if s.name == "destroy"]
+    assert isinstance(destroy, StackSteps)
+    found = {step.name: step.rechecked for step in destroy.steps}
+    assert set(found) == {
+        "remove_objects",
+        "remove_files",
+        "remove_timers",
+        "forget_state",
+    }
+    assert set(found.values()) == {mode == "destroy"}, found
