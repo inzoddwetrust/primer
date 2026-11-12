@@ -109,6 +109,7 @@ from pridem.steps.sources import (
     source_steps,
 )
 from pridem.steps.ssl import Ssl, TlsFiles
+from pridem.steps.stand import ROLLBACK_CHECK, RollbackCheck, Stand
 from pridem.steps.tests import TestReport, Tests
 from pridem.steps.timers import timer_steps
 from pridem.steps.types import Types
@@ -198,6 +199,9 @@ class Wanted:
     """``deploy <ref>``; ``None`` -- the passport's."""
     tries: Mapping[str, str] = field(default_factory=dict)
     new_secrets: bool = False
+    rollback: bool = False
+    """``rollback`` on prod: ``ref`` is the previous release, and
+    ``rollback_check`` measures the migrations before any step acts (DM-24)."""
 
 
 def _derives(stack: Product | Service) -> bool:
@@ -215,6 +219,12 @@ def _domains(passport: Passport | None) -> list[str]:
     if passport is None or passport.policies.ssl != "letsencrypt":
         return []
     return sorted(set(passport.domains.values()))
+
+
+def _guards_stand(wanted: Wanted, role: str) -> bool:
+    """``stand`` runs in ``update`` and ``deploy`` on a test box (TZ 9.3):
+    ``install`` and ``reinstall`` are the way off a blocked stand."""
+    return wanted.mode == "deploy" and role == "test" and not wanted.rollback
 
 
 def deploy_plan(
@@ -263,7 +273,12 @@ def deploy_plan(
         known.dependencies = [
             s for s in steps if isinstance(s, CheckLock | FetchServices)
         ]
-        own = [s for s in steps if isinstance(s, FetchRoot | FetchPackages)]
+        own: list[Step] = []
+        for step in steps:
+            if isinstance(step, FetchRoot | FetchPackages):
+                own.append(step)
+            if isinstance(step, FetchRoot) and _guards_stand(wanted, role):
+                own.append(Stand(step, box, root))  # right after it: DM-24
         key = DeployKey(passport.product.repo, root)  # none for file://
         return [StackSteps("sources", [key, *own])]
 
@@ -286,6 +301,51 @@ def deploy_plan(
             made.append(StackSteps(name, [DeployKey(address, root, others=others)]))
         made.append(StackSteps("dependencies", list(known.dependencies)))
         return made
+
+    def rollback() -> Sequence[StackSteps] | None:
+        """``rollback_check``: every entry that migrates, of the services the
+        box uses and of the product, measured before any of them acts."""
+        found = target()
+        passport = _passport(fetched)
+        resolved = known.resolved
+        if found is None or passport is None or resolved is None:
+            return None
+        product, release, ref, commit = found
+        here = installed(product, passport.edition, on=switched_on(passport))
+        if any(name not in resolved.services for name in here):
+            return None
+        migrates: list[Migrate] = []
+        for name in here:
+            service = resolved.services[name]
+            tag = resolved.lock.dependencies[name].tag if resolved.lock else ""
+            migrates += [
+                Migrate(
+                    service,
+                    entry,
+                    release=resolved.releases[name],
+                    ref=tag,
+                    commit=resolved.commits[name],
+                    root=root,
+                    fetched=fetched,
+                )
+                for entry, stage in service.stacks.items()
+                if stage.migrate is not None and stage.app is not None
+            ]
+        migrates += [
+            Migrate(
+                product,
+                entry,
+                release=release,
+                ref=ref,
+                commit=commit,
+                root=root,
+                fetched=fetched,
+            )
+            for entry, stage in product.stacks.items()
+            if stage.migrate is not None and stage.app is not None
+        ]
+        check = RollbackCheck(migrates, passport.product.ref)
+        return [StackSteps("rollback", [check])]
 
     def services() -> Sequence[StackSteps] | None:
         """``seams_check`` and the ladder of each service."""
@@ -676,6 +736,11 @@ def deploy_plan(
         StackSteps("timers", timer_steps(root, fetched=fetched)),
         Deferred("sources", sources, after="fetch_passport"),
         Deferred("dependencies", dependencies, after="fetch_root"),
+        *(
+            [Deferred("rollback", rollback, after="fetch_services")]
+            if wanted.rollback
+            else []
+        ),
         Deferred("services", services, after="fetch_services"),
         Deferred(PRODUCT, entries, after="fetch_root"),
         Deferred("types", types, after="fetch_root"),
@@ -690,7 +755,10 @@ def deploy_plan(
             GC_STACK, gc_steps(root, box=box, run_id=session.run_id, fetched=fetched)
         ),
     ]
-    return Planned(stacks, finally_, fetched, report)
+    restore_on = (
+        frozenset({f"{ROLLBACK_CHECK}:migrated"}) if wanted.rollback else frozenset()
+    )
+    return Planned(stacks, finally_, fetched, report, restore_on)
 
 
 def destroy_plan(session: Session, fs_root: Path) -> Planned:

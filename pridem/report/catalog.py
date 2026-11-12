@@ -76,6 +76,8 @@ ENGLISH: Catalog = {
     "@incomplete.item": "- {what} — {words}",
     "@doctor.heading": "## Doctor diff",
     "@doctor.item": "- {stack} · {name} — {words}",
+    "@rollback.passport-ref": "the passport still names {ref}: the next update "
+    "brings it back — change the passport",
     "@steps.heading": "## Steps",
     "@steps.header": "| stack | step | order | status | duration | fact or reason |",
     "@steps.rule": "|---|---|---|---|---|---|",

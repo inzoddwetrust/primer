@@ -40,8 +40,9 @@ and the size of ``journal/`` -- and decides what ``act`` removes:
 The current release of a stack is the target of ``/opt/<stack>/current``, its
 commit read from the worktree. The previous is named by the newest green verdict
 in ``history/`` whose ``finalize`` put another release of the stack in
-``current``; its commit comes from that verdict's ``fetch_root`` and
-``fetch_services`` facts, else from its worktree. ``state.json`` is not read:
+``current`` (``steps/history.py``, the one reading ``rollback`` goes back by);
+its commit comes from that verdict's ``fetch_root`` and ``fetch_services``
+facts, else from its worktree. ``state.json`` is not read:
 it is a record of the box, not a basis of decisions.
 
 ``verify`` measures again. What ``act`` removed and is still there -- an image,
@@ -79,7 +80,7 @@ from pridem.runner import CommandFailed, CommandNotStarted, CommandTimedOut
 from pridem.stacks.loader import ContractError
 from pridem.stacks.passport import Gc as GcPolicy
 from pridem.stacks.passport import Passport, load_passport, size_bytes
-from pridem.state import Box, VerdictDamaged
+from pridem.state import Box
 from pridem.steps.base import (
     CheckResult,
     Mode,
@@ -91,6 +92,7 @@ from pridem.steps.base import (
 )
 from pridem.steps.compose import out
 from pridem.steps.git import run_git
+from pridem.steps.history import previous_releases
 from pridem.steps.passport import NO_PASSPORT, PASSPORT_COPY, Fetched
 from pridem.steps.sources import marked, package_dir
 
@@ -238,15 +240,6 @@ class _Known:
     damaged: int
 
 
-def _finalized(verdict: Verdict) -> dict[str, str] | None:
-    for step in verdict.steps:
-        if (step.phase, step.name, step.status) == ("main", "finalize", "ok"):
-            current = (step.verify or {}).get("current")
-            if isinstance(current, dict):
-                return {k: v for k, v in current.items() if isinstance(v, str)}
-    return None
-
-
 def _heads(verdict: Verdict) -> dict[tuple[str, str], str]:
     """``(stack, release) -> commit`` from the ``fetch_*`` facts of ``verdict``."""
     found: dict[tuple[str, str], str] = {}
@@ -373,38 +366,22 @@ class Gc(Step):
                 current[stack] = target
                 if (target / ".git").exists():
                     commits.add(self._head(ctx, target))
-        previous: dict[str, str] = {}
+        found = previous_releases(
+            self.box, {stack: path.name for stack, path in current.items()}
+        )
         names: set[str] = set()
-        made: set[str] = set()  # stacks whose current release's verdict is read
-        damaged = 0
-        for run_id in reversed(self.box.history_ids()):
-            if not set(current) - set(previous) and set(current) <= made:
-                break
-            try:
-                verdict = self.box.read_verdict(run_id)
-            except VerdictDamaged:
-                damaged += 1
-                continue
-            finalized = _finalized(verdict) if verdict.result == "green" else None
-            if finalized is None:
-                continue
-            heads = _heads(verdict)
-            for stack in sorted(set(current) - made):
-                if finalized.get(stack) == current[stack].name:
-                    made.add(stack)  # the packages of the current release
-                    names.update(verdict.composition_after.values())
-            for stack in sorted(set(current) - set(previous)):
-                release = finalized.get(stack)
-                if release is None or release == current[stack].name:
-                    continue
-                previous[stack] = release
-                names.update(verdict.composition_after.values())
-                head = heads.get((stack, release))
-                path = self._releases_dir(stack) / release
-                if head is None and (path / ".git").exists():
-                    head = self._head(ctx, path)
-                if head is not None:
-                    commits.add(head)
+        for verdict in found.current_verdicts:  # the packages of the current
+            names.update(verdict.composition_after.values())
+        for stack, release in sorted(found.previous.items()):
+            verdict = found.previous_verdicts[stack]
+            names.update(verdict.composition_after.values())
+            head = _heads(verdict).get((stack, release))
+            path = self._releases_dir(stack) / release
+            if head is None and (path / ".git").exists():
+                head = self._head(ctx, path)
+            if head is not None:
+                commits.add(head)
+        previous, damaged = found.previous, found.damaged
         return _Known(current, previous, commits, names, damaged)
 
     def _releases(self, ctx: StepContext, stack: str) -> list[_Release]:

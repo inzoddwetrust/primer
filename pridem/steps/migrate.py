@@ -164,7 +164,9 @@ class Migrate(Step):
         )
         return current(lines)
 
-    def check(self, ctx: StepContext) -> CheckResult:
+    def target_head(self, ctx: StepContext) -> str:
+        """The one alembic head of the target release's image; ``rollback``
+        measures it too (``steps/stand.py``)."""
         found, read = self._heads(ctx)
         if not found:
             raise StepFailed("no-heads", {"stack": self.compose.entry, "lines": read})
@@ -177,7 +179,10 @@ class Migrate(Step):
                     "heads": list[Json](found),
                 },
             )
-        head = found[0]
+        return found[0]
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        head = self.target_head(ctx)
         data: dict[str, Json] = {"head": head}
         if running_head(ctx, self.compose) == head:
             return CheckResult(False, None, data)

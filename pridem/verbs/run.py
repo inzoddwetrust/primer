@@ -4,13 +4,15 @@ The box's passport copy (``/opt/pridem/passport.yaml``) is read before the
 lock: a copy its loader rejects refuses the command with its problems by path
 and rule (``ContractError``, no traceback), never as a quiet "no passport".
 Under the lock: runs that ended without a verdict get theirs first
-(``recover``), then the journal opens with its header -- one journal per hold
-of the lock -- the runner is handed the lock's descriptor, the verb makes its
-plan (``Make``) and runs it with the journal as its sink, and the verdict is
-written to ``history/``. The copy's secrets are cleaned from the journal and the
-verdict from the start; a passport the plan reads adds its own. The verdict's
-passport version is the plan's passport, else the copy's. Both compositions
-are what ``state.json`` holds, ``{pridem}`` without it.
+(``recover``), then the verb's own check of the box may refuse (``Before``:
+no journal, no verdict -- ``rollback``), then the journal opens with its
+header -- one journal per hold of the lock -- the runner is handed the lock's
+descriptor, the verb makes its plan (``Make``) and runs it with the journal as
+its sink, and the verdict is written to ``history/``. The copy's secrets are
+cleaned from the journal and the verdict from the start; a passport the plan
+reads adds its own. The verdict's passport version is the plan's passport, else
+the copy's. Both compositions are what ``state.json`` holds, ``{pridem}``
+without it.
 
 What the verdict says of the box beside the plan, each once, in the verdict of
 the command that found it (code 2): ``state.json`` quarantined, a journal
@@ -42,6 +44,7 @@ from pridem.events import (
     PlanMode,
     PlanOutcome,
     Secrets,
+    StepRecord,
 )
 from pridem.plan import Plan, Stack, StackSteps
 from pridem.report.catalog import ENGLISH, Catalog, say
@@ -84,9 +87,20 @@ class Planned:
     finally_: Sequence[StackSteps] = ()
     fetched: Fetched | None = None
     report: TestReport = field(default_factory=TestReport)
+    restore_on: frozenset[str] = frozenset()
+    """Codes of a failed step that leave only a restore: the verdict says
+    ``{restore, needed}`` (``rollback_check:migrated``, DM-24)."""
 
 
 Make = Callable[[Session], Planned]
+
+Before = Callable[[Box], None]
+"""What a verb checks under the lock before its journal opens -- after
+``recover``, so ``history/`` holds every run -- raising ``Refused``: a refusal,
+not a command, with no journal and no verdict (``rollback``, DM-24)."""
+
+Notes = Callable[[Verdict, Catalog], Sequence[str]]
+"""Lines a verb prints before the summary line, from its verdict."""
 
 Steps = Callable[[Box, str, Fetched, Secrets], Sequence[Step]]
 """The steps of a one-stack verb for the box, the run id, the passport and the
@@ -186,14 +200,17 @@ def _verdict(
     make: Make,
     copy: Fetched,
     ladder: bool,
+    before: Before | None = None,
 ) -> tuple[Verdict, Catalog]:
     """Everything the verb does once it holds the lock; the verdict and the
     words of its codes."""
     passport = copy.passport
     secrets = Secrets(passport_secrets(passport) if passport is not None else ())
     recovery = box.recover(secrets, __version__, ENGLISH)
+    if before is not None:
+        before(box)
     state = box.read_state()
-    before = dict(state.composition) if state else {"pridem": __version__}
+    composed = dict(state.composition) if state else {"pridem": __version__}
     started = datetime.now(UTC).replace(microsecond=0)
     run_id = box.new_run_id(started)
     actor = _actor(ctx)
@@ -204,7 +221,7 @@ def _verdict(
         "args": dict(args),
         "actor": Actor.model_validate(actor),
         "started": started,
-        "composition_before": before,
+        "composition_before": composed,
     }
     if passport is not None:  # absent without a passport, never null
         fields["passport_version"] = passport.version
@@ -237,6 +254,9 @@ def _verdict(
             interrupt=ctx.interrupt,
         )
         outcome = plan.run()
+        restore = planned.restore_on
+        if any(_failed_by(record, restore) for record in outcome.steps):
+            outcome = replace(outcome, needs_restore=True)
     finally:
         finished = finished_at(started, journal)
         lost = close_journal(journal)
@@ -253,7 +273,7 @@ def _verdict(
         started=started,
         finished=finished,
         passport_version=shown.version if shown is not None else None,
-        composition_before=before,
+        composition_before=composed,
         composition_after=(
             dict(after_state.composition) if after_state else {"pridem": __version__}
         ),
@@ -264,6 +284,14 @@ def _verdict(
     )
     box.write_verdict(verdict)
     return verdict, plan.catalog
+
+
+def _failed_by(record: StepRecord, codes: frozenset[str]) -> bool:
+    return (
+        record.status == "failed"
+        and record.reason is not None
+        and (record.reason.code in codes)
+    )
 
 
 def _diff_lines(verdict: Verdict, catalog: Catalog) -> list[str]:
@@ -289,6 +317,8 @@ def run_plan_verb(
     args: Mapping[str, Json] | None = None,
     ladder: bool = False,
     copy: Fetched | None = None,
+    before: Before | None = None,
+    notes: Notes | None = None,
 ) -> int:
     """Run the verb's plan under the box lock; print; return the exit code."""
     found = copy if copy is not None else read_copy(ctx)
@@ -304,13 +334,15 @@ def run_plan_verb(
                 make=make,
                 copy=found,
                 ladder=ladder,
+                before=before,
             )
     except BoxBusy as busy:  # raised only by taking the lock
         raise Refused(f"the box is busy: {busy}") from None
     if ctx.json:
         ctx.out.write(render_json(verdict) + "\n")
     else:
-        lines = [*_diff_lines(verdict, catalog), summary_line(verdict)]
+        noted = list(notes(verdict, catalog)) if notes is not None else []
+        lines = [*_diff_lines(verdict, catalog), *noted, summary_line(verdict)]
         ctx.out.write("\n".join(lines) + "\n")
     return int(verdict.exit_code)
 

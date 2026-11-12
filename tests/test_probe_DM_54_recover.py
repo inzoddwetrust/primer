@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from data_support import blank_box
+from history_support import NEW, OLD, release_box, released, run_of
 from passport_support import passport_example, section, write_passport
 from state_support import header, run_id
 
@@ -44,6 +45,7 @@ ARGV = {
     "backup": ["backup"],
     "seed": ["seed", "--list"],
     "verb": ["verb", "count-settings"],
+    "rollback": ["rollback", "--passport", PASSPORT],
 }
 """The command line of each verb with a verdict."""
 ON_A_BOX = {"db", "backup", "seed", "verb"}
@@ -51,6 +53,12 @@ ON_A_BOX = {"db", "backup", "seed", "verb"}
 and the passport's copy; the probe gives them a box that runs the blank
 (``data_support.blank_box``), and their steps' commands are refused here
 (``Refusing``) -- the probe is about what comes before."""
+ROLLBACK = {"rollback"}
+"""DM-24: ``rollback`` refuses before its journal on a box with no previous
+release (a refusal, not a command); the probe gives it a prod box with one
+(``history_support.release_box``), and its plan's commands are refused here.
+The box's two green verdicts are the setup's, not the verb's: they are left
+out of what the probe reads."""
 PLANS = {"install", "update", "deploy", "doctor", "reinstall", "destroy"}
 """DM-45: the verbs of the box's plan; their steps run commands, which a
 runner refuses here (``Refusing``): the probe is about what comes before."""
@@ -86,8 +94,9 @@ def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
 
     Changed by DM-86: ``db``, ``backup``, (pass 2) ``seed`` and (pass 3)
     ``verb`` are verbs with a verdict on a box; the list names them, and the
-    probe runs them on a box with an entry."""
-    assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS, *ON_A_BOX])
+    probe runs them on a box with an entry. Changed by DM-24, on the
+    dispatcher's word: ``rollback`` is a verb with a verdict on a box."""
+    assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS, *ON_A_BOX, *ROLLBACK])
     assert "version" in VERBS and not VERBS["version"].verdict
     assert {name for name, verb in VERBS.items() if not verb.box} == {"check"}
 
@@ -126,7 +135,11 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
         _box(tmp_path)
     elif name in ON_A_BOX:
         blank_box(tmp_path)
-    if name in PLANS | ON_A_BOX:
+    seeded: set[str] = set()
+    if name in ROLLBACK:  # a previous release to go back to (DM-24)
+        release_box(tmp_path, "prod", NEW, released(1, OLD), released(2, NEW))
+        seeded = {run_of(1), run_of(2)}
+    if name in PLANS | ON_A_BOX | ROLLBACK:
         run(argv, root=root, out=out, err=err, runner=Refusing(), fs_root=tmp_path)
     else:
         with FakeRunner() as runner:  # no passport: the verbs' steps run nothing
@@ -135,6 +148,7 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
     verdicts = {
         path.stem: Verdict.model_validate_json(path.read_text())
         for path in (root / "history").iterdir()
+        if path.stem not in seeded
     }
     dead = verdicts.pop(run_id(1))
     assert (dead.verb, dead.result) == ("deploy", "red")
