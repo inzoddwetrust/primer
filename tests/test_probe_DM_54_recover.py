@@ -46,9 +46,12 @@ ARGV = {
     "seed": ["seed", "--list"],
     "verb": ["verb", "count-settings"],
     "rollback": ["rollback", "--passport", PASSPORT],
+    "start": ["start"],
+    "stop": ["stop"],
+    "restart": ["restart"],
 }
 """The command line of each verb with a verdict."""
-ON_A_BOX = {"db", "backup", "seed", "verb"}
+ON_A_BOX = {"db", "backup", "seed", "verb", "start", "stop", "restart"}
 """DM-86: the data verbs refuse before the run without an entry the box runs
 and the passport's copy; the probe gives them a box that runs the blank
 (``data_support.blank_box``), and their steps' commands are refused here
@@ -92,9 +95,10 @@ def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
     ``version`` (no verdict) is not among them, and the verbs without a box
     are exactly ``check`` -- a new verb does not leave ``recover`` by a flag.
 
-    Changed by DM-86: ``db``, ``backup``, (pass 2) ``seed`` and (pass 3)
-    ``verb`` are verbs with a verdict on a box; the list names them, and the
-    probe runs them on a box with an entry. Changed by DM-24, on the
+    Changed by DM-86: ``db``, ``backup``, (pass 2) ``seed``, (pass 3)
+    ``verb`` and (pass 4) ``start``, ``stop``, ``restart`` are verbs with a
+    verdict on a box; the list names them, and the probe runs them on a box
+    with an entry; ``logs`` reads with no verdict. Changed by DM-24, on the
     dispatcher's word: ``rollback`` is a verb with a verdict on a box."""
     assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS, *ON_A_BOX, *ROLLBACK])
     assert "version" in VERBS and not VERBS["version"].verdict

@@ -183,11 +183,21 @@ class RemoveObjects(Step):
     }
 
     def __init__(
-        self, *, box: Box, root: Path = Path("/"), new_secrets: bool = False
+        self,
+        *,
+        box: Box,
+        root: Path = Path("/"),
+        new_secrets: bool = False,
+        everything: bool = False,
     ) -> None:
         self.box = box
         self.root = root
         self.new_secrets = new_secrets
+        self.everything = everything
+        self.wiped: list[str] = []
+        """``destroy --all``: the persistent volumes go too, and
+        ``kept-volumes.json`` with them -- the one way to wipe people's files
+        (contract 3 rule 14, DM-86)."""
 
     def _seen(self, ctx: StepContext) -> tuple[_Objects, list[str]] | None:
         """The objects and the volumes kept; ``None`` without docker. Every
@@ -206,6 +216,9 @@ class RemoveObjects(Step):
                 kept.append(name)  # persistent wins where the sources differ
             elif entry not in others:
                 unknown.append(name)
+        if self.everything:
+            self.wiped = sorted(kept)  # named in the fact: what --all took
+            return seen, []
         if unknown:
             raise StepFailed("persistent-unknown", {"volumes": _j(unknown)})
         if kept and self.new_secrets:
@@ -239,6 +252,8 @@ class RemoveObjects(Step):
         # failure, and the next destroy, still know it (forget_state keeps it)
         document = {"schema": 1, "volumes": {name: seen.volumes[name] for name in kept}}
         atomic_write(self.box.root / KEPT, json.dumps(document, indent=2) + "\n", 0o600)
+        if self.everything:  # nothing is kept: the record of the kept goes too
+            (self.box.root / KEPT).unlink()
         if seen.containers:
             out(ctx, ["docker", "rm", "-f", *seen.containers])
         if gone:
@@ -258,9 +273,17 @@ class RemoveObjects(Step):
         left += [name for name in kept if name not in expected]
         if left:
             raise StepFailed("left", {"objects": _j(left)})
-        return Verified(
-            {"containers": 0, "networks": 0, "images": 0, "kept_volumes": _j(kept)}
-        )
+        fact: dict[str, Json] = {
+            "containers": 0,
+            "networks": 0,
+            "images": 0,
+            "kept_volumes": _j(kept),
+        }
+        if self.everything:
+            if (self.box.root / KEPT).exists():
+                raise StepFailed("left", {"objects": [str(self.box.root / KEPT)]})
+            fact["wiped_volumes"] = _j(self.wiped)
+        return Verified(fact)
 
 
 def machine_stacks(root: Path) -> list[Path]:
@@ -281,9 +304,16 @@ class RemoveFiles(Step):
         "foreign-marker": "the mark of {paths} names another stack",
     }
 
-    def __init__(self, *, root: Path = Path("/"), new_secrets: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        root: Path = Path("/"),
+        new_secrets: bool = False,
+        everything: bool = False,
+    ) -> None:
         self.root = root
         self.new_secrets = new_secrets
+        self.everything = everything  # --all: minted.yaml goes, its base is gone
 
     def _doomed(self) -> list[Path]:
         """What is to go: every path but the minted secrets kept."""
@@ -292,7 +322,9 @@ class RemoveFiles(Step):
             for path in sorted(home.iterdir()):
                 if path.name == MARKER:
                     continue  # it goes with the directory, or stays with minted
-                if path.name == MINTED.parts[0] and not self.new_secrets:
+                if path.name == MINTED.parts[0] and not (
+                    self.new_secrets or self.everything
+                ):
                     doomed += [
                         p for p in sorted(path.iterdir()) if p.name != MINTED.name
                     ]
@@ -329,7 +361,13 @@ class RemoveFiles(Step):
             for home in machine_stacks(self.root)
             if (home / MINTED).is_file()
         ]
-        return Verified({"kept_minted": _j(kept), "new_secrets": self.new_secrets})
+        fact: dict[str, Json] = {
+            "kept_minted": _j(kept),
+            "new_secrets": self.new_secrets,
+        }
+        if self.everything:
+            fact["all"] = True
+        return Verified(fact)
 
 
 class RemoveTimers(Step):
@@ -402,7 +440,12 @@ class ForgetState(Step):
 
 
 def destroy_steps(
-    root: Path, *, box: Box, new_secrets: bool = False, rechecked: bool = True
+    root: Path,
+    *,
+    box: Box,
+    new_secrets: bool = False,
+    rechecked: bool = True,
+    everything: bool = False,
 ) -> list[Step]:
     """The ``destroy`` ladder, as stack ``STACK``.
 
@@ -413,8 +456,10 @@ def destroy_steps(
     FIX 2, the class of ``stop_for_migrate``). A ``destroy`` alone keeps them
     read again: nothing after it undoes them."""
     steps: list[Step] = [
-        RemoveObjects(box=box, root=root, new_secrets=new_secrets),
-        RemoveFiles(root=root, new_secrets=new_secrets),
+        RemoveObjects(
+            box=box, root=root, new_secrets=new_secrets, everything=everything
+        ),
+        RemoveFiles(root=root, new_secrets=new_secrets, everything=everything),
         RemoveTimers(root=root),
         ForgetState(box=box),
     ]

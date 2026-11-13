@@ -74,8 +74,8 @@ def _arguments(
         if word == "--json":
             as_json = True
             continue
-        if not word.startswith("--"):
-            positional.append(word)
+        if not word.startswith("--") and word not in verb.options:
+            positional.append(word)  # a short option only as the verb declares it
             continue
         known = verb.options.get(word)
         if known is None:

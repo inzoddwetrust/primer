@@ -53,7 +53,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_both_slots_from_one_brand_package_by_subpath", "b"),
     ("test_tier3_reinstall_keeps_the_persistent_volume", "b"),
     # c -- an install of its own: services, languages, a job, a stop for
-    # migrate, a dump and its restore, a reset, the project's verbs, then destroy
+    # migrate, a dump and its restore, a reset, the project's verbs, logs and
+    # a session, then destroy and destroy --all
     ("test_tier3_a_service_of_the_edition_goes_up_before_the_product", "c"),
     ("test_tier3_two_instances_with_their_own_languages", "c"),
     ("test_tier3_a_job_runs_before_its_dependent_on_every_deploy", "c"),
@@ -61,7 +62,9 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_a_dump_of_the_blank_restores_what_was_in_it", "c"),
     ("test_tier3_a_reset_of_the_blank_makes_its_database_new", "c"),
     ("test_tier3_a_project_verb_runs_in_its_service", "c"),
+    ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "c"),
     ("test_tier3_destroy_takes_the_blank_off_the_box", "c"),
+    ("test_tier3_destroy_all_wipes_the_persistent_volume", "c"),
     # d -- a clean box: the blank without its service, then with it
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),
     # e -- an install of its own: the build mode of packages

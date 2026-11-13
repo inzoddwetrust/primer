@@ -921,3 +921,107 @@ class ProjectVerb(Step):
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         return Verified({"verb": self.verb, "service": self.service, "exit_code": 0})
+
+
+# --- pass 4: start, stop, restart -----------------------------------------------
+
+SERVICE_TIMEOUT_S = STOP_TIMEOUT_S
+
+
+class _ServiceAction(Step):
+    """``start``, ``stop`` or ``restart`` of an entry's services -- the same
+    containers, on the same release; the jobs of the entry are none of them
+    (they do not live between deploys). ``verify`` reads each one back:
+    running after ``start`` and ``restart``, not after ``stop`` (DM-86)."""
+
+    order = 1
+    modes = COMMAND
+    rechecked = False  # the plan's later entries change what this one did
+
+    action: ClassVar[str]
+
+    def __init__(
+        self, compose: ComposeStack, services: Sequence[str] | None = None
+    ) -> None:
+        self.compose = compose
+        self.chosen = list(services) if services is not None else None
+
+    def _services(self, ctx: StepContext) -> list[str]:
+        if self.chosen is not None:
+            return self.chosen
+        services = config(ctx, self.compose).get("services")
+        jobs = {
+            j.service
+            for j in self.compose.stack.stacks[self.compose.entry].jobs.values()
+        }
+        return sorted(set(services) - jobs) if isinstance(services, dict) else []
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        services = self._services(ctx)
+        params: dict[str, Json] = {
+            "stack": self.compose.entry,
+            "services": list[Json](services),
+        }
+        return CheckResult(
+            bool(services),
+            local_code(self.action, params) if services else None,
+            {"services": list[Json](services)},
+        )
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        services = [str(s) for s in _list(check.data.get("services"))]
+        out(ctx, self.compose.argv(self.action, *services), timeout=SERVICE_TIMEOUT_S)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        services = [str(s) for s in _list(check.data.get("services"))]
+        up = running(ctx, self.compose, services)
+        wrong = up if self.action == "stop" else sorted(set(services) - set(up))
+        if wrong:
+            state = "running" if self.action == "stop" else "not running"
+            params: dict[str, Json] = {
+                "stack": self.compose.entry,
+                "services": list[Json](wrong),
+                "state": state,
+            }
+            raise StepFailed("failed", params)
+        return Verified(
+            {
+                "stack": self.compose.entry,
+                "services": list[Json](services),
+                "running": list[Json](up),
+            }
+        )
+
+
+class ServiceStart(_ServiceAction):
+    name = "service_start"
+    action = "start"
+    codes: ClassVar[dict[str, str]] = {
+        "start": "start {services} of {stack}",
+        "failed": "{services} of {stack} after start: {state}",
+    }
+
+
+class ServiceStop(_ServiceAction):
+    name = "service_stop"
+    action = "stop"
+    codes: ClassVar[dict[str, str]] = {
+        "stop": "stop {services} of {stack}",
+        "failed": "{services} of {stack} after stop: {state}",
+    }
+
+
+class ServiceRestart(_ServiceAction):
+    name = "service_restart"
+    action = "restart"
+    codes: ClassVar[dict[str, str]] = {
+        "restart": "restart {services} of {stack}",
+        "failed": "{services} of {stack} after restart: {state}",
+    }
+
+
+SERVICE_ACTIONS: dict[str, type[_ServiceAction]] = {
+    "start": ServiceStart,
+    "stop": ServiceStop,
+    "restart": ServiceRestart,
+}

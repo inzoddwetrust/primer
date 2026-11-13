@@ -69,7 +69,8 @@ import json
 import os
 import re
 import shutil
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -289,6 +290,12 @@ def _copies_gone(release: Path, mounts: Sequence[Path]) -> list[Path]:
     return gone
 
 
+CONNECT_DIR = "connect"
+"""``/opt/pridem/connect/``: the logs of ``db connect`` sessions (DM-86)."""
+CONNECT_KEEP_DAYS = 30
+"""How long ``gc`` keeps a session's log: it holds the results of queries."""
+
+
 class Gc(Step):
     """Remove what the box no longer needs, by labels, and measure it."""
 
@@ -321,11 +328,26 @@ class Gc(Step):
         run_id: str,
         fetched: Fetched,
         root: Path = Path("/"),
+        now: Callable[[], float] = time.time,
     ) -> None:
         self.box = box
         self.run_id = run_id
         self.fetched = fetched
         self.root = root
+        self.now = now
+
+    def _old_sessions(self) -> list[Path]:
+        """The logs of ``db connect`` older than ``CONNECT_KEEP_DAYS``: they hold
+        the results of the queries -- on ``prod``, people's data (DM-86)."""
+        home = self.box.root / CONNECT_DIR
+        if not home.is_dir():
+            return []
+        limit = self.now() - CONNECT_KEEP_DAYS * 86400
+        return sorted(
+            path
+            for path in home.iterdir()
+            if path.is_file() and path.stat().st_mtime < limit
+        )
 
     # --- the policy -------------------------------------------------------------
 
@@ -518,7 +540,9 @@ class Gc(Step):
             "in_use": list[Json](sorted(_short(i) for i in in_use)),
             "history_damaged": known.damaged,
         }
-        if not (images or removed or copies or prune or evict):
+        sessions = self._old_sessions()
+        data["connect"] = list[Json](str(path) for path in sessions)
+        if not (images or removed or copies or prune or evict or sessions):
             return CheckResult(False, data=data)
         names: list[Json] = [
             f"{r['stack']}/{Path(str(r['path'])).name}" for r in _dicts(removed)
@@ -648,6 +672,8 @@ class Gc(Step):
             )
         if check.data.get("evict"):
             self.box.evict_journals(size_bytes(policy.journal_budget), self.run_id)
+        for path in _strings(check.data.get("connect")):
+            Path(path).unlink(missing_ok=True)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         data = check.data
@@ -680,6 +706,11 @@ class Gc(Step):
                     *(str(r["path"]) for r in releases),
                     *_strings(data.get("data")),
                 ],
+                **(
+                    {"connect": list[Json](_strings(data.get("connect")))}
+                    if _strings(data.get("connect"))
+                    else {}
+                ),
             },
             "kept": {
                 "commits": data.get("kept_commits"),
@@ -692,6 +723,9 @@ class Gc(Step):
                 "keep_releases": policy.keep_releases,
             },
         }
+        if self._old_sessions():
+            stale = [str(path) for path in self._old_sessions()]
+            raise StepFailed("not-removed", {"objects": list[Json](stale)})
         volumes = (
             _number(before, "volumes", "count"),
             _number(after, "volumes", "count"),

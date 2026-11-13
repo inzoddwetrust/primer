@@ -2529,6 +2529,57 @@ def test_tier3_a_project_verb_runs_in_its_service(tmp_path: Path, mirror: Path) 
     assert code == 1 and "not for the role test" in "\n".join(err), (out, err)
 
 
+def test_tier3_logs_restart_stop_start_and_a_read_only_session() -> None:
+    """DM-86, pass 4, on the box the earlier tests left. ``logs`` of the app
+    with ``level=info``: every printed line a JSON object with that field
+    (measured first: the first lines unfiltered); ``restart`` of the blank --
+    green, the app a new start; ``stop`` of its frontend -- not running,
+    ``start`` -- running again. ``db connect`` with its stdin from a pipe (no
+    terminal: ``-T``) -- a ``SELECT`` answered, a ``CREATE TABLE`` refused by
+    the read-only transaction; the session's log kept on the box, 0600."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    code, out, err = _pridem("logs", STACK, "app", "--tail", "50")
+    print("DM-86 measure: logs", {"code": code, "first": out[:3], "err": err[-2:]})
+    assert code == 0 and out, (out, err)
+    code, out, err = _pridem("logs", STACK, "app", "--tail", "200", "level=info")
+    assert code == 0, err
+    assert out and all(json.loads(line)["level"] == "info" for line in out), out
+
+    before = _started("app")
+    verdict, printed = _verdict_of("restart", STACK)
+    assert verdict.result == "green", printed
+    assert _started("app") != before
+    verdict, printed = _verdict_of("stop", STACK, "frontend")
+    assert verdict.result == "green", printed
+    assert _stdout(
+        ["docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={STACK}",
+         "--filter", "label=com.docker.compose.service=frontend"]
+    ) == []  # fmt: skip
+    verdict, printed = _verdict_of("start", STACK, "frontend")
+    assert verdict.result == "green", printed
+    assert _container(STACK, "frontend")
+
+    session = (
+        "printf '%s\\n' 'SELECT 1 AS dm86_seen;' 'CREATE TABLE dm86x (i int);' "
+        f"| {PRIDEM} db connect {STACK}"
+    )
+    said: list[str] = []
+    result = SubprocessRunner().run(
+        ["/bin/sh", "-c", session],
+        expect=(0, 1),
+        timeout=300,
+        on_line=lambda stream, line, cut: said.append(line),
+    )
+    print("DM-86 measure: db connect", {"code": result.code, "said": said[-8:]})
+    assert result.code == 0, said
+    [log] = sorted(Path("/opt/pridem/connect").glob(f"*-{STACK}.log"))[-1:]
+    text = log.read_text(encoding="utf-8")
+    print("DM-86 measure: the session's log", text[-800:])
+    assert "dm86_seen" in text
+    assert log.stat().st_mode & 0o777 == 0o600
+    assert _psql("SELECT to_regclass('public.dm86x')") == [""]
+
+
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     """The last of the cycle (DM-45): ``pridem destroy`` -- every container,
     network, volume and image labelled ``pridem.stack`` gone but the volume of
@@ -2745,3 +2796,24 @@ def test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild(
     assert install.result == "red"
     [entry] = install.report.incomplete
     assert (entry.what, entry.code) == ("run", "no-verdict"), entry
+
+
+def test_tier3_destroy_all_wipes_the_persistent_volume() -> None:
+    """DM-86, pass 4, after ``destroy``: the volume of ``primer-blank-files``
+    stayed. ``destroy --all`` without ``--confirm`` -- refused, the volume
+    there; with the server's name -- green, the volume gone and named wiped,
+    ``kept-volumes.json`` gone."""
+    assert not (OPT / "current").exists(), "destroy runs first"
+    assert _stdout(["docker", "volume", "ls", "-q", "--filter", f"name={FILES_VOLUME}"])
+    code, out, err = _pridem("destroy", "--all")
+    assert code == 1 and "--confirm tier3-env" in "\n".join(err), (out, err)
+    assert _stdout(["docker", "volume", "ls", "-q", "--filter", f"name={FILES_VOLUME}"])
+    verdict, printed = _verdict_of("destroy", "--all", "--confirm", "tier3-env")
+    assert verdict.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    assert facts[("destroy", "remove_objects")]["wiped_volumes"] == [FILES_VOLUME]
+    assert (
+        _stdout(["docker", "volume", "ls", "-q", "--filter", f"name={FILES_VOLUME}"])
+        == []
+    )
+    assert not Path("/opt/pridem/kept-volumes.json").exists()

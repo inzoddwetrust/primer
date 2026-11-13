@@ -81,6 +81,9 @@ class ReinstallArgs(SourceArgs):
 
 class DestroyArgs(Strict):
     confirm: str | None = None
+    all: bool = False
+    """``--all``: the persistent volumes and the minted secrets go too --
+    ``--confirm <server.name>`` on any role (contract 3 rule 14, DM-86)."""
 
 
 def _given(args: Strict) -> dict[str, Json]:
@@ -229,11 +232,19 @@ def _destroy(args: Strict, ctx: Context) -> int:
     confirm = args.confirm
 
     def before(box: Box) -> None:
-        """The role under the lock (DM-24): the copy read now."""
-        _confirmed(read_copy(ctx).passport, "destroy", confirm)
+        """The role under the lock (DM-24): the copy read now. ``--all`` wipes
+        people's files: the server's name on any role (protocol 1.12, 8.2)."""
+        passport = read_copy(ctx).passport
+        if not args.all:
+            _confirmed(passport, "destroy", confirm)
+        elif passport is None:
+            raise Refused("destroy --all: the box has no passport to confirm against")
+        elif confirm != passport.server.name:
+            name = passport.server.name
+            raise Refused(f"destroy --all wipes people's files: --confirm {name}")
 
     def make(session: Session) -> Planned:
-        return destroy_plan(session, ctx.fs_root)
+        return destroy_plan(session, ctx.fs_root, everything=args.all)
 
     return run_plan_verb(
         ctx,
@@ -274,5 +285,8 @@ REINSTALL = Verb(
 )
 ROLLBACK = Verb("rollback", SourceArgs, _rollback, options=SOURCE)
 DESTROY = Verb(
-    "destroy", DestroyArgs, _destroy, options={"--confirm": ("confirm", "value")}
+    "destroy",
+    DestroyArgs,
+    _destroy,
+    options={"--confirm": ("confirm", "value"), "--all": ("all", "flag")},
 )

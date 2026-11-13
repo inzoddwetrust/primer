@@ -766,7 +766,10 @@ def deploy_plan(
     return Planned(stacks, finally_, fetched, report, restore_on)
 
 
-def destroy_plan(session: Session, fs_root: Path) -> Planned:
-    """The plan of ``destroy``: the ladder of ``pridem/steps/destroy.py``."""
-    steps = destroy_steps(fs_root, box=session.box)
+def destroy_plan(
+    session: Session, fs_root: Path, *, everything: bool = False
+) -> Planned:
+    """The plan of ``destroy``: the ladder of ``pridem/steps/destroy.py``;
+    ``everything`` -- ``destroy --all`` (DM-86)."""
+    steps = destroy_steps(fs_root, box=session.box, everything=everything)
     return Planned([StackSteps(DESTROY_STACK, steps, root=True)])

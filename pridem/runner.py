@@ -209,6 +209,17 @@ class Runner(Protocol):
 
 
 @runtime_checkable
+class Interactive(Protocol):
+    """A runner that hands the terminal to a command (``db connect``, DM-86)."""
+
+    def interactive(
+        self, argv: Sequence[str], *, env: Mapping[str, str] | None = None
+    ) -> int:
+        """Run ``argv`` on the caller's stdin, stdout and stderr; its code."""
+        ...
+
+
+@runtime_checkable
 class Holding(Protocol):
     """A runner that hands a descriptor -- the box lock -- to its commands."""
 
@@ -258,7 +269,8 @@ def _check(
 
 
 class SubprocessRunner:
-    """Runs real processes, each in its own session and process group."""
+    """Runs real processes, each in its own session and process group -- but
+    ``interactive``, which keeps the caller's group and terminal."""
 
     def __init__(self, interrupt: Interrupt | None = None) -> None:
         self._interrupt = interrupt if interrupt is not None else Interrupt()
@@ -267,6 +279,42 @@ class SubprocessRunner:
     def hold(self, fd: int) -> None:
         """Hand ``fd`` (the box lock) to every command from now on."""
         self._held = (*self._held, fd)
+
+    def interactive(
+        self, argv: Sequence[str], *, env: Mapping[str, str] | None = None
+    ) -> int:
+        """Run ``argv`` on the caller's terminal (DM-86, ``db connect``): its
+        stdin, stdout and stderr are the caller's, it stays in the caller's
+        process group -- so the terminal's Ctrl-C reaches it -- and the caller
+        ignores SIGINT and SIGQUIT until it ends: they belong to the session,
+        not to the machine (measured: in a session of its own the command never
+        sees Ctrl-C and the caller dies of it). No timeout: a session lasts as
+        long as its person wants. Returns its exit code."""
+        command = _validate(argv, (0,), 1.0)
+        try:
+            environment = clean_env() if env is None else dict(env)
+            program = _program(command[0], None, environment)
+        except (NoPasswdEntry, OSError) as error:
+            raise CommandNotStarted(command, str(error)) from None
+        try:
+            # started before the caller ignores the signals: an ignored signal
+            # would stay ignored across exec, and the command needs its own
+            process = subprocess.Popen(
+                [SETPRIV, "--pdeathsig", "KILL", "--", program, *command[1:]],
+                env=environment,
+                pass_fds=self._held,
+            )
+        except OSError as error:
+            raise CommandNotStarted(command, error.strerror or str(error)) from error
+        ignored = {
+            sig: signal.signal(sig, signal.SIG_IGN)
+            for sig in (signal.SIGINT, signal.SIGQUIT)
+        }
+        try:
+            return process.wait()
+        finally:
+            for sig, handler in ignored.items():
+                signal.signal(sig, handler)
 
     def run(
         self,
@@ -500,6 +548,21 @@ class FakeRunner:
     def hold(self, fd: int) -> None:
         """Record the descriptor a real runner would hand to its commands."""
         self.held.append(fd)
+
+    def interactive(
+        self, argv: Sequence[str], *, env: Mapping[str, str] | None = None
+    ) -> int:
+        """Consume the next scripted call as an interactive session: its code,
+        no lines (the terminal is the person's, not the journal's)."""
+        command = _validate(argv, (0,), 1.0)
+        actual = f"argv={list(command)} cwd=None env={env}"
+        head = self._script[0] if self._script else None
+        if head is None or (head.argv, head.cwd, head.env) != (command, None, env):
+            self._violations.append(f"unplanned interactive call: {actual}")
+            raise UnplannedCommand(self._violations[-1])
+        self._script.popleft()
+        self.calls.append(command)
+        return head.code
 
     def run(
         self,
