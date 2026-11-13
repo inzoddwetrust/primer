@@ -1550,11 +1550,45 @@ def _container(project: str, service: str) -> str:
     return container
 
 
+def _box_db_head() -> str | None:
+    """The head of the blank's database on the box, as ``alembic_version``
+    holds it; ``None`` -- no database running, or no head yet."""
+    running = _stdout(
+        ["docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={STACK}",
+         "--filter", "label=com.docker.compose.service=postgres"]
+    )  # fmt: skip
+    if len(running) != 1:
+        return None
+    said: list[str] = []
+    result = SubprocessRunner().run(
+        ["docker", "exec", running[0], "psql", "-U", "blank", "-d", "blank",
+         "-tAc", "SELECT version_num FROM alembic_version"],
+        expect=(0, 1),
+        timeout=60,
+        on_line=lambda stream, line, cut: said.append(line)
+        if stream is Stream.STDOUT
+        else None,
+    )  # fmt: skip
+    heads = [line.strip() for line in said if line.strip()]
+    return heads[0] if result.code == 0 and len(heads) == 1 else None
+
+
 def _copy_of_blank(tmp: Path, mirror: Path, name: str) -> Path:
-    """A clone of the mirror at ``BLANK_COMMIT``."""
+    """A clone of the mirror at ``BLANK_COMMIT`` -- with the migrations the
+    box has taken its database to: a copy is code that knows its database's
+    head, or ``migrate`` refuses it as ``db-ahead``, rightly (DM-24). Measured,
+    not assumed: before the stop for migrate the database is at ``0001`` and
+    a copy gets nothing; after it, at ``0002``, and every copy carries
+    ``REVISION`` (DM-86 FIX of pass 4b -- the class, not one copy)."""
     copy = tmp / name
     _run(["git", "clone", "-q", str(mirror), str(copy)], env=GIT_ENV)
     _run(["git", "-C", str(copy), "checkout", "-q", BLANK_COMMIT], env=GIT_ENV)
+    head = _box_db_head()
+    if head == "0002":
+        versions = copy / "backend" / "migrations" / "versions"
+        (versions / REVISION_FILE).write_text(REVISION, encoding="utf-8")
+    elif head not in (None, "0001"):
+        raise AssertionError(f"the box's database is at {head}: no copy knows it")
     return copy
 
 
@@ -2291,6 +2325,7 @@ def test_tier3_a_job_runs_before_its_dependent_on_every_deploy(
     assert commit == current.name, (commit, current.name)
 
 
+REVISION_FILE = "2026_11_10_0002_dm22.py"
 REVISION = """\"\"\"dm22 probe
 
 Revision ID: 0002
@@ -2329,7 +2364,7 @@ def _blank_stopping_for_migrate(tmp: Path, mirror: Path) -> None:
         "    stop_for_migrate: [frontend]\n",
     )
     versions = copy / "backend" / "migrations" / "versions"
-    (versions / "2026_11_10_0002_dm22.py").write_text(REVISION, encoding="utf-8")
+    (versions / REVISION_FILE).write_text(REVISION, encoding="utf-8")
     _push(copy, mirror, "DM-22: the blank stops its frontend for migrate")
 
 
@@ -2516,12 +2551,9 @@ def test_tier3_a_project_verb_runs_in_its_service(tmp_path: Path, mirror: Path) 
     }
     assert count in said, said
 
-    # FIX: the copy carries the migrations of the box's release -- its
-    # database is at 0002 (the stop for migrate put it there): a copy at 0001
-    # alone is code older than its database, and migrate is red, rightly
+    # the copy carries the revision the box's database is at -- the helper
+    # measures it (FIX of pass 4b; it was written here by the FIX of B2)
     copy = _copy_of_blank(tmp_path, mirror, "verb-role")
-    versions = copy / "backend" / "migrations" / "versions"
-    (versions / "2026_11_10_0002_dm22.py").write_text(REVISION, encoding="utf-8")
     _replace_once(copy / "primer.yaml", "    roles: [test]\n", "    roles: [prod]\n")
     _push(copy, mirror, "DM-86: count-settings for prod alone")
     verdict, printed = _install(_passport(tmp_path, version=45), "update")
