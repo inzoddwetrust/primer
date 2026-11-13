@@ -6,8 +6,8 @@ One function makes the plan of ``install``, ``update``, ``deploy``,
 ``primer.yaml`` has no steps of its own.
 
     host -> passport -> [destroy: reinstall] -> network -> timers -> sources ->
-    dependencies -> services -> <the product's entries> -> types -> edge ->
-    frontend -> finalize
+    dependencies -> services -> <the product's entries> -> edge -> frontend ->
+    finalize -> types (DM-63: after the gate; refusals left undone)
     finally: stopped (what stop_for_migrate stopped, when migrate never
     acted), host (timers back), gc
 
@@ -38,7 +38,8 @@ What a stack needs and when it is known:
   ``derived`` value, right after its ``build``: ``derive`` runs in the ``app``
   image ``build`` found or made in this run, before anything starts a
   container of the stack (``steps/env.py``);
-- ``types``, ``edge``, ``frontend``, ``finalize`` -- deferred on the product.
+- ``edge``, ``frontend``, ``finalize`` -- deferred on the product; ``write_key``
+  and ``types`` in the root stack, after ``finalize`` (DM-63).
 
 Where the passport comes from (contract 1 section 3): ``--passport <file>``,
 or ``--ops <url> --server <name>``; without either, from the box -- the
@@ -82,7 +83,7 @@ from pridem.steps.frontend import Frontend
 from pridem.steps.gc import GC_STACK, gc_steps
 from pridem.steps.git import repo
 from pridem.steps.host import EnsureNetwork, host_steps
-from pridem.steps.keys import DeployKey
+from pridem.steps.keys import DeployKey, WriteKey
 from pridem.steps.migrate import Migrate, StartStopped, StopForMigrate, Stopped
 from pridem.steps.nginx import Nginx
 from pridem.steps.packages import Packages
@@ -640,15 +641,24 @@ def deploy_plan(
                 )
         return SeamsVerify(product, services, stacks)
 
-    def types() -> Sequence[StackSteps] | None:
+    def types() -> list[Step]:
+        """``write_key`` and ``types``: in the root stack after ``finalize``
+        (DM-63) -- the ladder puts the root last, and the types go after the
+        gate."""
         found = target()
         passport = _passport(fetched)
         if found is None or passport is None or known.fetch_root is None:
-            return None
+            return []
         product, release, ref, commit = found
         declared = [name for name, stage in product.stacks.items() if stage.types]
         entry = declared[0] if declared else own_entry(product)
-        made: list[Step] = [
+        bare = known.fetch_root.checkout.bare
+        made: list[Step] = []
+        if declared and passport.server.role == "test":  # only a test box writes
+            made.append(
+                WriteKey(passport.product.repo, root, git_dir=bare, commit=commit)
+            )
+        made.append(
             Types(
                 product,
                 entry,
@@ -659,11 +669,11 @@ def deploy_plan(
                 branch=ref,
                 run_id=session.run_id,
                 push_to=passport.product.repo,
-                git_dir=known.fetch_root.checkout.bare,
+                git_dir=bare,
                 root=root,
             )
-        ]
-        return [StackSteps("types", made)]
+        )
+        return made
 
     def edge() -> Sequence[StackSteps] | None:
         found = target()
@@ -719,6 +729,7 @@ def deploy_plan(
                         fetched=fetched,
                         root=root,
                     ),
+                    *types(),
                 ],
                 root=True,
             )
@@ -748,9 +759,10 @@ def deploy_plan(
         ),
         Deferred("services", services, after="fetch_services"),
         Deferred(PRODUCT, entries, after="fetch_root"),
-        Deferred("types", types, after="fetch_root"),
         Deferred("edge", edge, after="fetch_root"),
         Deferred("frontend", frontend, after="fetch_root"),
+        # finalize, then the types (DM-63): a red deploy pushes no types, and
+        # what types is refused once the release is out is left undone
         Deferred("finalize", finalize, after="fetch_root", root=True),
     ]
     finally_ = [

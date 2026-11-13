@@ -1166,8 +1166,13 @@
           "title": "Commit As",
           "type": "string"
         },
+        "generate": {
+          "minLength": 1,
+          "title": "Generate",
+          "type": "string"
+        },
         "openapi": {
-          "pattern": "^/[A-Za-z0-9._~/-]*$",
+          "minLength": 1,
           "title": "Openapi",
           "type": "string"
         },
@@ -1178,6 +1183,7 @@
       },
       "required": [
         "openapi",
+        "generate",
         "out",
         "commit_as"
       ],

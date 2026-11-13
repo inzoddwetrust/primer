@@ -21,7 +21,7 @@ deploy keys over ssh only (passport ``access.mode: deploy-keys``).
 import os
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -54,6 +54,10 @@ class Repo:
     port: int | None = None
     form: Form = "scp"
     remote: str = ""  # the path as the address gives it
+    write: bool = False
+    """The key that writes (``<alias>-write``, DM-63): a repository has a
+    key to read and, for the types a test box commits, one to write -- two
+    deploy keys, two ssh aliases, one address."""
 
     @property
     def local(self) -> bool:
@@ -69,7 +73,8 @@ class Repo:
         """The ssh alias and key name: from host, port and full path, lower case."""
         port = "" if self.port is None else f"-{self.port}"
         raw = f"{self.host}{port}-{self.path}"
-        return "pridem-" + re.sub(r"[^a-z0-9.-]+", "-", raw.lower()).strip("-")
+        base = "pridem-" + re.sub(r"[^a-z0-9.-]+", "-", raw.lower()).strip("-")
+        return f"{base}-write" if self.write else base
 
     @property
     def name(self) -> str:
@@ -85,9 +90,15 @@ class Repo:
         return f"{self.alias}:{self.remote}"
 
 
-def repo(address: str) -> Repo:
+def repo(address: str, *, write: bool = False) -> Repo:
     """Parse ``[user@]host:path``, ``ssh://[user@]host[:port]/path`` or
-    ``file://``; ``https://`` and ``http://`` are refused."""
+    ``file://``; ``https://`` and ``http://`` are refused. ``write`` -- the
+    repository as its write key reaches it (``<alias>-write``, DM-63)."""
+    found = _parsed(address)
+    return replace(found, write=True) if write else found
+
+
+def _parsed(address: str) -> Repo:
     if address.startswith("file://"):
         path = address.removeprefix("file://").removesuffix(".git")
         return Repo(address, "", path, user="", form="file", remote=path)

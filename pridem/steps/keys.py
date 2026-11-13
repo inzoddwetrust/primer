@@ -34,7 +34,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import ClassVar
 
-from pridem.events import Json
+from pridem.events import Code, Json
 from pridem.files import atomic_write, commit_set, private_dir, temp_of
 from pridem.runner import Stream
 from pridem.steps.base import (
@@ -249,20 +249,28 @@ class DeployKey(Step):
             files = list[Json](str(path) for path in differs)
             params: dict[str, Json] = {"repo": self.repo.address, "files": files}
             return CheckResult(True, local_code("ssh-config", params))
-        if has_access(ctx, self.root, self.repo):
+        if self._access(ctx):
             return CheckResult(False)
         return mint
 
+    def _access(self, ctx: StepContext) -> bool:
+        """The key works for what it is for: read, ``git ls-remote``."""
+        return has_access(ctx, self.root, self.repo)
+
+    @property
+    def _title(self) -> str:
+        return "deploy key"
+
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         write_ssh_config(self.root, [self.repo])
-        if self._key.exists() and has_access(ctx, self.root, self.repo):
+        if self._key.exists() and self._access(ctx):
             return  # only the files were not as drawn
         if not self._key.exists():
             self._mint(ctx)
-        ctx.on_line(Stream.STDOUT, f"deploy key for {self.repo.address}:", False)
+        ctx.on_line(Stream.STDOUT, f"{self._title} for {self.repo.address}:", False)
         ctx.on_line(Stream.STDOUT, self._public(), False)
         deadline = self.clock() + self.wait_s
-        while not has_access(ctx, self.root, self.repo):
+        while not self._access(ctx):
             if self.clock() >= deadline:
                 raise StepFailed(
                     "no-access",
@@ -307,7 +315,7 @@ class DeployKey(Step):
             return Verified({"repo": self.repo.address, "key": "none: file://"})
         for path in ssh_config_differs(self.root, [self.repo]):
             raise StepFailed("ssh-config-differs", {"path": str(path)})
-        if not has_access(ctx, self.root, self.repo):
+        if not self._access(ctx):
             raise StepFailed(
                 "no-access",
                 {"repo": self.repo.address, "public_key": self._public(), "wait_s": 0},
@@ -320,4 +328,131 @@ class DeployKey(Step):
                 "key_mode": mode,
                 "host_keys": PINNED if self.repo.pinned else "accept-new",
             }
+        )
+
+
+WRITE_CHECK = "refs/pridem/write-check"
+"""The ref a dry push names to ask for write access: a ref of the machine's
+own, so the answer never depends on the branch or the commit."""
+
+
+def has_write_access(
+    ctx: StepContext, root: Path, found: Repo, git_dir: Path, commit: str
+) -> bool:
+    """``git push --dry-run`` of ``commit`` to ``WRITE_CHECK`` through the
+    write key's alias answers 0: the key may write; anything else -- refused.
+    Nothing is written: a dry run sends no object and moves no ref. ssh's own
+    failure (``SSH_OWN``) is ``unreachable``, as for ``has_access``.
+
+    KNOWN CEILING (DM-63).
+
+    1. Mechanics: that a dry push through a read-only deploy key is refused by
+       GitHub before anything is sent, and one through a key with write
+       access answers 0, is not measured: port 22 is closed from the sandbox
+       and tier 3 reaches its repositories by ``file://``, where no key is
+       asked. A server that accepts the dry run of a key it would refuse on
+       the real push leaves ``types`` to find it: ``write-refused``.
+    2. Status: acknowledged by design.
+    3. Task: none -- the first box of the role test with ``types`` on GitHub
+       measures it.
+    4. Trigger: ``write_key`` green and ``types:write-refused`` on the same
+       run, or ``write_key:no-access`` with the key added with write access.
+    5. Agreed fix: the answer of GitHub to a dry push measured on a live box,
+       and the check made by what it says.
+    6. Rejected: checking by a real push of a ref -- it writes the product's
+       repository for a question.
+    """
+    errors: list[str] = []
+    code, _ = run_git(
+        ctx,
+        root,
+        [
+            "--git-dir",
+            str(git_dir),
+            "push",
+            "--dry-run",
+            "--porcelain",
+            found.url(),
+            f"{commit}:{WRITE_CHECK}",
+        ],
+        expect=(0, 1, 128),
+        stderr=errors,
+    )
+    if code != 0 and any(line.startswith(SSH_OWN) for line in errors):
+        raise StepFailed("unreachable", {"repo": found.address})
+    return code == 0
+
+
+class WriteKey(DeployKey):
+    """The key that writes the types of a ``test`` box (DM-63): a deploy key
+    with write access, its own pair and alias (``<alias>-write``), the ceremony
+    of ``DeployKey``. It runs after ``finalize``, with ``types``: whatever it
+    is refused is left undone -- ``incomplete``, never a red verdict."""
+
+    name = "write_key"
+    order = 3  # in the root stack: after final_check and finalize
+    codes: ClassVar[dict[str, str]] = {
+        **DeployKey.codes,
+        "mint": "mint a write key for {repo} and wait for write access",
+        "no-access": "no write access to {repo} with key {public_key} after "
+        "{wait_s} s: add it as a deploy key with write access",
+    }
+
+    def __init__(
+        self,
+        address: str,
+        root: Path = Path("/"),
+        *,
+        git_dir: Path,
+        commit: str,
+        wait_s: float = KEY_WAIT_S,
+        poll_s: float = 10.0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        super().__init__(
+            address,
+            root,
+            name="write_key",
+            wait_s=wait_s,
+            poll_s=poll_s,
+            clock=clock,
+            sleep=sleep,
+        )
+        self.repo = repo(address, write=True)
+        self.git_dir = git_dir
+        self.commit = commit
+        self.left: Code | None = None
+
+    def _access(self, ctx: StepContext) -> bool:
+        return has_write_access(ctx, self.root, self.repo, self.git_dir, self.commit)
+
+    @property
+    def _title(self) -> str:
+        return "write key (a deploy key with write access)"
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        self.left = None
+        try:
+            return super().check(ctx)
+        except StepFailed as error:
+            self.left = error.reason
+            return CheckResult(True, error.reason, {"left": True})
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        if check.data.get("left") is True:
+            return
+        try:
+            super().act(ctx, check)
+        except StepFailed as error:
+            self.left = error.reason
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        if self.left is None:
+            try:
+                return super().verify(ctx, check)
+            except StepFailed as error:
+                self.left = error.reason
+        return Verified(
+            {"repo": self.repo.address, "left": self.left.code}, incomplete=self.left
         )

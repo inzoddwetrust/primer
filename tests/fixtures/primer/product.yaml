@@ -20,7 +20,7 @@ stacks:                               # собственные стеки про
     frontend: { service: frontend, port: 80 }                    # инстансных значений в сборке нет (п.19)
     migrate:  python -m alembic upgrade head
     test:     { run: python -m pytest tests/ --junitxml=/tmp/junit.xml, target: test }   # п.20
-    types:    { openapi: /openapi.json, out: frontend/src/api/generated.ts, commit_as: aivis-bot }
+    types:    { openapi: python scripts/dump_openapi.py, generate: python scripts/generate_ts_types.py <openapi> <out>, out: frontend/src/api/generated.ts, commit_as: aivis-bot }
     seeds:                            # профиль сам объявляет, когда он идёт (п.17)
       bootstrap: { run: python -m app.seed bootstrap, when: install }
       demo:      { run: python -m app.seed demo, when: command }

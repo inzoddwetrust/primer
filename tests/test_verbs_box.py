@@ -392,7 +392,11 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
     Changed by DM-86 FIX: ``network`` (``ensure_network``) is a stack of its
     own after where ``destroy`` stands, not a step of ``host`` -- ``destroy``
     removes the machine's networks, and ``reinstall`` could not bring a stack
-    up after it."""
+    up after it.
+
+    Changed by DM-63: ``types`` is no stack of its own before the edge any
+    more -- ``write_key`` and ``types`` are steps of the root stack after
+    ``finalize``: a red deploy pushes no types."""
     box = Box(tmp_path / "opt" / "pridem")
     wanted = Wanted(mode=mode, source=Source(file=tmp_path / "x"))
     planned = deploy_plan(
@@ -410,7 +414,6 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
         "dependencies",
         "services",
         "product",
-        "types",
         "edge",
         "frontend",
         "finalize",
@@ -423,7 +426,6 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
         "dependencies",
         "services",
         "product",
-        "types",
         "edge",
         "frontend",
         "finalize",

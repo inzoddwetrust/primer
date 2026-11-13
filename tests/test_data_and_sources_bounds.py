@@ -4,8 +4,10 @@ Each test is one row of the grid of the card's gate: the copy of a service's
 data (special files, drift, a red validate again), ``gc`` of the copies, the
 release's drift and a dead run's ``.tmp``, ``git show`` on a damaged
 repository, ``finalize`` on a new passport, conformance reading a long line,
-a big or slow body and the application's own names, the OpenAPI read with a
-bound, ssh that reaches nothing, and the release bound read-only.
+a big or slow body and the application's own names, ssh that reaches
+nothing, and the release bound read-only. (The OpenAPI read with a bound
+moved with DM-63 to ``test_steps_types.py``: the document is the product's
+command's stdout now, not an HTTP body.)
 """
 
 import json
@@ -30,8 +32,6 @@ from test_steps_keys import run as run_key
 from test_steps_services import IMAGE, _copy, _hashes, _item
 from test_steps_sources import git, product, remote
 from test_steps_sources import run as run_sources
-from test_steps_types import OPENAPI, app_calls, openapi, types  # noqa: F401
-from test_steps_types import run as run_types
 
 from pridem.conformance import stack as conformance
 from pridem.conformance.stack import (
@@ -48,7 +48,6 @@ from pridem.events import Json
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, Stream, SubprocessRunner
 from pridem.state import Box, BoxState
-from pridem.steps import types as types_module
 from pridem.steps.base import CheckResult, StepContext, StepFailed
 from pridem.steps.compose import ComposeStack, override_text
 from pridem.steps.finalize import FinalCheck
@@ -473,22 +472,6 @@ def test_values_of_the_application_are_cut_in_problems() -> None:
     found = check_logs([line, extra], stack_name="blank")
     assert found[0].params["service"] == "<object>"
     assert found[1].params["extra"] == [shown(long)]
-
-
-def test_types_refuses_an_openapi_over_its_bound(
-    tmp_path: Path,
-    openapi: int,  # noqa: F811 -- the fixture of test_steps_types
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The OpenAPI document is read with a bound too (the class of reads of
-    conformance): over it -- ``openapi-too-big``, never read whole."""
-    monkeypatch.setattr(types_module, "OPENAPI_LIMIT", len(OPENAPI) - 1)
-    step, _, cs = types(tmp_path, openapi, "test")
-    with FakeRunner(*app_calls(openapi, cs, 1)) as runner:
-        outcome = run_types(step, runner)
-    reason = outcome.steps[0].reason
-    assert reason is not None and reason.code == "types:openapi-too-big"
-    assert reason.params["limit"] == len(OPENAPI) - 1
 
 
 # --- keys -------------------------------------------------------------------------

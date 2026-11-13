@@ -393,8 +393,14 @@ class StackTest(Strict):
     services: Annotated[list[Ident], Field(min_length=1)] | None = None
 
 
+# Types of the frontend (contract 3 rule 23): ``openapi`` prints the OpenAPI
+# document to stdout, ``generate`` turns the file ``<openapi>`` into the file
+# ``<out>`` -- paths the machine puts in; both run in a throwaway container of
+# the release's app image with the app's environment. ``out`` is the one path
+# a ``test`` box commits, as ``commit_as``; no ``generate``, no ``types``.
 class Types(Strict):
-    openapi: UrlPath
+    openapi: Command
+    generate: Command
     out: RepoPath
     commit_as: Name
 
