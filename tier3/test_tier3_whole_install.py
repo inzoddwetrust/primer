@@ -2655,7 +2655,9 @@ if [ ! -e "$3/marker" ]; then
   echo "hook: not called"; kill -9 $pid; exit 0
 fi
 echo "hook: called"
-echo "journal: $(tail -n 1 "$(ls -t /opt/pridem/journal/*.jsonl | head -n 1)")"
+journal=$(ls -t /opt/pridem/journal/*.jsonl | head -n 1)
+echo "journal: $(tail -n 1 "$journal")"
+echo "run: $(basename "$journal" .jsonl)"
 kill -9 $pid
 wait $pid 2>/dev/null
 "$1" status >"$3/busy.out" 2>&1
@@ -2716,6 +2718,8 @@ def test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild(
         print("DM-24 measure:", seen)
         assert seen[0] == "hook: called", seen
         assert seen[1].startswith("journal: ") and '"fetch_root"' in seen[1], seen
+        assert seen[2].startswith("run: "), seen
+        run = seen[2].removeprefix("run: ")  # the killed run: its journal's name
         assert "busy exit: 1" in seen, seen
         refusal = "\n".join(seen)
         assert "the box is busy" in refusal and "held by pid" in refusal, seen
@@ -2733,12 +2737,11 @@ def test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild(
             ["git", "--git-dir", str(bare), "config", "--unset", "core.hooksPath"],
             expect=(0, 5),
         )
-    history = sorted(Path("/opt/pridem/history").glob("*.json"))
-    killed = [
-        Verdict.model_validate_json(path.read_text(encoding="utf-8"))
-        for path in history
-    ]
-    [install] = [v for v in killed if v.verb == "install"]
+    # FIX 2: history/ of group a holds the installs of earlier tests too -- the
+    # verdict is the killed run's, by its run_id
+    verdict = Path("/opt/pridem/history") / f"{run}.json"
+    install = Verdict.model_validate_json(verdict.read_text(encoding="utf-8"))
+    assert (install.run_id, install.verb) == (run, "install")
     assert install.result == "red"
     [entry] = install.report.incomplete
     assert (entry.what, entry.code) == ("run", "no-verdict"), entry
