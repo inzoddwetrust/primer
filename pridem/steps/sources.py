@@ -373,7 +373,7 @@ class FetchRoot(_SourceStep):
     order = 2
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
-        "fetch": "fetch {stack} at {ref}",
+        "fetch": "fetch {entry} at {ref}",
         "missing-ref": "{ref} is not on {repo}",
         "no-primer-yaml": "{ref} has no primer.yaml",
         "repo-damaged": "the repository of {ref} cannot give {path}: a tree or a "
@@ -428,7 +428,7 @@ class FetchRoot(_SourceStep):
             return CheckResult(False, data={"drift": []})
         return CheckResult(
             True,
-            local_code("fetch", {"stack": self.stack, "ref": self.ref}),
+            local_code("fetch", {"entry": self.stack, "ref": self.ref}),
             {"drift": _j(drift or [])},
         )
 

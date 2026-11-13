@@ -200,6 +200,7 @@ def has_access(ctx: StepContext, root: Path, found: Repo) -> bool:
 class DeployKey(Step):
     """The key of one repository; ``name`` is the step, ``repo`` its address."""
 
+    name = "deploy_key"  # the class's own: the report's catalog finds its codes (DM-92)
     order = 1
     modes = ALL_MODES
     waits_always = True

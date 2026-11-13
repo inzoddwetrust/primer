@@ -441,6 +441,9 @@ class Ssl(Step):
         self.secrets = secrets
         self.root = root
         self.now = now
+        self.precheck: str | None = None
+        """``ok`` -- DNS was checked before issuing; ``skipped`` -- no public IP
+        known to check it by (DM-92); ``None`` -- nothing was issued."""
 
     def _names(self) -> list[str]:
         return domains(self.product, _passport(self.fetched))
@@ -457,9 +460,11 @@ class Ssl(Step):
         facts = cert_facts(ctx, self.root)
         if not facts["self_signed"] and _fresh(facts, names, self._now()):
             return CheckResult(False)
-        _, _, wrong = dns_table(ctx, names)
+        ip, _, wrong = dns_table(ctx, names)
         if wrong:
             raise StepFailed("dns-not-ready", {"domains": list[Json](wrong)})
+        # no public IP known: no precheck -- Let's Encrypt checks it (DM-92)
+        self.precheck = "ok" if ip is not None else "skipped"
         return CheckResult(True, local_code("issue", {"domains": list[Json](names)}))
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
@@ -478,6 +483,8 @@ class Ssl(Step):
         if mode == "letsencrypt" and facts["self_signed"]:
             raise StepFailed("not-issued")
         fact: dict[str, Json] = {"mode": mode, **facts, **judged}
+        if self.precheck is not None:
+            fact["precheck"] = self.precheck
         if mode == "defer":
             return Verified(fact, incomplete=Code("deferred"))
         return Verified(fact)

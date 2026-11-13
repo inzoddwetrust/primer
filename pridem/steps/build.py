@@ -149,7 +149,7 @@ class Build(Step):
     codes: ClassVar[dict[str, str]] = {
         **NO_PASSPORT,
         **KEY_CODES,
-        "build": "build {services} of {stack} at {commit}",
+        "build": "build {services} of {entry} at {commit}",
         "path-outside": "{slot}: the package's path {from} leaves the package",
         **REFUSAL_CODES,
         "egress-unlisted": UNLISTED,
@@ -314,7 +314,7 @@ class Build(Step):
         self.app_image = None
         self.app_built = app is not None and app in rendered.built
         params: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "commit": self.compose.commit,
             "services": list[Json](rendered.built),
         }

@@ -265,16 +265,24 @@ def out(
     passed_on: bool = True,
     env: Mapping[str, str] | None = None,
 ) -> tuple[int, list[str]]:
-    """Run ``argv``; its exit code and stdout lines. ``passed_on`` -- every line
-    also goes to the run's sinks (a build's output); off -- kept by the step
-    (JSON a step parses)."""
+    """Run ``argv``; its exit code and stdout lines, each whole: the pieces of
+    a line longer than the runner's limit are joined again (a ``config`` JSON
+    of more than 64 KiB, DM-92). ``passed_on`` -- every line also goes to the
+    run's sinks (a build's output); off -- kept by the step (JSON a step
+    parses)."""
     lines: list[str] = []
+    piece = ""  # a line longer than the runner's limit, in pieces (DM-92)
 
     def keep(stream: Stream, line: str, cut: bool) -> None:
+        nonlocal piece
         if passed_on:
             ctx.on_line(stream, line, cut)
         if stream is Stream.STDOUT:
-            lines.append(line)
+            if cut:
+                piece += line
+            else:
+                lines.append(piece + line)
+                piece = ""
 
     result = ctx.runner.run(argv, expect=expect, timeout=timeout, env=env, on_line=keep)
     return result.code, lines

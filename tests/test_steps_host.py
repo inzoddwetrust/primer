@@ -237,7 +237,15 @@ def test_probe_DM_12_dns_mismatch_is_red_before_any_act(tmp_path: Path) -> None:
     assert [r.status for r in outcome.steps] == ["ok", "ok"]
 
 
-def test_echo_services_must_agree(tmp_path: Path) -> None:
+def test_echo_services_that_disagree_leave_the_public_ip_unknown(
+    tmp_path: Path,
+) -> None:
+    """Two echo services, two addresses: no public IP is known -- ``preflight``
+    goes on, its fact and ``dns`` say ``unknown``, no domain is judged.
+
+    Changed by DM-92 (R2-E10, the gate): disagreeing services were red
+    (``preflight:public-ip-unknown``); an echo service is no reason to stop an
+    install, the DNS precheck is a precheck."""
     root = box(tmp_path)
     calls = preflight_calls()
     calls += [
@@ -250,10 +258,42 @@ def test_echo_services_must_agree(tmp_path: Path) -> None:
             ECHO_SERVICES[1],
             lines=("198.51.100.1",),
         ),
+        call("getent", "ahostsv4", "a.example.org", lines=(f"{IP}   STREAM a",)),
+    ]
+    outcome = run([Preflight(root, domains=["a.example.org"], min_free_gib=0)], calls)
+    [record] = outcome.steps
+    assert record.status == "ok"
+    assert record.verify["public_ip"] == "unknown"
+    assert record.verify["dns"] == [
+        {"domain": "a.example.org", "resolves_to": [IP], "expected": "unknown"}
+    ]
+
+
+@pytest.mark.parametrize("code", [6, 7, 28])
+def test_an_echo_service_out_of_reach_is_no_answer(tmp_path: Path, code: int) -> None:
+    """The first echo service is out of reach (``curl`` 6, 7, 28: no host, no
+    connection, timed out): the second's answer is the public IP and the DNS
+    is judged by it. The pair: none answers -- ``unknown``, ``preflight`` green."""
+    root = box(tmp_path)
+    calls = preflight_calls()
+    calls += [
+        call("curl", "-fsS", "--max-time", "10", ECHO_SERVICES[0], code=code),
+        call("curl", "-fsS", "--max-time", "10", ECHO_SERVICES[1], lines=(IP,)),
+        call("getent", "ahostsv4", "a.example.org", lines=("198.51.100.9   STREAM a",)),
     ]
     outcome = run([Preflight(root, domains=["a.example.org"], min_free_gib=0)], calls)
     reason = outcome.steps[0].reason
-    assert reason is not None and reason.code == "preflight:public-ip-unknown"
+    assert reason is not None and reason.code == "preflight:dns-mismatch"
+    root = box(tmp_path / "none")
+    calls = preflight_calls()
+    calls += [
+        call("curl", "-fsS", "--max-time", "10", url, code=code)
+        for url in ECHO_SERVICES
+    ]
+    calls += [call("getent", "ahostsv4", "a.example.org", lines=(f"{IP}   STREAM a",))]
+    outcome = run([Preflight(root, domains=["a.example.org"], min_free_gib=0)], calls)
+    [record] = outcome.steps
+    assert (record.status, record.verify["public_ip"]) == ("ok", "unknown")
 
 
 def test_probe_DM_12_disk_below_threshold_is_red(tmp_path: Path) -> None:

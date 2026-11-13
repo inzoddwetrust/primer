@@ -303,7 +303,7 @@ class RenderEnv(Step):
     codes: ClassVar[dict[str, str]] = {
         **NO_PASSPORT,
         **READ_BACK_CODES,
-        "render": "render the env of {stack}",
+        "render": "render the env of {entry}",
         "missing": "the passport lacks {fields} and nobody can be asked",
         "no-answer": "no answer for {field}",
         "invalid": "the answer is rejected: {problems}",
@@ -446,7 +446,7 @@ class RenderEnv(Step):
         return result
 
     def _check(self) -> CheckResult:
-        needed = CheckResult(True, local_code("render", {"stack": self.stack.name}))
+        needed = CheckResult(True, local_code("render", {"entry": self.stack.name}))
         self._app_for_derive()
         if self._env.exists():
             private_mode(self._env, "env-mode")
@@ -600,7 +600,7 @@ class DeriveEnv(Step):
     codes: ClassVar[dict[str, str]] = {
         **NO_PASSPORT,
         **READ_BACK_CODES,
-        "derive": "derive {keys} of {stack}",
+        "derive": "derive {keys} of {entry}",
         "missing": "the passport lacks {fields} and nobody can be asked",
         "address-no-app": "{stack} has no app of its own to give an address of",
         "seam-before-health": "{names} of {from} are asked before its health",
@@ -625,7 +625,7 @@ class DeriveEnv(Step):
     def check(self, ctx: StepContext) -> CheckResult:
         render = self.render
         keys = render._derivable()
-        params: dict[str, Json] = {"keys": list[Json](keys), "stack": render.stack.name}
+        params: dict[str, Json] = {"keys": list[Json](keys), "entry": render.stack.name}
         needed = CheckResult(True, local_code("derive", params))
         if not keys:  # every derived key is of an option off: nothing to derive
             return CheckResult(False)

@@ -50,6 +50,7 @@ REASON_CODES: dict[str, tuple[str, ...]] = {
 INCOMPLETE_CODES: dict[str, tuple[str, ...]] = {
     "run/no-verdict": ("ended_at",),
     "run/journal-damaged": ("line",),
+    "run/unbuildable": ("type",),
     "journal/write-failed": (),
     "journal/quarantined": ("run_id",),
     "journal/cut": ("limit",),

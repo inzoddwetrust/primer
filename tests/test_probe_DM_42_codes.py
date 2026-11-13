@@ -3,7 +3,8 @@ catalog (contract 2 v1.6).
 
 The scenarios below make the machine write every code it can write today --
 every reason, every incomplete entry but ``journal/quarantined`` (its writer is
-the CLI, DM-16) and ``journal/cut`` (the CLI too, DM-24), a step's own codes
+the CLI, DM-16), ``journal/cut`` (the CLI too, DM-24) and ``run/unbuildable``
+(the fallback of the CLI, DM-92, on the dispatcher's word), a step's own codes
 and a doctor entry -- through the plan, the builder and the box's recovery,
 never by hand. Each entry of each verdict must
 be exactly a listed code with exactly its parameters, or a step's code; the pair
@@ -85,6 +86,7 @@ CATALOG = with_steps(ENGLISH, ((name, ScriptedStep.codes) for name in NAMES))
 NOT_WRITTEN_HERE = {
     "journal/quarantined",  # written by the CLI (DM-16)
     "journal/cut",  # written by the CLI (DM-24, on the dispatcher's word)
+    "run/unbuildable",  # written by the fallback of the CLI (DM-92)
 }
 
 

@@ -628,6 +628,9 @@
                 "$ref": "#/$defs/JournalDamaged"
               },
               {
+                "$ref": "#/$defs/RunUnbuildable"
+              },
+              {
                 "$ref": "#/$defs/JournalWriteFailed"
               },
               {
@@ -698,6 +701,34 @@
         "role"
       ],
       "title": "RoleSkip",
+      "type": "object"
+    },
+    "RunUnbuildable": {
+      "additionalProperties": false,
+      "description": "The verdict of the run could not be built (``type`` of the error); this\none holds what could be, the journal the rest (DM-92).",
+      "properties": {
+        "code": {
+          "const": "unbuildable",
+          "title": "Code",
+          "type": "string"
+        },
+        "type": {
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        },
+        "what": {
+          "const": "run",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code",
+        "type"
+      ],
+      "title": "RunUnbuildable",
       "type": "object"
     },
     "StateQuarantined": {

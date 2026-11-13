@@ -618,6 +618,18 @@ class Box:
                 return run_id
         raise RunIdTaken(f"{now:%Y-%m-%dT%H:%M:%SZ}")
 
+    def append_journal(
+        self, run_id: str, event: JournalEvent, secrets: Secrets
+    ) -> None:
+        """One line more in the closed journal of ``run_id``, cleaned of
+        ``secrets``: what came after its sink closed -- the error a verdict
+        could not be built by (DM-92)."""
+        path = self.journals / f"{run_id}.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(_event_line(event, secrets))
+            handle.flush()
+            os.fsync(handle.fileno())
+
     def open_journal(
         self, header: JournalHeader, secrets: Secrets, limit: int | None = None
     ) -> JournalSink:

@@ -257,6 +257,7 @@ class AgeKey(Step):
 class _OpsKey(DeployKey):
     """The ops repository's deploy key, after the age key in the ladder."""
 
+    name = "ops_key"  # the class's own: the report's catalog finds its codes
     order = 2
 
 

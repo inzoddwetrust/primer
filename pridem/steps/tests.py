@@ -131,11 +131,28 @@ def junit_dir(run: str) -> str | None:
     return None
 
 
+def _line(text: str | None) -> int:
+    """A failure's line: what the junit says when it is a line, else 1."""
+    try:
+        line = int(text or "")
+    except ValueError:
+        return 1
+    return line if line >= 1 else 1
+
+
 def read_junit(path: Path) -> TestReport:
-    """Totals and failures of a junit file the stack's tests wrote."""
+    """Totals and failures of a junit file the stack's tests wrote.
+
+    The file is the product's: a test with no name is ``unnamed``, a line
+    that is not one (``0``, negative, a word) is 1, as a missing one; a file
+    that is not XML is ``junit-unreadable`` -- never a verdict refused, never an
+    exception of the step (DM-92)."""
     # The file is written by the stack's own tests on this box; expat bounds
     # entity expansion, no network is reached.
-    tree = ElementTree.parse(path)  # noqa: S314
+    try:
+        tree = ElementTree.parse(path)  # noqa: S314
+    except ElementTree.ParseError:
+        raise StepFailed("junit-unreadable", {"path": str(path)}) from None
     root = tree.getroot()
     suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
     total = failed = skipped = 0
@@ -159,9 +176,10 @@ def read_junit(path: Path) -> TestReport:
                 )[:20]
                 failures.append(
                     {
-                        "test": f"{classname}.{case.get('name', '')}".strip("."),
+                        "test": f"{classname}.{case.get('name', '')}".strip(".")
+                        or "unnamed",
                         "file": case.get("file") or classname.replace(".", "/") + ".py",
-                        "line": int(case.get("line") or 1) or 1,
+                        "line": _line(case.get("line")),
                         "message": bad.get("message")
                         or (text.splitlines()[0] if text.strip() else ""),
                         "traceback_project_frames": frames,
@@ -211,12 +229,13 @@ class Tests(Step):
         **REFUSAL_CODES,
         **NO_PASSPORT,
         **KEY_CODES,
-        "run": "run the tests of {stack} at {commit} in {test_db}",
+        "run": "run the tests of {entry} at {commit} in {test_db}",
         "no-database-url": "{service} has no DATABASE_URL to take the database from",
         "test-db-is-live": "the test database {test} would be the live {live}",
         "junit-path-unknown": "report.junit is on and the test run has no --junitxml=",
         "junit-missing": "the tests wrote no junit at {path}",
         "junit-unsafe": "the junit at {path} is not taken: {cause}",
+        "junit-unreadable": "the junit at {path} is not XML",
         "no-tests": "the tests ran no test",
         "failed": "{failed} of {total} tests failed",
         "no-test": "{stack} declares no test or no app",
@@ -288,7 +307,7 @@ class Tests(Step):
     def check(self, ctx: StepContext) -> CheckResult:
         found, _ = self._database(ctx)
         params: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "commit": self.compose.commit,
             "test_db": found.test,
         }

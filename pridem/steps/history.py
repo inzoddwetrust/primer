@@ -5,7 +5,9 @@ Decisions about releases are taken from ``history/``, never from
 share this module, so that they never disagree:
 
 - ``previous_releases`` -- the previous release of each stack: the newest green
-  verdict whose ``finalize`` put another release of the stack in ``current``.
+  or incomplete verdict whose ``finalize`` put another release of the stack in
+  ``current`` -- a release that went live (DM-92: ``incomplete`` is a frequent
+  end of a deploy since DM-63).
   ``gc`` keeps that release's images and worktree; ``rollback`` on prod goes
   back to it (DM-24), so the release it goes to is one ``gc`` kept.
 - ``stand_block`` -- a red stand blocks the stand (TZ 9.3, DM-24): the newest
@@ -72,7 +74,10 @@ def previous_releases(box: Box, current: Mapping[str, str]) -> Releases:
         except VerdictDamaged:
             found.damaged += 1
             continue
-        switched = finalized(verdict) if verdict.result == "green" else None
+        # green or incomplete (DM-92): what put the release in current made it
+        # live -- after DM-63 a deploy with its types stale is incomplete
+        live = verdict.result in ("green", "incomplete")
+        switched = finalized(verdict) if live else None
         if switched is None:
             continue
         for stack in sorted(set(current) - made):

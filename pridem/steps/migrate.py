@@ -127,7 +127,7 @@ class Migrate(Step):
         "db-ahead": DB_AHEAD,
         **NO_PASSPORT,
         **KEY_CODES,
-        "migrate": "migrate {stack} to {head}",
+        "migrate": "migrate {entry} to {head}",
         "alembic-heads": "the migrations of {stack} have {count} heads: {heads}",
         "no-heads": "no alembic head read from the image of {stack} in {lines} lines",
         "no-image": "no image of {service} at {commit}: build runs before migrate",
@@ -224,7 +224,7 @@ class Migrate(Step):
             ctx, self._alembic(ctx, "show", live), live
         ):
             raise StepFailed("db-ahead", {"entry": self.compose.entry, "head": live})
-        params: dict[str, Json] = {"stack": self.compose.entry, "head": head}
+        params: dict[str, Json] = {"entry": self.compose.entry, "head": head}
         return CheckResult(True, local_code("migrate", params), data)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
@@ -286,7 +286,7 @@ MIGRATE_VERB_CODES: dict[str, str] = {
     "db-ahead": DB_AHEAD,
     "no-app": "{stack} has no app to run its migrations in",
     "no-migrate": "{stack} has no migrate",
-    "migrate": "migrate {stack} from {current} to {head}",
+    "migrate": "migrate {entry} from {current} to {head}",
     "alembic-heads": "the migrations of {stack} have {count} heads: {heads}",
     "not-at-head": "the database of {stack} is at {current}, not at {head}",
 }
@@ -332,7 +332,7 @@ class StopForMigrate(Step):
         **Migrate.codes,
         **IMAGE_CODES,
         **MIGRATE_VERB_CODES,
-        "stop": "stop {services} of {stack} for its migration",
+        "stop": "stop {services} of {entry} for its migration",
         "stop-failed": "{services} of {stack} still run after stop",
     }
 
@@ -349,7 +349,7 @@ class StopForMigrate(Step):
         if not self.services or not self.migrate.check(ctx).needed:
             return CheckResult(False, None, {})
         params: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "services": list[Json](self.services),
         }
         return CheckResult(True, local_code("stop", params), {"stop": True})
@@ -401,7 +401,7 @@ class StartStopped(Step):
     order = 1
     modes = ALL_MODES | {"command"}  # db restore stops too (DM-86)
     codes: ClassVar[dict[str, str]] = {
-        "start": "start {services} of {stack} again: what they stopped for never acted",
+        "start": "start {services} of {entry} again: what they stopped for never acted",
         "start-failed": "{services} of {stack} do not run after start",
     }
 
@@ -420,7 +420,7 @@ class StartStopped(Step):
         if not due:
             return CheckResult(False, None, {})
         params: dict[str, Json] = {
-            "stack": ", ".join(compose.entry for compose, _ in due),
+            "entry": ", ".join(compose.entry for compose, _ in due),
             "services": [s for _, services in due for s in services],
         }
         return CheckResult(True, local_code("start", params), {"start": True})

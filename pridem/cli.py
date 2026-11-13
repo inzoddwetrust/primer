@@ -12,10 +12,14 @@ A contract file a loader rejects (``ContractError``) is a message on stderr --
 the file and its problems by path and rule, never a traceback: the loaders
 carry no input in the error, and nothing here prints a chain of exceptions.
 
-``main`` holds the command's interrupt for the whole run: SIGINT and SIGTERM
--- a terminal's Ctrl-C, systemd stopping a timer's service, ``kill`` -- only
-set its flag (``pridem/interrupt.py``); the plan reads it between steps, its
-``restore`` and ``finally`` run and the verb writes its verdict.
+``main`` holds the command's interrupt for the whole run: SIGINT, SIGTERM,
+SIGHUP and SIGQUIT -- a terminal's Ctrl-C, systemd stopping a timer's service,
+``kill``, an ssh session dropped -- only set its flag (``pridem/interrupt.py``);
+the plan reads it between steps, its ``restore`` and ``finally`` run and the
+verb writes its verdict. A signal that stops a command outside a plan
+(``check``) is the refusal ``interrupted``, exit 1, never a traceback (DM-92);
+``logs -f`` ends by it with 0. A console that is gone mid-run goes silent
+(``events.said``); the journal and the verdict are written.
 """
 
 import errno
@@ -27,8 +31,8 @@ from typing import TextIO
 import click
 from pydantic import ValidationError
 
-from pridem.events import ShortSecret
-from pridem.interrupt import Interrupt
+from pridem.events import ShortSecret, said
+from pridem.interrupt import Interrupt, Interrupted
 from pridem.runner import Runner, SubprocessRunner
 from pridem.stacks.loader import ContractError
 from pridem.stacks.stack import CompositionCollision
@@ -148,7 +152,10 @@ def run(
         )
         return verb.run(args, context)
     except Refused as refused:
-        err.write(f"pridem: {refused}\n")
+        said(err, f"pridem: {refused}\n")
+        return 1
+    except Interrupted:  # a signal outside a plan (check): no traceback (DM-92)
+        said(err, "pridem: interrupted\n")
         return 1
     except ContractError as error:  # the loaders quote no input (DM-43)
         err.write(f"pridem: {error}\n")

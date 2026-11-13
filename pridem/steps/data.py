@@ -99,7 +99,7 @@ class Wiping(Acting, Protocol):
 
 
 RESET_CODES: dict[str, str] = {
-    "reset": "drop and make again the database of {stack}",
+    "reset": "drop and make again the database of {entry}",
     "no-migrate": "{stack} has no migrate to bring the schema back",
     "database-name": "the database name {name} of {stack} is not a plain name",
     "not-reset": "the database of {stack} is the same one after the reset",
@@ -191,7 +191,7 @@ class DbDump(Step):
     order = 1
     modes = COMMAND
     codes: ClassVar[dict[str, str]] = {
-        "dump": "dump the database of {stack}",
+        "dump": "dump the database of {entry}",
         "no-app": "{stack} has no app to take the database from",
         "no-database-url": "{service} has no DATABASE_URL to take the database from",
         "test-db-is-live": "the database {live} cannot be told from its test one",
@@ -226,7 +226,7 @@ class DbDump(Step):
             "live": found.live,
             "image": image,
         }
-        params: dict[str, Json] = {"stack": self.compose.entry}
+        params: dict[str, Json] = {"entry": self.compose.entry}
         return CheckResult(True, local_code("dump", params), data)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
@@ -304,7 +304,7 @@ class DbRestore(Step):
     point_of_no_return = True
     codes: ClassVar[dict[str, str]] = {
         **{k: v for k, v in DbDump.codes.items() if k != "dump"},
-        "restore": "restore {path} into the database of {stack}",
+        "restore": "restore {path} into the database of {entry}",
         "head-mismatch": "the database of {stack} is at {current}, the dump at {head}",
     }
 
@@ -330,7 +330,8 @@ class DbRestore(Step):
             "user": found.user,
             "live": found.live,
         }
-        return CheckResult(True, local_code("restore", drift), data)
+        would = {"entry": self.compose.entry, "path": str(self.path)}
+        return CheckResult(True, local_code("restore", would), data)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         self.acted = True
@@ -385,7 +386,7 @@ class StopForRestore(Step):
         # what db_restore's and db_reset's checks refuse with, run here first
         **IMAGE_CODES,
         **RESET_CODES,
-        "stop": "stop {services} of {stack} for its restore",
+        "stop": "stop {services} of {entry} for its restore",
         "stop-failed": "{services} of {stack} still run after stop",
     }
 
@@ -405,7 +406,7 @@ class StopForRestore(Step):
         if not live:
             return CheckResult(False, None, {})
         params: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "services": list[Json](live),
         }
         return CheckResult(True, local_code("stop", params), {"stop": list[Json](live)})
@@ -437,7 +438,7 @@ class StartRestored(Step):
     order = 3
     modes = COMMAND
     codes: ClassVar[dict[str, str]] = {
-        "start": "start {services} of {stack} again on its database",
+        "start": "start {services} of {entry} again on its database",
         "start-failed": "{services} of {stack} do not run after start",
     }
 
@@ -461,7 +462,7 @@ class StartRestored(Step):
         if not mine:
             return CheckResult(False, None, {})
         params: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "services": list[Json](mine),
         }
         return CheckResult(True, local_code("start", params), {})
@@ -673,7 +674,7 @@ class DbReset(Step):
             "oid": _oid(ctx, self.compose, found),
             "head": _head(ctx, self.compose),
         }
-        params: dict[str, Json] = {"stack": self.compose.entry}
+        params: dict[str, Json] = {"entry": self.compose.entry}
         return CheckResult(True, local_code("reset", params), data)
 
     def _db(self, check: CheckResult) -> Database:
@@ -746,7 +747,7 @@ class DbMigrate(Step):
         if now is not None and unknown_head(ctx, [*show, now], now):
             raise StepFailed("db-ahead", {"entry": self.compose.entry, "head": now})
         params = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "current": now or "none",
             "head": found[0],
         }
@@ -801,12 +802,12 @@ class Seeds(Step):
         if not inside:
             return CheckResult(False, None, {})
         params: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "profiles": list[Json](inside),
         }
         return CheckResult(True, local_code("seed", params), {})
 
-    codes: ClassVar[dict[str, str]] = {"seed": "seed {stack} with {profiles}"}
+    codes: ClassVar[dict[str, str]] = {"seed": "seed {entry} with {profiles}"}
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         inside, _ = self._split(ctx)
@@ -836,7 +837,7 @@ class SeedRun(Step):
     codes: ClassVar[dict[str, str]] = {
         **IMAGE_CODES,
         "no-app": "{stack} has no app to seed in",
-        "seed": "seed {stack} with {profile}",
+        "seed": "seed {entry} with {profile}",
     }
 
     def __init__(self, compose: ComposeStack, profile: str, run: str) -> None:
@@ -846,7 +847,7 @@ class SeedRun(Step):
 
     def check(self, ctx: StepContext) -> CheckResult:
         image_is_current(ctx, self.compose, config(ctx, self.compose))
-        params: dict[str, Json] = {"stack": self.compose.entry, "profile": self.profile}
+        params: dict[str, Json] = {"entry": self.compose.entry, "profile": self.profile}
         return CheckResult(True, local_code("seed", params), {})
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
@@ -899,7 +900,7 @@ class ProjectVerb(Step):
     modes = COMMAND
     codes: ClassVar[dict[str, str]] = {
         **IMAGE_CODES,
-        "verb": "run the verb {verb} in {service} of {stack}",
+        "verb": "run the verb {verb} in {service} of {entry}",
         "service-down": ("{service} of {stack} does not run; the verb {verb} needs it"),
     }
 
@@ -922,7 +923,7 @@ class ProjectVerb(Step):
 
     def check(self, ctx: StepContext) -> CheckResult:
         params: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "service": self.service,
             "verb": self.verb,
         }
@@ -933,7 +934,12 @@ class ProjectVerb(Step):
             if isinstance(body, dict) and "build" in body:
                 image_is_current(ctx, self.compose, document, self.service)
         elif not running(ctx, self.compose, [self.service]):
-            raise StepFailed("service-down", params)
+            down = {
+                "stack": self.compose.entry,  # a reason, not a doctor entry
+                "service": self.service,
+                "verb": self.verb,
+            }
+            raise StepFailed("service-down", down)
         return CheckResult(True, local_code("verb", params), {})
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
@@ -993,7 +999,7 @@ class _ServiceAction(Step):
     def check(self, ctx: StepContext) -> CheckResult:
         services = self._services(ctx)
         params: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "services": list[Json](services),
         }
         return CheckResult(
@@ -1031,7 +1037,7 @@ class ServiceStart(_ServiceAction):
     name = "service_start"
     action = "start"
     codes: ClassVar[dict[str, str]] = {
-        "start": "start {services} of {stack}",
+        "start": "start {services} of {entry}",
         "failed": "{services} of {stack} after start: {state}",
     }
 
@@ -1040,7 +1046,7 @@ class ServiceStop(_ServiceAction):
     name = "service_stop"
     action = "stop"
     codes: ClassVar[dict[str, str]] = {
-        "stop": "stop {services} of {stack}",
+        "stop": "stop {services} of {entry}",
         "failed": "{services} of {stack} after stop: {state}",
     }
 
@@ -1049,7 +1055,7 @@ class ServiceRestart(_ServiceAction):
     name = "service_restart"
     action = "restart"
     codes: ClassVar[dict[str, str]] = {
-        "restart": "restart {services} of {stack}",
+        "restart": "restart {services} of {entry}",
         "failed": "{services} of {stack} after restart: {state}",
     }
 

@@ -638,3 +638,29 @@ def test_days_left_is_the_whole_days_to_the_end(tmp_path: Path) -> None:
                 "cert_expires": ends.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "days_left": days,
             }, (step.name, left)
+
+
+def test_letsencrypt_with_no_public_ip_known_issues_without_the_precheck(
+    tmp_path: Path,
+) -> None:
+    """DM-92 (R2-E10, the gate): no echo service answers -- the DNS precheck
+    is skipped, certbot is asked all the same (Let's Encrypt checks the domain
+    itself), the fact says ``precheck: skipped``. The pair: an answer -- the
+    precheck runs, ``precheck: ok``."""
+    for answered, said in ((False, "skipped"), (True, "ok")):
+        root, fetched = passport(tmp_path / said, ssl="letsencrypt")
+        issued_cert, issued_key = issued_pair(tmp_path, NAMES)
+        live = letsencrypt_dir(root) / "live" / "pridem"
+        live.mkdir(parents=True)
+        (live / "fullchain.pem").write_text(issued_cert)
+        (live / "privkey.pem").write_text(issued_key)
+        calls = _dns_green()
+        if not answered:
+            for at in (0, 1):  # no host: curl 6
+                calls[at] = FakeCall(calls[at].argv, code=6)
+        runner = Mixed(*calls, *_issue(root))
+        with runner:
+            outcome, _ = run(ladder(root, fetched), runner)
+        assert outcome.code is ExitCode.OK, outcome.steps
+        assert any("certonly" in a for a in runner.argvs)
+        assert outcome.steps[1].verify["precheck"] == said

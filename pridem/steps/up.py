@@ -174,8 +174,8 @@ class Up(Step):
         **REFUSAL_CODES,
         **NO_PASSPORT,
         **KEY_CODES,
-        "up": "bring {stack} up at {commit}",
-        "pair-networks": "remove {networks}: networks of pairs of {stack} no more",
+        "up": "bring {entry} up at {commit}",
+        "pair-networks": "remove {networks}: networks of pairs of {entry} no more",
         "pair-networks-left": "networks of pairs no more are still there: {networks}",
         "no-image": "no image of {service} at {commit}: build runs before up",
         "old-image": "{service} runs on {running}, not on {expected}",
@@ -302,7 +302,7 @@ class Up(Step):
 
     def check(self, ctx: StepContext) -> CheckResult:
         params: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "commit": self.compose.commit,
         }
         gone = self._gone_pairs(ctx)
@@ -311,7 +311,7 @@ class Up(Step):
         if result.needed or not gone:
             return result
         pairs_only: dict[str, Json] = {
-            "stack": self.compose.entry,
+            "entry": self.compose.entry,
             "networks": list[Json](gone),
         }
         return CheckResult(

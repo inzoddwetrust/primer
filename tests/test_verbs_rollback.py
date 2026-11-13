@@ -32,8 +32,10 @@ from history_support import (
     OLD,
     STACK,
     deploy_verdict,
+    history,
     release_box,
     released,
+    run_of,
     sha,
 )
 from passport_support import passport_example, section, write_passport
@@ -45,6 +47,7 @@ from pridem.plan import Deferred, StackSteps
 from pridem.report.schema import Verdict
 from pridem.runner import FakeCall, FakeRunner
 from pridem.state import Box
+from pridem.steps.history import previous_releases
 from pridem.steps.migrate import Migrate
 from pridem.steps.passport import Fetched
 from pridem.steps.stand import RollbackCheck
@@ -317,3 +320,27 @@ def _plan(stacks: list[StackSteps]) -> Callable[[FakeRunner], tuple[StepRecord, 
 def _check(step: RollbackCheck, runner: FakeRunner) -> Code | None:
     [record] = _plan([StackSteps("rollback", [step], root=True)])(runner)
     return record.reason
+
+
+def test_an_incomplete_deploy_that_went_live_is_the_previous_release(
+    tmp_path: Path,
+) -> None:
+    """R2-B16 (DM-92): since DM-63 ``incomplete`` is a frequent end of a deploy
+    -- the release it put in ``current`` is live, and it is the previous one
+    for ``rollback`` and ``gc`` alike (one function). The pair: an incomplete
+    run whose ``finalize`` never ran is no release."""
+    mid = "v1.5.0"
+    unswitched = deploy_verdict(4, result="incomplete", head=sha("4"), release="v1.9.0")
+    unswitched = unswitched.model_copy(
+        update={"steps": [s for s in unswitched.steps if s.name != "finalize"]}
+    )
+    box = history(
+        tmp_path,
+        released(1, OLD),
+        deploy_verdict(2, result="incomplete", head=sha("2"), release=mid),
+        deploy_verdict(3, result="incomplete", head=sha("3"), release=NEW),
+        unswitched,
+    )
+    found = previous_releases(box, {STACK: NEW})
+    assert found.previous == {STACK: mid}
+    assert [v.run_id for v in found.current_verdicts] == [run_of(3)]

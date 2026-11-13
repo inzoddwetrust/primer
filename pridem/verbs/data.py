@@ -27,6 +27,7 @@ from pydantic import SecretStr
 
 from pridem.contract import SECRET_MIN_LENGTH, Strict
 from pridem.events import Json, Secrets
+from pridem.interrupt import Interrupted
 from pridem.plan import StackSteps
 from pridem.runner import Interactive, RunnerError, Stream
 from pridem.stacks.env import MINTED_FILE, read_minted
@@ -665,8 +666,8 @@ def _logs(args: Strict, ctx: Context) -> int:
             timeout=LOGS_FOLLOW_S if args.follow else LOGS_TIMEOUT_S,
             on_line=line,
         )
-    except KeyboardInterrupt:  # Ctrl-C ends -f: that is how it is meant to end
-        pass
+    except (Interrupted, KeyboardInterrupt):  # Ctrl-C ends -f: as it is meant to
+        pass  # (DM-92: under the command's interrupt the runner raises Interrupted)
     except RunnerError as error:
         raise Refused(f"logs: {error}") from None
     if filters:

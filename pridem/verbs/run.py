@@ -38,6 +38,7 @@ from pridem.events import (
     ConsoleSink,
     Event,
     EventSink,
+    Fact,
     Incomplete,
     Json,
     LogLine,
@@ -45,6 +46,7 @@ from pridem.events import (
     PlanOutcome,
     Secrets,
     StepRecord,
+    said,
 )
 from pridem.plan import Plan, Stack, StackSteps
 from pridem.report.catalog import ENGLISH, Catalog, say
@@ -271,26 +273,84 @@ def _verdict(
     read_passport = planned.fetched.passport if planned.fetched else None
     shown = read_passport if read_passport is not None else passport
     after_state = box.read_state()
-    verdict = build_verdict(
-        outcome,
-        run_id=run_id,
-        verb=verb,
-        args=dict(args),
-        actor=actor,
-        started=started,
-        finished=finished,
-        passport_version=shown.version if shown is not None else None,
-        composition_before=composed,
-        composition_after=(
-            dict(after_state.composition) if after_state else {"pridem": __version__}
-        ),
-        secrets=secrets,
-        failures=planned.report.failures,
-        junit=planned.report.junit,
-        catalog=plan.catalog,
-    )
+
+    def assemble(
+        found: PlanOutcome, failures: Sequence[Fact], junit: Mapping[str, int] | None
+    ) -> Verdict:
+        return build_verdict(
+            found,
+            run_id=run_id,
+            verb=verb,
+            args=dict(args),
+            actor=actor,
+            started=started,
+            finished=finished,
+            passport_version=shown.version if shown is not None else None,
+            composition_before=composed,
+            composition_after=(
+                dict(after_state.composition)
+                if after_state
+                else {"pridem": __version__}
+            ),
+            secrets=secrets,
+            failures=failures,
+            junit=junit,
+            catalog=plan.catalog,
+        )
+
+    try:
+        verdict = assemble(outcome, planned.report.failures, planned.report.junit)
+    except ValueError as error:  # the model refused what the run gave (DM-92)
+        name = type(error).__name__
+        note = LogLine("finally", "verdict", "build", Stream.STDERR, f"{name}: {error}")
+        box.append_journal(run_id, note, secrets)
+        verdict = assemble(salvaged(outcome, name, assemble), (), None)
     box.write_verdict(verdict)
     return verdict, plan.catalog
+
+
+Assemble = Callable[[PlanOutcome, Sequence[Fact], Mapping[str, int] | None], Verdict]
+
+
+def salvaged(outcome: PlanOutcome, error: str, assemble: Assemble) -> PlanOutcome:
+    """The outcome of a run whose verdict could not be built: red, every step,
+    ``incomplete`` and ``doctor`` entry the verdict takes on its own, no
+    failures of tests, and ``run/unbuildable {type}`` -- a verdict always
+    (DM-92). An entry is taken when a verdict of it alone is built."""
+    base = replace(
+        outcome,
+        code=ExitCode.FAILED,
+        steps=(),
+        restore=(),
+        finally_=(),
+        incomplete=(),
+        doctor_diff=(),
+        needs_restore=False,
+    )
+
+    def fits(part: PlanOutcome) -> bool:
+        try:
+            assemble(part, (), None)
+        except ValueError:
+            return False
+        return True
+
+    return replace(
+        base,
+        steps=tuple(r for r in outcome.steps if fits(replace(base, steps=(r,)))),
+        restore=tuple(r for r in outcome.restore if fits(replace(base, restore=(r,)))),
+        finally_=tuple(
+            r for r in outcome.finally_ if fits(replace(base, finally_=(r,)))
+        ),
+        incomplete=(
+            *(i for i in outcome.incomplete if fits(replace(base, incomplete=(i,)))),
+            Incomplete("run", Code("unbuildable", {"type": error})),
+        ),
+        doctor_diff=tuple(
+            d for d in outcome.doctor_diff if fits(replace(base, doctor_diff=(d,)))
+        ),
+        needs_restore=outcome.needs_restore,
+    )
 
 
 def _failed_by(record: StepRecord, codes: frozenset[str]) -> bool:
@@ -346,11 +406,11 @@ def run_plan_verb(
     except BoxBusy as busy:  # raised only by taking the lock
         raise Refused(f"the box is busy: {busy}") from None
     if ctx.json:
-        ctx.out.write(render_json(verdict) + "\n")
+        said(ctx.out, render_json(verdict) + "\n")
     else:
         noted = list(notes(verdict, catalog)) if notes is not None else []
         lines = [*_diff_lines(verdict, catalog), *noted, summary_line(verdict)]
-        ctx.out.write("\n".join(lines) + "\n")
+        said(ctx.out, "\n".join(lines) + "\n")  # a console gone: the verdict is written
     return int(verdict.exit_code)
 
 

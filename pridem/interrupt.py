@@ -1,6 +1,7 @@
-"""The interrupt of a command: SIGINT and SIGTERM set a flag, they raise nothing.
+"""The interrupt of a command: SIGINT, SIGTERM, SIGHUP and SIGQUIT set a flag,
+they raise nothing.
 
-``Interrupt.install`` puts its own handler on SIGINT and SIGTERM for the time
+``Interrupt.install`` puts its own handler on these signals for the time
 of a command and gives the previous handlers back after it. The handler only
 counts the signal (``received``); no exception lands in the middle of the
 plan's code. Who reads the flag:
@@ -27,8 +28,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from types import FrameType
 
-SIGNALS = (signal.SIGINT, signal.SIGTERM)
-"""The signals that interrupt a command."""
+SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+"""The signals that interrupt a command: a terminal's Ctrl-C and Ctrl-\\,
+``kill``, systemd stopping a unit, and the terminal going away -- an ssh session
+dropped -- which by default kills the process with no ``finally`` and no
+verdict (measured, DM-92)."""
 
 ESCALATION = 2
 """The signal of a command that stops a step of ``finally``: every one from
@@ -109,7 +113,7 @@ class Interrupt:
 
     @contextmanager
     def install(self) -> Iterator[None]:
-        """The handler on SIGINT and SIGTERM inside; the previous ones after."""
+        """The handler on ``SIGNALS`` inside; the previous ones after."""
         previous = {sig: signal.signal(sig, self._handler) for sig in SIGNALS}
         try:
             yield

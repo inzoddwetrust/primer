@@ -54,6 +54,12 @@ def local_code(code: str, params: Mapping[str, Json] | None = None) -> Code:
     return Code(code, dict(params or {}))
 
 
+DOCTOR_KEYS = frozenset({"stack", "name"})
+"""The keys of a doctor entry around a step's code: a code ``check`` says
+``act`` would do never takes them as parameters -- ``doctor`` would have no
+verdict (DM-92, R2-B2)."""
+
+
 @dataclass(frozen=True)
 class CheckResult:
     """What ``check`` found: is ``act`` needed, the code of what it would do,
@@ -66,6 +72,10 @@ class CheckResult:
     def __post_init__(self) -> None:
         if self.needed and self.would is None:
             raise ValueError("a needed act must say, by a code, what it would do")
+        taken = sorted(DOCTOR_KEYS & set(self.would.params if self.would else ()))
+        if taken:  # contract 2: a doctor entry is {stack, name, code, ...} (DM-92)
+            code = self.would.code if self.would else ""
+            raise ValueError(f"{code}: what act would do does not take {taken}")
 
 
 @dataclass(frozen=True)

@@ -38,7 +38,8 @@ and the size of ``journal/`` -- and decides what ``act`` removes:
   before is red.
 
 The current release of a stack is the target of ``/opt/<stack>/current``, its
-commit read from the worktree. The previous is named by the newest green verdict
+commit read from the worktree. The previous is named by the newest green (or
+incomplete, DM-92) verdict
 in ``history/`` whose ``finalize`` put another release of the stack in
 ``current`` (``steps/history.py``, the one reading ``rollback`` goes back by);
 its commit comes from that verdict's ``fetch_root`` and ``fetch_services``

@@ -21,6 +21,7 @@ writes are built here.
 """
 
 import json
+import os
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -366,6 +367,32 @@ def _fact_line(fact: Fact, catalog: Catalog) -> str:
     return say(catalog, "@fact.sep").join(parts)
 
 
+def muted(stream: TextIO) -> None:
+    """The terminal of ``stream`` is gone -- an ssh session dropped, a write
+    is ``EIO`` or ``EPIPE`` (measured on a live pty, DM-92): its descriptor
+    goes to ``/dev/null``, so no later write and no flush at the interpreter's
+    exit raises; the journal and the verdict are written as ever."""
+    try:
+        fd = stream.fileno()
+    except (OSError, ValueError):  # a stream with no descriptor of its own
+        return
+    null = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(null, fd)
+    finally:
+        os.close(null)
+
+
+def said(stream: TextIO, text: str) -> None:
+    """``text`` to the console; a console that is gone is muted, never an
+    error of the run."""
+    try:
+        stream.write(text)
+        stream.flush()
+    except OSError:
+        muted(stream)
+
+
 class ConsoleSink:
     """The step ladder as it runs: one line per finished step.
 
@@ -393,8 +420,7 @@ class ConsoleSink:
             self._step(event.record)
 
     def _write(self, line: str) -> None:
-        self._stream.write(line + "\n")
-        self._stream.flush()
+        said(self._stream, line + "\n")
 
     def _step(self, record: StepRecord) -> None:
         catalog = self._catalog() if callable(self._catalog) else self._catalog
