@@ -239,6 +239,7 @@ def _passport(
     default_language: str = "en",
     options: list[str] | None = None,
     params: dict[str, dict[str, str]] | None = None,
+    asked: dict[str, dict[str, str]] | None = None,
 ) -> Path:
     """A passport of the box; the blank declares ``languages: [en, ru]`` since
     ``BLANK_COMMIT`` 2e7580f, and an instance names its own (DM-46)."""
@@ -252,7 +253,7 @@ def _passport(
         "product": {"repo": f"file://{MIRROR}", "ref": REF},
         "domains": {"frontend": FRONTEND, "api": API},
         "access": {"mode": "deploy-keys"},
-        "asked": {},
+        "asked": asked or {},
         "params": params or {},
         **({"options": options} if options is not None else {}),
         "policies": {
@@ -2578,6 +2579,180 @@ def test_tier3_logs_restart_stop_start_and_a_read_only_session() -> None:
     assert "dm86_seen" in text
     assert log.stat().st_mode & 0o777 == 0o600
     assert _psql("SELECT to_regclass('public.dm86x')") == [""]
+
+
+ASKED_TAG = "v1.2.0"
+BOT_TOKEN = "dm86-asked-" + "q" * 24
+"""The service's ``asked`` value its seam gives the product (pass 4b)."""
+
+
+def _service_giving_its_asked(tmp: Path) -> str:
+    """A copy of the service at ``v1.0.0`` whose ``SERVICE_BOT_TOKEN`` --
+    source ``asked`` -- is in ``provides``, consistent as a whole (par0
+    14.3): ``primer.yaml``, its compose, ``config.py`` and ``PROVIDES`` of
+    ``main.py`` (``seams_verify`` reads ``/health.seams.provides``). Tagged
+    ``ASKED_TAG``; the commit back."""
+    copy = tmp / "service-asked"
+    _run(["git", "clone", "-q", str(SERVICE_MIRROR), str(copy)], env=GIT_ENV)
+    _run(["git", "-C", str(copy), "checkout", "-q", "v1.0.0"], env=GIT_ENV)
+    primer = copy / "primer.yaml"
+    _replace_once(
+        primer,
+        "  PRODUCT_WEBHOOK_URL: { source: seam, from: product }\n",
+        "  PRODUCT_WEBHOOK_URL: { source: seam, from: product }\n"
+        "  SERVICE_BOT_TOKEN:   { source: asked }\n",
+    )
+    _replace_once(
+        primer,
+        "provides: [SERVICE_API_URL, SERVICE_TOKEN, SERVICE_KEY]",
+        "provides: [SERVICE_API_URL, SERVICE_TOKEN, SERVICE_KEY, SERVICE_BOT_TOKEN]",
+    )
+    _replace_once(
+        copy / "docker-compose.yml",
+        "      PRODUCT_WEBHOOK_URL: ${PRODUCT_WEBHOOK_URL:?}\n",
+        "      PRODUCT_WEBHOOK_URL: ${PRODUCT_WEBHOOK_URL:?}\n"
+        "      SERVICE_BOT_TOKEN: ${SERVICE_BOT_TOKEN:?}\n",
+    )
+    _replace_once(
+        copy / "backend" / "app" / "config.py",
+        '    key: str = Field(validation_alias="SERVICE_KEY", default="")\n',
+        '    key: str = Field(validation_alias="SERVICE_KEY", default="")\n'
+        '    bot_token: str = Field(validation_alias="SERVICE_BOT_TOKEN", '
+        'default="")\n',
+    )
+    _replace_once(
+        copy / "backend" / "app" / "main.py",
+        '    "SERVICE_KEY": "key",\n',
+        '    "SERVICE_KEY": "key",\n    "SERVICE_BOT_TOKEN": "bot_token",\n',
+    )
+    _git("-C", str(copy), "add", "-A")
+    _git("-C", str(copy), "commit", "-q", "-m", "DM-86: a seam from asked")
+    _git("-C", str(copy), "tag", "-f", ASKED_TAG)
+    _git(
+        "-C", str(copy), "push", "-q", "--force", str(SERVICE_MIRROR),
+        f"refs/tags/{ASKED_TAG}",
+    )  # fmt: skip
+    return _stdout(["git", "-C", str(copy), "rev-parse", "HEAD"])[0]
+
+
+def _blank_with_a_verb_on_a_job_and_the_asked_seam(
+    tmp: Path, mirror: Path, commit: str
+) -> None:
+    """The blank, consistent as a whole: the seam ``SERVICE_BOT_TOKEN`` from
+    the service, in the app's environment, the lock at ``ASKED_TAG``; in the
+    entry ``primer-blank-files`` the job ``files-list`` (the image of the
+    registry the entry already runs, the volume ``files``, no healthcheck);
+    the verb ``files-list`` on that job by ``entry``, for ``test``."""
+    copy = _copy_of_blank(tmp, mirror, "verb-job")
+    primer = copy / "primer.yaml"
+    _replace_once(
+        primer,
+        "  SERVICE_KEY:       { source: seam, from: primer-blank-service }",
+        "  SERVICE_BOT_TOKEN: { source: seam, from: primer-blank-service }\n"
+        "  SERVICE_KEY:       { source: seam, from: primer-blank-service }",
+    )
+    _replace_once(
+        primer,
+        "    persistent: true\n",
+        "    persistent: true\n    jobs: { list: { service: files-list } }\n",
+    )
+    _replace_once(
+        primer,
+        "  count-settings:",
+        "  files-list:\n"
+        '    run: "ls -1 /srv/files"\n'
+        "    entry: primer-blank-files\n"
+        "    service: files-list\n"
+        "    roles: [test]\n"
+        "  count-settings:",
+    )
+    _replace_once(
+        copy / "docker-compose.yml",
+        "      SERVICE_KEY: ${SERVICE_KEY:?}\n",
+        "      SERVICE_KEY: ${SERVICE_KEY:?}\n"
+        "      SERVICE_BOT_TOKEN: ${SERVICE_BOT_TOKEN:?}\n",
+    )
+    files = copy / "deploy" / "files-compose.yml"
+    image = (
+        "postgres:16-alpine@sha256:"
+        "f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36"
+    )
+    _replace_once(
+        files,
+        "\nvolumes:\n",
+        "  files-list:\n"
+        f"    image: {image}\n"
+        '    command: ["true"]\n'
+        "    volumes:\n      - files:/srv/files\n"
+        "\nvolumes:\n",
+    )
+    _replace_once(
+        copy / "primer.lock",
+        f'{{ version: "1.0.0", tag: v1.0.0, commit: {SERVICE_PINS["v1.0.0"]} }}',
+        f'{{ version: "1.2.0", tag: {ASKED_TAG}, commit: {commit} }}',
+    )
+    _push(copy, mirror, "DM-86: a verb on a job of another entry, a seam from asked")
+
+
+def test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-86, pass 4b, last before ``destroy`` (after it only ``destroy`` and
+    ``destroy --all`` run -- no passport is deployed over the lock at
+    ``ASKED_TAG``). The service gives the product its ``asked`` value by a
+    seam: ``update`` green, ``seams_verify`` names the seam, the app has the
+    value in its environment, neither the journal nor the verdict has it.
+    The verb ``files-list`` on the job of ``primer-blank-files``: a one-off
+    container that lists the mark on the volume ``files``; no container of
+    the job left. Measured into the journal first (par0 14.3): the lines of
+    ``ls``, the seams of ``seams_verify``."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    commit = _service_giving_its_asked(tmp_path)
+    _blank_with_a_verb_on_a_job_and_the_asked_seam(tmp_path, mirror, commit)
+    passport = _passport(
+        tmp_path, version=46, asked={SERVICE: {"SERVICE_BOT_TOKEN": BOT_TOKEN}}
+    )
+    verdict, printed = _install(passport, "update")
+    assert verdict.result == "green", printed
+    seams = {(s.stack, s.name): s.verify or {} for s in verdict.steps}[
+        ("seams", "seams_verify")
+    ]
+    print("DM-86 measure: seams", seams.get("seams"))
+    named = seams.get("seams")
+    assert isinstance(named, list), seams
+    assert f"{STACK}.SERVICE_BOT_TOKEN <- {SERVICE}" in named, seams
+    app = _container(STACK, "app")
+    assert _stdout(["docker", "exec", app, "printenv", "SERVICE_BOT_TOKEN"]) == [
+        BOT_TOKEN
+    ]
+    journal = Path("/opt/pridem") / str(verdict.log_ref)
+    assert BOT_TOKEN not in journal.read_text(encoding="utf-8")
+    assert BOT_TOKEN not in verdict.model_dump_json()
+
+    files = _container(FILES, "files")
+    _stdout(["docker", "exec", files, "sh", "-c", "echo x > /srv/files/dm86-4b-mark"])
+    verdict, printed = _verdict_of("verb", "files-list")
+    assert verdict.result == "green", printed
+    assert verdict.steps[0].verify == {
+        "verb": "files-list",
+        "service": "files-list",
+        "exit_code": 0,
+        "entry": FILES,
+        "oneoff": True,
+    }
+    run_journal = Path("/opt/pridem") / str(verdict.log_ref)
+    said = [
+        json.loads(line).get("line")
+        for line in run_journal.read_text(encoding="utf-8").splitlines()
+        if '"project_verb"' in line and '"log"' in line
+    ]
+    print("DM-86 measure: files-list said", said)
+    assert "dm86-4b-mark" in said, said
+    left = _stdout(
+        ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={FILES}",
+         "--filter", "label=com.docker.compose.service=files-list"]
+    )  # fmt: skip
+    assert left == [], left
 
 
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:

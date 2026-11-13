@@ -63,6 +63,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_a_reset_of_the_blank_makes_its_database_new", "c"),
     ("test_tier3_a_project_verb_runs_in_its_service", "c"),
     ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "c"),
+    ("test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked", "c"),
     ("test_tier3_destroy_takes_the_blank_off_the_box", "c"),
     ("test_tier3_destroy_all_wipes_the_persistent_volume", "c"),
     # d -- a clean box: the blank without its service, then with it

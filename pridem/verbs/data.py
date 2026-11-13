@@ -34,7 +34,7 @@ from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import Ident, Product, Service, load_primer_yaml
 from pridem.state import Box
 from pridem.steps.base import Step, StepFailed
-from pridem.steps.compose import ComposeStack, verb_service
+from pridem.steps.compose import ComposeStack, verb_entry, verb_service
 from pridem.steps.data import (
     BACKUPS,
     SERVICE_ACTIONS,
@@ -532,11 +532,20 @@ def _verb(args: Strict, ctx: Context) -> int:
                 raise Refused(f"verb {name}: {key} is a secret of the box")
 
     service = verb_service(made, args.name)
-    if service is None or made.name not in made.stacks:
-        raise Refused(f"verb {args.name}: no service of the product's own entry")
-    compose = compose_of(ctx, stack, made, made.name)
+    entry = verb_entry(made, args.name)
+    if service is None or entry not in made.stacks:
+        raise Refused(f"verb {args.name}: no service of the product's entry {entry}")
+    compose = compose_of(ctx, stack, made, entry)
     argv = [*shlex.split(declared.run), *(values[name] for name in declared.args)]
-    step = ProjectVerb(compose, verb=args.name, service=service, argv=argv)
+    jobs = {job.service for job in made.stacks[entry].jobs.values()}
+    step = ProjectVerb(
+        compose,
+        verb=args.name,
+        service=service,
+        argv=argv,
+        oneoff=service in jobs,  # a job runs as a one-off container (pass 4b)
+        own=entry == made.name,
+    )
 
     def make(session: Session) -> Planned:
         return Planned([StackSteps(made.name, [step], root=True)])

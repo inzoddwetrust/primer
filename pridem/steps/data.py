@@ -548,7 +548,10 @@ def _override_services(compose: ComposeStack) -> Json:
 
 
 def image_is_current(
-    ctx: StepContext, compose: ComposeStack, document: dict[str, Json]
+    ctx: StepContext,
+    compose: ComposeStack,
+    document: dict[str, Json],
+    service: str | None = None,
 ) -> str:
     """Outside a deploy, ``compose run --rm <app>`` takes the image by its name:
     the release's own since DM-90 (``steps.compose.release_image``), which a
@@ -557,8 +560,9 @@ def image_is_current(
     and a migration or a seed of other code on the release's database is what
     this refuses: the image's ``pridem.commit``, the fact, against the current
     release's commit -- red before anything is stopped (DM-86). A name with no
-    image under it is ``image-unread``. Returns the commit."""
-    app = compose.app_service
+    image under it is ``image-unread``. ``service`` -- a built job of a verb
+    (pass 4b); by default the app. Returns the commit."""
+    app = service if service is not None else compose.app_service
     if app is None:
         raise StepFailed("no-app", {"stack": compose.entry})
     image = run_image(document, compose, app)
@@ -880,27 +884,41 @@ VERB_TIMEOUT_S = 3600
 
 
 class ProjectVerb(Step):
-    """A verb of ``verbs`` (contract 3 rule 7, protocol 8.2): ``exec`` in the
-    running container of its service -- the declared one, by default the
-    app; the live container is the current release's, so no question of an
-    image arises. Its code 0 is the fact: the machine runs it, knowing
-    nothing of what it does (DM-86)."""
+    """A verb of ``verbs`` (contract 3 rule 7, protocol 8.2) in its service of
+    its entry (``entry``, by default the product's own). A running service:
+    ``exec`` in its live container -- the current release's, no question of
+    an image. A job of the entry (pass 4b): a one-off container, ``run --rm
+    --no-deps``, on the ``.env`` and override of the release ``current`` --
+    as the job runs on a deploy; a job built from the product's code is
+    checked for its image first (``image-not-current``), one from a registry
+    is not -- the machine neither builds nor labels it. Its code 0 is the
+    fact: the machine runs it, knowing nothing of what it does (DM-86)."""
 
     name = "project_verb"
     order = 1
     modes = COMMAND
     codes: ClassVar[dict[str, str]] = {
+        **IMAGE_CODES,
         "verb": "run the verb {verb} in {service} of {stack}",
         "service-down": ("{service} of {stack} does not run; the verb {verb} needs it"),
     }
 
     def __init__(
-        self, compose: ComposeStack, *, verb: str, service: str, argv: Sequence[str]
+        self,
+        compose: ComposeStack,
+        *,
+        verb: str,
+        service: str,
+        argv: Sequence[str],
+        oneoff: bool = False,
+        own: bool = True,
     ) -> None:
         self.compose = compose
         self.verb = verb
         self.service = service
         self.argv = list(argv)
+        self.oneoff = oneoff
+        self.own = own
 
     def check(self, ctx: StepContext) -> CheckResult:
         params: dict[str, Json] = {
@@ -908,19 +926,35 @@ class ProjectVerb(Step):
             "service": self.service,
             "verb": self.verb,
         }
-        if not running(ctx, self.compose, [self.service]):
+        if self.oneoff:
+            document = config(ctx, self.compose)
+            services = document.get("services")
+            body = services.get(self.service) if isinstance(services, dict) else None
+            if isinstance(body, dict) and "build" in body:
+                image_is_current(ctx, self.compose, document, self.service)
+        elif not running(ctx, self.compose, [self.service]):
             raise StepFailed("service-down", params)
         return CheckResult(True, local_code("verb", params), {})
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
+        how = ("run", "--rm", "--no-deps") if self.oneoff else ("exec", "-T")
         out(
             ctx,
-            self.compose.argv("exec", "-T", self.service, *self.argv),
+            self.compose.argv(*how, self.service, *self.argv),
             timeout=VERB_TIMEOUT_S,
         )
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        return Verified({"verb": self.verb, "service": self.service, "exit_code": 0})
+        fact: dict[str, Json] = {
+            "verb": self.verb,
+            "service": self.service,
+            "exit_code": 0,
+        }
+        if not self.own:
+            fact["entry"] = self.compose.entry
+        if self.oneoff:
+            fact["oneoff"] = True
+        return Verified(fact)
 
 
 # --- pass 4: start, stop, restart -----------------------------------------------

@@ -591,23 +591,30 @@ def _job_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[s
     return found
 
 
+def verb_entry(stack: Product, name: str) -> str:
+    """The entry a verb runs in: its ``entry``, else the product's own."""
+    return stack.verbs[name].entry or stack.name
+
+
 def verb_service(stack: Product, name: str) -> str | None:
-    """The service a verb runs in: its ``service``, else the app of the
-    product's own entry (DM-86)."""
+    """The service a verb runs in: its ``service``, else the app of its entry
+    (DM-86)."""
     verb = stack.verbs[name]
-    own = stack.stacks.get(stack.name)
+    chosen = stack.stacks.get(verb_entry(stack, name))
     if verb.service is not None:
         return verb.service
-    return own.app.service if own is not None and own.app is not None else None
+    return chosen.app.service if chosen is not None and chosen.app is not None else None
 
 
 def _verb_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[str]:
     """Every verb's service is a service of the own entry's compose (DM-86)."""
     stack = compose.stack
-    if not isinstance(stack, Product) or compose.entry != stack.name:
+    if not isinstance(stack, Product):
         return []
     found: list[str] = []
     for name in stack.verbs:
+        if verb_entry(stack, name) != compose.entry:
+            continue  # the compose of the verb's own entry names its service
         service = verb_service(stack, name)
         if service is not None and service not in services:
             found.append(f"verbs.{name}: no service {service}")

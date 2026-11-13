@@ -1244,6 +1244,11 @@
           "title": "Destructive",
           "type": "boolean"
         },
+        "entry": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "title": "Entry",
+          "type": "string"
+        },
         "roles": {
           "items": {
             "enum": [

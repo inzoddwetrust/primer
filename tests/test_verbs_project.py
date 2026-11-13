@@ -289,13 +289,17 @@ def _product(verbs: dict[str, Json], **entry: Json) -> dict[str, Json]:
     }
 
 
-def test_a_verb_runs_in_no_job_and_needs_an_app_when_it_names_no_service() -> None:
+def test_a_verb_on_a_job_is_taken_and_needs_an_app_when_it_names_no_service() -> None:
+    """Changed by DM-86 pass 4b (the owner's word, the dispatcher's of 13.11):
+    a job of the entry is a service of a verb now -- it runs as a one-off
+    container -- so ``S.verb-service`` no longer refuses it; a verb that names
+    no service still needs the entry's app."""
     made = PRIMER_YAML.validate_python(
         _product(
             {"v": {"run": "x", "service": "init"}}, jobs={"init": {"service": "init"}}
         )
     )
-    assert [p.code for p in rule_problems(made)] == ["S.verb-service"]
+    assert rule_problems(made) == []
     raw = _product({"v": {"run": "x"}})
     stacks = raw["stacks"]
     assert isinstance(stacks, dict)

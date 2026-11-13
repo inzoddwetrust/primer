@@ -181,9 +181,9 @@ RULES = {
     ),
     "S.verb-service": (
         0,
-        "a verb runs in a running service of the stack's own entry: not a job, "
-        "and the app when it names none",
+        "a verb names its service, or its entry has an app to run it in",
     ),
+    "S.verb-entry": (0, "a verb's entry is an entry of the same product"),
     "S.stop-service": (
         0,
         "stop_for_migrate is for an entry with migrate and an app, each service once",
@@ -638,6 +638,10 @@ class Verb(Strict):
     roles: Roles | None = None
     destructive: bool = False
     service: Ident | None = None
+    entry: Ident | None = None
+    """The entry of the same product whose ``service`` runs the verb; absent --
+    the product's own entry. A job of that entry runs as a one-off container
+    (DM-86, pass 4b)."""
 
 
 class UpdateWindow(Strict):
@@ -802,23 +806,24 @@ def _s_jobs(stack: Product | Service) -> list[Problem]:
 
 
 def _s_verbs(stack: Product | Service) -> list[Problem]:
-    """A verb runs in a service of the stack's own entry that keeps running:
-    not a job; without ``service`` -- the entry's app, which it must have
-    (DM-86)."""
+    """A verb runs in a service of an entry of the same product -- ``entry``,
+    by default the product's own: a running service, or a job of that entry
+    as a one-off container (DM-86, pass 4b); without ``service`` -- the
+    entry's app, which it must have."""
     out: list[Problem] = []
     if not isinstance(stack, Product):
         return out  # a service declares no verbs (contract 3 section 2)
-    own = stack.stacks.get(stack.name)
     for name, verb in stack.verbs.items():
         at = ("verbs", name)
-        if own is None:
+        if verb.entry is not None and verb.entry not in stack.stacks:
+            detail = f"{verb.entry!r} is no entry of {stack.name}"
+            out.append(problem_at((*at, "entry"), "S.verb-entry", detail))
+            continue
+        chosen = stack.stacks.get(verb.entry or stack.name)
+        if chosen is None:
             continue  # the verb verb refuses it: the product has no own entry
-        if verb.service is None and own.app is None:
+        if verb.service is None and chosen.app is None:
             out.append(problem_at(at, "S.verb-service", "no service and no app"))
-        jobs = {job.service for job in own.jobs.values()}
-        if verb.service is not None and verb.service in jobs:
-            detail = f"{verb.service!r} is a job"
-            out.append(problem_at((*at, "service"), "S.verb-service", detail))
     return out
 
 
