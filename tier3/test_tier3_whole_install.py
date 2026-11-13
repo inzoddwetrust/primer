@@ -80,7 +80,7 @@ from groups import NEEDS_BOX
 
 from pridem.conformance.stack import check_health, check_logs
 from pridem.report.schema import Verdict
-from pridem.runner import CommandTimedOut, Stream, SubprocessRunner
+from pridem.runner import CommandNotStarted, CommandTimedOut, Stream, SubprocessRunner
 from pridem.steps.compose import PROXY_URL as PROXY
 from pridem.steps.edge import CERTBOT_IMAGE
 from pridem.steps.egress import SQUID_IMAGE
@@ -1552,11 +1552,17 @@ def _container(project: str, service: str) -> str:
 
 def _box_db_head() -> str | None:
     """The head of the blank's database on the box, as ``alembic_version``
-    holds it; ``None`` -- no database running, or no head yet."""
-    running = _stdout(
-        ["docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={STACK}",
-         "--filter", "label=com.docker.compose.service=postgres"]
-    )  # fmt: skip
+    holds it; ``None`` -- no database running, or no head yet, or no docker
+    at all: a clean runner of group d before its first install has none (tier
+    3 takes the runner's own docker off before the bootstrap) -- FIX 2."""
+    try:
+        running = _stdout(
+            ["docker", "ps", "-q",
+             "--filter", f"label=com.docker.compose.project={STACK}",
+             "--filter", "label=com.docker.compose.service=postgres"]
+        )  # fmt: skip
+    except CommandNotStarted:
+        return None  # no docker on the box: no database either
     if len(running) != 1:
         return None
     said: list[str] = []
