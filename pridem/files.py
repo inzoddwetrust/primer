@@ -105,15 +105,19 @@ def resolve_inside(root: Path, rel: str | Path) -> Path:
     no part from ``root`` down is a symlink (DM-78): a package, a release or
     the ops repository is someone else's tree, and a link in it -- out or even
     in -- would take the machine's read or write past what it checked. With
-    the three, the path stays under ``root`` by construction. The path need
-    not exist; what exists of it is checked. A refusal names no part of the
-    path."""
+    the three, the path stays under ``root`` by construction. No part is
+    ``.git`` in any case (DM-63 FIX): a worktree's ``.git`` hands git its
+    config and hooks -- the second line behind the schema's ``S.git-path``.
+    The path need not exist; what exists of it is checked. A refusal names no
+    part of the path."""
     if Path(rel).is_absolute():
         raise PathOutside("an absolute path")
     target = Path(root)
     for part in Path(rel).parts:
         if part in ("", ".", ".."):
             raise PathOutside("a relative path of names only")
+        if part.lower() == ".git":  # its config and hooks are git's (DM-63 FIX)
+            raise PathOutside("a .git in the path")
         target = target / part
         if target.is_symlink():
             raise PathOutside("a symlink in the path")

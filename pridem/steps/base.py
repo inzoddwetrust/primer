@@ -21,12 +21,12 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, TypeVar
 
 from pridem.events import Code, Fact, Json
 from pridem.interrupt import Interrupt
 from pridem.report.codes import LOCAL_CODE
-from pridem.runner import OnLine, Runner
+from pridem.runner import OnLine, Runner, RunnerError
 
 Mode = Literal["install", "deploy", "reinstall", "destroy", "gc", "renew", "command"]
 """The plans a step can belong to: the three of a deploy, ``destroy``, the
@@ -102,6 +102,30 @@ class StepContext:
     stack: str
     on_line: OnLine
     interrupt: Interrupt = field(default_factory=Interrupt)
+
+
+_T = TypeVar("_T")
+
+
+class LeftUndone:
+    """A step after ``finalize`` (DM-63): the release is out and running, so
+    what the step is refused is left undone -- ``incomplete`` through
+    ``verify``, never a red verdict. ``_guard`` is the one place a refusal is
+    caught: ``StepFailed``, a command that failed or timed out (``RunnerError``)
+    and a file the box would not write (``OSError``) -- the last two as
+    ``failed {error}``, the class named. ``Interrupted`` is no ``Exception``
+    and goes through; any other exception is the machine's defect, red."""
+
+    left: Code | None = None
+
+    def _guard(self, call: Callable[[], _T]) -> _T | None:
+        try:
+            return call()
+        except StepFailed as error:
+            self.left = error.reason
+        except (RunnerError, OSError) as error:
+            self.left = local_code("failed", {"error": type(error).__name__})
+        return None
 
 
 class Step(ABC):

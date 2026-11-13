@@ -34,11 +34,12 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import ClassVar
 
-from pridem.events import Code, Json
+from pridem.events import Json
 from pridem.files import atomic_write, commit_set, private_dir, temp_of
 from pridem.runner import Stream
 from pridem.steps.base import (
     CheckResult,
+    LeftUndone,
     Mode,
     Step,
     StepContext,
@@ -201,6 +202,9 @@ class DeployKey(Step):
 
     order = 1
     modes = ALL_MODES
+    waits_always = True
+    """A key in place without access is waited for on every run: nothing goes
+    on without it. ``WriteKey`` waits only for a key it minted."""
     codes: ClassVar[dict[str, str]] = {
         "mint": "mint a deploy key for {repo} and wait for access",
         "alias-clash": "repositories share one key: {aliases}",
@@ -265,11 +269,13 @@ class DeployKey(Step):
         write_ssh_config(self.root, [self.repo])
         if self._key.exists() and self._access(ctx):
             return  # only the files were not as drawn
-        if not self._key.exists():
+        minted = not self._key.exists()
+        if minted:
             self._mint(ctx)
         ctx.on_line(Stream.STDOUT, f"{self._title} for {self.repo.address}:", False)
         ctx.on_line(Stream.STDOUT, self._public(), False)
-        deadline = self.clock() + self.wait_s
+        waits = minted or self.waits_always
+        deadline = self.clock() + (self.wait_s if waits else 0)
         while not self._access(ctx):
             if self.clock() >= deadline:
                 raise StepFailed(
@@ -383,19 +389,25 @@ def has_write_access(
     return code == 0
 
 
-class WriteKey(DeployKey):
+class WriteKey(LeftUndone, DeployKey):
     """The key that writes the types of a ``test`` box (DM-63): a deploy key
     with write access, its own pair and alias (``<alias>-write``), the ceremony
     of ``DeployKey``. It runs after ``finalize``, with ``types``: whatever it
-    is refused is left undone -- ``incomplete``, never a red verdict."""
+    is refused is left undone -- ``incomplete``, never a red verdict
+    (``LeftUndone``). It waits ``KEY_WAIT_S`` only for a key it minted in this
+    run (DM-63 FIX): a key in place without write access is ``no-access`` at
+    once -- the release is out, and the box's lock is not held for half an
+    hour on every deploy."""
 
     name = "write_key"
     order = 3  # in the root stack: after final_check and finalize
+    waits_always = False
     codes: ClassVar[dict[str, str]] = {
         **DeployKey.codes,
         "mint": "mint a write key for {repo} and wait for write access",
         "no-access": "no write access to {repo} with key {public_key} after "
         "{wait_s} s: add it as a deploy key with write access",
+        "failed": "the write key was not made: {error}",
     }
 
     def __init__(
@@ -405,6 +417,7 @@ class WriteKey(DeployKey):
         *,
         git_dir: Path,
         commit: str,
+        others: Sequence[str] = (),
         wait_s: float = KEY_WAIT_S,
         poll_s: float = 10.0,
         clock: Callable[[], float] = time.monotonic,
@@ -414,15 +427,16 @@ class WriteKey(DeployKey):
             address,
             root,
             name="write_key",
+            others=others,
             wait_s=wait_s,
             poll_s=poll_s,
             clock=clock,
             sleep=sleep,
         )
+        self.address = address
         self.repo = repo(address, write=True)
         self.git_dir = git_dir
         self.commit = commit
-        self.left: Code | None = None
 
     def _access(self, ctx: StepContext) -> bool:
         return has_write_access(ctx, self.root, self.repo, self.git_dir, self.commit)
@@ -431,28 +445,34 @@ class WriteKey(DeployKey):
     def _title(self) -> str:
         return "write key (a deploy key with write access)"
 
+    def _clashes(self) -> None:
+        """The write key's alias among the box's read keys (DM-63 FIX)."""
+        clash = collisions([*self.others], write=[self.address])
+        if clash:
+            raise StepFailed("alias-clash", {"aliases": list[Json](clash)})
+
     def check(self, ctx: StepContext) -> CheckResult:
         self.left = None
-        try:
-            return super().check(ctx)
-        except StepFailed as error:
-            self.left = error.reason
-            return CheckResult(True, error.reason, {"left": True})
+
+        def look() -> CheckResult:
+            self._clashes()
+            return DeployKey.check(self, ctx)
+
+        found = self._guard(look)
+        if found is not None or self.left is None:
+            return found or CheckResult(False)
+        return CheckResult(True, self.left, {"left": True})
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         if check.data.get("left") is True:
             return
-        try:
-            super().act(ctx, check)
-        except StepFailed as error:
-            self.left = error.reason
+        self._guard(lambda: DeployKey.act(self, ctx, check))
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         if self.left is None:
-            try:
-                return super().verify(ctx, check)
-            except StepFailed as error:
-                self.left = error.reason
+            found = self._guard(lambda: DeployKey.verify(self, ctx, check))
+            if found is not None or self.left is None:
+                return found or Verified({"repo": self.repo.address})
         return Verified(
             {"repo": self.repo.address, "left": self.left.code}, incomplete=self.left
         )

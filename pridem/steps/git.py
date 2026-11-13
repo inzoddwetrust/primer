@@ -128,17 +128,22 @@ def _parsed(address: str) -> Repo:
     )
 
 
-def collisions(addresses: Sequence[str]) -> list[str]:
+def collisions(addresses: Sequence[str], write: Sequence[str] = ()) -> list[str]:
     """Different repositories, or one repository by two users, that would share
-    one alias (one key, one ``Host`` block with one user): sorted."""
-    seen: dict[str, tuple[str, str]] = {}
+    one alias (one key, one ``Host`` block with one user): sorted. ``write`` --
+    addresses whose write key is drawn too: ``a/b``'s (``…-a-b-write``) is the
+    same alias as the read key of ``a/b-write`` (DM-63 FIX)."""
+    seen: dict[str, tuple[str, str, bool]] = {}
     clashes: set[str] = set()
-    for address in addresses:
-        found = repo(address)
+    keys = [(address, False) for address in addresses]
+    keys += [(address, True) for address in write]
+    for address, writes in keys:
+        found = repo(address, write=writes)
         if found.local:
             continue
-        other = seen.setdefault(found.alias, (found.path, found.user))
-        if other != (found.path, found.user):
+        mine = (found.path, found.user, writes)
+        other = seen.setdefault(found.alias, mine)
+        if other != mine:
             clashes.add(found.alias)
     return sorted(clashes)
 

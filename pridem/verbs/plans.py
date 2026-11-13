@@ -655,9 +655,22 @@ def deploy_plan(
         bare = known.fetch_root.checkout.bare
         made: list[Step] = []
         if declared and passport.server.role == "test":  # only a test box writes
+            others = [  # every read key of the box: no write alias among them
+                passport.product.repo,
+                *(d.repo for d in product.dependencies.values()),
+                *(p.repo for p in passport.packages.values()),
+            ]
             made.append(
-                WriteKey(passport.product.repo, root, git_dir=bare, commit=commit)
+                WriteKey(
+                    passport.product.repo,
+                    root,
+                    git_dir=bare,
+                    commit=commit,
+                    others=others,
+                )
             )
+        target_of = known.fetch_root.target
+        tag = target_of is not None and target_of.tag
         made.append(
             Types(
                 product,
@@ -666,7 +679,7 @@ def deploy_plan(
                 ref=ref,
                 commit=commit,
                 role=passport.server.role,
-                branch=ref,
+                branch=None if tag else ref,  # a tag is no branch (DM-63 FIX)
                 run_id=session.run_id,
                 push_to=passport.product.repo,
                 git_dir=bare,

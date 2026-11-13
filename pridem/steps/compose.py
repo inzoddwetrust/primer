@@ -390,9 +390,15 @@ BIND_OPTIONS = frozenset({"type", "o", "device"})
 
 
 def _within(path: str, release: Path) -> bool:
-    """``path`` resolves into ``release`` (a symlink counts where it leads)."""
+    """``path`` resolves into ``release`` (a symlink counts where it leads),
+    and not through its ``.git`` in any case (DM-63 FIX): what a container
+    binds or a build reads of the release is the product's files, never the
+    worktree's pointer to the box's repository."""
     real = Path(os.path.realpath(path))
-    return real.is_relative_to(Path(os.path.realpath(release)))
+    base = Path(os.path.realpath(release))
+    if not real.is_relative_to(base):
+        return False
+    return not any(part.lower() == ".git" for part in real.relative_to(base).parts)
 
 
 def _socket(path: str) -> bool:

@@ -55,7 +55,7 @@ import shlex
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from packaging.specifiers import InvalidSpecifier, Specifier, SpecifierSet
 from pydantic import (
@@ -67,6 +67,7 @@ from pydantic import (
     TypeAdapter,
     ValidationError,
     WithJsonSchema,
+    model_validator,
 )
 from pydantic_core import PydanticCustomError
 
@@ -173,6 +174,14 @@ RULES = {
     ),
     "S.endpoint-unknown": (0, "an address names a point its entry does not expose"),
     "S.command": (0, "a command is one or more words shlex can split"),
+    "S.git-path": (
+        0,
+        "a path of primer.yaml, a package or the passport never goes through "
+        ".git, in any case: the machine writes, copies and binds no repository's "
+        "own files",
+    ),
+    "S.types-one": (0, "types are declared on one entry of the product at most"),
+    "R23.generate": (23, "generate names both paths it is given: <openapi> and <out>"),
     "S.minted-length": (0, "a minted value is no shorter than 32 characters"),
     "S.job-service": (
         0,
@@ -223,12 +232,23 @@ def _specifier(value: str) -> str:
     return value
 
 
+def through_git(value: str) -> bool:
+    """A part of ``value`` is ``.git`` in any case (``.github``, ``.gitignore``
+    are other names): a worktree's ``.git`` is a file git reads its config from
+    -- written, it hands the machine's next ``git`` another repository and its
+    hooks (DM-63 FIX). One test for every path of ``primer.yaml``, a package
+    and the passport, and for the second line in the steps."""
+    return any(part.lower() == ".git" for part in PurePosixPath(value).parts)
+
+
 def _relative_path(value: str) -> str:
     path = PurePosixPath(value)
     if not value or path.is_absolute() or ".." in path.parts:
         raise ValueError(
             f"must be a relative path inside the repo without ..: {value!r}"
         )
+    if through_git(value):
+        raise _rule_error("S.git-path", repr(value))
     return value
 
 
@@ -403,6 +423,13 @@ class Types(Strict):
     generate: Command
     out: RepoPath
     commit_as: Name
+
+    @model_validator(mode="after")
+    def _paths_given(self) -> Self:
+        for mark in ("<openapi>", "<out>"):
+            if mark not in self.generate:
+                raise _rule_error("R23.generate", f"no {mark}")
+        return self
 
 
 _SCHEME = re.compile(r"[a-z][a-z0-9+.-]*")
@@ -909,6 +936,8 @@ def _mount_problems(path: tuple[int | str, ...], mount: Mount) -> list[Problem]:
                     f"from must be a relative normalized subdirectory: {mount.from_!r}",
                 )
             )
+        elif through_git(mount.from_):
+            out.append(problem_at((*path, "from"), "S.git-path", repr(mount.from_)))
     return out
 
 
@@ -964,6 +993,8 @@ def _r10_apply(stack: Product | Service) -> list[Problem]:
                         (*where, "path"), "R10.build", f"not relative: {place.path!r}"
                     )
                 )
+            elif through_git(place.path):
+                out.append(problem_at((*where, "path"), "S.git-path", repr(place.path)))
             key = (place.service, place.path)
             if key in seen:
                 out.append(problem_at(where, "R10.build", f"{key} twice"))
@@ -1229,6 +1260,18 @@ def _s_entries(stack: Product | Service) -> list[Problem]:
     return out
 
 
+def _s_types_one(stack: Product | Service) -> list[Problem]:
+    """``types`` on one entry at most (DM-63 FIX): the step makes the types of
+    one entry; a second would be left without a word."""
+    declared = [name for name, stage in stack.stacks.items() if stage.types]
+    if len(declared) < 2:
+        return []
+    return [
+        problem_at(("stacks", name, "types"), "S.types-one", f"also on {declared[0]}")
+        for name in declared[1:]
+    ]
+
+
 RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r3_single_point,
     _r4_route_domains,
@@ -1247,6 +1290,7 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _s_jobs,
     _s_stop,
     _s_verbs,
+    _s_types_one,
 )
 
 

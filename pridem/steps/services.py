@@ -278,7 +278,7 @@ class DataCopy(Step):
         "copy": "copy {kinds} of the product to {service} and validate them",
         "validate": "validate {kinds} of the product with the new {service}",
         "data-missing": "{service}.{kind}: {path} is not in the product",
-        "data-unsafe": "{service}.{kind}: {paths} lead out of {base}",
+        "data-unsafe": "{service}.{kind}: {paths} lead out of {base} or through .git",
         "data-special": "{service}.{kind}: {paths} are neither files, directories "
         "nor links",
         "copy-drift": "{service}.{kind}: {path} no longer holds what it was copied "
@@ -315,6 +315,13 @@ class DataCopy(Step):
                     "data-missing", {**self._params(item), "path": str(item.source)}
                 )
             leaving = _leaves(item)
+            inside = (
+                item.source.relative_to(item.base)
+                if item.source.is_relative_to(item.base)
+                else item.source
+            )
+            if any(part.lower() == ".git" for part in inside.parts):
+                leaving = [*leaving, str(inside)]  # DM-63 FIX: never git's own
             if leaving:
                 raise StepFailed(
                     "data-unsafe",

@@ -505,5 +505,5 @@ def test_a_refused_push_says_why(
     )  # fmt: skip
     with FakeRunner(FakeCall(push, code=code, lines=lines, env=GIT_ENV)) as runner:
         with pytest.raises(StepFailed) as error:
-            step._push(context(runner), ["-C", "/w"])
+            step._push(context(runner), ["-C", "/w"], REF)
     assert error.value.reason == refused
