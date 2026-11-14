@@ -21,19 +21,22 @@ from typing import ClassVar
 
 import pytest
 from data_support import FIXTURE, STACK, blank_box
-from plan_support import Journal, ScriptedStep
+from plan_support import Journal, ListSink, ScriptedStep
+from services_support import TAG, git, remotes
 from test_verbs_admin import _logs, _out
 from test_verbs_project import _box
 
 from pridem.cli import run
 from pridem.events import Code
-from pridem.plan import StackSteps
-from pridem.report.codes import LOCAL_CODE
+from pridem.plan import Plan, StackSteps
+from pridem.report.codes import LOCAL_CODE, ExitCode
 from pridem.report.schema import Failure
 from pridem.runner import FakeCall, FakeRunner, Stream, SubprocessRunner
+from pridem.stacks.passport import Package as PassportPackage
 from pridem.state import Box
 from pridem.steps.base import CheckResult, StepContext, StepFailed, local_code
 from pridem.steps.compose import out
+from pridem.steps.sources import source_steps
 from pridem.steps.tests import read_junit
 from pridem.verbs import deploy as deploy_verbs
 from pridem.verbs.report import machine_catalog
@@ -319,3 +322,110 @@ def test_a_line_longer_than_the_runner_s_limit_is_whole(tmp_path: Path) -> None:
     ctx = StepContext(SubprocessRunner(), "deploy", "test", "blank", lambda *_: None)
     _, lines = out(ctx, [sys.executable, "-c", code])
     assert json.loads(lines[0]) == document and lines[1:] == ["short"]
+
+
+def _git(*argv: str, cwd: Path | None = None) -> None:
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    SubprocessRunner().run(
+        ["git", *argv], timeout=60, env=env, cwd=cwd, on_line=lambda *_: None
+    )
+
+
+@pytest.mark.parametrize("given", [False, True])
+def test_doctor_with_a_new_commit_on_the_branch_is_a_difference(
+    tmp_path: Path, given: bool
+) -> None:
+    """R2-B18 (DM-92 FIX; review 0003, measured with real git): installed at
+    one commit, the branch moves on -- ``doctor``: ``fetch_root`` would fetch,
+    and ``fetch_packages``, which reads ``primer.yaml`` of the target, answers by
+    its own code -- the passport's packages to fetch -- or nothing without
+    them; never ``exception RuntimeError`` (with or without a package: its
+    ``_plan`` read ``primer.yaml`` first). The pair: ``install`` before it."""
+    import shutil
+
+    work, bare, root = tmp_path / "work", tmp_path / "blank.git", tmp_path / "box"
+    shutil.copytree(FIXTURE, work)
+    _git("init", "-q", "-b", "main", str(work))
+    _git("add", "-A", cwd=work)
+    _git("commit", "-qm", "one", cwd=work)
+    _git("clone", "-q", "--bare", str(work), str(bare))
+    root.mkdir()
+
+    def plan(mode: str) -> Plan:
+        packages = (
+            {"skin": PassportPackage(repo="file:///nowhere/skin.git", version="1.0.0")}
+            if given and mode == "doctor"
+            else {}
+        )
+        _, steps = source_steps(
+            root,
+            stack="blank",
+            address=f"file://{bare}",
+            ref="main",
+            tag=False,
+            packages=packages,
+        )
+        return Plan(
+            [StackSteps("sources", steps, root=True)],
+            mode=mode,  # type: ignore[arg-type]
+            role="test",
+            runner=SubprocessRunner(),
+            sink=ListSink(),
+        )
+
+    assert plan("install").run().code is ExitCode.OK
+    _git("commit", "-q", "--allow-empty", "-m", "two", cwd=work)
+    _git("push", "-q", str(bare), "main", cwd=work)
+    doctor = plan("doctor").run()
+    assert doctor.code is ExitCode.INCOMPLETE, doctor.steps
+    assert [r for r in doctor.steps if r.status == "failed"] == []
+    diff = {(d.name, d.reason.code) for d in doctor.doctor_diff}
+    expected = {("fetch_root", "fetch_root:fetch")}
+    if given:
+        expected.add(("fetch_packages", "fetch_packages:fetch"))
+    assert diff == expected
+
+
+def test_doctor_with_a_service_tag_the_remote_lost_is_its_code(tmp_path: Path) -> None:
+    """DM-92 FIX, the class of R2-B18 (the gate): ``check_lock`` checks the
+    tags of the lock in its ``verify``, which ``doctor`` does not run; a tag the
+    remote no longer holds reached ``fetch_services.check`` as an exception
+    (``_known``). Now -- its own code, literally. The pair: ``install`` while the
+    tag is there is green."""
+    remotes(tmp_path)
+    root = tmp_path / "box"
+
+    def plan(mode: str) -> Plan:
+        _, steps = source_steps(
+            root,
+            stack="aivis",
+            address=f"file://{tmp_path}/aivis.git",
+            ref="main",
+            tag=False,
+        )
+        return Plan(
+            [StackSteps("sources", steps, root=True)],
+            mode=mode,  # type: ignore[arg-type]
+            role="test",
+            runner=SubprocessRunner(),
+            sink=ListSink(),
+        )
+
+    assert plan("install").run().code is ExitCode.OK
+    git(tmp_path / "comms.git", "tag", "-d", TAG)
+    doctor = plan("doctor").run()
+    [failed] = [r for r in doctor.steps if r.status == "failed"]
+    assert failed.name == "fetch_services"
+    assert failed.reason == Code(
+        "fetch_services:missing-tag",
+        {"service": "comms", "tag": "v1.0.0", "repo": f"file://{tmp_path}/comms.git"},
+    )

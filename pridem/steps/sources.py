@@ -604,6 +604,7 @@ class FetchServices(_SourceStep):
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
         "fetch": "fetch {services}",
+        "missing-tag": "{service}: tag {tag} is not on {repo}",
         "release-off-target": "{release} is not on the target commit after the reset",
         "no-primer-yaml": "{service}: {tag} has no primer.yaml",
         "repo-damaged": "{service}: the repository of {tag} cannot give {path}: "
@@ -622,10 +623,14 @@ class FetchServices(_SourceStep):
             dependency = product.dependencies[name]
             entry = lock.dependencies[name]
             found = repo(dependency.repo)
-            target = _known(
-                remote_target(ctx, self.root, found, entry.tag, True),
-                f"tag {entry.tag}",
-            )
+            target = remote_target(ctx, self.root, found, entry.tag, True)
+            if target is None:  # check_lock says it in its verify; doctor runs
+                # none -- the remote holds no such tag: this step's code, never
+                # an exception (DM-92 FIX)
+                raise StepFailed(
+                    "missing-tag",
+                    {"service": name, "tag": entry.tag, "repo": dependency.repo},
+                )
             out.append((Checkout(self.root, name, found), target))
         return out
 
@@ -788,6 +793,14 @@ class FetchPackages(_SourceStep):
         return package_contract(product, slot, text, path, tag)
 
     def check(self, ctx: StepContext) -> CheckResult:
+        if self.resolved.product is None:
+            # doctor (DM-92 FIX, R2-B18): fetch_root only said it would fetch,
+            # primer.yaml of the target is not read -- every package of the
+            # passport is to fetch, said by this step's code, never an exception
+            if not self.packages:
+                return CheckResult(False)
+            slots = sorted(self.packages)
+            return CheckResult(True, local_code("fetch", {"packages": _j(slots)}))
         stale = [
             slot
             for slot, checkout, target, _ in self._plan(ctx)
