@@ -71,6 +71,10 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),
     # e -- an install of its own: the build mode of packages
     ("test_tier3_build_mode_of_the_blank", "e"),
+    (
+        "test_tier3_optional_build_slot_without_a_package_serves_the_repository_s_front",
+        "e",
+    ),
     ("test_tier3_types_are_made_by_the_products_commands", "e"),  # DM-63
     # f -- an install of its own: options, derive, points (out of c, DM-85:
     # the longest group is the time of tier 3; the order of the file kept)

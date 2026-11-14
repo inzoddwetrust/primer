@@ -629,11 +629,16 @@ class BuildPlace(Strict):
 
 class Package(Strict):
     """Checked as a whole by rule 10 in the rule layer: ``apply: runtime``
-    mounts (``mount``, ``validate``), ``apply: build`` builds (``build``)."""
+    mounts (``mount``, ``validate``), ``apply: build`` builds (``build``).
+    ``optional`` -- a slot of ``apply: build`` the passport may leave without a
+    package: the service builds as its repository has it (DM-101); without it
+    a passport with no package is ``package-missing``. On a slot of ``apply:
+    runtime`` it says nothing: such a slot mounts nothing without a package."""
 
     contract: Range
     validate_: Command | None = Field(default=None, alias="validate")
     apply: Literal["runtime", "build"] = "runtime"
+    optional: bool = False
     mount: list[Mount] = []
     build: list[BuildPlace] = []
 

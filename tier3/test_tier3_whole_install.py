@@ -3279,3 +3279,52 @@ def test_tier3_destroy_all_wipes_the_persistent_volume() -> None:
         == []
     )
     assert not Path("/opt/pridem/kept-volumes.json").exists()
+
+
+GOLDEN_DOCKERFILE_CHECK = """COPY . .
+RUN test ! -e public/skin/skin.css
+ARG PRIMER_EDITION
+RUN test -n "$PRIMER_EDITION" && mkdir -p public \\
+    && printf '%s' "$PRIMER_EDITION" > public/edition.txt
+"""
+"""What the copy of DM-101 adds to the build stage of its frontend: no skin's
+copy in the context -- one there and the build fails -- and the edition the
+golden build got, served at ``/edition.txt``."""
+
+
+def test_tier3_optional_build_slot_without_a_package_serves_the_repository_s_front(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-101 on the box the install left: a copy of the blank whose slot
+    ``skin`` is built into frontend and ``optional``; the passport names no
+    skin. The update is green: the build had no copy of a package in its
+    context (the copy's Dockerfile refuses one) and got the edition; the key
+    is ``skin: absent``, the fact of ``packages`` too; the page serves the
+    repository's front; ``doctor`` is empty. Measured into the run's output
+    (par0 14.3): the key and the fact."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    copy = _copy_of_blank(tmp_path, mirror, "golden")
+    primer = copy / "primer.yaml"
+    golden = BUILD_SKIN.replace(
+        "    apply: build\n", "    apply: build\n    optional: true\n"
+    )
+    assert golden.count("optional: true") == 1
+    _replace_once(primer, RUNTIME_SKIN, golden)
+    _replace_once(
+        copy / "frontend" / "Dockerfile", "COPY . .\n", GOLDEN_DOCKERFILE_CHECK
+    )
+    _push(copy, mirror, "DM-101: the skin of the blank built in and optional")
+    passport = _passport(tmp_path, version=70)
+    verdict, printed = _install(passport, "update")
+    assert verdict.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    keys = facts[(STACK, "build")]["keys"]
+    packages = _packages_fact(verdict)
+    print("DM-101 measure:", {"keys": keys, "packages": packages})
+    assert keys == {
+        "frontend": {"pridem.edition": "core", "pridem.package.skin": "absent"}
+    }, keys
+    assert packages == {"skin": "absent"}, packages
+    assert _body("/edition.txt", FRONTEND) == "core"
+    diff, failed, _ = _doctor(passport)
+    assert (diff, failed) == ([], []), (diff, failed)

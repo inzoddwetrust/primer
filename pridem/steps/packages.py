@@ -151,6 +151,28 @@ def package_base(root: Path, stack: str, given: Package, slot: str) -> Path:
     return inside_package(base, given.subpath, slot)
 
 
+ABSENT = "absent"
+"""The key's value and the fact's of an optional slot of ``apply: build`` the
+passport gives no package for (DM-101): never a package's ``<repo>@<version>``,
+which always has an ``@``."""
+
+
+def build_slots(product: Product, passport: Passport) -> dict[str, Package | None]:
+    """Every slot of ``apply: build`` and the passport's package of it --
+    ``None`` for an ``optional`` slot it gives none; a slot it gives none and
+    that is not optional is ``package-missing``. The one decision of
+    ``build_places``, ``image_key`` and the fact of ``packages`` (DM-101)."""
+    slots: dict[str, Package | None] = {}
+    for slot, declared in sorted(product.packages.items()):
+        if declared.apply != "build":
+            continue
+        given = passport.packages.get(slot)
+        if given is None and not declared.optional:
+            raise StepFailed("package-missing", {"slot": slot})
+        slots[slot] = given
+    return slots
+
+
 def build_places(
     product: Product,
     stack: str,
@@ -159,17 +181,15 @@ def build_places(
     services: Collection[str],
 ) -> list[PackagePlace]:
     """The build places of ``services`` (one entry's), every package of
-    ``apply: build`` given by the passport (``package-missing``): a service of
-    that mode has no image without it."""
+    ``apply: build`` given by the passport (``build_slots``): an optional slot
+    with no package has no place -- its service builds as the repository has
+    it."""
     out_: list[PackagePlace] = []
-    for slot, declared in sorted(product.packages.items()):
-        if declared.apply != "build":
-            continue
-        given = passport.packages.get(slot)
+    for slot, given in build_slots(product, passport).items():
         if given is None:
-            raise StepFailed("package-missing", {"slot": slot})
+            continue
         base = package_base(root, stack, given, slot)
-        for place in declared.build:
+        for place in product.packages[slot].build:
             if place.service in services:
                 out_.append(
                     PackagePlace(
@@ -185,7 +205,9 @@ def image_key(
     """The labels that tell the image of ``service`` beyond its commit: for a
     service a package of ``apply: build`` goes into, ``pridem.edition`` (when
     the product declares ``editions``) and ``pridem.package.<slot>`` --
-    ``<repo>@<version>``; ``{}`` for every other service."""
+    ``<repo>@<version>``, or ``absent`` for an optional slot with no package
+    (DM-101: a build with and one without a package are two images); ``{}``
+    for every other service."""
     if not isinstance(stack, Product):
         return {}
     slots = [
@@ -206,11 +228,12 @@ def image_key(
         if edition not in stack.editions:
             raise StepFailed("edition-unknown", {"edition": edition})
         key["pridem.edition"] = edition
+    given_of = build_slots(stack, passport)
     for slot in slots:
-        given = passport.packages.get(slot)
-        if given is None:
-            raise StepFailed("package-missing", {"slot": slot})
-        key[f"pridem.package.{slot}"] = package_release(given)
+        given = given_of[slot]
+        key[f"pridem.package.{slot}"] = (
+            ABSENT if given is None else package_release(given)
+        )
     return key
 
 
@@ -435,8 +458,29 @@ class Packages(Step):
                 timeout=VALIDATE_TIMEOUT_S,
             )
 
+    def _absent(self, ctx: StepContext) -> list[str]:
+        """The optional slots of ``apply: build`` of this entry's services the
+        passport gives no package for (DM-101): each is ``absent`` in the
+        fact. The compose of the entry is read only when there is one."""
+        passport = self.fetched.passport
+        if passport is None:
+            raise StepFailed("no-passport")
+        empty = [s for s, g in build_slots(self.product, passport).items() if g is None]
+        if not empty:
+            return []
+        services = config(ctx, self.compose).get("services")
+        known = services if isinstance(services, dict) else {}
+        return [
+            slot
+            for slot in empty
+            if any(
+                place.service in known for place in self.product.packages[slot].build
+            )
+        ]
+
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         mounts, _ = self._mounts(ctx)
         found: dict[str, Json] = {mount.slot: mount.release for mount in mounts}
+        found.update(dict.fromkeys(self._absent(ctx), ABSENT))
         fact: dict[str, Json] = {"packages": found} if found else {"packages": "none"}
         return Verified(fact)

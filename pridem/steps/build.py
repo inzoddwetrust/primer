@@ -259,7 +259,21 @@ class Build(Step):
         places = self._places(services)
         builds: dict[str, dict[str, Json]] = {}
         contexts: dict[str, tuple[Path, Path, list[PackagePlace]]] = {}
-        for service in sorted({place.service for place in places}):
+        # every service of a slot of apply: build, not every place: an optional
+        # slot with no package has none, and its service still builds by its
+        # key -- the labels up, migrate and tests find it by (DM-101)
+        slotted = {
+            place.service
+            for declared in (
+                compose.stack.packages.values()
+                if isinstance(compose.stack, Product)
+                else ()
+            )
+            if declared.apply == "build"
+            for place in declared.build
+            if place.service in services
+        }
+        for service in sorted(slotted):
             body = bodies.get(service) if isinstance(bodies, dict) else None
             build = body.get("build") if isinstance(body, dict) else None
             context = build.get("context") if isinstance(build, dict) else None

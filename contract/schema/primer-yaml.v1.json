@@ -395,7 +395,7 @@
     },
     "Package": {
       "additionalProperties": false,
-      "description": "Checked as a whole by rule 10 in the rule layer: ``apply: runtime``\nmounts (``mount``, ``validate``), ``apply: build`` builds (``build``).",
+      "description": "Checked as a whole by rule 10 in the rule layer: ``apply: runtime``\nmounts (``mount``, ``validate``), ``apply: build`` builds (``build``).\n``optional`` -- a slot of ``apply: build`` the passport may leave without a\npackage: the service builds as its repository has it (DM-101); without it\na passport with no package is ``package-missing``. On a slot of ``apply:\nruntime`` it says nothing: such a slot mounts nothing without a package.",
       "properties": {
         "apply": {
           "default": "runtime",
@@ -425,6 +425,11 @@
           },
           "title": "Mount",
           "type": "array"
+        },
+        "optional": {
+          "default": false,
+          "title": "Optional",
+          "type": "boolean"
         },
         "validate": {
           "minLength": 1,
