@@ -11,7 +11,13 @@ that is not a dump of ``db_dump`` for that entry (under
 ``/opt/pridem/backups/``, with its manifest); ``db restore`` without
 ``--confirm <server.name>`` on any role -- a verb that wipes data asks where
 it is allowed (protocol 1.11 to 8.2, the owner's word 10.11); ``backup``
-without the box's passport.
+without the box's passport, or with a stack's ``primer.yaml`` or an entry's
+compose it cannot read -- it dumps every database or says which it cannot
+see (DM-94, R2-E14).
+
+``db restore`` dumps the live database first, in the stack ``backup`` before
+the entry's (DM-94, R2-S7): a red dump stops it before anything is stopped,
+and the dump is the way back -- said before ``pg_restore`` and in the fact.
 """
 
 import json
@@ -68,15 +74,23 @@ class DbArgs(Strict):
     confirm: str | None = None
 
 
-def box_entries(ctx: Context) -> list[tuple[str, Product | Service]]:
+def box_entries(
+    ctx: Context, *, strict: bool = False
+) -> list[tuple[str, Product | Service]]:
     """Every stack ``state.json`` names, with its ``primer.yaml`` of
-    ``current``: services first, the product last."""
+    ``current``: services first, the product last. A ``primer.yaml`` that
+    cannot be read is passed over -- or, ``strict``, refused: ``backup``
+    dumps every database or says which it cannot see (R2-E14)."""
     state = Box(ctx.root).read_state()
     found: list[tuple[str, Product | Service]] = []
     for stack in sorted(state.current if state is not None else ()):
         try:
             made = load_primer_yaml(current_link(ctx.fs_root, stack) / "primer.yaml")
         except (ContractError, OSError):
+            if strict:
+                raise Refused(
+                    f"backup: primer.yaml of {stack} cannot be read"
+                ) from None
             continue
         found.append((stack, made))
     return sorted(found, key=lambda item: isinstance(item[1], Product))
@@ -93,12 +107,23 @@ def compose_of(
 def has_database_url(compose: ComposeStack) -> bool:
     """The app of the entry names ``DATABASE_URL`` in its compose file, as
     written -- read before the run, without docker."""
+    return database_url_named(compose, strict=False)
+
+
+def database_url_named(compose: ComposeStack, *, strict: bool) -> bool:
+    """``has_database_url``; a compose file that cannot be read is no
+    database -- or, ``strict``, refused (R2-E14: ``backup`` never counts an
+    entry it cannot read as one without a database)."""
     app = compose.app_service
     if app is None:
         return False
     try:
         document = yaml.safe_load(compose.compose_file.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        if strict:
+            raise Refused(
+                f"backup: the compose of {compose.entry} cannot be read"
+            ) from None
         return False
     services = document.get("services") if isinstance(document, dict) else None
     body = services.get(app) if isinstance(services, dict) else None
@@ -189,15 +214,25 @@ def _db(args: Strict, ctx: Context) -> int:
         _confirmed(ctx, verb, confirm)  # the copy read under the lock (DM-24)
 
     def restore(session: Session) -> Planned:
+        """The live database dumped first, in a stack of its own before the
+        entry's (DM-94): a red dump stops the ladder before anything is
+        stopped; the dump is the way back."""
+        directory = backups_dir(session.box.root, session.run_id)
+        insurance = DbDump(compose, directory=directory, run_id=session.run_id)
         stopped = Stopped()
-        restoring = DbRestore(compose, path=path, manifest=manifest)
+        restoring = DbRestore(
+            compose, path=path, manifest=manifest, insurance=insurance.path
+        )
         steps: list[Step] = [
             StopForRestore(restoring, stopped),
             restoring,
             StartRestored(compose, stopped),
         ]
         return Planned(
-            [StackSteps(compose.entry, steps, root=True)],
+            [
+                StackSteps("backup", [insurance]),
+                StackSteps(compose.entry, steps, root=True),
+            ],
             finally_=[StackSteps("stopped", [StartStopped(stopped)])],
         )
 
@@ -224,10 +259,10 @@ def _backup(args: Strict, ctx: Context) -> int:
         return run_plan_verb(ctx, verb="backup", mode="command", make=off)
     dumped: list[ComposeStack] = []
     without: list[str] = []
-    for stack, made in box_entries(ctx):
+    for stack, made in box_entries(ctx, strict=True):
         for entry in made.stacks:
             compose = compose_of(ctx, stack, made, entry)
-            if has_database_url(compose):
+            if database_url_named(compose, strict=True):
                 dumped.append(compose)
             else:
                 without.append(entry)

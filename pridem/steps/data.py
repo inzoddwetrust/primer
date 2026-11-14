@@ -17,7 +17,16 @@ entry, release, commit, alembic_head, bytes, sha256, toc`` (TZ 12) -- is
 written last: a dump without a manifest is no dump. ``verify`` reads the file
 and the manifest back: the same sha256 and size.
 
-``db restore`` stops every service of the entry but the database
+A dump that fails leaves nothing behind (R2-E15): the file in the
+container goes in ``finally``, red or green, and so does the ``.partial`` on
+the box; a removal that fails is a line of the journal, never the step's cause
+and never silent (``clean_inside``).
+
+``db restore`` first dumps the live database (DM-94, R2-S7): ``db_dump`` in a
+stack before the entry's, to the run's own ``backups/<run_id>/`` -- a red dump
+stops the ladder before anything is stopped, and the dump is the way back,
+said in the console before ``pg_restore`` and in the fact of ``db_restore``
+(``insurance``). Then it stops every service of the entry but the database
 (``stop_for_restore``: the app's connections would hold ``--clean``), restores
 with ``pg_restore --clean --if-exists --no-owner`` -- the point of no return
 -- reads ``alembic current`` back against the manifest's head, and starts
@@ -48,6 +57,7 @@ from pathlib import Path
 from typing import ClassVar, Protocol
 
 from pridem.events import Json
+from pridem.runner import RunnerError, Stream
 from pridem.stacks.env import write_private
 from pridem.steps.base import (
     NO_NETWORK,
@@ -187,6 +197,35 @@ def read_manifest(path: Path) -> dict[str, Json] | None:
     return found if isinstance(found, dict) else None
 
 
+def clean_inside(
+    ctx: StepContext, compose: ComposeStack, service: str, inside: str
+) -> None:
+    """``rm -f`` of the machine's file in the database's container (R2-E15):
+    it never hides the step's own cause -- any exit, any failure of the
+    command, is no exception here -- and it is never silent: a file left is a
+    line of the run's journal, with the path and why (par0 10, as the
+    worktree of ``types``, DM-63 FIX)."""
+    argv = compose.argv("exec", "-T", operands=(service, "rm", "-f", inside))
+    try:
+        code, _ = out(ctx, argv, expect=tuple(range(256)), timeout=COMMAND_TIMEOUT_S)
+    except RunnerError as error:
+        why = type(error).__name__
+    else:
+        if code == 0:
+            return
+        why = f"rm exited {code}"
+    ctx.on_line(Stream.STDERR, f"pridem: {inside} left in {service}: {why}", False)
+
+
+def _clean_partial(ctx: StepContext, partial: Path) -> None:
+    """The ``.partial`` of a dump that failed, removed; a failure to, said."""
+    try:
+        partial.unlink(missing_ok=True)
+    except OSError as error:
+        why = type(error).__name__
+        ctx.on_line(Stream.STDERR, f"pridem: {partial} left: {why}", False)
+
+
 class DbDump(Step):
     """The database of one entry, dumped to ``backups/<run_id>/<entry>.dump``."""
 
@@ -243,42 +282,50 @@ class DbDump(Step):
             place.mkdir(exist_ok=True, mode=0o700)
             place.chmod(0o700)
         exec_ = ("exec", "-T")  # the service among the operands, after --
-        out(
-            ctx,
-            self.compose.argv(
-                *exec_,
-                operands=(service, "pg_dump", "-U", user, "-Fc", "-f", inside, live),
-            ),
-            timeout=DUMP_TIMEOUT_S,
-        )
-        out(
-            ctx,
-            self.compose.argv("cp", operands=(f"{service}:{inside}", str(partial))),
-            timeout=DUMP_TIMEOUT_S,
-        )
-        out(
-            ctx,
-            self.compose.argv(*exec_, operands=(service, "rm", "-f", inside)),
-            timeout=COMMAND_TIMEOUT_S,
-        )
-        partial.chmod(0o600)
-        toc = _toc(ctx, partial, image)
-        if toc == 0:
-            raise StepFailed("dump-empty", {"stack": self.compose.entry})
-        head = _head(ctx, self.compose)
-        manifest: dict[str, Json] = {
-            "stack": self.compose.stack.name,
-            "entry": self.compose.entry,
-            "release": self.compose.ref,
-            "commit": release_commit(ctx, self.compose),  # a service's: not its tag
-            "bytes": partial.stat().st_size,
-            "sha256": sha256_of(partial),
-            "toc": toc,
-        }
-        if head is not None:
-            manifest["alembic_head"] = head
-        partial.replace(self.path)
-        write_private(self.manifest, json.dumps(manifest, indent=2) + "\n")
+        named = False
+        try:
+            try:
+                out(
+                    ctx,
+                    self.compose.argv(
+                        *exec_,
+                        operands=(
+                            service, "pg_dump", "-U", user, "-Fc", "-f", inside, live,
+                        ),
+                    ),
+                    timeout=DUMP_TIMEOUT_S,
+                )  # fmt: skip
+                out(
+                    ctx,
+                    self.compose.argv(
+                        "cp", operands=(f"{service}:{inside}", str(partial))
+                    ),
+                    timeout=DUMP_TIMEOUT_S,
+                )
+            finally:  # the file in the container goes, the dump red or green
+                clean_inside(ctx, self.compose, service, inside)
+            partial.chmod(0o600)
+            toc = _toc(ctx, partial, image)
+            if toc == 0:
+                raise StepFailed("dump-empty", {"stack": self.compose.entry})
+            head = _head(ctx, self.compose)
+            manifest: dict[str, Json] = {
+                "stack": self.compose.stack.name,
+                "entry": self.compose.entry,
+                "release": self.compose.ref,
+                "commit": release_commit(ctx, self.compose),  # a service's: not a tag
+                "bytes": partial.stat().st_size,
+                "sha256": sha256_of(partial),
+                "toc": toc,
+            }
+            if head is not None:
+                manifest["alembic_head"] = head
+            partial.replace(self.path)
+            named = True
+            write_private(self.manifest, json.dumps(manifest, indent=2) + "\n")
+        finally:  # a dump that failed leaves no .partial (R2-E15)
+            if not named:
+                _clean_partial(ctx, partial)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         manifest = read_manifest(self.manifest)
@@ -315,11 +362,20 @@ class DbRestore(Step):
     }
 
     def __init__(
-        self, compose: ComposeStack, *, path: Path, manifest: dict[str, Json]
+        self,
+        compose: ComposeStack,
+        *,
+        path: Path,
+        manifest: dict[str, Json],
+        insurance: Path | None = None,
     ) -> None:
         self.compose = compose
         self.path = path
         self.manifest = manifest
+        self.insurance = insurance
+        """The dump of the live database ``db restore`` took first (DM-94):
+        the way back, named in the console before ``pg_restore`` and in the
+        fact."""
         self.acted = False
         """``act`` began: what ``stop_for_restore`` stopped stays stopped."""
 
@@ -331,6 +387,10 @@ class DbRestore(Step):
         if self.manifest.get("sha256") != sha256_of(self.path):
             raise StepFailed("dump-drift", drift)
         found, _, _ = _found(ctx, self.compose)
+        if not running(ctx, self.compose, [found.service]):  # R2-E13
+            raise StepFailed(
+                "database-down", {"stack": self.compose.entry, "service": found.service}
+            )
         data: dict[str, Json] = {
             "service": found.service,
             "user": found.user,
@@ -345,32 +405,37 @@ class DbRestore(Step):
         # a path inside the database's container, not on the box
         inside = f"/tmp/pridem-restore-{self.compose.entry}.dump"  # noqa: S108
         exec_ = ("exec", "-T")  # the service among the operands, after --
-        out(
-            ctx,
-            self.compose.argv("cp", operands=(str(self.path), f"{service}:{inside}")),
-            timeout=DUMP_TIMEOUT_S,
-        )
-        # one transaction, stopped at the first error: a restore that fails
-        # half-way leaves the database as it was (DM-93, R2-S7)
-        restore = (
-            "pg_restore", "--clean", "--if-exists", "--no-owner",
-            "--single-transaction", "--exit-on-error",
-        )  # fmt: skip
-        out(
-            ctx,
-            self.compose.argv(
-                *exec_, operands=(service, *restore, "-U", user, "-d", live, inside)
-            ),
-            timeout=DUMP_TIMEOUT_S,
-        )
-        out(
-            ctx,
-            self.compose.argv(*exec_, operands=(service, "rm", "-f", inside)),
-            timeout=COMMAND_TIMEOUT_S,
-        )
+        if self.insurance is not None:  # the way back, said before anything
+            line = f"pridem: the database before the restore: {self.insurance}"
+            ctx.on_line(Stream.STDOUT, line, False)
+        try:
+            out(
+                ctx,
+                self.compose.argv(
+                    "cp", operands=(str(self.path), f"{service}:{inside}")
+                ),
+                timeout=DUMP_TIMEOUT_S,
+            )
+            # one transaction, stopped at the first error: a restore that fails
+            # half-way leaves the database as it was (DM-93, R2-S7)
+            restore = (
+                "pg_restore", "--clean", "--if-exists", "--no-owner",
+                "--single-transaction", "--exit-on-error",
+            )  # fmt: skip
+            out(
+                ctx,
+                self.compose.argv(
+                    *exec_, operands=(service, *restore, "-U", user, "-d", live, inside)
+                ),
+                timeout=DUMP_TIMEOUT_S,
+            )
+        finally:  # the copy in the container goes, the restore red or green
+            clean_inside(ctx, self.compose, service, inside)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         fact: dict[str, Json] = {"stack": self.compose.entry, "path": str(self.path)}
+        if self.insurance is not None:
+            fact["insurance"] = str(self.insurance)
         head = self.manifest.get("alembic_head")
         if isinstance(head, str):
             now = _head(ctx, self.compose)

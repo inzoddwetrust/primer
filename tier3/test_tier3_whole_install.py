@@ -2622,7 +2622,9 @@ def test_tier3_a_dump_of_the_blank_restores_what_was_in_it() -> None:
     ``app_settings``; ``db dump`` -- the dump and its manifest under
     ``/opt/pridem/backups/<run_id>/`` (0600), its table of contents read
     back; the row deleted; ``db restore --confirm <server.name>`` -- the row
-    back, the app running, the head of the manifest. ``backup`` -- green with
+    back, the app running, the head of the manifest; DM-94 -- the live
+    database dumped first, named in the fact, and its restore gives the
+    database before (the row gone again). ``backup`` -- green with
     the policy of this box's passport off: the fact says so, no new directory
     of dumps (FIX 2). Measured into the journal (par0
     14.3): the modes of the dump's file and directory, the manifest."""
@@ -2657,6 +2659,20 @@ def test_tier3_a_dump_of_the_blank_restores_what_was_in_it() -> None:
     facts = {s.name: s.verify or {} for s in verdict.steps}
     assert facts["db_restore"].get("alembic_head") == manifest.get("alembic_head")
     assert facts["start_restored"]["started"] == ["app", "frontend"], facts
+    assert _container(STACK, "app")
+
+    # DM-94: the live database was dumped first -- the way back. Restoring it
+    # gives the database as it was before the restore: the row deleted again
+    insurance = Path(str(facts["db_dump"]["path"]))
+    print("DM-94 measure:", {"insurance": str(insurance), "fact": facts["db_restore"]})
+    assert facts["db_restore"]["insurance"] == str(insurance), facts
+    assert insurance.is_file() and insurance.with_suffix(".json").is_file()
+    assert insurance.parent != path.parent, (insurance, path)
+    verdict, printed = _verdict_of(
+        "db", "restore", STACK, str(insurance), "--confirm", "tier3-env"
+    )
+    assert verdict.result == "green", printed
+    assert _psql("SELECT value FROM app_settings WHERE key = 'dm86'") == []
     assert _container(STACK, "app")
 
     # FIX 2: the passport of this box says policies.backup.enabled: false --

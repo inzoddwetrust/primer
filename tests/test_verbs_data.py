@@ -19,6 +19,7 @@ from pridem.report.codes import ExitCode
 from pridem.report.schema import Verdict
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result, Stream
 from pridem.stacks.schema import load_primer_yaml
+from pridem.state import Box
 from pridem.steps.base import Step
 from pridem.steps.compose import ComposeStack, forbidden
 from pridem.steps.data import BackupScope, DbDump, backups_dir, sha256_of
@@ -96,12 +97,17 @@ def running_call(cs: ComposeStack, service: str, *ids: str) -> FakeCall:
     return FakeCall(tuple(argv), lines=lines(*ids))
 
 
-def inside(entry: str = STACK) -> str:
-    return f"/tmp/pridem-{RUN_ID}-{entry}.dump"  # noqa: S108 -- in the container
+def inside(entry: str = STACK, run_id: str = RUN_ID) -> str:
+    return f"/tmp/pridem-{run_id}-{entry}.dump"  # noqa: S108 -- in the container
 
 
 def dump_calls(
-    cs: ComposeStack, directory: Path, *, toc: Sequence[str] = TOC, code: int = 0
+    cs: ComposeStack,
+    directory: Path,
+    *,
+    toc: Sequence[str] = TOC,
+    code: int = 0,
+    run_id: str = RUN_ID,
 ) -> list[FakeCall]:
     partial = directory / f"{STACK}.dump.partial"
     calls = [
@@ -119,7 +125,7 @@ def dump_calls(
                         "blank",
                         "-Fc",
                         "-f",
-                        inside(),
+                        inside(STACK, run_id),
                         "blank",
                     ),
                 )
@@ -127,8 +133,15 @@ def dump_calls(
             code=code,
         ),
     ]
-    if code:
-        return calls
+    rm = FakeCall(
+        tuple(
+            cs.argv(
+                "exec", "-T", operands=("postgres", "rm", "-f", inside(STACK, run_id))
+            )
+        )
+    )
+    if code:  # DM-94: the file in the container goes, the dump red or green
+        return [*calls, rm]
     return [
         *calls,
         FakeCall(
@@ -136,7 +149,7 @@ def dump_calls(
                 cs.argv(
                     "cp",
                     operands=(
-                        f"postgres:{inside()}",
+                        f"postgres:{inside(STACK, run_id)}",
                         str(partial),
                     ),
                 )
@@ -151,7 +164,7 @@ def dump_calls(
                         "postgres",
                         "rm",
                         "-f",
-                        inside(),
+                        inside(STACK, run_id),
                     ),
                 )
             )
@@ -372,6 +385,7 @@ def _restore_calls(
     restore_inside = f"/tmp/pridem-restore-{STACK}.dump"  # noqa: S108 -- the container
     calls = [
         config_call(cs),  # db_restore's check, before anything is stopped
+        running_call(cs, "postgres", "c-pg"),  # DM-94: the database runs
         config_call(cs),
         running_call(cs, "app", "c-app"),
         running_call(cs, "frontend", "c-front"),
@@ -409,6 +423,7 @@ def _restore_calls(
         running_call(cs, "app"),
         running_call(cs, "frontend"),
         config_call(cs),
+        running_call(cs, "postgres", "c-pg"),
         FakeCall(
             tuple(
                 cs.argv(
@@ -482,13 +497,39 @@ def _verdict(out: str) -> Verdict:
     return Verdict.model_validate_json(out)
 
 
+INSURANCE_RUN = "2026-11-14T00:00:00Z-cd34"
+"""The run id of a ``db restore`` of the tests: its insurance dump goes to
+``backups/<INSURANCE_RUN>/``, beside the dump it restores (``RUN_ID``)."""
+
+
+@pytest.fixture
+def insured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``db restore`` runs as ``INSURANCE_RUN``."""
+    monkeypatch.setattr(Box, "new_run_id", lambda self, now: INSURANCE_RUN)
+
+
+def insurance_calls(fs_root: Path, cs: ComposeStack) -> list[FakeCall]:
+    """The dump of the live database ``db restore`` takes first (DM-94)."""
+    directory = backups_dir(fs_root / "opt" / "pridem", INSURANCE_RUN)
+    calls = dump_calls(cs, directory, run_id=INSURANCE_RUN)
+    return [*calls, head_call(cs), git_call(cs)]
+
+
+def insurance_path(fs_root: Path) -> Path:
+    directory = backups_dir(fs_root / "opt" / "pridem", INSURANCE_RUN)
+    return directory / f"{STACK}.dump"
+
+
 @pytest.mark.parametrize("role", ["test", "preview", "prod"])
 def test_db_restore_asks_the_server_s_name_on_any_role(
-    tmp_path: Path, role: str
+    tmp_path: Path, role: str, insured: None
 ) -> None:
     """Protocol 1.11 to 8.2 (gate DM-86): a verb that wipes data asks where
     it is allowed -- no ``--confirm`` or another name: refused before the
-    run, nothing ran (an empty script). The pair: the box's name -- it runs."""
+    run, nothing ran (an empty script). The pair: the box's name -- it runs.
+
+    Changed by DM-94: the live database is dumped first (``db_dump`` of the
+    stack ``backup``), and ``db_restore`` names that dump (``insurance``)."""
     blank_box(tmp_path, role=role, name="box-1")
     path = _a_dump(tmp_path)
     for confirm in ([], ["--confirm", "box-2"]):
@@ -498,7 +539,8 @@ def test_db_restore_asks_the_server_s_name_on_any_role(
             )
         assert (code, out) == (1, ""), err
         assert "--confirm box-1" in err
-    with FakeRunner(*_restore_calls(compose(tmp_path), path)) as runner:
+    cs = compose(tmp_path)
+    with Copying(*insurance_calls(tmp_path, cs), *_restore_calls(cs, path)) as runner:
         code, out, err = _cli(
             tmp_path, ["db", "restore", STACK, str(path), "--confirm", "box-1"], runner
         )
@@ -506,17 +548,19 @@ def test_db_restore_asks_the_server_s_name_on_any_role(
     assert code == 0, verdict.steps
     names = [(s.name, s.status) for s in verdict.steps]
     assert names == [
+        ("db_dump", "ok"),
         ("stop_for_restore", "ok"),
         ("db_restore", "ok"),
         ("start_restored", "ok"),
         ("start_stopped", "ok"),
     ]
-    assert verdict.steps[1].verify == {
+    assert verdict.steps[2].verify == {
         "stack": STACK,
         "path": str(path),
+        "insurance": str(insurance_path(tmp_path)),
         "alembic_head": HEAD,
     }
-    assert verdict.steps[3].verify == {"started": {}}
+    assert verdict.steps[4].verify == {"started": {}}
 
 
 def _a_dump(fs_root: Path, entry: str = STACK, run_id: str = RUN_ID) -> Path:
@@ -580,7 +624,7 @@ def test_db_restore_takes_a_dump_of_db_dump_for_that_entry_alone(
 
 
 def test_a_restored_head_other_than_the_dump_s_is_red_past_the_point(
-    tmp_path: Path,
+    tmp_path: Path, insured: None
 ) -> None:
     """The database is at another head than the manifest's after
     ``pg_restore`` -- ``head-mismatch``, restore needed; nothing is started
@@ -588,14 +632,15 @@ def test_a_restored_head_other_than_the_dump_s_is_red_past_the_point(
     script."""
     blank_box(tmp_path, name="box-1")
     path = _a_dump(tmp_path)
-    calls = _restore_calls(compose(tmp_path), path, head="0002")
-    with FakeRunner(*calls) as runner:
+    cs = compose(tmp_path)  # DM-94: the insurance dump first
+    calls = [*insurance_calls(tmp_path, cs), *_restore_calls(cs, path, head="0002")]
+    with Copying(*calls) as runner:
         code, out, _ = _cli(
             tmp_path, ["db", "restore", STACK, str(path), "--confirm", "box-1"], runner
         )
     verdict = _verdict(out)
     assert code == 1
-    restore = verdict.steps[1]
+    restore = verdict.steps[2]
     assert restore.reason is not None
     assert restore.reason.model_dump() == {
         "code": "db_restore:head-mismatch",
@@ -604,30 +649,32 @@ def test_a_restored_head_other_than_the_dump_s_is_red_past_the_point(
         "current": "0002",
     }
     assert [i.code for i in verdict.report.incomplete] == ["needed"]
-    assert verdict.steps[3].verify == {"started": {}}
+    assert verdict.steps[4].verify == {"started": {}}
 
 
 def test_a_red_stop_crosses_no_point_and_finally_starts_what_it_stopped(
-    tmp_path: Path,
+    tmp_path: Path, insured: None
 ) -> None:
+    """Changed by DM-94: the insurance dump comes first."""
     blank_box(tmp_path, name="box-1")
     path = _a_dump(tmp_path)
-    calls = _restore_calls(compose(tmp_path), path, stop_code=1)
-    with FakeRunner(*calls) as runner:
+    cs = compose(tmp_path)
+    calls = [*insurance_calls(tmp_path, cs), *_restore_calls(cs, path, stop_code=1)]
+    with Copying(*calls) as runner:
         code, out, _ = _cli(
             tmp_path, ["db", "restore", STACK, str(path), "--confirm", "box-1"], runner
         )
     verdict = _verdict(out)
     assert code == 1
-    assert verdict.steps[0].reason is not None
-    assert verdict.steps[0].reason.code == "command-failed"
-    assert [s.status for s in verdict.steps[1:3]] == ["skipped", "skipped"]
+    assert verdict.steps[1].reason is not None
+    assert verdict.steps[1].reason.code == "command-failed"
+    assert [s.status for s in verdict.steps[2:4]] == ["skipped", "skipped"]
     assert not verdict.report.incomplete
-    assert verdict.steps[3].verify == {"started": {STACK: ["app", "frontend"]}}
+    assert verdict.steps[4].verify == {"started": {STACK: ["app", "frontend"]}}
 
 
 def test_a_dump_changed_since_its_manifest_is_red_before_the_restore(
-    tmp_path: Path,
+    tmp_path: Path, insured: None
 ) -> None:
     """``db_restore`` reads the file against its manifest before ``act`` --
     and, since pass 2, before ``stop_for_restore`` stops anything: its check
@@ -639,16 +686,17 @@ def test_a_dump_changed_since_its_manifest_is_red_before_the_restore(
     blank_box(tmp_path, name="box-1")
     path = _a_dump(tmp_path)
     path.write_bytes(b"PGDMP\x00changed")
-    with FakeRunner() as runner:
+    cs = compose(tmp_path)  # DM-94: the insurance dump first
+    with Copying(*insurance_calls(tmp_path, cs)) as runner:
         code, out, _ = _cli(
             tmp_path, ["db", "restore", STACK, str(path), "--confirm", "box-1"], runner
         )
     verdict = _verdict(out)
-    assert verdict.steps[0].reason is not None
-    assert verdict.steps[0].reason.code == "stop_for_restore:dump-drift"
-    assert [s.status for s in verdict.steps[1:3]] == ["skipped", "skipped"]
+    assert verdict.steps[1].reason is not None
+    assert verdict.steps[1].reason.code == "stop_for_restore:dump-drift"
+    assert [s.status for s in verdict.steps[2:4]] == ["skipped", "skipped"]
     assert not verdict.report.incomplete
-    assert verdict.steps[3].verify == {"started": {}}
+    assert verdict.steps[4].verify == {"started": {}}
 
 
 # --- backup and the entries of the box ------------------------------------------
@@ -693,7 +741,6 @@ def _service(fs_root: Path, name: str, with_database: bool) -> None:
     env = ["DATABASE_URL=postgresql://s:p@db:5432/s"] if with_database else ["X=1"]
     compose_doc = {"services": {"app": {"image": "a", "environment": env}}}
     (release / "docker-compose.yml").write_text(yaml.safe_dump(compose_doc))
-    from pridem.state import Box
 
     box = Box(fs_root / "opt" / "pridem")
     state = box.read_state()
