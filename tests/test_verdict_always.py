@@ -164,7 +164,7 @@ def test_a_verdict_the_model_refuses_is_a_fallback_verdict(
     assert [s["name"] for s in verdict["steps"]] == ["first"]
     journal = (tmp_path / "opt" / "pridem" / verdict["log_ref"]).read_text()
     last = json.loads(journal.splitlines()[-1])
-    assert (last["stack"], last["name"]) == ("verdict", "build")
+    assert (last["stack"], last["name"]) == ("pridem-verdict", "build")
     assert "no text in the catalog" in last["line"]
 
 
@@ -189,7 +189,7 @@ def test_doctor_with_work_to_do_has_its_verdict(
 
     def make(session: Session, *_: object) -> Planned:
         step = Fetching("fetch_root", 1, Journal())
-        return Planned([StackSteps("sources", [step], root=True)])
+        return Planned([StackSteps("pridem-sources", [step], root=True)])
 
     blank_box(tmp_path)
     monkeypatch.setattr(deploy_verbs, "deploy_plan", make)
@@ -207,7 +207,7 @@ def test_doctor_with_work_to_do_has_its_verdict(
     assert code == 2
     assert verdict["report"]["doctor_diff"] == [
         {
-            "stack": "sources",
+            "stack": "pridem-sources",
             "name": "fetch_root",
             "code": "fetch_root:fetch",
             "entry": "aivis",
@@ -375,7 +375,7 @@ def test_doctor_with_a_new_commit_on_the_branch_is_a_difference(
             packages=packages,
         )
         return Plan(
-            [StackSteps("sources", steps, root=True)],
+            [StackSteps("pridem-sources", steps, root=True)],
             mode=mode,  # type: ignore[arg-type]
             role="test",
             runner=SubprocessRunner(),
@@ -413,7 +413,7 @@ def test_doctor_with_a_service_tag_the_remote_lost_is_its_code(tmp_path: Path) -
             tag=False,
         )
         return Plan(
-            [StackSteps("sources", steps, root=True)],
+            [StackSteps("pridem-sources", steps, root=True)],
             mode=mode,  # type: ignore[arg-type]
             role="test",
             runner=SubprocessRunner(),

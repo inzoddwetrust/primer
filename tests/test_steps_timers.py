@@ -69,7 +69,7 @@ def start(*, reload: bool = True) -> list[FakeCall]:
 def run(root: Path, fetched: Fetched, runner: FakeRunner) -> PlanOutcome:
     ticks = count()
     return Plan(
-        [StackSteps("timers", timer_steps(root, fetched=fetched), root=True)],
+        [StackSteps("pridem-timers", timer_steps(root, fetched=fetched), root=True)],
         mode="install",
         role="test",
         runner=runner,

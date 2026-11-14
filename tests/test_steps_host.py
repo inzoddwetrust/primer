@@ -95,12 +95,12 @@ def run(
     ticks = count()
     with runner:
         plan = Plan(
-            [StackSteps("host", steps, root=True)],
+            [StackSteps("pridem-host", steps, root=True)],
             mode="install",
             role="test",
             runner=runner,
             sink=ListSink(),
-            finally_=[StackSteps("host", finally_ or [], root=True)]
+            finally_=[StackSteps("pridem-host", finally_ or [], root=True)]
             if finally_
             else (),
             clock=lambda: float(next(ticks)),
@@ -180,7 +180,7 @@ def create(network: str) -> FakeCall:
         "create",
         "--internal",
         "--label",
-        "pridem.stack=host",
+        "pridem.stack=pridem-host",
         network,
     )
 
@@ -338,7 +338,7 @@ def test_probe_DM_12_apt_always_passes_lock_timeout(
     runner = FakeRunner(*before, *apt, *after, *tail)
     with runner:
         outcome = Plan(
-            [StackSteps("host", [ProvisionHost(root)], root=True)],
+            [StackSteps("pridem-host", [ProvisionHost(root)], root=True)],
             mode="install",
             role="test",
             runner=runner,
@@ -680,7 +680,7 @@ def daemon_box(tmp_path: Path, config: object | str | None) -> Path:
 def run_mode(steps: list[Step], calls: list[FakeCall], mode: str) -> PlanOutcome:
     with FakeRunner(*calls) as runner:
         return Plan(
-            [StackSteps("host", steps, root=True)],
+            [StackSteps("pridem-host", steps, root=True)],
             mode=mode,  # type: ignore[arg-type]
             role="test",
             runner=runner,

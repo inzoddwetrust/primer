@@ -15,7 +15,7 @@ from test_verbs_data import compose
 from pridem.events import Json
 from pridem.runner import FakeCall, FakeRunner
 from pridem.stacks.routes import render
-from pridem.stacks.schema import PRIMER_YAML, RESERVED_NAMES, rule_problems
+from pridem.stacks.schema import PRIMER_YAML, rule_problems
 from pridem.steps.base import StepFailed
 from pridem.steps.packages import PackagePlace, write_context
 from pridem.steps.sources import MARKER, NotOurs, mark, marked
@@ -170,10 +170,14 @@ def test_a_dependency_named_product_or_pridem_is_refused() -> None:
         assert "S.name-reserved" in _codes(raw), name
 
 
-@pytest.mark.parametrize("entry", ["pridem-egress", "edge", "sources", "finalize"])
-def test_an_entry_named_as_the_machine_or_its_plans_is_refused(entry: str) -> None:
-    """S16 and the plans' stacks: the verdict keys a step by ``(stack,
-    name)`` -- an entry ``edge`` would mix its facts with the edge's."""
+@pytest.mark.parametrize("entry", ["pridem-egress", "pridem-host", "pridem"])
+def test_an_entry_named_as_the_machine_is_refused(entry: str) -> None:
+    """S16: an entry of the machine's names -- ``pridem`` or ``pridem-…``.
+
+    Changed by DM-102, on the dispatcher's word before the change: the stacks
+    of the machine's plans are ``pridem-<name>``, so an entry ``edge``,
+    ``sources`` or ``finalize`` is the product's own again
+    (``test_dm102_machine_stacks``); the words left the cases."""
     raw = _product()
     stacks = raw["stacks"]
     assert isinstance(stacks, dict)
@@ -183,35 +187,6 @@ def test_an_entry_named_as_the_machine_or_its_plans_is_refused(entry: str) -> No
 
 def test_an_ordinary_name_is_taken() -> None:
     assert "S.name-reserved" not in _codes(_product("velo"))
-
-
-def test_the_reserved_names_hold_every_stack_of_the_machine_s_plans(
-    tmp_path: Path,
-) -> None:
-    """The list is one constant; the plans are built from code. Every stack a
-    plan of the machine names -- deploy (with rollback), its ``finally``,
-    destroy, gc, ssl, the data verbs -- is in it: a new stack of a plan turns
-    this red until the list has it."""
-    from pridem.events import Secrets
-    from pridem.state import Box
-    from pridem.steps.destroy import STACK as DESTROY_STACK
-    from pridem.steps.gc import GC_STACK
-    from pridem.steps.passport import Fetched
-    from pridem.steps.stand import ROLLBACK_CHECK
-    from pridem.verbs.plans import Source, Wanted, deploy_plan
-    from pridem.verbs.run import Session
-    from pridem.verbs.ssl import SSL_STACK
-
-    box = Box(tmp_path / "opt" / "pridem")
-    names: set[str] = set()
-    for mode, back in (("install", False), ("reinstall", False), ("deploy", True)):
-        wanted = Wanted(mode=mode, source=Source(file=tmp_path / "x"), rollback=back)
-        planned = deploy_plan(
-            Session(box, "r1", Fetched(), Secrets(())), tmp_path, wanted, None
-        )
-        names |= {stack.name for stack in [*planned.stacks, *planned.finally_]}
-    names |= {DESTROY_STACK, GC_STACK, SSL_STACK, ROLLBACK_CHECK, "backup", "seed"}
-    assert names <= RESERVED_NAMES, sorted(names - RESERVED_NAMES)
 
 
 # --- the mark of /opt/<stack> ------------------------------------------------------

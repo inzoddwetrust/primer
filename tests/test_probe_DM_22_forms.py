@@ -615,7 +615,7 @@ def run_with_finally(
         sink=ListSink(),
         clock=lambda: float(next(ticks)),
         now=lambda: datetime(2026, 11, 10, tzinfo=UTC),
-        finally_=[StackSteps("stopped", final)],
+        finally_=[StackSteps("pridem-stopped", final)],
     ).run()
 
 
@@ -954,7 +954,7 @@ def test_the_final_check_leaves_a_step_a_later_step_undoes() -> None:
         built = Plan(
             [
                 StackSteps("blank", [step], root=False),
-                StackSteps("finalize", [FinalCheck()], root=True),
+                StackSteps("pridem-finalize", [FinalCheck()], root=True),
             ],
             mode="install",
             role="test",

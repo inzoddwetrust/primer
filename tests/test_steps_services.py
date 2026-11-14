@@ -307,7 +307,7 @@ def _sources(tmp: Path, comms: dict[str, object]) -> list[str]:
         ref="main",
         tag=False,
     )
-    outcome = run_stacks([StackSteps("sources", steps)])
+    outcome = run_stacks([StackSteps("pridem-sources", steps)])
     return [r.reason.code for r in outcome.steps if r.reason is not None]
 
 
@@ -840,7 +840,8 @@ def test_a_services_ladder_validates_its_data_before_the_point_of_no_return(
     before the point of no return -- with no list it has nothing to do."""
     made, _ = planned(tmp_path, "full")
     ladders = {
-        s.name: [step.name for step in s.steps] for s in deferred(made, "services")
+        s.name: [step.name for step in s.steps]
+        for s in deferred(made, "pridem-services")
     }
     assert ladders["comms"] == [
         "render_env",
@@ -859,7 +860,7 @@ def test_a_services_ladder_validates_its_data_before_the_point_of_no_return(
         "migrate",
         "up",
     ]
-    assert list(ladders)[:3] == ["seams", "comms", "payments"]
+    assert list(ladders)[:3] == ["pridem-seams", "comms", "payments"]
 
 
 def test_a_product_with_derived_gets_derive_env_after_its_build(
@@ -872,12 +873,12 @@ def test_a_product_with_derived_gets_derive_env_after_its_build(
         "API_SIGNING_KEY": {"source": "derived", "run": "python -m app derive key"}
     }
     made, _ = planned(tmp_path / "with", "core", product_env=env)
-    [own, *_] = deferred(made, "product")
+    [own, *_] = deferred(made, "pridem-product")
     names = [step.name for step in own.steps]
     assert names[:3] == ["render_env", "build", "derive_env"]
     assert own.steps[2].build is own.steps[1]  # type: ignore[attr-defined]
     made, _ = planned(tmp_path / "without", "core")
-    [own, *_] = deferred(made, "product")
+    [own, *_] = deferred(made, "pridem-product")
     assert "derive_env" not in [step.name for step in own.steps]
 
 
@@ -970,7 +971,7 @@ def test_finalize_makes_the_services_current_with_the_product(tmp_path: Path) ->
     """``current`` and the composition name every installed service at its
     tag beside the product: ``gc`` and ``destroy`` read them."""
     made, root = planned(tmp_path, "full")
-    [stack] = deferred(made, "finalize")
+    [stack] = deferred(made, "pridem-finalize")
     [final] = [step for step in stack.steps if isinstance(step, Finalize)]
     releases = root / "opt"
     assert final.releases["comms"] == releases / "comms" / "releases" / "v1.0.0"

@@ -525,9 +525,9 @@ def test_a_plan_deploying_a_tag_gives_types_no_branch(tmp_path: Path) -> None:
         )
         assert made.fetched is not None
         made.fetched.passport = load_passport(file)
-        for name in ("sources", "dependencies"):
+        for name in ("pridem-sources", "pridem-dependencies"):
             assert run_stacks(deferred(made, name)).code is ExitCode.OK
-        [stack] = deferred(made, "finalize")
+        [stack] = deferred(made, "pridem-finalize")
         [step] = [s for s in stack.steps if s.name == "types"]
         assert isinstance(step, TypesStep)
         assert step.branch == branch, ref

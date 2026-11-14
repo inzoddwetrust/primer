@@ -151,7 +151,9 @@ def _sources(tmp: Path, role: str, wanted: Wanted) -> tuple[FetchRoot, dict[str,
     assert planned.fetched is not None
     planned.fetched.passport = load_passport(file)
     [sources] = [
-        s for s in planned.stacks if isinstance(s, Deferred) and s.name == "sources"
+        s
+        for s in planned.stacks
+        if isinstance(s, Deferred) and s.name == "pridem-sources"
     ]
     made = sources.build()
     assert made is not None
@@ -192,14 +194,14 @@ def test_a_deferred_stack_not_known_yet_is_a_difference_in_doctor() -> None:
     entry ``ladder:unresolved``, code 2, not red; in a run the same is red."""
     journal = Journal()
     stacks: list[Stack] = [
-        StackSteps("host", [ScriptedStep("a", 1, journal, needed=False)]),
-        Deferred("product", lambda: None, after="fetch_root", root=True),
+        StackSteps("pridem-host", [ScriptedStep("a", 1, journal, needed=False)]),
+        Deferred("pridem-product", lambda: None, after="fetch_root", root=True),
     ]
     doctor, _ = plan(stacks, "doctor")
     outcome = doctor.run()
     assert outcome.code is ExitCode.INCOMPLETE
     assert [(i.stack, i.name, i.reason.code) for i in outcome.doctor_diff] == [
-        ("product", "ladder", "ladder:unresolved")
+        ("pridem-product", "ladder", "ladder:unresolved")
     ]
     assert outcome.doctor_diff[0].reason.params == {"after": "fetch_root"}
     deploy, _ = plan(stacks, "deploy")
@@ -365,9 +367,9 @@ def test_a_deferred_stack_after_a_signal_is_not_made(signalled: bool) -> None:
         "a", 1, journal, signal_in="verify" if signalled else None, signal_stops=False
     )
     stacks: list[Stack] = [
-        StackSteps("host", [last]),
-        Deferred("product", entries, after="fetch_root"),
-        StackSteps("finalize", [ScriptedStep("f", 1, journal)], root=True),
+        StackSteps("pridem-host", [last]),
+        Deferred("pridem-product", entries, after="fetch_root"),
+        StackSteps("pridem-finalize", [ScriptedStep("f", 1, journal)], root=True),
     ]
     outcome = plan(stacks)[0].run()
     assert (made == []) is signalled, made
@@ -403,32 +405,36 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
         Session(box, "r1", Fetched(), NO_SECRETS), tmp_path, wanted, None
     )
     names = [stack.name for stack in planned.stacks]
-    middle = ["destroy"] if mode == "reinstall" else []
+    middle = ["pridem-destroy"] if mode == "reinstall" else []
     assert names == [
-        "host",
-        "passport",
+        "pridem-host",
+        "pridem-passport",
         *middle,
-        "network",
-        "timers",
-        "sources",
-        "dependencies",
-        "services",
-        "product",
-        "edge",
-        "frontend",
-        "finalize",
+        "pridem-network",
+        "pridem-timers",
+        "pridem-sources",
+        "pridem-dependencies",
+        "pridem-services",
+        "pridem-product",
+        "pridem-edge",
+        "pridem-frontend",
+        "pridem-finalize",
     ]
-    assert [s.name for s in planned.stacks if s.root] == ["finalize"]
-    assert [stack.name for stack in planned.finally_] == ["stopped", "host", "box"]
+    assert [s.name for s in planned.stacks if s.root] == ["pridem-finalize"]
+    assert [stack.name for stack in planned.finally_] == [
+        "pridem-stopped",
+        "pridem-host",
+        "pridem-box",
+    ]
     deferred = {s.name for s in planned.stacks if isinstance(s, Deferred)}
     assert deferred == {
-        "sources",
-        "dependencies",
-        "services",
-        "product",
-        "edge",
-        "frontend",
-        "finalize",
+        "pridem-sources",
+        "pridem-dependencies",
+        "pridem-services",
+        "pridem-product",
+        "pridem-edge",
+        "pridem-frontend",
+        "pridem-finalize",
     }
 
 
@@ -459,7 +465,7 @@ def test_nothing_before_destroy_in_reinstall_makes_what_destroy_removes(
         Session(box, "r1", Fetched(), NO_SECRETS), tmp_path, wanted, None
     )
     names = [stack.name for stack in planned.stacks]
-    at = names.index("destroy")
+    at = names.index("pridem-destroy")
     before = [
         step.name
         for stack in planned.stacks[:at]
@@ -467,8 +473,8 @@ def test_nothing_before_destroy_in_reinstall_makes_what_destroy_removes(
         for step in stack.steps
     ]
     assert before and set(before) <= set(ALLOWED_BEFORE_DESTROY), before
-    assert at < names.index("network") < names.index("timers")
-    [network] = [s for s in planned.stacks if s.name == "network"]
+    assert at < names.index("pridem-network") < names.index("pridem-timers")
+    [network] = [s for s in planned.stacks if s.name == "pridem-network"]
     assert isinstance(network, StackSteps)
     assert [step.name for step in network.steps] == ["ensure_network"]
 
@@ -491,7 +497,7 @@ def test_the_destroy_of_reinstall_is_not_read_again_by_the_final_check(
         planned = deploy_plan(session, tmp_path, wanted, None)
     else:
         planned = destroy_plan(session, tmp_path)
-    [destroy] = [s for s in planned.stacks if s.name == "destroy"]
+    [destroy] = [s for s in planned.stacks if s.name == "pridem-destroy"]
     assert isinstance(destroy, StackSteps)
     found = {step.name: step.rechecked for step in destroy.steps}
     assert set(found) == {

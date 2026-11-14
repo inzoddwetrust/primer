@@ -242,7 +242,7 @@ class World:
                 verify={"stack": STACK, "head": commit, "release": commit},
             ),
             StepRecord(
-                "finalize",
+                "pridem-finalize",
                 "finalize",
                 2,
                 "ok",

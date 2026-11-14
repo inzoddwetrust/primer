@@ -289,7 +289,7 @@ def test_destroy_all_wipes_the_persistent_volume_its_record_and_minted(
         outcome = Plan(
             [
                 StackSteps(
-                    "destroy",
+                    "pridem-destroy",
                     destroy_steps(root, box=box, everything=True)[:2],
                     root=True,
                 )

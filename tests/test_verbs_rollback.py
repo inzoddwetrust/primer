@@ -103,7 +103,7 @@ def _plan_of(
         )
         check = RollbackCheck([migrate], NEW)
         return Planned(
-            [StackSteps("rollback", [check], root=True)],
+            [StackSteps("pridem-rollback", [check], root=True)],
             restore_on=real.restore_on,
         )
 
@@ -228,7 +228,7 @@ def test_a_second_rollback_goes_back_again(
     def make(session: Session, root: Path, wanted: Wanted, preread: object) -> Planned:
         captured["wanted"] = wanted  # the target is all this test reads
         check = RollbackCheck([], NEW)
-        return Planned([StackSteps("rollback", [check], root=True)])
+        return Planned([StackSteps("pridem-rollback", [check], root=True)])
 
     monkeypatch.setattr(deploy_verbs, "deploy_plan", make)
     _cli(tmp_path, file, FakeRunner())
@@ -272,7 +272,9 @@ def test_an_image_the_box_lost_is_refused(tmp_path: Path) -> None:
 
 def test_no_entry_that_migrates_is_green_with_the_ref(tmp_path: Path) -> None:
     with FakeRunner() as runner:
-        built = _plan([StackSteps("rollback", [RollbackCheck([], NEW)], root=True)])
+        built = _plan(
+            [StackSteps("pridem-rollback", [RollbackCheck([], NEW)], root=True)]
+        )
         outcome = built(runner)
     [record] = outcome
     assert record.verify == {"heads": {}, "passport_ref": NEW}
@@ -293,12 +295,16 @@ def test_the_plan_of_a_rollback(tmp_path: Path, rollback: bool) -> None:
     planned = deploy_plan(session, tmp_path, wanted, None)
     names = [stack.name for stack in planned.stacks]
     if rollback:
-        at = names.index("rollback")
-        assert names[at - 1 : at + 2] == ["dependencies", "rollback", "services"]
+        at = names.index("pridem-rollback")
+        assert names[at - 1 : at + 2] == [
+            "pridem-dependencies",
+            "pridem-rollback",
+            "pridem-services",
+        ]
         assert isinstance(planned.stacks[at], Deferred)
         assert planned.restore_on == frozenset({"rollback_check:migrated"})
     else:
-        assert "rollback" not in names
+        assert "pridem-rollback" not in names
         assert planned.restore_on == frozenset()
 
 
@@ -318,7 +324,7 @@ def _plan(stacks: list[StackSteps]) -> Callable[[FakeRunner], tuple[StepRecord, 
 
 
 def _check(step: RollbackCheck, runner: FakeRunner) -> Code | None:
-    [record] = _plan([StackSteps("rollback", [step], root=True)])(runner)
+    [record] = _plan([StackSteps("pridem-rollback", [step], root=True)])(runner)
     return record.reason
 
 

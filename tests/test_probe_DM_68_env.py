@@ -58,7 +58,7 @@ def _deploy(tmp: Path, value: str, *, red: bool) -> tuple[ExitCode, ComposeStack
     )
     stacks = [
         StackSteps("aivis", [render(made, root, fetched), gate]),
-        StackSteps("finalize", [FinalCheck(), finalize], root=True),
+        StackSteps("pridem-finalize", [FinalCheck(), finalize], root=True),
     ]
     with pridem.lock("probe"):
         outcome = plan(stacks, "install")[0].run()

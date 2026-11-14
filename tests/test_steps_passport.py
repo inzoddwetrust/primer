@@ -192,7 +192,7 @@ def run(
     ticks = count()
     sink = ListSink()
     outcome = Plan(
-        [StackSteps("passport", steps, root=True)],
+        [StackSteps("pridem-passport", steps, root=True)],
         mode=mode,  # type: ignore[arg-type]
         role="test",
         runner=runner,
@@ -889,7 +889,7 @@ def test_fetch_passport_puts_the_passports_tls_in_the_runs_set(tmp_path: Path) -
 
     ticks = count()
     outcome = Plan(
-        [StackSteps("passport", steps, root=True)],
+        [StackSteps("pridem-passport", steps, root=True)],
         mode="install",
         role="test",
         runner=FakeRunner(),
@@ -1127,7 +1127,7 @@ def test_doctor_cleans_the_passports_secrets_read_in_check(tmp_path: Path) -> No
 
     ticks = count()
     outcome = Plan(
-        [StackSteps("passport", steps, root=True)],
+        [StackSteps("pridem-passport", steps, root=True)],
         mode="doctor",
         role="test",
         runner=FakeRunner(),

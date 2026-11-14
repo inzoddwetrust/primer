@@ -227,7 +227,7 @@ def plan(
         sink=ListSink(),
         clock=lambda: float(next(ticks)),
         now=lambda: datetime(2026, 11, 10, tzinfo=UTC),
-        finally_=[StackSteps("stopped", list(final))] if final else (),
+        finally_=[StackSteps("pridem-stopped", list(final))] if final else (),
     ).run()
 
 
@@ -712,7 +712,7 @@ def test_backup_with_the_policy_off_dumps_nothing_and_says_so(tmp_path: Path) ->
     verdict = _verdict(out)
     assert code == 0
     assert [(s.stack, s.name, s.verify) for s in verdict.steps] == [
-        ("backup", "backup_scope", {"policy": "disabled"})
+        ("pridem-backup", "backup_scope", {"policy": "disabled"})
     ]
 
 
@@ -781,7 +781,7 @@ def test_backup_dumps_the_services_before_the_product_and_names_the_rest(
 
     code, out, _ = _cli(tmp_path, ["backup"], Refusing())
     verdict = _verdict(out)
-    assert [s.stack for s in verdict.steps] == ["comms", STACK, "backup"]
+    assert [s.stack for s in verdict.steps] == ["comms", STACK, "pridem-backup"]
     assert verdict.steps[-1].status == "skipped"  # after the red comms dump
     del code
 

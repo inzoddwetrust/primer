@@ -36,6 +36,7 @@ from pridem.events import Json, Secrets
 from pridem.interrupt import Interrupted
 from pridem.plan import StackSteps
 from pridem.runner import Interactive, RunnerError, Stream
+from pridem.stacks import names as machine
 from pridem.stacks.env import MINTED_FILE, read_minted
 from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import Ident, Product, Service, load_primer_yaml
@@ -230,10 +231,10 @@ def _db(args: Strict, ctx: Context) -> int:
         ]
         return Planned(
             [
-                StackSteps("backup", [insurance]),
+                StackSteps(machine.BACKUP, [insurance]),
                 StackSteps(compose.entry, steps, root=True),
             ],
-            finally_=[StackSteps("stopped", [StartStopped(stopped)])],
+            finally_=[StackSteps(machine.STOPPED, [StartStopped(stopped)])],
         )
 
     return run_plan_verb(
@@ -254,7 +255,7 @@ def _backup(args: Strict, ctx: Context) -> int:
 
         def off(session: Session) -> Planned:
             step = BackupScope({"policy": "disabled"})
-            return Planned([StackSteps("backup", [step], root=True)])
+            return Planned([StackSteps(machine.BACKUP, [step], root=True)])
 
         return run_plan_verb(ctx, verb="backup", mode="command", make=off)
     dumped: list[ComposeStack] = []
@@ -277,7 +278,7 @@ def _backup(args: Strict, ctx: Context) -> int:
             "dumped": [c.entry for c in dumped],
             "no_database": list[Json](without),
         }
-        stacks.append(StackSteps("backup", [BackupScope(scope)], root=True))
+        stacks.append(StackSteps(machine.BACKUP, [BackupScope(scope)], root=True))
         return Planned(stacks)
 
     return run_plan_verb(ctx, verb="backup", mode="command", make=every)
@@ -331,7 +332,7 @@ def _reset(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
         stopped = Stopped()
         return Planned(
             [StackSteps(compose.entry, _reset_steps(compose, stopped), root=True)],
-            finally_=[StackSteps("stopped", [StartStopped(stopped)])],
+            finally_=[StackSteps(machine.STOPPED, [StartStopped(stopped)])],
         )
 
     return run_plan_verb(
@@ -360,7 +361,7 @@ def _migrate(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
         ]
         return Planned(
             [StackSteps(compose.entry, steps, root=True)],
-            finally_=[StackSteps("stopped", [StartStopped(stopped)])],
+            finally_=[StackSteps(machine.STOPPED, [StartStopped(stopped)])],
         )
 
     return run_plan_verb(
@@ -405,7 +406,7 @@ def _seed(args: Strict, ctx: Context) -> int:
 
         def lists(session: Session) -> Planned:
             step = SeedPlan("seed_list", {"entries": listed})
-            return Planned([StackSteps("seed", [step], root=True)])
+            return Planned([StackSteps(machine.SEED, [step], root=True)])
 
         return run_plan_verb(
             ctx, verb="seed", mode="command", make=lists, args={"list": True}
@@ -462,7 +463,9 @@ def _seed(args: Strict, ctx: Context) -> int:
         steps: list[Step] = (
             [*_reset_steps(compose, stopped), run] if args.reset else [run]
         )
-        finals = [StackSteps("stopped", [StartStopped(stopped)])] if args.reset else []
+        finals = (
+            [StackSteps(machine.STOPPED, [StartStopped(stopped)])] if args.reset else []
+        )
         return Planned([StackSteps(compose.entry, steps, root=True)], finally_=finals)
 
     if args.reset:

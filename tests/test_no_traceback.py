@@ -43,8 +43,8 @@ def _ladder(
     journal: Journal, build: object
 ) -> tuple[list[Stack], list[StackSteps], list[StackSteps]]:
     stacks: list[Stack] = [
-        StackSteps("host", [ScriptedStep("migrate", 1, journal)]),
-        Deferred("product", build, after="fetch_root", root=True),  # type: ignore[arg-type]
+        StackSteps("pridem-host", [ScriptedStep("migrate", 1, journal)]),
+        Deferred("pridem-product", build, after="fetch_root", root=True),  # type: ignore[arg-type]
     ]
     restore = [StackSteps("restore", [ScriptedStep("back", 1, journal)])]
     finally_ = [StackSteps("finally", [ScriptedStep("tidy", 1, journal)])]
@@ -76,7 +76,7 @@ def test_probe_DM_77_a_ladder_that_cannot_be_built_still_ends_the_plan() -> None
     assert "restore/back:act" in journal and "finally/tidy:act" in journal, journal
     # the pair
     journal = Journal()
-    good = [StackSteps("product", [ScriptedStep("up", 1, journal)])]
+    good = [StackSteps("pridem-product", [ScriptedStep("up", 1, journal)])]
     stacks, restore, finally_ = _ladder(journal, lambda: good)
     made, _ = plan(stacks, "deploy", restore=restore, finally_=finally_)
     assert made.run().code is ExitCode.OK

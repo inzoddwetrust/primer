@@ -110,7 +110,7 @@ def test_the_types_go_after_finalize_and_a_test_box_has_a_write_key(
     ``types`` -- a red deploy never reaches them. The pair: a product without
     ``types`` gets no write key."""
     made, _ = planned(tmp_path / "with", "core")  # the fixture declares types
-    [root] = deferred(made, "finalize")
+    [root] = deferred(made, "pridem-finalize")
     assert [step.name for step in root.steps] == [
         "final_check",
         "finalize",
@@ -118,7 +118,7 @@ def test_the_types_go_after_finalize_and_a_test_box_has_a_write_key(
         "types",
     ]
     made, _ = planned(tmp_path / "without", "core", product_patch=_without_types)
-    [root] = deferred(made, "finalize")
+    [root] = deferred(made, "pridem-finalize")
     assert [step.name for step in root.steps] == ["final_check", "finalize", "types"]
 
 

@@ -259,7 +259,7 @@ def planned(
     )
     assert made.fetched is not None
     made.fetched.passport = load_passport(file)
-    for name in ("sources", "dependencies"):
+    for name in ("pridem-sources", "pridem-dependencies"):
         outcome = run_stacks(deferred(made, name))
         assert outcome.code.value == 0, outcome.steps
     return made, root

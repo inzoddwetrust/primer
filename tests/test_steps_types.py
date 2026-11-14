@@ -213,7 +213,7 @@ def types(
 
 def run(step: Types, runner: FakeRunner, role: Role = "test") -> PlanOutcome:
     return Plan(
-        [StackSteps("finalize", [step], root=True)],
+        [StackSteps("pridem-finalize", [step], root=True)],
         mode="install",
         role=role,
         runner=runner,

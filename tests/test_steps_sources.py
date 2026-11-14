@@ -148,7 +148,7 @@ def lock(commit_prefix: str, version: str = "3.0.0") -> str:
 def run(root: Path, steps: list, mode: str = "install") -> PlanOutcome:  # type: ignore[type-arg]
     ticks = count()
     return Plan(
-        [StackSteps("sources", steps, root=True)],
+        [StackSteps("pridem-sources", steps, root=True)],
         mode=mode,  # type: ignore[arg-type]
         role="test",
         runner=SubprocessRunner(),
@@ -528,7 +528,7 @@ def test_a_remote_answer_that_is_not_a_commit_stops_everything(
     )
     with runner:  # strict: nothing after the ls-remote
         outcome = Plan(
-            [StackSteps("sources", steps, root=True)],
+            [StackSteps("pridem-sources", steps, root=True)],
             mode="install",
             role="test",
             runner=runner,
@@ -603,7 +603,7 @@ def _tried(
     )
     ticks = count()
     outcome = Plan(
-        [StackSteps("sources", steps, root=True)],
+        [StackSteps("pridem-sources", steps, root=True)],
         mode="install",
         role=role,  # type: ignore[arg-type]
         runner=SubprocessRunner(),

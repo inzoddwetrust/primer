@@ -7,6 +7,7 @@ from typing import Literal
 
 from pridem.contract import Strict
 from pridem.events import Secrets
+from pridem.stacks import names as machine
 from pridem.state import Box
 from pridem.steps.base import Step
 from pridem.steps.passport import Fetched
@@ -14,7 +15,7 @@ from pridem.steps.ssl import SslRenew
 from pridem.verbs.base import Context, Verb
 from pridem.verbs.run import one_stack, run_plan_verb
 
-SSL_STACK = "edge"
+SSL_STACK = machine.EDGE
 
 
 class SslArgs(Strict):

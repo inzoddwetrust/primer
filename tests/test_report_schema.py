@@ -315,7 +315,7 @@ def test_doctor_check_command_failure_reason_has_no_output() -> None:
     )
     with runner:
         outcome = plan(
-            [StackSteps("host", [Probe("nginx", 1, Journal())], True)],
+            [StackSteps("pridem-host", [Probe("nginx", 1, Journal())], True)],
             "doctor",
             runner=runner,
         )[0].run()

@@ -54,6 +54,7 @@ from pridem.report.codes import ExitCode, worst
 from pridem.report.render import render_json, summary_line, words
 from pridem.report.schema import Actor, Verdict, build_verdict
 from pridem.runner import Holding, Stream
+from pridem.stacks import names as machine
 from pridem.stacks.passport import load_passport, size_bytes
 from pridem.state import Box, BoxBusy, JournalHeader, JournalSink, Recovery
 from pridem.steps.base import Role, Step
@@ -120,7 +121,7 @@ def finished_at(started: datetime, journal: JournalSink) -> datetime:
     journal.emit(
         LogLine(
             "finally",
-            "pridem",
+            machine.PRIDEM,
             "clock",
             Stream.STDERR,
             f"clock-back {back} s: finished is taken as started",
@@ -302,7 +303,9 @@ def _verdict(
         verdict = assemble(outcome, planned.report.failures, planned.report.junit)
     except ValueError as error:  # the model refused what the run gave (DM-92)
         name = type(error).__name__
-        note = LogLine("finally", "verdict", "build", Stream.STDERR, f"{name}: {error}")
+        note = LogLine(
+            "finally", machine.VERDICT, "build", Stream.STDERR, f"{name}: {error}"
+        )
         box.append_journal(run_id, note, secrets)
         verdict = assemble(salvaged(outcome, name, assemble), (), None)
     box.write_verdict(verdict)

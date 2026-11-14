@@ -203,7 +203,7 @@ def test_probe_DM_67_service_derived_seam_reaches_the_product(tmp_path: Path) ->
             comms=comms(app.port),
             asked={"comms": {"TELEGRAM_BOT_TOKEN": ASKED}},
         )
-        services = {s.name: s for s in deferred(made, "services")}
+        services = {s.name: s for s in deferred(made, "pridem-services")}
         ladder = services["comms"].steps
         assert [step.name for step in ladder] == [
             "render_env",
@@ -218,14 +218,14 @@ def test_probe_DM_67_service_derived_seam_reaches_the_product(tmp_path: Path) ->
         cs = build.compose
         app.health = health(service="comms", release=cs.ref, commit=cs.commit)
         app.health["alembic_head"] = None
-        product = deferred(made, "product")[0]
+        product = deferred(made, "pridem-product")[0]
         render = product.steps[0]
         assert isinstance(render, RenderEnv) and product.name == "aivis"
         ticks = count()
         with FakeRunner(*script(cs, root / "opt" / "comms" / "env")) as runner:
             outcome = Plan(
                 [
-                    services["seams"],
+                    services["pridem-seams"],
                     services["comms"],
                     StackSteps("aivis", [render]),
                     StackSteps("root", [], root=True),

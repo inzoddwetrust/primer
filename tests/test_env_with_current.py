@@ -18,8 +18,8 @@ from test_steps_finalize import finalize, tail
 
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeRunner
+from pridem.stacks import names as machine
 from pridem.stacks.env import env_file, write_private
-from pridem.stacks.seams import PRODUCT
 from pridem.state import Box
 from pridem.steps import finalize as finalize_module
 from pridem.steps.base import StepFailed
@@ -130,7 +130,10 @@ def test_every_compose_of_a_deploys_steps_is_on_the_deploys_env(
     reads. Something of each is there: the list is not empty."""
     made, _ = planned(tmp_path, "full")
     found: list[tuple[str, ComposeStack]] = []
-    for stack in (*deferred(made, "services"), *deferred(made, PRODUCT)):
+    for stack in (
+        *deferred(made, machine.SERVICES),
+        *deferred(made, machine.PRODUCT),
+    ):
         for step in stack.steps:
             compose = getattr(step, "compose", None)
             if isinstance(compose, ComposeStack):

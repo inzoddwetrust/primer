@@ -267,7 +267,7 @@ def run(
     ticks = count()
     sink = ListSink()
     outcome = Plan(
-        [StackSteps("edge", steps, root=True)],
+        [StackSteps("pridem-edge", steps, root=True)],
         mode=mode,  # type: ignore[arg-type]
         role="test",
         runner=runner,

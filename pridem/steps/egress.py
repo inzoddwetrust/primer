@@ -10,7 +10,7 @@ image ``SQUID_IMAGE`` pinned by digest, in the compose project
 proxy sits on ``pridem-egress`` under ``PROXY_ALIAS`` -- every service of the
 product's stacks joins it and has the address as ``HTTPS_PROXY`` and
 ``https_proxy`` -- and on its project's own ordinary network ``default``, its
-way out. Every object carries ``pridem.stack=egress``.
+way out. Every object carries ``pridem.stack=pridem-egress``.
 
 The proxy runs as the image's user ``proxy`` from its first instruction, by
 ``/usr/sbin/squid`` itself in the foreground (``entrypoint``, ``command``), its
@@ -44,7 +44,7 @@ own user) and recreates the container (``up -d --force-recreate``). With
 left (``down`` of its project, or ``rm -f`` by label when its file is gone) and
 the files. ``verify`` reads the fact back:
 
-- empty ``egress`` -- no container labelled ``pridem.stack=egress``, running or
+- empty ``egress`` -- no container labelled ``pridem.stack=pridem-egress``, running or
   not, and no file;
 - otherwise -- the files are the rendered ones; one container runs, on the
   image of ``SQUID_IMAGE``; the config it reads is the rendered one; and the
@@ -73,6 +73,7 @@ from typing import ClassVar
 
 from pridem.events import Fact, Json
 from pridem.runner import CommandFailed, Stream
+from pridem.stacks import names as machine
 from pridem.stacks.options import open_hosts, switched_on
 from pridem.stacks.schema import Product
 from pridem.steps.base import (
@@ -90,8 +91,8 @@ from pridem.steps.passport import NO_PASSPORT, Fetched
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 PROJECT = "pridem-egress"
-STACK_LABEL = {"pridem.stack": "egress"}
-LABEL_FILTER = "label=pridem.stack=egress"
+STACK_LABEL = {"pridem.stack": machine.EGRESS_LABEL}
+LABEL_FILTER = f"label=pridem.stack={machine.EGRESS_LABEL}"
 OUTSIDE = f"{PROJECT}_default"
 """The proxy's own ordinary network: its way out, and where the host reads it."""
 

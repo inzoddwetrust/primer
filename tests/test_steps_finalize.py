@@ -64,7 +64,7 @@ def finalize(tmp: Path, box: Box) -> tuple[Finalize, Path]:
 def tail(*steps: Step) -> list[StackSteps]:
     return [
         StackSteps("blank", steps[:-2], root=False),
-        StackSteps("finalize", steps[-2:], root=True),
+        StackSteps("pridem-finalize", steps[-2:], root=True),
     ]
 
 

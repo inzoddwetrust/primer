@@ -65,15 +65,15 @@ def _fake_plan(
 
         return Planned(
             [
-                StackSteps("host", [ScriptedStep("preflight", 1, journal)]),
-                Deferred("product", entries, after="fetch_root"),
+                StackSteps("pridem-host", [ScriptedStep("preflight", 1, journal)]),
+                Deferred("pridem-product", entries, after="fetch_root"),
                 StackSteps(
-                    "finalize",
+                    "pridem-finalize",
                     [ScriptedStep("finalize", 1, journal), *(extra or [])],
                     root=True,
                 ),
             ],
-            [StackSteps("box", [ScriptedStep("gc", 1, journal)])],
+            [StackSteps("pridem-box", [ScriptedStep("gc", 1, journal)])],
         )
 
     return make
@@ -107,10 +107,10 @@ def test_probe_DM_45_doctor_prints_full_plan_without_act(
     assert code == ExitCode.INCOMPLETE
     lines = out.splitlines()
     assert lines[:4] == [
-        "- host · preflight — would do preflight",
+        "- pridem-host · preflight — would do preflight",
         "- blank · build — would do build",
         "- blank · up — would do up",
-        "- finalize · finalize — would do finalize",
+        "- pridem-finalize · finalize — would do finalize",
     ]
     assert [entry.rpartition(":")[2] for entry in journal] == ["check"] * 4
     # the pair: deploy acts on every step of the same plan, then verifies
@@ -119,11 +119,11 @@ def test_probe_DM_45_doctor_prints_full_plan_without_act(
     assert code == ExitCode.OK
     acted = [entry for entry in journal if entry.endswith(":act")]
     assert acted == [
-        "host/preflight:act",
+        "pridem-host/preflight:act",
         "blank/build:act",
         "blank/up:act",
-        "finalize/finalize:act",
-        "box/gc:act",
+        "pridem-finalize/finalize:act",
+        "pridem-box/gc:act",
     ]
 
 
@@ -213,12 +213,12 @@ def test_probe_DM_45_signal_sets_the_flag_and_finally_runs(
     assert code == ExitCode.FAILED
     verdict = Verdict.model_validate_json(out)
     steps = {(s.phase, s.stack, s.name): s for s in verdict.steps}
-    assert steps[("main", "finalize", "finalize_mark")].status == "ok"
-    skipped = steps[("main", "finalize", "finalize_tail")]
+    assert steps[("main", "pridem-finalize", "finalize_mark")].status == "ok"
+    skipped = steps[("main", "pridem-finalize", "finalize_tail")]
     assert skipped.status == "skipped" and skipped.reason is not None
     assert skipped.reason.code == "after-interrupt"
-    assert steps[("finally", "box", "gc")].status == "ok"
-    assert "box/gc:verify" in journal
+    assert steps[("finally", "pridem-box", "gc")].status == "ok"
+    assert "pridem-box/gc:verify" in journal
     # the pair: no signal, every step runs
     journal.clear()
     monkeypatch.setattr(
@@ -227,7 +227,7 @@ def test_probe_DM_45_signal_sets_the_flag_and_finally_runs(
         _fake_plan(journal, extra=[ScriptedStep("finalize_tail", 3, journal)]),
     )
     code, _, _ = _cli(tmp_path, ["update", "--passport", str(file)])
-    assert code == ExitCode.OK and "finalize/finalize_tail:verify" in journal
+    assert code == ExitCode.OK and "pridem-finalize/finalize_tail:verify" in journal
 
 
 def test_probe_DM_45_second_run_in_a_session_is_refused(tmp_path: Path) -> None:
@@ -237,10 +237,12 @@ def test_probe_DM_45_second_run_in_a_session_is_refused(tmp_path: Path) -> None:
     run did run, the first journal is there."""
     journal = Journal()
     runner = FakeRunner()
-    once, sink = plan([StackSteps("box", [ScriptedStep("a", 1, journal)], root=True)])
+    once, sink = plan(
+        [StackSteps("pridem-box", [ScriptedStep("a", 1, journal)], root=True)]
+    )
     once.run()
     events = list(sink.events)
-    assert events and "box/a:verify" in journal  # the pair: it ran
+    assert events and "pridem-box/a:verify" in journal  # the pair: it ran
     with runner, pytest.raises(RunRefused):
         once.run()
     assert sink.events == events and runner.calls == []

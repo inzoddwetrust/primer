@@ -54,16 +54,16 @@ def _plan(
         asked={"comms": {"TELEGRAM_BOT_TOKEN": ASKED}},
         again=again,
     )
-    services = {s.name: s for s in deferred(made, "services")}
+    services = {s.name: s for s in deferred(made, "pridem-services")}
     build = services["comms"].steps[1]
     assert isinstance(build, Build)
-    render = deferred(made, "product")[0].steps[0]
+    render = deferred(made, "pridem-product")[0].steps[0]
     ticks = count()
     given = calls or script(build.compose, root / "opt" / "comms" / "env")
     with FakeRunner(*given) as runner:
         outcome = Plan(
             [
-                services["seams"],
+                services["pridem-seams"],
                 services["comms"],
                 StackSteps("aivis", [render]),
                 StackSteps("root", [], root=True),
@@ -128,7 +128,7 @@ def test_doctor_of_a_product_with_a_seam_from_a_healthy_service_is_empty(
             comms=comms(app.port),
             asked={"comms": {"TELEGRAM_BOT_TOKEN": ASKED}},
         )
-        build = {s.name: s for s in deferred(made, "services")}["comms"].steps[1]
+        build = {s.name: s for s in deferred(made, "pridem-services")}["comms"].steps[1]
         assert isinstance(build, Build)
         app.health = health(
             service="comms", release=build.compose.ref, commit=build.compose.commit

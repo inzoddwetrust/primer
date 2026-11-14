@@ -89,7 +89,7 @@ def box_with_release(tmp: Path, persistent: set[str]) -> tuple[Path, Box]:
 def run(root: Path, box: Box, runner: FakeRunner, **kw: bool) -> PlanOutcome:
     ticks = count()
     return Plan(
-        [StackSteps("destroy", destroy_steps(root, box=box, **kw), root=True)],
+        [StackSteps("pridem-destroy", destroy_steps(root, box=box, **kw), root=True)],
         mode="destroy",
         role="test",
         runner=runner,
@@ -457,13 +457,15 @@ def test_new_secrets_with_volumes_kept_is_refused(tmp_path: Path) -> None:
 
 
 def test_the_volumes_of_the_machines_own_stacks_go(tmp_path: Path) -> None:
-    """DM-76 FIX: the edge's ACME webroot (``pridem.stack=edge``), and any
+    """DM-76 FIX: the edge's ACME webroot (``pridem.stack=pridem-edge``), and any
     volume of the proxy or the host's networks, is the machine's -- no record
     of a product names it, and it goes, as before DM-76. The pair: a volume
     whose label nobody names is ``persistent-unknown``
     (``test_a_volume_of_an_entry_no_longer_named_is_never_removed``)."""
     root, box = box_with_release(tmp_path, set())
-    seen = listed(volumes=("pridem-edge_acme\tedge", "x\tegress", "y\thost"))
+    seen = listed(
+        volumes=("pridem-edge_acme\tpridem-edge", "x\tpridem-egress", "y\tpridem-host")
+    )
     removal = FakeCall(("docker", "volume", "rm", "pridem-edge_acme", "x", "y"))
     script = [docker(), *seen, docker(), *seen, removal, *listed()]
     with box.lock("destroy"), FakeRunner(*script) as runner:

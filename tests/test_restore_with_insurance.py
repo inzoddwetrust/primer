@@ -63,7 +63,7 @@ def test_a_red_insurance_dump_stops_everything_before_anything_stops(
     verdict = _verdict(out)
     assert code == 1
     assert [(s.stack, s.name, s.status) for s in verdict.steps[:4]] == [
-        ("backup", "db_dump", "failed"),
+        ("pridem-backup", "db_dump", "failed"),
         (STACK, "stop_for_restore", "skipped"),
         (STACK, "db_restore", "skipped"),
         (STACK, "start_restored", "skipped"),

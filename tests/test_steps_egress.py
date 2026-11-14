@@ -435,7 +435,7 @@ def test_the_proxy_compose_puts_it_on_its_network_and_a_way_out(tmp_path: Path) 
     document = json.loads(compose_text(tmp_path))
     proxy = document["services"]["proxy"]
     assert proxy["image"] == SQUID_IMAGE and "@sha256:" in SQUID_IMAGE
-    assert proxy["labels"] == {"pridem.stack": "egress"}
+    assert proxy["labels"] == {"pridem.stack": "pridem-egress"}
     assert proxy["networks"] == {
         EGRESS_NETWORK: {"aliases": [PROXY_ALIAS]},
         "default": None,
@@ -449,7 +449,7 @@ def test_the_proxy_compose_puts_it_on_its_network_and_a_way_out(tmp_path: Path) 
     assert "ports" not in proxy  # nothing of the host
     assert document["networks"] == {
         EGRESS_NETWORK: {"external": True},
-        "default": {"labels": {"pridem.stack": "egress"}},
+        "default": {"labels": {"pridem.stack": "pridem-egress"}},
     }
 
 

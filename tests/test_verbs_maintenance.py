@@ -73,7 +73,7 @@ def test_gc_writes_one_verdict_and_its_journal(tmp_path: Path) -> None:
     assert fetched.passport is not None
     assert verdict.passport_version == fetched.passport.version
     assert [(s.stack, s.name, s.phase) for s in verdict.steps] == [
-        ("box", "gc", "main")
+        ("pridem-box", "gc", "main")
     ]
     assert out.startswith("gc → green · ")
     assert verdict.log_ref is not None  # gc keeps a journal
@@ -146,7 +146,7 @@ def test_ssl_renew_on_a_self_signed_box(tmp_path: Path) -> None:
     [verdict] = verdicts(root)
     assert (verdict.verb, verdict.actor.via) == ("ssl renew", "timer")
     [step] = verdict.steps
-    assert (step.stack, step.name) == ("edge", "ssl_renew")
+    assert (step.stack, step.name) == ("pridem-edge", "ssl_renew")
     assert step.verify is not None and step.verify["mode"] == "self-signed"
 
 

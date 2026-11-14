@@ -32,21 +32,21 @@ def test_probe_DM_46_edition_installs_only_its_services(tmp_path: Path) -> None:
     """``core`` leaves ``payments`` out: no key, no tag asked of its remote, no
     clone, no ladder; the pair: ``full`` installs it."""
     made, root = planned(tmp_path / "core", "core", gone=["payments"])
-    keys = [s.name for s in deferred(made, "dependencies")]
-    ladders = _ladder(deferred(made, "services"))
-    assert keys == ["comms", "dependencies"]
+    keys = [s.name for s in deferred(made, "pridem-dependencies")]
+    ladders = _ladder(deferred(made, "pridem-services"))
+    assert keys == ["comms", "pridem-dependencies"]
     assert ("comms", "up") in ladders
     assert not any(stack == "payments" for stack, _ in ladders)
     assert not (root / "opt" / "payments").exists()
     assert (root / "opt" / "comms" / "releases" / "v1.0.0" / "primer.yaml").is_file()
     # the pair: full installs payments, by the same ladder
     made, root = planned(tmp_path / "full", "full")
-    assert [s.name for s in deferred(made, "dependencies")] == [
+    assert [s.name for s in deferred(made, "pridem-dependencies")] == [
         "comms",
         "payments",
-        "dependencies",
+        "pridem-dependencies",
     ]
-    ladders = _ladder(deferred(made, "services"))
+    ladders = _ladder(deferred(made, "pridem-services"))
     assert ("payments", "up") in ladders
     assert (root / "opt" / "payments" / "releases" / "v1.0.0").is_dir()
 
@@ -56,7 +56,9 @@ def test_probe_DM_46_product_waits_for_all_provides(tmp_path: Path) -> None:
     its health -- before the product renders its env; the product cannot
     render before (``seam-before-health``); the pair: with them, it does."""
     made, _ = planned(tmp_path, "full")
-    order = _ladder([*deferred(made, "services"), *deferred(made, "product")])
+    order = _ladder(
+        [*deferred(made, "pridem-services"), *deferred(made, "pridem-product")]
+    )
     first = order.index(("aivis", "render_env"))
     ups = [order.index((name, "up")) for name in ("comms", "payments")]
     assert all(up < first for up in ups)
@@ -64,7 +66,7 @@ def test_probe_DM_46_product_waits_for_all_provides(tmp_path: Path) -> None:
     # the product's env before the service's health is refused by name
     render = next(
         step
-        for stack in deferred(made, "product")
+        for stack in deferred(made, "pridem-product")
         for step in stack.steps
         if stack.name == "aivis" and step.name == "render_env"
     )

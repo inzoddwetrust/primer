@@ -569,13 +569,13 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     total, failed = junit["total"], junit["failed"]
     assert isinstance(total, int) and total > 0 and failed == 0, printed
     assert verdict.junit is not None and verdict.junit.total == total, printed
-    verified = facts[("finalize", "final_check")]["verified"]
+    verified = facts[("pridem-finalize", "final_check")]["verified"]
     assert isinstance(verified, int) and verified > 10, printed
     assert str((OPT / "current").readlink()) == RELEASE, printed
     state = json.loads(Path("/opt/pridem/state.json").read_text())
     # the name (DM-70): the stack is the repository's, fetch_root took the
     # blank's primer.yaml with no detour, and nothing went under the old name
-    assert facts[("sources", "fetch_root")]["config"] == STACK, printed
+    assert facts[("pridem-sources", "fetch_root")]["config"] == STACK, printed
     assert OPT.is_dir() and not Path("/opt/blank").exists(), printed
     # the service of every edition (DM-59): by its tag, the lock's
     assert state["current"] == {STACK: BLANK_COMMIT, SERVICE: "v1.0.0"}, state
@@ -950,7 +950,7 @@ def _internal(network: str) -> str:
 
 def _proxies() -> list[str]:
     return _stdout(
-        ["docker", "ps", "-a", "-q", "--filter", "label=pridem.stack=egress"]
+        ["docker", "ps", "-a", "-q", "--filter", "label=pridem.stack=pridem-egress"]
     )
 
 
@@ -1449,7 +1449,7 @@ def test_tier3_reinstall_keeps_the_persistent_volume(tmp_path: Path) -> None:
     verdict, printed = _install(_passport(tmp_path, version=15), "reinstall")
     assert verdict.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
-    assert facts[("destroy", "remove_objects")]["kept_volumes"] == [FILES_VOLUME]
+    assert facts[("pridem-destroy", "remove_objects")]["kept_volumes"] == [FILES_VOLUME]
     files = _container(FILES, "files")
     assert _stdout(["docker", "exec", files, "cat", "/srv/files/mark"]) == [MARK]
     assert _psql("SELECT value FROM app_settings WHERE key = 'dm86-gone'") == []
@@ -1726,7 +1726,7 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     assert back.result == "green", printed
     assert not any(s.stack == SERVICE for s in back.steps), back.steps
     facts = {(s.stack, s.name): s.verify or {} for s in back.steps}
-    assert facts[("seams", "seams_check")]["left"] == [SERVICE], facts
+    assert facts[("pridem-seams", "seams_check")]["left"] == [SERVICE], facts
     assert _container(SERVICE, "app") == running
     diff, failed, doctor = _doctor(alone)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
@@ -1824,7 +1824,7 @@ def test_tier3_two_instances_with_their_own_languages(
     red, printed = _install(third, "update")
     assert red.result != "green", printed
     [failed] = [s for s in red.steps if s.status == "failed"]
-    assert (failed.stack, failed.name) == ("seams", "seams_check"), red.steps
+    assert (failed.stack, failed.name) == ("pridem-seams", "seams_check"), red.steps
     assert failed.reason is not None
     assert failed.reason.code == "seams_check:language-outside-product", failed
     assert failed.reason.model_dump()["languages"] == ["uk"], failed.reason
@@ -3018,7 +3018,7 @@ def test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked(
     verdict, printed = _install(passport, "update")
     assert verdict.result == "green", printed
     seams = {(s.stack, s.name): s.verify or {} for s in verdict.steps}[
-        ("seams", "seams_verify")
+        ("pridem-seams", "seams_verify")
     ]
     print("DM-86 measure: seams", seams.get("seams"))
     named = seams.get("seams")
@@ -3080,7 +3080,7 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     verdict, printed = _verdict_of("destroy")
     assert verdict.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
-    kept = facts[("destroy", "remove_objects")]["kept_volumes"]
+    kept = facts[("pridem-destroy", "remove_objects")]["kept_volumes"]
     assert kept == [FILES_VOLUME], facts
     for kind in ("ps -aq", "network ls -q", "volume ls -q", "image ls -q"):
         left = _stdout(["docker", *kind.split(), "--filter", "label=pridem.stack"])
@@ -3154,7 +3154,7 @@ def test_probe_DM_59_product_gets_the_seams_of_its_service_after_health(
         assert ours[key] == theirs[key], key  # values, not names
         held = _stdout(["docker", "exec", product, "printenv", key])
         assert held == [theirs[key]], key
-    edges = facts[("seams", "seams_verify")]["seams"]
+    edges = facts[("pridem-seams", "seams_verify")]["seams"]
     assert isinstance(edges, list), edges
     for key in SEAMS:
         assert f"{STACK}.{key} <- {SERVICE}" in edges, edges
@@ -3289,7 +3289,9 @@ def test_tier3_destroy_all_wipes_the_persistent_volume() -> None:
     verdict, printed = _verdict_of("destroy", "--all", "--confirm", "tier3-env")
     assert verdict.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
-    assert facts[("destroy", "remove_objects")]["wiped_volumes"] == [FILES_VOLUME]
+    assert facts[("pridem-destroy", "remove_objects")]["wiped_volumes"] == [
+        FILES_VOLUME
+    ]
     assert (
         _stdout(["docker", "volume", "ls", "-q", "--filter", f"name={FILES_VOLUME}"])
         == []
@@ -3344,3 +3346,42 @@ def test_tier3_optional_build_slot_without_a_package_serves_the_repository_s_fro
     assert _body("/edition.txt", FRONTEND) == "core"
     diff, failed, _ = _doctor(passport)
     assert (diff, failed) == ([], []), (diff, failed)
+
+
+def test_tier3_an_entry_named_frontend_is_the_product_s_own(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-102, last of group f: a copy of the blank with a second entry named
+    ``frontend`` -- a word of the machine's plans before DM-102, the
+    product's own now. ``update`` green; the verdict holds the entry's
+    ``(frontend, up)`` and the machine's ``(pridem-frontend, frontend)``, two
+    keys, two facts, none mixed with the other."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    copy = _copy_of_blank(tmp_path, mirror, "frontend-entry")
+    _replace_once(
+        copy / "primer.yaml",
+        "  primer-blank-files:",
+        "  frontend:\n    compose: deploy/frontend-compose.yml\n  primer-blank-files:",
+    )
+    image = (
+        "postgres:16-alpine@sha256:"
+        "f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36"
+    )
+    (copy / "deploy" / "frontend-compose.yml").write_text(
+        "services:\n"
+        "  idle:\n"
+        f"    image: {image}\n"
+        '    command: ["sh", "-c", "while sleep 3600; do :; done"]\n'
+        "    healthcheck:\n"
+        '      test: ["CMD", "true"]\n'
+        "      interval: 5s\n",
+        encoding="utf-8",
+    )
+    _push(copy, mirror, "DM-102: an entry named frontend")
+    verdict, printed = _install(_passport(tmp_path, version=90), "update")
+    assert verdict.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    print("DM-102 measure:", sorted(k for k in facts if "frontend" in k[0]))
+    assert facts[("frontend", "up")]["stack"] == "frontend", facts
+    assert "domain" in facts[("pridem-frontend", "frontend")], facts
+    assert _container("frontend", "idle")

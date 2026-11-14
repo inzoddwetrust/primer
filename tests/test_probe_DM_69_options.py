@@ -64,12 +64,12 @@ def _box(tmp: Path, options: list[str], token: str, *, gone: tuple[str, ...] = (
 def _render(made, root: Path):  # type: ignore[no-untyped-def]
     """``seams_check`` and comms' ``render_env``, then the product's with the
     seams of comms in the plan's memory, as ``up`` of comms would put them."""
-    services = {s.name: s for s in deferred(made, "services")}
+    services = {s.name: s for s in deferred(made, "pridem-services")}
     outcome = run_stacks(
-        [services["seams"], StackSteps("comms", [services["comms"].steps[0]])]
+        [services["pridem-seams"], StackSteps("comms", [services["comms"].steps[0]])]
     )
     assert outcome.code is ExitCode.OK, outcome.steps
-    own = deferred(made, "product")[0]
+    own = deferred(made, "pridem-product")[0]
     render = own.steps[0]
     assert isinstance(render, RenderEnv) and isinstance(render.stack, Product)
     seams = [k for k, v in render.stack.env.items() if isinstance(v, Seam)]
@@ -90,7 +90,10 @@ def test_probe_DM_69_switched_off_option_takes_the_literal_and_leaves_its_servic
     is open."""
     made, root = _box(tmp_path / "off", [], LITERAL, gone=("payments",))
     services, egress = _render(made, root)
-    assert [s.name for s in deferred(made, "dependencies")] == ["comms", "dependencies"]
+    assert [s.name for s in deferred(made, "pridem-dependencies")] == [
+        "comms",
+        "pridem-dependencies",
+    ]
     assert "payments" not in services
     assert not (root / "opt" / "payments").exists()
     assert read_env(root, "comms")["TELEGRAM_BOT_TOKEN"] == LITERAL
@@ -100,10 +103,10 @@ def test_probe_DM_69_switched_off_option_takes_the_literal_and_leaves_its_servic
     # the pair: both options on
     made, root = _box(tmp_path / "on", ["telegram", "pay"], BOT)
     services, egress = _render(made, root)
-    assert [s.name for s in deferred(made, "dependencies")] == [
+    assert [s.name for s in deferred(made, "pridem-dependencies")] == [
         "comms",
         "payments",
-        "dependencies",
+        "pridem-dependencies",
     ]
     assert "payments" in services
     assert (root / "opt" / "payments" / "releases" / "v1.0.0").is_dir()
@@ -135,20 +138,22 @@ def test_probe_DM_69_passport_without_a_required_option_is_refused_before_act(
         )
 
     made, root = box(tmp_path / "off", ["pay"], LITERAL)
-    services = {s.name: s for s in deferred(made, "services")}
-    outcome = run_stacks([services["seams"], services["comms"]])
+    services = {s.name: s for s in deferred(made, "pridem-services")}
+    outcome = run_stacks([services["pridem-seams"], services["comms"]])
     [failed] = [r for r in outcome.steps if r.status == "failed"]
-    assert (failed.stack, failed.name) == ("seams", "seams_check")
+    assert (failed.stack, failed.name) == ("pridem-seams", "seams_check")
     assert failed.reason is not None
     assert failed.reason.code == "seams_check:option-required-off"
     assert failed.reason.params == {"options": ["telegram"]}
-    assert not [r for r in outcome.steps if r.status == "ok" and r.stack != "seams"]
+    assert not [
+        r for r in outcome.steps if r.status == "ok" and r.stack != "pridem-seams"
+    ]
     for stack in ("comms", "payments", "aivis"):
         assert not (root / "opt" / stack / "env").exists(), stack
         assert not (root / "opt" / stack / "current").exists(), stack
 
     # the pair: telegram on -- seams_check is green
     made, root = box(tmp_path / "on", ["telegram"], BOT)
-    services = {s.name: s for s in deferred(made, "services")}
-    outcome = run_stacks([services["seams"]])
+    services = {s.name: s for s in deferred(made, "pridem-services")}
+    outcome = run_stacks([services["pridem-seams"]])
     assert outcome.code is ExitCode.OK, outcome.steps

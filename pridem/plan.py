@@ -336,6 +336,13 @@ class Plan:
             *(step for _, step in _chosen(known, self._selected)),
             *(step for _, step in (*self._restore, *self._finally)),
         ]
+        self._pairs: set[tuple[str, str]] = {
+            (stack.name, step.name) for stack in known for step in stack.steps
+        }
+        """The main phase's ``(stack, step)`` -- the key of a fact. A deferred
+        stack built late adds its own (``_made``); a pair taken already is a
+        red ``ladder`` (DM-102): a stack's name may be shared -- ``seams`` is
+        built by the services and by the product -- a fact's key may not."""
 
     @property
     def _role(self) -> Role:
@@ -448,6 +455,14 @@ class Plan:
         )
         for part in made:
             _validate_steps(part.name, part.steps)
+        pairs = [(part.name, step.name) for part in made for step in part.steps]
+        twice = [pair for pair in pairs if pair in self._pairs or pairs.count(pair) > 1]
+        if twice:
+            # two steps of one (stack, name) would mix their facts (DM-102)
+            twin = ValueError(f"two steps named {twice[0][1]!r} in {twice[0][0]!r}")
+            made = [StackSteps(stack.name, [Unbuilt(twin)])]
+        else:
+            self._pairs.update(pairs)
         chosen = _chosen(made, self._selected)
         self._named.extend(step for _, step in chosen)
         return chosen

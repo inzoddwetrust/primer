@@ -46,6 +46,7 @@ from typing import ClassVar
 
 from pridem.events import Json, strings
 from pridem.files import atomic_write
+from pridem.stacks import names as machine
 from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import load_primer_yaml
 from pridem.state import STATE, Box
@@ -68,7 +69,7 @@ from pridem.steps.sources import MARKER, marked
 from pridem.steps.timers import UNIT_DIR
 
 MODES: frozenset[Mode] = frozenset({"destroy", "reinstall"})
-STACK = "destroy"
+STACK = machine.DESTROY
 LABEL = "label=pridem.stack"
 MINTED = Path("env") / "minted.yaml"
 TIMERS = ("pridem-gc.timer", "pridem-ssl-renew.timer")

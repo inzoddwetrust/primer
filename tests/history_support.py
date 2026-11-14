@@ -55,7 +55,7 @@ def deploy_verdict(
     if head is not None:
         steps.append(
             {
-                "stack": "sources",
+                "stack": "pridem-sources",
                 "name": "fetch_root",
                 "phase": "main",
                 "order": 2,
@@ -72,7 +72,7 @@ def deploy_verdict(
     if refused is not None:
         steps.append(
             {
-                "stack": "sources",
+                "stack": "pridem-sources",
                 "name": "stand",
                 "phase": "main",
                 "order": 3,
@@ -100,7 +100,7 @@ def deploy_verdict(
         current = release or head or sha("0")
         steps.append(
             {
-                "stack": "finalize",
+                "stack": "pridem-finalize",
                 "name": "finalize",
                 "phase": "main",
                 "order": 2,
@@ -159,7 +159,7 @@ def deploy_verbs_box(fs_root: Path, verb: str, role: str) -> Stack:
     planned = deploy_plan(session, fs_root, wanted, None)
     assert planned.fetched is not None
     planned.fetched.passport = load_passport(file)
-    [sources] = [s for s in planned.stacks if s.name == "sources"]
+    [sources] = [s for s in planned.stacks if s.name == "pridem-sources"]
     return sources
 
 

@@ -50,7 +50,7 @@ def nginx_t(root: Path, code: int = 0) -> FakeCall:
             "run",
             "--rm",
             "--label",
-            "pridem.stack=edge",
+            "pridem.stack=pridem-edge",
             "-v",
             f"{candidate_dir(root)}:/etc/nginx/conf.d:ro",
             "-v",
@@ -313,7 +313,7 @@ def test_first_install_starts_nginx_with_the_compose_of_edge(tmp_path: Path) -> 
     assert nginx["networks"] == ["pridem", "default"]
     assert document["networks"] == {
         "pridem": {"external": True},
-        "default": {"labels": {"pridem.stack": "edge"}},
+        "default": {"labels": {"pridem.stack": "pridem-edge"}},
     }
     assert document["services"]["certbot"]["profiles"] == ["certbot"]
     assert "networks" not in document["services"]["certbot"]

@@ -377,7 +377,7 @@ def test_probe_DM_22_persistent_volumes_survive_destroy_and_reinstall(
     ticks = count()
     with box.lock(mode), FakeRunner(*script) as runner:
         outcome = Plan(
-            [StackSteps("destroy", destroy_steps(root, box=box), root=True)],
+            [StackSteps("pridem-destroy", destroy_steps(root, box=box), root=True)],
             mode=mode,  # type: ignore[arg-type]
             role="test",
             runner=runner,

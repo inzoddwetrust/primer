@@ -83,7 +83,7 @@ def _deploy(tmp: Path, *, red: bool) -> tuple[ExitCode, ComposeStack]:
     )
     stacks = [
         StackSteps(ENTRY, [packages(root, fetched, stack), gate]),
-        StackSteps("finalize", [FinalCheck(), finalize], root=True),
+        StackSteps("pridem-finalize", [FinalCheck(), finalize], root=True),
     ]
     with FakeRunner(*script) as runner, pridem.lock("probe"):
         outcome = plan(stacks, "install", runner=runner)[0].run()

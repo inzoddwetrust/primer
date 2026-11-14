@@ -82,7 +82,7 @@ def run(
     ticks = count()
     with runner:
         outcome = Plan(
-            [StackSteps("sources", [step], root=True)],
+            [StackSteps("pridem-sources", [step], root=True)],
             mode="install",
             role="test",
             runner=runner,
@@ -174,7 +174,7 @@ def _key_in_place(root: Path) -> Path:
 def _doctor(root: Path, calls: list[FakeCall]) -> PlanOutcome:
     with _KeygenRunner(*calls) as runner:
         return Plan(
-            [StackSteps("sources", [DeployKey(ADDRESS, root)], root=True)],
+            [StackSteps("pridem-sources", [DeployKey(ADDRESS, root)], root=True)],
             mode="doctor",
             role="test",
             runner=runner,

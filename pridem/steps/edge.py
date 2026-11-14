@@ -11,7 +11,7 @@ config from ``/opt/pridem/edge/nginx`` and the certificate from
 ``/opt/pridem/edge/certs``; the ACME webroot is the volume ``acme`` it shares
 with certbot. certbot never runs as a service: ``run --rm`` when a
 certificate is issued or renewed, writing to ``/opt/pridem/edge/letsencrypt``.
-Every object carries ``pridem.stack=edge``. Images are pinned by digest.
+Every object carries ``pridem.stack=pridem-edge``. Images are pinned by digest.
 
 nginx runs confined (``confined``): every capability dropped and only
 ``NGINX_CAPS`` given back -- its master binds 80 and 443 and drops its
@@ -27,10 +27,11 @@ from pathlib import Path
 
 from pridem.events import Json
 from pridem.files import atomic_write, private_dir
+from pridem.stacks import names as machine
 from pridem.steps.compose import NETWORK
 
 PROJECT = "pridem-edge"
-STACK_LABEL = {"pridem.stack": "edge"}
+STACK_LABEL = {"pridem.stack": machine.EDGE_LABEL}
 
 NGINX_IMAGE = (
     "nginx:1.30.6-alpine@sha256:"

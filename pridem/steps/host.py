@@ -48,6 +48,7 @@ from typing import ClassVar
 from pridem.events import Json, strings
 from pridem.files import atomic_write, private_dir
 from pridem.runner import Stream
+from pridem.stacks import names as machine
 from pridem.steps.base import (
     CheckResult,
     Mode,
@@ -156,7 +157,7 @@ def _busy(ctx: StepContext, unit: str) -> bool:
     return active or state in BUSY_STATES
 
 
-STACK_LABEL = {"pridem.stack": "host"}
+STACK_LABEL = {"pridem.stack": machine.HOST_LABEL}
 """The label of what the host's own steps make in docker: the networks
 ``pridem`` and ``pridem-egress``."""
 

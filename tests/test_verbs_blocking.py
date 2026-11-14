@@ -45,7 +45,7 @@ def _stand(fs_root: Path, box: Box, commit: str = NEW) -> Stand:
 
 def _record(fs_root: Path, box: Box, *calls: FakeCall) -> StepRecord:
     with FakeRunner(*calls) as runner:
-        stack = StackSteps("sources", [_stand(fs_root, box)], root=True)
+        stack = StackSteps("pridem-sources", [_stand(fs_root, box)], root=True)
         built, _ = plan([stack], runner=runner)
         outcome = built.run()
     [record] = outcome.steps

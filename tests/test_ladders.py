@@ -79,7 +79,7 @@ def _made(
         for part in built:  # a deferred part: validated as the run reaches it
             ladder([StackSteps(part.name, list(part.steps), root=True)])
         stacks += built
-        if stack.name == "sources":  # what fetch_root reads: the target
+        if stack.name == "pridem-sources":  # what fetch_root reads: the target
             [fetch] = [s for s in built[0].steps if isinstance(s, FetchRoot)]
             fetch.target = Target("main", role == "test", COMMIT)
             fetch.resolved.product = blank()
@@ -98,9 +98,11 @@ def test_every_ladder_of_every_verb_is_made_whole(
     plan, stacks = _made(tmp_path, verb, role, rollback)
     assert plan is not None
     names = [stack.name for stack in stacks]
-    assert {"sources", "dependencies", "blank", "finalize"} <= set(names), names
-    assert names[-1] == "finalize"
-    assert ("rollback" in names) is rollback
-    [sources] = [stack for stack in stacks if stack.name == "sources"]
+    assert {"pridem-sources", "pridem-dependencies", "blank", "pridem-finalize"} <= set(
+        names
+    ), names
+    assert names[-1] == "pridem-finalize"
+    assert ("pridem-rollback" in names) is rollback
+    [sources] = [stack for stack in stacks if stack.name == "pridem-sources"]
     stands = verb in ("update", "deploy") and role == "test"
     assert ("stand" in [step.name for step in sources.steps]) is stands

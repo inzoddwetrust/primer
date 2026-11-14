@@ -289,7 +289,7 @@ def test_a_product_named_unlike_its_repository_is_refused(
             ref="main",
             tag=False,
         )
-        outcome = run_stacks([StackSteps("sources", steps)])
+        outcome = run_stacks([StackSteps("pridem-sources", steps)])
         by = {record.name: record for record in outcome.steps}
         releases = tmp / "box" / "opt" / "aivis" / "releases"
         if called == name:

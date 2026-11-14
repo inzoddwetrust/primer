@@ -73,6 +73,7 @@ LAYERS: Layers = (
             "pridem.stacks.egress",
             "pridem.stacks.env",
             "pridem.stacks.loader",
+            "pridem.stacks.names",
             "pridem.stacks.lock",
             "pridem.stacks.options",
             "pridem.stacks.package",

@@ -65,6 +65,7 @@ from pathlib import Path
 
 from pridem import __version__
 from pridem.plan import Deferred, Stack, StackSteps
+from pridem.stacks import names as machine
 from pridem.stacks.env import own_entry
 from pridem.stacks.options import switched_on
 from pridem.stacks.passport import Passport
@@ -118,7 +119,7 @@ from pridem.steps.up import Up
 from pridem.verbs.base import Refused
 from pridem.verbs.run import Planned, Session
 
-PRODUCT = "product"
+PRODUCT = machine.PRODUCT
 """The stack of the step ``ladder`` while the product's entries are unknown."""
 
 
@@ -281,7 +282,7 @@ def deploy_plan(
             if isinstance(step, FetchRoot) and _guards_stand(wanted, role):
                 own.append(Stand(step, box, root))  # right after it: DM-24
         key = DeployKey(passport.product.repo, root)  # none for file://
-        return [StackSteps("sources", [key, *own])]
+        return [StackSteps(machine.SOURCES, [key, *own])]
 
     def dependencies() -> Sequence[StackSteps] | None:
         """The keys of the dependencies the edition uses, the lock, the services."""
@@ -300,7 +301,7 @@ def deploy_plan(
             address = product.dependencies[name].repo
             others = [a for a in addresses if a != address]
             made.append(StackSteps(name, [DeployKey(address, root, others=others)]))
-        made.append(StackSteps("dependencies", list(known.dependencies)))
+        made.append(StackSteps(machine.DEPENDENCIES, list(known.dependencies)))
         return made
 
     def rollback() -> Sequence[StackSteps] | None:
@@ -346,7 +347,7 @@ def deploy_plan(
             if stage.migrate is not None and stage.app is not None
         ]
         check = RollbackCheck(migrates, passport.product.ref)
-        return [StackSteps("rollback", [check])]
+        return [StackSteps(machine.ROLLBACK, [check])]
 
     def services() -> Sequence[StackSteps] | None:
         """``seams_check`` and the ladder of each service."""
@@ -364,7 +365,7 @@ def deploy_plan(
             return None
         made: list[StackSteps] = [
             StackSteps(
-                "seams",
+                machine.SEAMS,
                 [SeamsCheck(product, resolved.services, fetched, root)],
             )
         ]
@@ -609,7 +610,9 @@ def deploy_plan(
             )
             steps += _seeds(product, entry, release, ref, commit)
             made.append(StackSteps(entry, steps))
-        made.append(StackSteps("seams", [_seams_verify(product, release, ref, commit)]))
+        made.append(
+            StackSteps(machine.SEAMS, [_seams_verify(product, release, ref, commit)])
+        )
         return made
 
     def _seams_verify(
@@ -695,7 +698,7 @@ def deploy_plan(
         product = found[0]
         return [
             StackSteps(
-                "edge",
+                machine.EDGE,
                 [
                     TlsFiles(product, fetched=fetched, root=root),
                     Nginx(product, fetched=fetched, secrets=secrets, root=root),
@@ -709,7 +712,9 @@ def deploy_plan(
         if found is None:
             return None
         return [
-            StackSteps("frontend", [Frontend(found[0], fetched=fetched, root=root)])
+            StackSteps(
+                machine.FRONTEND, [Frontend(found[0], fetched=fetched, root=root)]
+            )
         ]
 
     def finalize() -> Sequence[StackSteps] | None:
@@ -731,7 +736,7 @@ def deploy_plan(
         composition["pridem"] = __version__
         return [
             StackSteps(
-                "finalize",
+                machine.FINALIZE,
                 [
                     FinalCheck(),
                     Finalize(
@@ -748,7 +753,10 @@ def deploy_plan(
             )
         ]
 
-    stacks: list[Stack] = [StackSteps("host", host), StackSteps("passport", first)]
+    stacks: list[Stack] = [
+        StackSteps(machine.HOST, host),
+        StackSteps(machine.PASSPORT, first),
+    ]
     if wanted.mode == "reinstall":
         stacks.append(
             StackSteps(
@@ -761,26 +769,26 @@ def deploy_plan(
     stacks += [
         # what destroy undoes stands after it: the machine's networks, the
         # timers (DM-86 FIX -- ensure_network stood in host, before destroy)
-        StackSteps("network", [EnsureNetwork(root)]),
-        StackSteps("timers", timer_steps(root, fetched=fetched)),
-        Deferred("sources", sources, after="fetch_passport"),
-        Deferred("dependencies", dependencies, after="fetch_root"),
+        StackSteps(machine.NETWORK, [EnsureNetwork(root)]),
+        StackSteps(machine.TIMERS, timer_steps(root, fetched=fetched)),
+        Deferred(machine.SOURCES, sources, after="fetch_passport"),
+        Deferred(machine.DEPENDENCIES, dependencies, after="fetch_root"),
         *(
-            [Deferred("rollback", rollback, after="fetch_services")]
+            [Deferred(machine.ROLLBACK, rollback, after="fetch_services")]
             if wanted.rollback
             else []
         ),
-        Deferred("services", services, after="fetch_services"),
+        Deferred(machine.SERVICES, services, after="fetch_services"),
         Deferred(PRODUCT, entries, after="fetch_root"),
-        Deferred("edge", edge, after="fetch_root"),
-        Deferred("frontend", frontend, after="fetch_root"),
+        Deferred(machine.EDGE, edge, after="fetch_root"),
+        Deferred(machine.FRONTEND, frontend, after="fetch_root"),
         # finalize, then the types (DM-63): a red deploy pushes no types, and
         # what types is refused once the release is out is left undone
-        Deferred("finalize", finalize, after="fetch_root", root=True),
+        Deferred(machine.FINALIZE, finalize, after="fetch_root", root=True),
     ]
     finally_ = [
-        StackSteps("stopped", [StartStopped(known.stopped)]),
-        StackSteps("host", final),
+        StackSteps(machine.STOPPED, [StartStopped(known.stopped)]),
+        StackSteps(machine.HOST, final),
         StackSteps(
             GC_STACK, gc_steps(root, box=box, run_id=session.run_id, fetched=fetched)
         ),

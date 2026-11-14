@@ -870,37 +870,15 @@ def _s_jobs(stack: Product | Service) -> list[Problem]:
 
 RESERVED_NAMES: frozenset[str] = frozenset(
     {
-        # the machine's own directory and compose projects, /opt/<name> and -p
-        "pridem",
-        "pridem-edge",
-        "pridem-egress",
-        # the word a service's seam names its product by (from: product)
-        "product",
-        # the stacks of the machine's plans: the verdict keys a step by
-        # (stack, name), and an entry of the same name would mix its facts
-        "backup",
-        "box",
-        "dependencies",
-        "destroy",
-        "edge",
-        "finalize",
-        "frontend",
-        "host",
-        "network",
-        "passport",
-        "rollback",
-        "rollback_check",
-        "seams",
-        "seed",
-        "services",
-        "sources",
-        "stopped",
-        "timers",
+        "pridem",  # the machine: /opt/pridem, its journal, its composition key
+        "product",  # the word a service's seam names its product by
     }
 )
-"""The names no stack, dependency or entry takes (DM-93: R2-S6, S16, B27) --
-one list, read by the schema; ``pridem-`` is reserved as a prefix too. A test
-holds it against the plans' stacks the code builds."""
+"""The names no stack, dependency or entry takes -- the machine's own and
+``product``; ``pridem-`` is reserved as a prefix: every stack of the
+machine's plans and every object it labels is ``pridem-<name>``
+(``pridem/stacks/names.py``), so no name a product may take is one of them
+(DM-93; DM-102 -- the plain words are the products' again)."""
 RESERVED_PREFIX = "pridem-"
 
 
@@ -910,9 +888,8 @@ def _reserved(name: str) -> bool:
 
 def _s_reserved(stack: Product | Service) -> list[Problem]:
     """The stack's name, its dependencies and its entries are none of the
-    machine's: ``/opt/pridem`` is the box, ``pridem-edge`` and
-    ``pridem-egress`` its compose projects, ``product`` a seam's word, the
-    plans' stacks the verdict's keys (DM-93)."""
+    machine's: ``/opt/pridem`` is the box, ``pridem-<name>`` its stacks and
+    compose projects, ``product`` a seam's word (DM-93, DM-102)."""
     out: list[Problem] = []
     if _reserved(stack.name):
         out.append(problem_at(("name",), "S.name-reserved", stack.name))

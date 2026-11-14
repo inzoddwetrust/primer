@@ -79,6 +79,7 @@ from typing import ClassVar
 from pridem.events import Fact, Json
 from pridem.report.schema import Verdict
 from pridem.runner import CommandFailed, CommandNotStarted, CommandTimedOut
+from pridem.stacks import names as machine
 from pridem.stacks.loader import ContractError
 from pridem.stacks.passport import Gc as GcPolicy
 from pridem.stacks.passport import Passport, load_passport, size_bytes
@@ -98,7 +99,7 @@ from pridem.steps.history import previous_releases
 from pridem.steps.passport import NO_PASSPORT, PASSPORT_COPY, Fetched
 from pridem.steps.sources import marked, package_dir
 
-GC_STACK = "box"
+GC_STACK = machine.BOX
 """The stack name a plan builder gives the ``gc`` step in ``finally``."""
 
 GC_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall", "gc"})
