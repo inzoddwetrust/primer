@@ -139,6 +139,7 @@ def _validate_call(compose: ComposeStack, item: DataItem, code: int) -> FakeCall
             f"type=bind,source={item.target},target={item.container},readonly",
             "-e",
             f"PROFILE_DIR={item.container}",
+            "--",
             "sha256:" + "c" * 64,
             "comms",
             "validate",

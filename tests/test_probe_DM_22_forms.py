@@ -152,11 +152,11 @@ def up_of(stack: Product, root: Path, commit: str = SHA) -> Up:
 
 def up_argv(cs: ComposeStack, *services: str) -> tuple[str, ...]:
     head = ("up", "-d", "--no-build", "--wait", "--wait-timeout", "300")
-    return tuple(cs.argv(*head, "--no-deps", *services))
+    return tuple(cs.argv(*head, "--no-deps", operands=services))
 
 
 def run_argv(cs: ComposeStack, job: str) -> tuple[str, ...]:
-    return tuple(cs.argv("run", "--rm", "--no-deps", job))
+    return tuple(cs.argv("run", "--rm", "--no-deps", operands=(job,)))
 
 
 def acting(cs: ComposeStack, job_code: int = 0) -> list[FakeCall]:
@@ -637,11 +637,11 @@ def migrate_check(cs: ComposeStack, behind: str | None = None) -> list[FakeCall]
 
 
 def stop_call(cs: ComposeStack, *services: str, code: int = 0) -> FakeCall:
-    return FakeCall(tuple(cs.argv("stop", *services)), code=code)
+    return FakeCall(tuple(cs.argv("stop", operands=(*services,))), code=code)
 
 
 def running_call(cs: ComposeStack, service: str, *ids: str) -> FakeCall:
-    argv = cs.argv("ps", "--status", "running", "-q", service)
+    argv = cs.argv("ps", "--status", "running", "-q", operands=(service,))
     return FakeCall(tuple(argv), lines=stdout(*ids))
 
 
@@ -736,13 +736,14 @@ def test_a_red_stop_crosses_no_point_and_finally_starts_what_it_stopped(
     script = [
         *migrate_check(cs, "0000"),
         stop_call(cs, "worker", code=1),
-        FakeCall(tuple(cs.argv("start", "worker"))),
+        FakeCall(tuple(cs.argv("start", operands=("worker",)))),
         running_call(cs, "worker", "c-worker"),
     ]
     with FakeRunner(*script) as runner:
         outcome = run_with_finally([stop, migrate], [start], runner)
     assert outcome.steps[0].reason == Code(
-        "command-failed", {"argv": list(cs.argv("stop", "worker")), "exit_code": 1}
+        "command-failed",
+        {"argv": list(cs.argv("stop", operands=("worker",))), "exit_code": 1},
     )
     assert outcome.steps[1].status == "skipped"
     assert outcome.needs_restore is False
@@ -763,7 +764,7 @@ def test_a_service_that_still_runs_after_stop_is_red_before_the_point(
         *migrate_check(cs, "0000"),
         stop_call(cs, "worker"),
         running_call(cs, "worker", "c-worker"),
-        FakeCall(tuple(cs.argv("start", "worker"))),
+        FakeCall(tuple(cs.argv("start", operands=("worker",)))),
         running_call(cs, "worker", "c-worker"),
     ]
     with FakeRunner(*script) as runner:

@@ -401,6 +401,7 @@ class DataCopy(Step):
                         *item.mount,
                         "-e",
                         f"{item.env}={item.container}",
+                        "--",  # the image is an operand, never an option (DM-93)
                         images[0],
                         *command,
                     ],

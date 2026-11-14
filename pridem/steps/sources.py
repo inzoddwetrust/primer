@@ -120,6 +120,9 @@ COMMIT = re.compile(r"[0-9a-f]{40}")
 
 NOT_A_COMMIT: dict[str, str] = {
     "not-a-commit": "{repo} answered {ref} with {commit}, not a 40-hex commit",
+    # every step that checks a repository out marks its directory (DM-93)
+    "not-ours": "{path} holds files and no mark of the machine: it is not the "
+    "machine's to write in",
 }
 """The code of every step that asks a remote for a commit: what the remote
 answered is checked before it reaches a git command or a release path."""
@@ -176,12 +179,22 @@ other directory of ``/opt`` -- a virtualenv ``env/``, a ``releases/`` of
 someone else -- is not the machine's and is left alone."""
 
 
+class NotOurs(Exception):
+    """``/opt/<stack>`` holds someone else's files and no mark of the machine."""
+
+
 def mark(home: Path, stack: str) -> None:
-    """The mark of ``home``, written once, atomically."""
+    """The mark of ``home``, written once, atomically -- in a directory that is
+    new or empty only: one that holds files and no mark is someone else's
+    (``/opt/pridem`` of the box, a deploy before the machine), and a mark would
+    hand it to ``destroy`` and ``gc`` (DM-93, R2-S6, B27)."""
     marker = home / MARKER
-    if not marker.is_file():
-        home.mkdir(parents=True, exist_ok=True)
-        atomic_write(marker, f"{stack}\n", 0o644)
+    if marker.is_file():
+        return
+    if home.exists() and (not home.is_dir() or any(home.iterdir())):
+        raise NotOurs(str(home))
+    home.mkdir(parents=True, exist_ok=True)
+    atomic_write(marker, f"{stack}\n", 0o644)
 
 
 def marked(root: Path) -> tuple[list[Path], list[Path]]:
@@ -222,7 +235,10 @@ class Checkout:
         """The bare repository with every branch and tag of the remote; the
         stack's directory marked as the machine's (``MARKER``)."""
         if "/" not in self.stack:
-            mark(self.home, self.stack)
+            try:
+                mark(self.home, self.stack)
+            except NotOurs:
+                raise StepFailed("not-ours", {"path": str(self.home)}) from None
         if not (self.bare / "HEAD").exists():
             self.bare.parent.mkdir(parents=True, exist_ok=True)
             run_git(ctx, self.root, ["init", "--quiet", "--bare", str(self.bare)])

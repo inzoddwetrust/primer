@@ -55,6 +55,7 @@ def nginx_t(root: Path, code: int = 0) -> FakeCall:
             f"{candidate_dir(root)}:/etc/nginx/conf.d:ro",
             "-v",
             f"{certs_dir(root)}:/etc/pridem/certs:ro",
+            "--",
             NGINX_IMAGE,
             "nginx",
             "-t",

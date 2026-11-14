@@ -199,6 +199,12 @@ def _server(
         "    proxy_set_header X-Real-IP $remote_addr;",
         "    proxy_set_header X-Forwarded-For $remote_addr;",
         "    proxy_set_header X-Forwarded-Proto https;",
+        # what the client says of the edge is the edge's to say (DM-93, R2-S11):
+        # its own host and port; the prefix and Forwarded never reach the app
+        "    proxy_set_header X-Forwarded-Host $host;",
+        "    proxy_set_header X-Forwarded-Port 443;",
+        '    proxy_set_header X-Forwarded-Prefix "";',
+        '    proxy_set_header Forwarded "";',
     ]
     if route.read_timeout is not None:
         lines.append(f"    proxy_read_timeout {route.read_timeout};")

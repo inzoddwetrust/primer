@@ -148,7 +148,14 @@ def script(
         # DM-81: a running database is never recreated by the tests
         FakeCall(
             tuple(
-                cs.argv("up", "-d", "--no-build", "--no-recreate", "--wait", "postgres")
+                cs.argv(
+                    "up",
+                    "-d",
+                    "--no-build",
+                    "--no-recreate",
+                    "--wait",
+                    operands=("postgres",),
+                )
             )
         ),
         FakeCall(
@@ -156,14 +163,16 @@ def script(
                 cs.argv(
                     "exec",
                     "-T",
-                    "postgres",
-                    "psql",
-                    "-U",
-                    "blank",
-                    "-d",
-                    "postgres",
-                    "-tAc",
-                    f"SELECT 1 FROM pg_database WHERE datname = '{test_db}'",  # noqa: S608
+                    operands=(
+                        "postgres",
+                        "psql",
+                        "-U",
+                        "blank",
+                        "-d",
+                        "postgres",
+                        "-tAc",
+                        f"SELECT 1 FROM pg_database WHERE datname = '{test_db}'",  # noqa: S608
+                    ),
                 )
             ),
             lines=stdout("1") if exists else (),
@@ -175,7 +184,15 @@ def script(
                 FakeCall(
                     tuple(
                         cs.argv(
-                            "exec", "-T", "postgres", "createdb", "-U", "blank", test_db
+                            "exec",
+                            "-T",
+                            operands=(
+                                "postgres",
+                                "createdb",
+                                "-U",
+                                "blank",
+                                test_db,
+                            ),
                         )
                     )
                 )
@@ -213,6 +230,7 @@ def script(
                 str(home / "test.env"),
                 "--mount",  # never -v (DM-86 FIX)
                 f"type=bind,source={home / 'junit'},target=/tmp/out",
+                "--",
                 IID,
                 "python",
                 "-m",

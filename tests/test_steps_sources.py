@@ -29,6 +29,7 @@ from pridem.steps.sources import (
     FetchPackages,
     FetchRoot,
     FetchServices,
+    mark,
     marked,
     remote_target,
     source_steps,
@@ -322,11 +323,16 @@ def test_probe_DM_10_config_is_read_from_target_ref_not_worktree(
 
 
 def test_probe_DM_10_release_dir_is_inert(tmp_path: Path) -> None:
-    """Nothing runs from releases/ and current is never touched."""
+    """Nothing runs from releases/ and current is never touched.
+
+    Changed by DM-93, on the dispatcher's word before the change: the box is
+    drawn as the machine leaves it -- ``/opt/aivis`` with the machine's mark;
+    a directory with ``current`` and no mark is someone else's, and the fetch
+    refuses it (``fetch_root:not-ours``, ``test_dm93_cheap_guards``)."""
     remote(tmp_path, "aivis", {"primer.yaml": product(tmp_path, dependency=False)})
     root = tmp_path / "box"
     home = root / "opt" / "aivis"
-    home.mkdir(parents=True)
+    mark(home, "aivis")  # the machine's directory has its mark from the start
     (home / "current").symlink_to("releases/older")
     _, steps = source_steps(
         root,

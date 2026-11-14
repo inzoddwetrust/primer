@@ -362,8 +362,8 @@ class Up(Step):
     def _up(self, ctx: StepContext, *services: str) -> None:
         argv = ["up", "-d", "--no-build", "--wait", "--wait-timeout", str(UP_WAIT_S)]
         if services:  # an entry with jobs names what comes up (DM-22)
-            argv += ["--no-deps", *services]
-        out(ctx, self.compose.argv(*argv), timeout=UP_WAIT_S + 60)
+            argv.append("--no-deps")
+        out(ctx, self.compose.argv(*argv, operands=services), timeout=UP_WAIT_S + 60)
 
     def _with_jobs(self, ctx: StepContext, jobs: frozenset[str]) -> list[str]:
         """The jobs, each after what it needs; then every other service. The
@@ -376,7 +376,7 @@ class Up(Step):
                 self._up(ctx, *needed)
             out(
                 ctx,
-                self.compose.argv("run", "--rm", "--no-deps", job),
+                self.compose.argv("run", "--rm", "--no-deps", operands=(job,)),
                 timeout=JOB_TIMEOUT_S,
             )
             ran.append(job)

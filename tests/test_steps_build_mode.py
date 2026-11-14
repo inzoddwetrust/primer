@@ -658,6 +658,7 @@ def test_up_and_migrate_find_the_image_of_app_by_its_key(tmp_path: Path) -> None
             "--network",
             "none",
             *labels,
+            "--",
             APP_IMAGE,
             "python",
             "-m",
@@ -1048,7 +1049,9 @@ def running(
 ) -> list[FakeCall]:
     """``running_image`` of ``service``: its container and the container's image."""
     return [
-        FakeCall(tuple(cs.argv("ps", "-q", service)), lines=stdout(container)),
+        FakeCall(
+            tuple(cs.argv("ps", "-q", operands=(service,))), lines=stdout(container)
+        ),
         FakeCall(
             ("docker", "inspect", "-f", "{{.Image}}", container), lines=stdout(image)
         ),

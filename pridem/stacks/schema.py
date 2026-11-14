@@ -162,6 +162,10 @@ RULES = {
     "S.egress-duplicate": (0, "protocol 4.2: an egress host is named once"),
     "S.option-name": (0, "an option is named ^[a-z][a-z0-9_]*$"),
     "S.name": (0, "a name is ^[a-z0-9][a-z0-9_-]{0,62}$"),
+    "S.name-reserved": (
+        0,
+        "a name of the machine's is not a stack's, a dependency's or an entry's",
+    ),
     "S.env-key": (0, "a key of env is ^[A-Za-z_][A-Za-z0-9_]*$"),
     "S.env-reserved": (
         0,
@@ -838,6 +842,64 @@ def _s_jobs(stack: Product | Service) -> list[Problem]:
     return out
 
 
+RESERVED_NAMES: frozenset[str] = frozenset(
+    {
+        # the machine's own directory and compose projects, /opt/<name> and -p
+        "pridem",
+        "pridem-edge",
+        "pridem-egress",
+        # the word a service's seam names its product by (from: product)
+        "product",
+        # the stacks of the machine's plans: the verdict keys a step by
+        # (stack, name), and an entry of the same name would mix its facts
+        "backup",
+        "box",
+        "dependencies",
+        "destroy",
+        "edge",
+        "finalize",
+        "frontend",
+        "host",
+        "network",
+        "passport",
+        "rollback",
+        "rollback_check",
+        "seams",
+        "seed",
+        "services",
+        "sources",
+        "stopped",
+        "timers",
+    }
+)
+"""The names no stack, dependency or entry takes (DM-93: R2-S6, S16, B27) --
+one list, read by the schema; ``pridem-`` is reserved as a prefix too. A test
+holds it against the plans' stacks the code builds."""
+RESERVED_PREFIX = "pridem-"
+
+
+def _reserved(name: str) -> bool:
+    return name in RESERVED_NAMES or name.startswith(RESERVED_PREFIX)
+
+
+def _s_reserved(stack: Product | Service) -> list[Problem]:
+    """The stack's name, its dependencies and its entries are none of the
+    machine's: ``/opt/pridem`` is the box, ``pridem-edge`` and
+    ``pridem-egress`` its compose projects, ``product`` a seam's word, the
+    plans' stacks the verdict's keys (DM-93)."""
+    out: list[Problem] = []
+    if _reserved(stack.name):
+        out.append(problem_at(("name",), "S.name-reserved", stack.name))
+    for name in stack.stacks:
+        if _reserved(name):
+            out.append(problem_at(("stacks", name), "S.name-reserved", name))
+    if isinstance(stack, Product):
+        for name in stack.dependencies:
+            if _reserved(name):
+                out.append(problem_at(("dependencies", name), "S.name-reserved", name))
+    return out
+
+
 def _s_verbs(stack: Product | Service) -> list[Problem]:
     """A verb runs in a service of an entry of the same product -- ``entry``,
     by default the product's own: a running service, or a job of that entry
@@ -1291,6 +1353,7 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _s_stop,
     _s_verbs,
     _s_types_one,
+    _s_reserved,
 )
 
 

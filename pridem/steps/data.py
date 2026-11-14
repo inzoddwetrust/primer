@@ -144,7 +144,9 @@ def _head(ctx: StepContext, compose: ComposeStack) -> str | None:
         return None
     _, lines = out(
         ctx,
-        compose.argv("run", "--rm", compose.app_service, *ALEMBIC, "current"),
+        compose.argv(
+            "run", "--rm", operands=(compose.app_service, *ALEMBIC, "current")
+        ),
         timeout=COMMAND_TIMEOUT_S,
     )
     heads = current(lines)
@@ -165,6 +167,7 @@ def _toc(ctx: StepContext, path: Path, image: str) -> int:
             *THROWAWAY,
             *NO_PULL,
             *mount_flag(path, "/primer/db.dump"),  # a run_id holds colons
+            "--",  # the image is an operand, never an option (DM-93)
             image,
             "pg_restore",
             "--list",
@@ -239,20 +242,23 @@ class DbDump(Step):
         for place in (self.directory.parent, self.directory):
             place.mkdir(exist_ok=True, mode=0o700)
             place.chmod(0o700)
-        exec_ = ("exec", "-T", service)
+        exec_ = ("exec", "-T")  # the service among the operands, after --
         out(
             ctx,
-            self.compose.argv(*exec_, "pg_dump", "-U", user, "-Fc", "-f", inside, live),
+            self.compose.argv(
+                *exec_,
+                operands=(service, "pg_dump", "-U", user, "-Fc", "-f", inside, live),
+            ),
             timeout=DUMP_TIMEOUT_S,
         )
         out(
             ctx,
-            self.compose.argv("cp", f"{service}:{inside}", str(partial)),
+            self.compose.argv("cp", operands=(f"{service}:{inside}", str(partial))),
             timeout=DUMP_TIMEOUT_S,
         )
         out(
             ctx,
-            self.compose.argv(*exec_, "rm", "-f", inside),
+            self.compose.argv(*exec_, operands=(service, "rm", "-f", inside)),
             timeout=COMMAND_TIMEOUT_S,
         )
         partial.chmod(0o600)
@@ -338,21 +344,28 @@ class DbRestore(Step):
         service, user, live = (str(check.data[k]) for k in ("service", "user", "live"))
         # a path inside the database's container, not on the box
         inside = f"/tmp/pridem-restore-{self.compose.entry}.dump"  # noqa: S108
-        exec_ = ("exec", "-T", service)
+        exec_ = ("exec", "-T")  # the service among the operands, after --
         out(
             ctx,
-            self.compose.argv("cp", str(self.path), f"{service}:{inside}"),
+            self.compose.argv("cp", operands=(str(self.path), f"{service}:{inside}")),
             timeout=DUMP_TIMEOUT_S,
         )
-        restore = ("pg_restore", "--clean", "--if-exists", "--no-owner")
+        # one transaction, stopped at the first error: a restore that fails
+        # half-way leaves the database as it was (DM-93, R2-S7)
+        restore = (
+            "pg_restore", "--clean", "--if-exists", "--no-owner",
+            "--single-transaction", "--exit-on-error",
+        )  # fmt: skip
         out(
             ctx,
-            self.compose.argv(*exec_, *restore, "-U", user, "-d", live, inside),
+            self.compose.argv(
+                *exec_, operands=(service, *restore, "-U", user, "-d", live, inside)
+            ),
             timeout=DUMP_TIMEOUT_S,
         )
         out(
             ctx,
-            self.compose.argv(*exec_, "rm", "-f", inside),
+            self.compose.argv(*exec_, operands=(service, "rm", "-f", inside)),
             timeout=COMMAND_TIMEOUT_S,
         )
 
@@ -414,7 +427,7 @@ class StopForRestore(Step):
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         stop = [str(name) for name in _list(check.data.get("stop"))]
         self.stopped.entries.append((self.compose, stop, self.restore))
-        out(ctx, self.compose.argv("stop", *stop), timeout=STOP_TIMEOUT_S)
+        out(ctx, self.compose.argv("stop", operands=stop), timeout=STOP_TIMEOUT_S)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         stop = [str(name) for name in _list(check.data.get("stop"))]
@@ -468,7 +481,11 @@ class StartRestored(Step):
         return CheckResult(True, local_code("start", params), {})
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        out(ctx, self.compose.argv("start", *self._mine()), timeout=STOP_TIMEOUT_S)
+        out(
+            ctx,
+            self.compose.argv("start", operands=self._mine()),
+            timeout=STOP_TIMEOUT_S,
+        )
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         mine = self._mine()
@@ -570,7 +587,7 @@ def image_is_current(
     label = '{{index .Config.Labels "pridem.commit"}}'
     _, lines = out(
         ctx,
-        ["docker", "image", "inspect", "-f", label, image],
+        ["docker", "image", "inspect", "-f", label, "--", image],
         timeout=COMMAND_TIMEOUT_S,
         passed_on=False,
     )
@@ -593,7 +610,7 @@ def _heads(ctx: StepContext, compose: ComposeStack) -> list[str]:
     app = compose.app_service or ""
     _, lines = out(
         ctx,
-        compose.argv("run", "--rm", "--no-deps", app, *ALEMBIC, "heads"),
+        compose.argv("run", "--rm", "--no-deps", operands=(app, *ALEMBIC, "heads")),
         timeout=COMMAND_TIMEOUT_S,
     )
     return heads_of(lines)
@@ -609,15 +626,8 @@ def _psql(ctx: StepContext, compose: ComposeStack, db: Database, sql: str) -> li
         compose.argv(
             "exec",
             "-T",
-            db.service,
-            "psql",
-            "-U",
-            db.user,
-            "-d",
-            "postgres",
-            "-tAc",
-            sql,
-        ),  # fmt: skip
+            operands=(db.service, "psql", "-U", db.user, "-d", "postgres", "-tAc", sql),
+        ),
         timeout=COMMAND_TIMEOUT_S,
     )
     return [line.strip() for line in lines if line.strip()]
@@ -640,7 +650,9 @@ def _migrate_argv(compose: ComposeStack) -> list[str]:
     stage = compose.stack.stacks[compose.entry]
     if stage.migrate is None or compose.app_service is None:
         raise StepFailed("no-migrate", {"stack": compose.entry})
-    return compose.argv("run", "--rm", compose.app_service, *shlex.split(stage.migrate))
+    return compose.argv(
+        "run", "--rm", operands=(compose.app_service, *shlex.split(stage.migrate))
+    )
 
 
 class DbReset(Step):
@@ -743,7 +755,9 @@ class DbMigrate(Step):
         if now == found[0]:
             return CheckResult(False, None, data)
         app = self.compose.app_service or ""
-        show = self.compose.argv("run", "--rm", "--no-deps", app, *ALEMBIC, "show")
+        show = self.compose.argv(
+            "run", "--rm", "--no-deps", operands=(app, *ALEMBIC, "show")
+        )
         if now is not None and unknown_head(ctx, [*show, now], now):
             raise StepFailed("db-ahead", {"entry": self.compose.entry, "head": now})
         params = {
@@ -772,7 +786,7 @@ class DbMigrate(Step):
 
 def _seed_argv(compose: ComposeStack, run: str) -> list[str]:
     app = compose.app_service or ""
-    return compose.argv("run", "--rm", app, *shlex.split(run))
+    return compose.argv("run", "--rm", operands=(app, *shlex.split(run)))
 
 
 class Seeds(Step):
@@ -946,7 +960,7 @@ class ProjectVerb(Step):
         how = ("run", "--rm", "--no-deps") if self.oneoff else ("exec", "-T")
         out(
             ctx,
-            self.compose.argv(*how, self.service, *self.argv),
+            self.compose.argv(*how, operands=(self.service, *self.argv)),
             timeout=VERB_TIMEOUT_S,
         )
 
@@ -1010,7 +1024,11 @@ class _ServiceAction(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         services = [str(s) for s in _list(check.data.get("services"))]
-        out(ctx, self.compose.argv(self.action, *services), timeout=SERVICE_TIMEOUT_S)
+        out(
+            ctx,
+            self.compose.argv(self.action, operands=services),
+            timeout=SERVICE_TIMEOUT_S,
+        )
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         services = [str(s) for s in _list(check.data.get("services"))]

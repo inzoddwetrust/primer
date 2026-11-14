@@ -693,6 +693,7 @@ class DeriveEnv(Step):
                     f"pridem.stack={render.stack.name}",
                     "--env-file",
                     str(env_file),
+                    "--",  # the image is an operand, never an option (DM-93)
                     image,
                     *command,
                 ],

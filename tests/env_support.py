@@ -219,7 +219,7 @@ def running_calls(step: DeriveEnv, image: str | None) -> list[FakeCall]:
     app = compose.app_service
     assert app is not None
     ps = FakeCall(
-        tuple(compose.argv("ps", "-q", app)),
+        tuple(compose.argv("ps", "-q", operands=(app,))),
         lines=() if image is None else ((Stream.STDOUT, "c-app"),),
     )
     if image is None:

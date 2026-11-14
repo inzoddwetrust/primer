@@ -205,8 +205,11 @@ class ComposeStack:
             *args,
         ]
 
-    def argv(self, *args: str) -> list[str]:
-        """Compose of the product's file with the machine's override."""
+    def argv(self, *args: str, operands: Sequence[str] = ()) -> list[str]:
+        """Compose of the product's file with the machine's override.
+        ``operands`` -- the service names and what follows them -- go after
+        ``--``: a name or an image from the product's compose, a package or a
+        person is never read as an option of compose (DM-93, R2-S2, S17)."""
         return [
             "docker",
             "compose",
@@ -219,6 +222,7 @@ class ComposeStack:
             "-f",
             str(self.override),
             *args,
+            *(["--", *operands] if operands else []),
         ]
 
     def stack_labels(self) -> dict[str, str]:
@@ -1050,7 +1054,7 @@ def image_of(
 
 def running_image(ctx: StepContext, compose: ComposeStack, service: str) -> str | None:
     """The image ID the running container of ``service`` was made from."""
-    _, ids = out(ctx, compose.argv("ps", "-q", service), passed_on=False)
+    _, ids = out(ctx, compose.argv("ps", "-q", operands=(service,)), passed_on=False)
     found = [line.strip() for line in ids if line.strip()]
     if not found:
         return None

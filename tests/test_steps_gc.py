@@ -985,11 +985,15 @@ def test_a_fault_of_the_machine_in_gc_is_red_not_unreadable(
 def test_gc_takes_only_the_stacks_the_machine_marked(tmp_path: Path) -> None:
     """DM-76: ``/opt/<x>/releases`` of someone else is not a stack of the
     machine -- ``gc`` does not collect it; a mark naming another stack is not
-    one either. The pair: the machine's marked stack is."""
+    one either. The pair: the machine's marked stack is.
+
+    Changed by DM-93, on the dispatcher's word: the machine marks its
+    directory before anything is in it -- a directory with files and no mark
+    is not marked any more (``mark`` refuses it)."""
     root = tmp_path / "fs"
+    mark(root / "opt" / "aivis", "aivis")  # marked before it holds anything (DM-93)
     for name in ("aivis", "theirs", "copied"):
-        (root / "opt" / name / "releases").mkdir(parents=True)
-    mark(root / "opt" / "aivis", "aivis")
+        (root / "opt" / name / "releases").mkdir(parents=True, exist_ok=True)
     (root / "opt" / "copied" / ".pridem").write_text("aivis\n")
     step = Gc(
         box=Box(root / "opt" / "pridem"), run_id="r", fetched=Fetched(), root=root

@@ -187,6 +187,7 @@ def test_red_validate_stops_before_anything_is_switched(tmp_path: Path) -> None:
             *labels,
             "--mount",  # never -v (DM-86 FIX)
             f"type=bind,source={package / 'css'},target=/srv/skin,readonly",
+            "--",
             FRONT_IMAGE,
             "validate-skin",
             "/srv/skin",
@@ -267,6 +268,7 @@ def test_an_image_named_in_compose_is_used_only_without_build(
                 "--mount",
                 f"type=bind,source={package / 'css'},target=/srv/skin,readonly",
             ),
+            "--",
             *("front:1", "validate-skin", "/srv/skin"),
         )
         calls += [FakeCall(validate, code=3)]
@@ -529,6 +531,7 @@ def _validate(package: Path, code: int) -> FakeCall:
             *labels,
             "--mount",  # never -v (DM-86 FIX)
             f"type=bind,source={package / 'css'},target=/srv/skin,readonly",
+            "--",
             FRONT_IMAGE,
             "validate-skin",
             "/srv/skin",

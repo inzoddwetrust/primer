@@ -52,6 +52,7 @@ def _validate(compose: ComposeStack, item: DataItem, code: int) -> FakeCall:
             f"type=bind,source={item.target},target={item.container},readonly",
             "-e",
             "PROFILE_DIR=/primer/data/profile",
+            "--",
             IMAGE,
             "comms",
             "validate",

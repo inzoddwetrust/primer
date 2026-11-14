@@ -41,13 +41,24 @@ def image_calls(cs: ComposeStack, commit: str = SHA) -> list[FakeCall]:
     """The image ``compose run app`` starts -- the name the release's override
     gives it (DM-90; it was compose's own, ``<project>-app``) -- and the
     commit of the current release."""
-    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, APP_IMAGE)
+    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, "--", APP_IMAGE)
     return [FakeCall(inspect, lines=lines(commit)), git_call(cs)]
 
 
 def psql_call(cs: ComposeStack, sql: str, *out: str) -> FakeCall:
     argv = cs.argv(
-        "exec", "-T", "postgres", "psql", "-U", "blank", "-d", "postgres", "-tAc", sql
+        "exec",
+        "-T",
+        operands=(
+            "postgres",
+            "psql",
+            "-U",
+            "blank",
+            "-d",
+            "postgres",
+            "-tAc",
+            sql,
+        ),
     )
     return FakeCall(tuple(argv), lines=lines(*out))
 
@@ -72,13 +83,34 @@ def reset_calls(
         config_call(cs),
         running_call(cs, "app", "c-app"),
         running_call(cs, "frontend", "c-front"),
-        FakeCall(tuple(cs.argv("stop", "app", "frontend"))),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "stop",
+                    operands=(
+                        "app",
+                        "frontend",
+                    ),
+                )
+            )
+        ),
         running_call(cs, "app"),
         running_call(cs, "frontend"),
         *check,  # db_reset's own
         psql_call(cs, 'DROP DATABASE "blank" WITH (FORCE)'),
         psql_call(cs, 'CREATE DATABASE "blank" OWNER "blank"'),
-        FakeCall(tuple(cs.argv("run", "--rm", "app", *MIGRATE))),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "run",
+                    "--rm",
+                    operands=(
+                        "app",
+                        *MIGRATE,
+                    ),
+                )
+            )
+        ),
         psql_call(cs, OID_SQL, oid_after),
     ]
     if oid_after in (OID, ""):  # red on the OID: the head is not read
@@ -88,7 +120,17 @@ def reset_calls(
         return calls
     return [
         *calls,
-        FakeCall(tuple(cs.argv("start", "app", "frontend"))),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "start",
+                    operands=(
+                        "app",
+                        "frontend",
+                    ),
+                )
+            )
+        ),
         running_call(cs, "app", "c-app"),
         running_call(cs, "frontend", "c-front"),
     ]
@@ -198,7 +240,7 @@ def test_an_image_not_of_the_current_release_is_refused_before_anything_stops(
     way out. Each side of the comparison has its case."""
     blank_box(tmp_path, name="box-1")
     cs = compose(tmp_path)
-    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, APP_IMAGE)
+    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, "--", APP_IMAGE)
     calls = [
         config_call(cs),
         FakeCall(inspect, lines=lines(image_commit)),
@@ -228,10 +270,29 @@ def test_an_image_not_of_the_current_release_is_refused_before_anything_stops(
 
 def migrate_check(cs: ComposeStack, current: str) -> list[FakeCall]:
     heads = cs.argv(
-        "run", "--rm", "--no-deps", "app", "python", "-m", "alembic", "heads"
+        "run",
+        "--rm",
+        "--no-deps",
+        operands=(
+            "app",
+            "python",
+            "-m",
+            "alembic",
+            "heads",
+        ),
     )
     show = cs.argv(
-        "run", "--rm", "--no-deps", "app", "python", "-m", "alembic", "show", current
+        "run",
+        "--rm",
+        "--no-deps",
+        operands=(
+            "app",
+            "python",
+            "-m",
+            "alembic",
+            "show",
+            current,
+        ),
     )
     known = [FakeCall(tuple(show), lines=lines(f"Rev: {current}"))]
     return [
@@ -252,7 +313,18 @@ def test_db_migrate_brings_the_database_to_the_head_of_its_code(tmp_path: Path) 
     cs = compose(tmp_path)
     calls = [
         *migrate_check(cs, "0001"),  # stop_for_migrate: empty list, no check
-        FakeCall(tuple(cs.argv("run", "--rm", "app", *MIGRATE))),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "run",
+                    "--rm",
+                    operands=(
+                        "app",
+                        *MIGRATE,
+                    ),
+                )
+            )
+        ),
         head_call(cs, "0002"),
     ]
     with FakeRunner(*calls) as runner:
@@ -282,10 +354,29 @@ def test_db_migrate_on_a_database_ahead_of_its_code_is_red_before_it_acts(
     blank_box(tmp_path)
     cs = compose(tmp_path)
     heads = cs.argv(
-        "run", "--rm", "--no-deps", "app", "python", "-m", "alembic", "heads"
+        "run",
+        "--rm",
+        "--no-deps",
+        operands=(
+            "app",
+            "python",
+            "-m",
+            "alembic",
+            "heads",
+        ),
     )
     show = cs.argv(
-        "run", "--rm", "--no-deps", "app", "python", "-m", "alembic", "show", "0003"
+        "run",
+        "--rm",
+        "--no-deps",
+        operands=(
+            "app",
+            "python",
+            "-m",
+            "alembic",
+            "show",
+            "0003",
+        ),
     )
     missing = "FAILED: Can't locate revision identified by '0003'"
     calls = [
@@ -312,7 +403,16 @@ def test_db_migrate_with_two_heads_is_red_before_it_acts(tmp_path: Path) -> None
     blank_box(tmp_path)
     cs = compose(tmp_path)
     heads = cs.argv(
-        "run", "--rm", "--no-deps", "app", "python", "-m", "alembic", "heads"
+        "run",
+        "--rm",
+        "--no-deps",
+        operands=(
+            "app",
+            "python",
+            "-m",
+            "alembic",
+            "heads",
+        ),
     )
     calls = [
         config_call(cs),
@@ -394,7 +494,19 @@ def _plan(
 
 def _seed_call(cs: ComposeStack, name: str) -> FakeCall:
     return FakeCall(
-        tuple(cs.argv("run", "--rm", "app", "python", "-m", "app.seed", name))
+        tuple(
+            cs.argv(
+                "run",
+                "--rm",
+                operands=(
+                    "app",
+                    "python",
+                    "-m",
+                    "app.seed",
+                    name,
+                ),
+            )
+        )
     )
 
 
@@ -527,7 +639,19 @@ def test_probe_DM_22_seed_dry_run_writes_nothing(tmp_path: Path) -> None:
         "stack": STACK,
         "profile": "demo",
         "service": "app",
-        "argv": list(cs.argv("run", "--rm", "app", "python", "-m", "app.seed", "demo")),
+        "argv": list(
+            cs.argv(
+                "run",
+                "--rm",
+                operands=(
+                    "app",
+                    "python",
+                    "-m",
+                    "app.seed",
+                    "demo",
+                ),
+            )
+        ),
     }
     after = sorted(
         p
@@ -629,7 +753,18 @@ def test_a_migration_that_leaves_the_database_behind_is_red(tmp_path: Path) -> N
     cs = compose(tmp_path)
     calls = [
         *migrate_check(cs, "0001"),
-        FakeCall(tuple(cs.argv("run", "--rm", "app", *MIGRATE))),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "run",
+                    "--rm",
+                    operands=(
+                        "app",
+                        *MIGRATE,
+                    ),
+                )
+            )
+        ),
         head_call(cs, "0001"),
     ]
     with FakeRunner(*calls) as runner:
@@ -644,7 +779,7 @@ def test_an_image_with_no_commit_label_is_refused(tmp_path: Path) -> None:
     build: ``image-unread``, nothing stopped."""
     blank_box(tmp_path, name="box-1")
     cs = compose(tmp_path)
-    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, APP_IMAGE)
+    inspect = ("docker", "image", "inspect", "-f", IMAGE_LABEL, "--", APP_IMAGE)
     calls = [config_call(cs), FakeCall(inspect, lines=lines("<no value>"))]
     with FakeRunner(*calls) as runner:
         code, out, _ = _cli(tmp_path, RESET, runner)

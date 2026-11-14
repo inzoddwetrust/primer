@@ -238,6 +238,7 @@ class Nginx(Step):
                     f"{candidate_dir(self.root)}:/etc/nginx/conf.d:ro",
                     "-v",
                     f"{certs_dir(self.root)}:/etc/pridem/certs:ro",
+                    "--",  # the image is an operand, never an option (DM-93)
                     NGINX_IMAGE,
                     "nginx",
                     "-t",

@@ -184,6 +184,7 @@ class Migrate(Step):
             "--network",
             "none",
             *labels,
+            "--",  # the image is an operand, never an option (DM-93)
             images[0],
             *ALEMBIC,
             *args,
@@ -192,7 +193,7 @@ class Migrate(Step):
     def _current(self, ctx: StepContext) -> list[str]:
         _, lines = out(
             ctx,
-            self.compose.argv("run", "--rm", self.app, *ALEMBIC, "current"),
+            self.compose.argv("run", "--rm", operands=(self.app, *ALEMBIC, "current")),
             timeout=COMMAND_TIMEOUT_S,
         )
         return current(lines)
@@ -231,7 +232,7 @@ class Migrate(Step):
         self.acted = True
         out(
             ctx,
-            self.compose.argv("run", "--rm", self.app, *self.command),
+            self.compose.argv("run", "--rm", operands=(self.app, *self.command)),
             timeout=MIGRATE_TIMEOUT_S,
         )
 
@@ -264,7 +265,7 @@ def running(ctx: StepContext, compose: ComposeStack, services: list[str]) -> lis
     for service in services:
         _, lines = out(
             ctx,
-            compose.argv("ps", "--status", "running", "-q", service),
+            compose.argv("ps", "--status", "running", "-q", operands=(service,)),
             timeout=COMMAND_TIMEOUT_S,
         )
         if any(line.strip() for line in lines):
@@ -360,7 +361,7 @@ class StopForMigrate(Step):
         self.stopped.entries.append((self.compose, self.services, self.migrate))
         out(
             ctx,
-            self.compose.argv("stop", *self.services),
+            self.compose.argv("stop", operands=self.services),
             timeout=STOP_TIMEOUT_S,
         )
 
@@ -427,7 +428,7 @@ class StartStopped(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         for compose, services in self._due():
-            out(ctx, compose.argv("start", *services), timeout=STOP_TIMEOUT_S)
+            out(ctx, compose.argv("start", operands=services), timeout=STOP_TIMEOUT_S)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         started: dict[str, Json] = {}

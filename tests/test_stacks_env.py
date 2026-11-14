@@ -99,7 +99,7 @@ def derive_call(
     env_file: Path, code: int = 0, lines: Sequence[tuple[object, str]] = ()
 ) -> FakeCall:
     return FakeCall(
-        (*DERIVE_ARGV, str(env_file), IMAGE, "comms", "derive", "bot-url"),
+        (*DERIVE_ARGV, str(env_file), "--", IMAGE, "comms", "derive", "bot-url"),
         code=code,
         lines=tuple(lines),  # type: ignore[arg-type]
     )
@@ -718,7 +718,7 @@ def test_two_derived_keys_one_red_leaves_the_env_as_render_env_wrote_it(
     env_file = root / "opt" / "comms" / "env" / "derive.env"
     second = replace(
         derive_call(env_file, code=3),
-        argv=(*DERIVE_ARGV, str(env_file), IMAGE, "comms", "derive", "bot-name"),
+        argv=(*DERIVE_ARGV, str(env_file), "--", IMAGE, "comms", "derive", "bot-name"),
     )
     secrets = Secrets(())
     steps = passes(comms, root, fetched, made, secrets=secrets)

@@ -578,6 +578,7 @@ def test_changed_data_is_a_new_copy_and_the_old_one_stays(tmp_path: Path) -> Non
             f"type=bind,source={item.target},target={item.container},readonly",
             "-e",
             "PROFILE_DIR=/primer/data/profile",
+            "--",
             IMAGE,
             "comms",
             "validate",
@@ -755,7 +756,15 @@ def test_test_services_come_up_with_the_database(tmp_path: Path) -> None:
     up = FakeCall(
         tuple(
             compose.argv(
-                "up", "-d", "--no-build", "--no-recreate", "--wait", "postgres", "redis"
+                "up",
+                "-d",
+                "--no-build",
+                "--no-recreate",
+                "--wait",
+                operands=(
+                    "postgres",
+                    "redis",
+                ),
             )
         )
     )
@@ -764,14 +773,16 @@ def test_test_services_come_up_with_the_database(tmp_path: Path) -> None:
             compose.argv(
                 "exec",
                 "-T",
-                "postgres",
-                "psql",
-                "-U",
-                "u",
-                "-d",
-                "postgres",
-                "-tAc",
-                "SELECT 1 FROM pg_database WHERE datname = 'aivis_test'",
+                operands=(
+                    "postgres",
+                    "psql",
+                    "-U",
+                    "u",
+                    "-d",
+                    "postgres",
+                    "-tAc",
+                    "SELECT 1 FROM pg_database WHERE datname = 'aivis_test'",
+                ),
             )
         ),
         lines=stdout("1"),
@@ -915,6 +926,7 @@ def test_an_empty_directory_is_copied_too(tmp_path: Path) -> None:
             f"type=bind,source={item.target},target={item.container},readonly",
             "-e",
             "PROFILE_DIR=/primer/data/profile",
+            "--",
             IMAGE,
             "comms",
             "validate",

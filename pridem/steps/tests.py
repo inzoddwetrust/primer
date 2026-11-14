@@ -327,7 +327,7 @@ class Tests(Step):
         compose = self.compose
         wanted = [found.service, *(s for s in self.services if s != found.service)]
         up = ["up", "-d", "--no-build", "--no-recreate", "--wait"]
-        out(ctx, compose.argv(*up, *wanted))
+        out(ctx, compose.argv(*up, operands=wanted))
         # the name is [a-z0-9_] only: database() refuses anything else
         sql = f"SELECT 1 FROM pg_database WHERE datname = '{found.test}'"  # noqa: S608
         _, lines = out(
@@ -335,14 +335,8 @@ class Tests(Step):
             compose.argv(
                 "exec",
                 "-T",
-                found.service,
-                "psql",
-                "-U",
-                found.user,
-                "-d",
-                "postgres",
-                "-tAc",
-                sql,
+                operands=(found.service, "psql", "-U", found.user, "-d", "postgres")
+                + ("-tAc", sql),
             ),
         )
         if "1" not in [line.strip() for line in lines]:
@@ -351,11 +345,7 @@ class Tests(Step):
                 compose.argv(
                     "exec",
                     "-T",
-                    found.service,
-                    "createdb",
-                    "-U",
-                    found.user,
-                    found.test,
+                    operands=(found.service, "createdb", "-U", found.user, found.test),
                 ),
             )
 
@@ -450,6 +440,7 @@ class Tests(Step):
                     "--env-file",
                     str(env_file),
                     *mount,
+                    "--",  # the image is an operand, never an option (DM-93)
                     self.image,
                     *shlex.split(self.run),
                 ],

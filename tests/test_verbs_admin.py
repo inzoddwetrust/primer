@@ -46,8 +46,11 @@ RECORDS = [
 ]
 
 
-def _logs(cs: ComposeStack, *extra: str) -> FakeCall:
-    return FakeCall(tuple(cs.argv(*LOGS, *extra)), lines=lines(*RECORDS))
+def _logs(cs: ComposeStack, *extra: str, service: str | None = None) -> FakeCall:
+    named = () if service is None else (service,)
+    return FakeCall(
+        tuple(cs.argv(*LOGS, *extra, operands=named)), lines=lines(*RECORDS)
+    )
 
 
 def _out(fs_root: Path, argv: list[str], runner: FakeRunner) -> tuple[int, str, str]:
@@ -98,7 +101,7 @@ def test_logs_without_a_filter_print_every_line_and_take_the_service_and_follow(
     """No filter: every line, JSON or not, the secret cleaned. A first word
     without ``=`` is the service; ``-f`` and ``--tail`` go to compose."""
     cs = _box(tmp_path)
-    with FakeRunner(_logs(cs, "-f", "--tail", "50", "app")) as runner:
+    with FakeRunner(_logs(cs, "-f", "--tail", "50", service="app")) as runner:
         code, out, err = _out(
             tmp_path, ["logs", STACK, "app", "-f", "--tail", "50"], runner
         )
@@ -151,7 +154,7 @@ def _action_calls(
     up = action != "stop"
     return [
         config_call(cs, document),  # type: ignore[arg-type]
-        FakeCall(tuple(cs.argv(action, *services))),
+        FakeCall(tuple(cs.argv(action, operands=services))),
         *(running_call(cs, s, *(["c"] if up else [])) for s in services),
     ]
 
@@ -189,7 +192,10 @@ def test_a_service_in_the_wrong_state_after_the_action_is_red(
 ) -> None:
     blank_box(tmp_path)
     cs = compose(tmp_path)
-    script = [FakeCall(tuple(cs.argv(action, "app"))), running_call(cs, "app", *ids)]
+    script = [
+        FakeCall(tuple(cs.argv(action, operands=("app",)))),
+        running_call(cs, "app", *ids),
+    ]
     with FakeRunner(*script) as runner:
         code, out, _ = _cli(tmp_path, [action, STACK, "app"], runner)
     reason = _verdict(out).steps[0].reason
@@ -320,7 +326,7 @@ def _connect_calls(
     inside = "/tmp/pridem-connect-STAMP.log"  # noqa: S108 -- in the container
     session = cs.argv(
         "exec", "-T", "-e", "PGOPTIONS=-c default_transaction_read_only=on",
-        "postgres", "psql", "-U", "blank", "-d", "blank", "-L", inside,
+        operands=("postgres", "psql", "-U", "blank", "-d", "blank", "-L", inside),
     )  # fmt: skip
     calls = [
         FakeCall(
@@ -332,8 +338,31 @@ def _connect_calls(
     ]
     if kept is not None:
         calls += [
-            FakeCall(tuple(cs.argv("cp", f"postgres:{inside}", str(kept)))),
-            FakeCall(tuple(cs.argv("exec", "-T", "postgres", "rm", "-f", inside))),
+            FakeCall(
+                tuple(
+                    cs.argv(
+                        "cp",
+                        operands=(
+                            f"postgres:{inside}",
+                            str(kept),
+                        ),
+                    )
+                )
+            ),
+            FakeCall(
+                tuple(
+                    cs.argv(
+                        "exec",
+                        "-T",
+                        operands=(
+                            "postgres",
+                            "rm",
+                            "-f",
+                            inside,
+                        ),
+                    )
+                )
+            ),
         ]
     return calls
 

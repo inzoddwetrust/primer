@@ -184,7 +184,9 @@ class Types(LeftUndone, Step):
         """``compose run`` of the app with ``words``: its code and, ``keep``, its
         stdout to ``OPENAPI_LIMIT`` (a line in pieces joined back); without,
         the stdout goes to the run's sinks, as stderr does."""
-        argv = self.compose.argv("run", "--rm", "--no-deps", "-T", *extra, self._app)
+        argv = self.compose.argv(
+            "run", "--rm", "--no-deps", "-T", *extra, operands=(self._app,)
+        )
         lines: list[str] = []
         size = 0
         joining = False

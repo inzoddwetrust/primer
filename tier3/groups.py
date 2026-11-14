@@ -60,6 +60,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_a_job_runs_before_its_dependent_on_every_deploy", "c"),
     ("test_tier3_services_stopped_for_migrate_come_back", "c"),
     ("test_tier3_a_dump_of_the_blank_restores_what_was_in_it", "c"),
+    ("test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was", "c"),
     ("test_tier3_a_reset_of_the_blank_makes_its_database_new", "c"),
     ("test_tier3_a_project_verb_runs_in_its_service", "c"),
     ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "c"),

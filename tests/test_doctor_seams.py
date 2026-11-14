@@ -81,7 +81,9 @@ def _plan(
 def _doctor_calls(cs: ComposeStack) -> list[FakeCall]:
     """Every command of ``doctor`` on comms' ladder, nothing to do: the
     checks of ``build``, ``derive_env`` and ``up`` read docker and the app."""
-    ps_app = FakeCall(tuple(cs.argv("ps", "-q", APP)), lines=stdout(CONTAINER))
+    ps_app = FakeCall(
+        tuple(cs.argv("ps", "-q", operands=(APP,))), lines=stdout(CONTAINER)
+    )
     inspect = FakeCall(
         ("docker", "inspect", "-f", "{{.Image}}", CONTAINER), lines=stdout(IMAGE)
     )

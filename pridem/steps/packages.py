@@ -235,7 +235,16 @@ def write_context(source: Path, target: Path, places: Collection[PackagePlace]) 
     private_dir(target.parent)
     shutil.copytree(source, temp, symlinks=True, ignore=_ignore_git)
     for place in places:
-        inside = temp / place.path
+        # the copy keeps the context's symlinks as links: a write through one
+        # would land outside -- the path is checked on the copy written to,
+        # the representation the write acts on (DM-93, R2-S3; the class of
+        # the DM-63 FIX)
+        try:
+            inside = resolve_inside(temp, place.path)
+        except PathOutside:
+            shutil.rmtree(temp)
+            params: dict[str, Json] = {"slot": place.slot, "from": place.path}
+            raise StepFailed("path-outside", params) from None
         if inside.is_symlink() or inside.is_file():
             inside.unlink()
         elif inside.exists():
@@ -419,6 +428,7 @@ class Packages(Step):
                     *(NO_PULL if ours else ()),
                     *labels,
                     *binds,
+                    "--",  # the image is an operand, never an option (DM-93)
                     image,
                     *command,
                 ],

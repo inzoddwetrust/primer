@@ -212,7 +212,7 @@ def build_call(cs: ComposeStack, code: int = 0) -> FakeCall:
 
 
 def ps_call(cs: ComposeStack, *ids: str) -> FakeCall:
-    return FakeCall(tuple(cs.argv("ps", "-q", "app")), lines=stdout(*ids))
+    return FakeCall(tuple(cs.argv("ps", "-q", operands=("app",))), lines=stdout(*ids))
 
 
 def inspect_image_call(container: str, image: str) -> FakeCall:
@@ -224,7 +224,7 @@ def inspect_image_call(container: str, image: str) -> FakeCall:
 def alembic_call(cs: ComposeStack, what: str, *lines: str, deps: bool) -> FakeCall:
     throwaway = ("run", "--rm") if deps else ("run", "--rm", "--no-deps")
     return FakeCall(
-        tuple(cs.argv(*throwaway, "app", "python", "-m", "alembic", what)),
+        tuple(cs.argv(*throwaway, operands=("app", "python", "-m", "alembic", what))),
         lines=stdout(*lines),
     )
 
@@ -249,6 +249,7 @@ def show_call(
         "--network",
         "none",
         *labels,
+        "--",
         image,
         "python",
         "-m",
@@ -280,6 +281,7 @@ def heads_call(cs: ComposeStack, image: str, *lines: str) -> FakeCall:
             "--network",
             "none",
             *labels,
+            "--",
             image,
             "python",
             "-m",
@@ -293,7 +295,18 @@ def heads_call(cs: ComposeStack, image: str, *lines: str) -> FakeCall:
 def migrate_call(cs: ComposeStack, code: int = 0) -> FakeCall:
     return FakeCall(
         tuple(
-            cs.argv("run", "--rm", "app", "python", "-m", "alembic", "upgrade", "head")
+            cs.argv(
+                "run",
+                "--rm",
+                operands=(
+                    "app",
+                    "python",
+                    "-m",
+                    "alembic",
+                    "upgrade",
+                    "head",
+                ),
+            )
         ),
         code=code,
     )

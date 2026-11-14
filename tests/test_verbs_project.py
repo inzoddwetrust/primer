@@ -62,7 +62,19 @@ def _box(
 def _exec(cs: ComposeStack, service: str, *argv: str, code: int = 0) -> FakeCall:
     """The command as docker gets it, written out (par0 14.2): ``docker
     compose ... exec -T <service> <run> <values>``."""
-    return FakeCall(tuple(cs.argv("exec", "-T", service, *argv)), code=code)
+    return FakeCall(
+        tuple(
+            cs.argv(
+                "exec",
+                "-T",
+                operands=(
+                    service,
+                    *argv,
+                ),
+            )
+        ),
+        code=code,
+    )
 
 
 SET = ("python", "-m", "app.cli", "set-setting")

@@ -270,10 +270,10 @@ def test_probe_DM_63_types_are_made_by_the_products_command(tmp_path: Path) -> N
     ]  # fmt: skip
     host = f"{root}/opt/blank/types-run"
     assert runner.docker[:2] == [
-        [*project, "run", "--rm", "--no-deps", "-T", "app", "dump-openapi"],
+        [*project, "run", "--rm", "--no-deps", "-T", "--", "app", "dump-openapi"],
         [
             *project, "run", "--rm", "--no-deps", "-T", "-v", f"{host}:/primer/types",
-            "app", "gen-types", "--in", "/primer/types/openapi.json",
+            "--", "app", "gen-types", "--in", "/primer/types/openapi.json",
             "--out=/primer/types/out",
         ],
     ]  # fmt: skip

@@ -105,6 +105,7 @@ def script(cs: ComposeStack, env_dir: Path) -> list[FakeCall]:
             "pridem.stack=comms",
             "--env-file",
             str(env_dir / "derive.env"),
+            "--",
             IMAGE,
             "comms",
             "derive",
@@ -112,7 +113,9 @@ def script(cs: ComposeStack, env_dir: Path) -> list[FakeCall]:
         ),
         lines=stdout(BOT_URL),
     )
-    ps_app = FakeCall(tuple(cs.argv("ps", "-q", "comms-app")), lines=stdout(CONTAINER))
+    ps_app = FakeCall(
+        tuple(cs.argv("ps", "-q", operands=("comms-app",))), lines=stdout(CONTAINER)
+    )
     inspect = FakeCall(
         ("docker", "inspect", "-f", "{{.Image}}", CONTAINER), lines=stdout(IMAGE)
     )
@@ -143,7 +146,7 @@ def script(cs: ComposeStack, env_dir: Path) -> list[FakeCall]:
         derive,
         # up: check -- nothing runs yet
         image_call(cs, "comms-app", IMAGE),
-        FakeCall(tuple(cs.argv("ps", "-q", "comms-app"))),
+        FakeCall(tuple(cs.argv("ps", "-q", operands=("comms-app",)))),
         FakeCall(
             tuple(cs.argv("up", "-d", "--no-build", "--wait", "--wait-timeout", "300"))
         ),

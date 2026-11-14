@@ -2573,6 +2573,49 @@ def test_tier3_a_dump_of_the_blank_restores_what_was_in_it() -> None:
     assert sorted(Path("/opt/pridem/backups").iterdir()) == before
 
 
+def test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was() -> None:
+    """DM-93 (R2-S7), after the dump test: a dump; then, in the live
+    database, a row the dump has not and a view on ``app_settings`` -- its
+    ``DROP TABLE`` by ``pg_restore --clean`` fails half-way (no ``CASCADE``).
+    One transaction, stopped at the first error: the restore is red, and the
+    row and the view are there -- the database as it was. Measured into the
+    journal first (par0 14.3): how long the restore took, its reason, the
+    lines of ``pg_restore``. The services the restore stopped are started
+    again (``start``) for the tests after it; the view and the row go."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    verdict, printed = _verdict_of("db", "dump", STACK)
+    assert verdict.result == "green", printed
+    [dump] = [s for s in verdict.steps if s.name == "db_dump"]
+    path = str((dump.verify or {})["path"])
+    _psql("INSERT INTO app_settings (key, value) VALUES ('dm93-after', 'kept')")
+    _psql("CREATE VIEW dm93_v AS SELECT key FROM app_settings")
+    started = time.monotonic()
+    verdict, printed = _verdict_of(
+        "db", "restore", STACK, path, "--confirm", "tier3-env"
+    )
+    took = round(time.monotonic() - started, 1)
+    [restore] = [s for s in verdict.steps if s.name == "db_restore"]
+    journal = Path("/opt/pridem") / str(verdict.log_ref)
+    said = [
+        json.loads(line).get("line")
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if '"db_restore"' in line and '"log"' in line
+    ]
+    print(
+        "DM-93 measure:", {"seconds": took, "reason": restore.reason, "said": said[-6:]}
+    )
+    assert verdict.result == "red", printed
+    assert restore.reason is not None and restore.reason.code == "command-failed"
+    assert _psql("SELECT value FROM app_settings WHERE key = 'dm93-after'") == ["kept"]
+    assert _psql("SELECT to_regclass('public.dm93_v')") == ["dm93_v"]
+
+    _psql("DROP VIEW dm93_v")
+    _psql("DELETE FROM app_settings WHERE key = 'dm93-after'")
+    verdict, printed = _verdict_of("start", STACK)
+    assert verdict.result == "green", printed
+    assert _container(STACK, "app")
+
+
 def test_tier3_a_reset_of_the_blank_makes_its_database_new() -> None:
     """DM-86, pass 2, on the box the earlier tests left. The install of the
     group seeded ``bootstrap`` (``when: install``): ``installed_at`` is there.
@@ -2930,7 +2973,7 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
         left = _stdout(["docker", *kind.split(), "--filter", "label=pridem.stack"])
         assert left == ([FILES_VOLUME] if kind == "volume ls -q" else []), (kind, left)
     read = ["docker", "run", "--rm", "--network", "none",
-            "--mount", f"type=volume,source={FILES_VOLUME},target=/v", image,
+            "--mount", f"type=volume,source={FILES_VOLUME},target=/v", "--", image,
             "cat", "/v/mark"]  # fmt: skip
     assert _stdout(read) == [MARK]
     assert sorted(str(p) for p in OPT.rglob("*")) == [

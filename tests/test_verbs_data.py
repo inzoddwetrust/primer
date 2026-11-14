@@ -92,7 +92,7 @@ def config_call(cs: ComposeStack, document: Mapping[str, Json] = CONFIG) -> Fake
 
 
 def running_call(cs: ComposeStack, service: str, *ids: str) -> FakeCall:
-    argv = cs.argv("ps", "--status", "running", "-q", service)
+    argv = cs.argv("ps", "--status", "running", "-q", operands=(service,))
     return FakeCall(tuple(argv), lines=lines(*ids))
 
 
@@ -112,14 +112,16 @@ def dump_calls(
                 cs.argv(
                     "exec",
                     "-T",
-                    "postgres",
-                    "pg_dump",
-                    "-U",
-                    "blank",
-                    "-Fc",
-                    "-f",
-                    inside(),
-                    "blank",
+                    operands=(
+                        "postgres",
+                        "pg_dump",
+                        "-U",
+                        "blank",
+                        "-Fc",
+                        "-f",
+                        inside(),
+                        "blank",
+                    ),
                 )
             ),  # fmt: skip
             code=code,
@@ -129,8 +131,31 @@ def dump_calls(
         return calls
     return [
         *calls,
-        FakeCall(tuple(cs.argv("cp", f"postgres:{inside()}", str(partial)))),
-        FakeCall(tuple(cs.argv("exec", "-T", "postgres", "rm", "-f", inside()))),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "cp",
+                    operands=(
+                        f"postgres:{inside()}",
+                        str(partial),
+                    ),
+                )
+            )
+        ),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "exec",
+                    "-T",
+                    operands=(
+                        "postgres",
+                        "rm",
+                        "-f",
+                        inside(),
+                    ),
+                )
+            )
+        ),
         FakeCall(
             (
                 "docker",
@@ -144,6 +169,7 @@ def dump_calls(
                 "never",
                 "--mount",
                 f"type=bind,source={partial},target=/primer/db.dump,readonly",
+                "--",
                 IMAGE,
                 "pg_restore",
                 "--list",
@@ -162,7 +188,17 @@ def git_call(cs: ComposeStack, commit: str = SHA) -> FakeCall:
 
 
 def head_call(cs: ComposeStack, head: str = HEAD) -> FakeCall:
-    argv = cs.argv("run", "--rm", "app", "python", "-m", "alembic", "current")
+    argv = cs.argv(
+        "run",
+        "--rm",
+        operands=(
+            "app",
+            "python",
+            "-m",
+            "alembic",
+            "current",
+        ),
+    )
     return FakeCall(tuple(argv), lines=lines(f"{head} (head)"))
 
 
@@ -339,12 +375,33 @@ def _restore_calls(
         config_call(cs),
         running_call(cs, "app", "c-app"),
         running_call(cs, "frontend", "c-front"),
-        FakeCall(tuple(cs.argv("stop", "app", "frontend")), code=stop_code),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "stop",
+                    operands=(
+                        "app",
+                        "frontend",
+                    ),
+                )
+            ),
+            code=stop_code,
+        ),
     ]
     if stop_code:
         return [
             *calls,
-            FakeCall(tuple(cs.argv("start", "app", "frontend"))),
+            FakeCall(
+                tuple(
+                    cs.argv(
+                        "start",
+                        operands=(
+                            "app",
+                            "frontend",
+                        ),
+                    )
+                )
+            ),
             running_call(cs, "app", "c-app"),
             running_call(cs, "frontend", "c-front"),
         ]
@@ -352,33 +409,70 @@ def _restore_calls(
         running_call(cs, "app"),
         running_call(cs, "frontend"),
         config_call(cs),
-        FakeCall(tuple(cs.argv("cp", str(path), f"postgres:{restore_inside}"))),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "cp",
+                    operands=(
+                        str(path),
+                        f"postgres:{restore_inside}",
+                    ),
+                )
+            )
+        ),
         FakeCall(
             tuple(
                 cs.argv(
                     "exec",
                     "-T",
-                    "postgres",
-                    "pg_restore",
-                    "--clean",
-                    "--if-exists",
-                    "--no-owner",
-                    "-U",
-                    "blank",
-                    "-d",
-                    "blank",
-                    restore_inside,
+                    operands=(
+                        "postgres",
+                        "pg_restore",
+                        "--clean",
+                        "--if-exists",
+                        "--no-owner",
+                        "--single-transaction",
+                        "--exit-on-error",
+                        "-U",
+                        "blank",
+                        "-d",
+                        "blank",
+                        restore_inside,
+                    ),
                 )
             )  # fmt: skip
         ),
-        FakeCall(tuple(cs.argv("exec", "-T", "postgres", "rm", "-f", restore_inside))),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "exec",
+                    "-T",
+                    operands=(
+                        "postgres",
+                        "rm",
+                        "-f",
+                        restore_inside,
+                    ),
+                )
+            )
+        ),
         head_call(cs, head),
     ]
     if head != HEAD:
         return calls
     return [
         *calls,
-        FakeCall(tuple(cs.argv("start", "app", "frontend"))),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "start",
+                    operands=(
+                        "app",
+                        "frontend",
+                    ),
+                )
+            )
+        ),
         running_call(cs, "app", "c-app"),
         running_call(cs, "frontend", "c-front"),
     ]

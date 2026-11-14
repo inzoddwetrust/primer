@@ -69,7 +69,18 @@ def _two_entry_box(tmp_path: Path) -> tuple[ComposeStack, ComposeStack]:
 def _oneoff(cs: ComposeStack, service: str, *argv: str, code: int = 0) -> FakeCall:
     """The command as docker gets it (par0 14.2)."""
     return FakeCall(
-        tuple(cs.argv("run", "--rm", "--no-deps", service, *argv)), code=code
+        tuple(
+            cs.argv(
+                "run",
+                "--rm",
+                "--no-deps",
+                operands=(
+                    service,
+                    *argv,
+                ),
+            )
+        ),
+        code=code,
     )
 
 
@@ -110,7 +121,18 @@ def test_a_verb_on_a_running_service_of_another_entry_execs_in_it(
     _, files = _two_entry_box(tmp_path)
     calls = [
         running_call(files, "files", "c-files"),
-        FakeCall(tuple(files.argv("exec", "-T", "files", "true"))),
+        FakeCall(
+            tuple(
+                files.argv(
+                    "exec",
+                    "-T",
+                    operands=(
+                        "files",
+                        "true",
+                    ),
+                )
+            )
+        ),
     ]
     with FakeRunner(*calls) as runner:
         code, out, _ = _cli(tmp_path, ["verb", "files-ping"], runner)
@@ -135,7 +157,8 @@ def _built(document: dict[str, Json] | None = None) -> dict[str, Json]:
 def _inspect(commit: str) -> FakeCall:
     label = '{{index .Config.Labels "pridem.commit"}}'
     return FakeCall(
-        ("docker", "image", "inspect", "-f", label, BUILT_IMAGE), lines=lines(commit)
+        ("docker", "image", "inspect", "-f", label, "--", BUILT_IMAGE),
+        lines=lines(commit),
     )
 
 

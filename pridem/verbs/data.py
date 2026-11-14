@@ -398,7 +398,7 @@ def _seed(args: Strict, ctx: Context) -> int:
 
     if args.dry_run:
         app = compose.app_service or ""
-        argv = compose.argv("run", "--rm", app, *shlex.split(seed.run))
+        argv = compose.argv("run", "--rm", operands=(app, *shlex.split(seed.run)))
         fact: dict[str, Json] = {
             "stack": compose.entry,
             "profile": args.profile,
@@ -649,8 +649,6 @@ def _logs(args: Strict, ctx: Context) -> int:
         argv.append("-f")
     if args.tail is not None:
         argv += ["--tail", str(args.tail)]
-    if service is not None:
-        argv.append(service)
     dropped = 0
 
     def line(stream: Stream, text: str, cut: bool) -> None:
@@ -662,7 +660,7 @@ def _logs(args: Strict, ctx: Context) -> int:
 
     try:
         ctx.runner.run(
-            compose.argv(*argv),
+            compose.argv(*argv, operands=() if service is None else (service,)),
             timeout=LOGS_FOLLOW_S if args.follow else LOGS_TIMEOUT_S,
             on_line=line,
         )
@@ -788,7 +786,11 @@ def _connect(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
         )
         found = database(document, app)
         if not "".join(
-            lines_of(compose.argv("ps", "--status", "running", "-q", found.service))
+            lines_of(
+                compose.argv(
+                    "ps", "--status", "running", "-q", operands=(found.service,)
+                )
+            )
         ).strip():
             raise Refused(f"db connect: the database {found.service} does not run")
     except (RunnerError, ValueError, StepFailed) as error:
@@ -802,13 +804,17 @@ def _connect(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
     kept = home / f"{stamp}-{compose.entry}.log"
     tty = [] if sys.stdin.isatty() else ["-T"]  # no terminal: stdin is a file
     session = compose.argv(
-        "exec", *tty, "-e", READ_ONLY, found.service,
-        "psql", "-U", found.user, "-d", found.live, "-L", inside,
+        "exec", *tty, "-e", READ_ONLY,
+        operands=(
+            found.service, "psql", "-U", found.user, "-d", found.live, "-L", inside,
+        ),
     )  # fmt: skip
     code = runner.interactive(session)
     try:
-        lines_of(compose.argv("cp", f"{found.service}:{inside}", str(kept)))
-        lines_of(compose.argv("exec", "-T", found.service, "rm", "-f", inside))
+        lines_of(compose.argv("cp", operands=(f"{found.service}:{inside}", str(kept))))
+        lines_of(
+            compose.argv("exec", "-T", operands=(found.service, "rm", "-f", inside))
+        )
         kept.chmod(0o600)
     except (RunnerError, OSError) as error:
         print(f"db connect: the session's log was not kept ({error})", file=ctx.err)
