@@ -2,12 +2,20 @@
   "$defs": {
     "Accepted": {
       "additionalProperties": false,
-      "description": "A kind of the product's data a service takes (protocol 4.5, 4.7):\n``validate`` -- its command, ``<dir>`` the data's path in the container;\n``env`` -- the variable the machine gives that path under.",
+      "description": "A kind of the product's data a service takes (protocol 4.5, 4.7):\n``validate`` -- its command, ``<dir>`` the data's path in the container;\n``env`` -- the variable the machine gives that path under; ``services`` --\nthe compose services of the service's first entry that read the data,\neach with the same bind and variable (DM-100); without it, ``app`` alone.\nEmpty, a name twice -- ``S.accepts-services``; jobs alone -- the same, in\nthe rule layer; a name compose does not have -- ``forbidden``.",
       "properties": {
         "env": {
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "title": "Env",
           "type": "string"
+        },
+        "services": {
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "type": "string"
+          },
+          "title": "Services",
+          "type": "array"
         },
         "validate": {
           "minLength": 1,

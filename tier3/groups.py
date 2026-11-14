@@ -77,6 +77,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "f"),
     ("test_tier3_product_derive_reaches_nothing", "f"),
     ("test_tier3_only_the_declared_consumer_reaches_a_point", "f"),
+    ("test_tier3_every_listed_service_reads_the_data", "f"),  # DM-100
 )
 
 NEEDS_BOX = frozenset({"c", "e", "f"})

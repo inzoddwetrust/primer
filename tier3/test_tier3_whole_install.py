@@ -2278,6 +2278,103 @@ def test_tier3_only_the_declared_consumer_reaches_a_point(
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
 
+READER_TAG = "v1.2.0"
+"""The tag of the copy of the service with a second reader of its data
+(DM-100): pushed to the service's mirror beside ``v1.0.0``, which stays."""
+
+
+def _service_with_a_reader(tmp: Path) -> str:
+    """A copy of the service at ``v1.0.0`` whose profile two services read,
+    consistent as a whole (par0 14.3): a second compose service ``reader`` --
+    the same build, healthy only while ``PROFILE_DIR`` names a directory with
+    files -- and ``accepts.profile.services: [app, reader]``. Tagged
+    ``READER_TAG``; the commit back."""
+    copy = tmp / "service-reader"
+    _run(["git", "clone", "-q", str(SERVICE_MIRROR), str(copy)], env=GIT_ENV)
+    _run(["git", "-C", str(copy), "checkout", "-q", "v1.0.0"], env=GIT_ENV)
+    compose = copy / "docker-compose.yml"
+    compose.write_text(
+        compose.read_text(encoding="utf-8") + "  reader:\n"
+        "    build:\n"
+        "      context: ./backend\n"
+        "      target: runtime\n"
+        '    command: ["python", "-m", "http.server", "7001"]\n'
+        "    healthcheck:\n"
+        '      test: ["CMD", "python", "-c", "import os; '
+        "assert os.listdir(os.environ['PROFILE_DIR'])\"]\n"
+        "      interval: 10s\n"
+        "      timeout: 5s\n"
+        "      retries: 3\n"
+        "      start_period: 5s\n"
+        "    restart: unless-stopped\n",
+        encoding="utf-8",
+    )
+    _replace_once(
+        copy / "primer.yaml",
+        "    env: PROFILE_DIR\n",
+        "    env: PROFILE_DIR\n    services: [app, reader]\n",
+    )
+    _git("-C", str(copy), "add", "-A")
+    _git("-C", str(copy), "commit", "-q", "-m", "DM-100: a second reader")
+    _git("-C", str(copy), "tag", "-f", READER_TAG)
+    _git(
+        "-C",
+        str(copy),
+        "push",
+        "-q",
+        "--force",
+        str(SERVICE_MIRROR),
+        f"refs/tags/{READER_TAG}",
+    )
+    [commit] = _git("-C", str(copy), "rev-parse", "HEAD")
+    return commit
+
+
+def _blank_on_the_reader(tmp: Path, mirror: Path, commit: str) -> None:
+    """The blank at its pin, the service locked at ``READER_TAG``."""
+    copy = _copy_of_blank(tmp, mirror, "reader")
+    _replace_once(
+        copy / "primer.lock",
+        f'{{ version: "1.0.0", tag: v1.0.0, commit: {SERVICE_PINS["v1.0.0"]} }}',
+        f'{{ version: "1.2.0", tag: {READER_TAG}, commit: {commit} }}',
+    )
+    _push(copy, mirror, "DM-100: the blank on the service's second reader")
+
+
+def test_tier3_every_listed_service_reads_the_data(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-100 on the box the earlier tests left: the service's profile goes to
+    both services of ``accepts.profile.services`` -- ``app`` and ``reader``
+    mount the same copy, read-only, and both have ``PROFILE_DIR``; ``reader``
+    is healthy only so. Measured into the run's log first (par0 14.3):
+    ``.Mounts`` and the variable of both."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    commit = _service_with_a_reader(tmp_path)
+    _blank_on_the_reader(tmp_path, mirror, commit)
+    verdict, printed = _install(_passport(tmp_path, version=70), "update")
+    seen = []
+    for name in ("app", "reader"):
+        running = _container(SERVICE, name)
+        [mounts] = _stdout(["docker", "inspect", "-f", "{{json .Mounts}}", running])
+        env = _stdout(["docker", "exec", running, "printenv", "PROFILE_DIR"])
+        seen.append(f"{name}: mounts {mounts}; PROFILE_DIR {env}")
+    warnings.warn("DM-100 " + " | ".join(seen), stacklevel=1)
+    assert verdict.result == "green", printed
+    app = _data_source(_container(SERVICE, "app"))
+    reader = _data_source(_container(SERVICE, "reader"))
+    assert app == reader and Path(app).name.startswith("profile@"), (app, reader)
+    for name in ("app", "reader"):
+        running = _container(SERVICE, name)
+        [mounts] = _stdout(["docker", "inspect", "-f", "{{json .Mounts}}", running])
+        [data] = [
+            m for m in json.loads(mounts) if m["Destination"] == "/primer/data/profile"
+        ]
+        assert data["RW"] is False, data
+        env = _stdout(["docker", "exec", running, "printenv", "PROFILE_DIR"])
+        assert env == ["/primer/data/profile"], (name, env)
+
+
 JOB_RUN = (
     'python -c "import datetime; '
     "open('/tmp/runs', 'a').write(datetime.datetime.now().isoformat() + chr(10))\""

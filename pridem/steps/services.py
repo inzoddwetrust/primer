@@ -121,6 +121,9 @@ class DataItem:
     """``/opt/<service>/data/<product>@<release>``: where the copies are."""
     env: str
     validate: str
+    services: tuple[str, ...] = ()
+    """The services that read it (``accepts.<kind>.services``); none named --
+    the entry's ``app`` (DM-100)."""
 
     @property
     def target(self) -> Path:
@@ -176,22 +179,33 @@ def data_items(
         if accepted is None:
             continue
         found.append(
-            DataItem(kind, source, base, home, accepted.env, accepted.validate_)
+            DataItem(
+                kind,
+                source,
+                base,
+                home,
+                accepted.env,
+                accepted.validate_,
+                tuple(accepted.services or ()),
+            )
         )
     return found
 
 
 def data_binds(
-    items: Sequence[DataItem], service: str | None
+    items: Sequence[DataItem], app: str | None
 ) -> tuple[dict[str, list[Json]], dict[str, dict[str, str]]]:
-    """The override's binds and variables of ``items`` on ``service`` (the
-    service's ``app``)."""
-    if service is None or not items:
-        return {}, {}
-    return (
-        {service: [item.volume for item in items]},
-        {service: {item.env: item.container for item in items}},
-    )
+    """The override's binds and variables of ``items``: each on every service
+    its kind names (``accepts.<kind>.services``), the same bind and the same
+    variable on each; a kind that names none -- on ``app`` (DM-100)."""
+    mounts: dict[str, list[Json]] = {}
+    variables: dict[str, dict[str, str]] = {}
+    for item in items:
+        readers = item.services or ((app,) if app is not None else ())
+        for service in readers:
+            mounts.setdefault(service, []).append(item.volume)
+            variables.setdefault(service, {})[item.env] = item.container
+    return mounts, variables
 
 
 def tree(path: Path) -> list[tuple[str, str, str]]:

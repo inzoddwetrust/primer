@@ -97,7 +97,7 @@ import yaml
 from pridem.events import Json, as_list
 from pridem.files import PathOutside, atomic_write, resolve_inside
 from pridem.runner import Stream, clean_env
-from pridem.stacks.env import env_file
+from pridem.stacks.env import env_file, own_entry
 from pridem.stacks.routes import alias, routed_services
 from pridem.stacks.schema import PROXY_VARIABLES, Product, Service
 from pridem.stacks.seams import Pair
@@ -651,6 +651,22 @@ def depended(services: Mapping[str, Json], start: str) -> set[str]:
     return seen
 
 
+def _accepts_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[str]:
+    """``accepts.<kind>.services`` (DM-100): a service compose has, in the
+    service's own entry -- the one the data goes to (``own_entry``). The
+    loader cannot see compose; ``build`` and ``pridem check`` say it here, as
+    for ``stop_for_migrate``."""
+    stack = compose.stack
+    if not isinstance(stack, Service) or compose.entry != own_entry(stack):
+        return []
+    return [
+        f"accepts.{kind}: no service {name}"
+        for kind, accepted in stack.accepts.items()
+        for name in accepted.services or ()
+        if name not in services
+    ]
+
+
 def _stop_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[str]:
     """``stop_for_migrate`` (DM-22): a service compose has, and none that
     ``run --rm <app>`` of ``migrate`` would bring up again by ``depends_on``."""
@@ -685,6 +701,7 @@ def forbidden(compose: ComposeStack, document: Mapping[str, Json]) -> list[str]:
         found += [f"{name}: {problem}" for problem in problems]
     found += _job_problems(compose, services)
     found += _stop_problems(compose, services)
+    found += _accepts_problems(compose, services)
     found += _verb_problems(compose, services)
     top = [key for key in document if not key.startswith("x-")]
     found += [f"compose: {key}" for key in sorted(top) if key not in TOP_KEYS]

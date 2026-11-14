@@ -185,6 +185,11 @@ RULES = {
         "own files",
     ),
     "S.types-one": (0, "types are declared on one entry of the product at most"),
+    "S.accepts-services": (
+        0,
+        "accepts.<kind>.services names services of the service's first entry, "
+        "each once, not empty, not jobs alone",
+    ),
     "R23.generate": (23, "generate names both paths it is given: <openapi> and <out>"),
     "S.minted-length": (0, "a minted value is no shorter than 32 characters"),
     "S.job-service": (
@@ -691,10 +696,26 @@ class UpdateWindow(Strict):
 class Accepted(Strict):
     """A kind of the product's data a service takes (protocol 4.5, 4.7):
     ``validate`` -- its command, ``<dir>`` the data's path in the container;
-    ``env`` -- the variable the machine gives that path under."""
+    ``env`` -- the variable the machine gives that path under; ``services`` --
+    the compose services of the service's first entry that read the data,
+    each with the same bind and variable (DM-100); without it, ``app`` alone.
+    Empty, a name twice -- ``S.accepts-services``; jobs alone -- the same, in
+    the rule layer; a name compose does not have -- ``forbidden``."""
 
     validate_: Command = Field(alias="validate")
     env: EnvKey
+    services: list[Ident] | None = None
+
+    @model_validator(mode="after")
+    def _services_form(self) -> Self:
+        if self.services is None:
+            return self
+        if not self.services:
+            raise _rule_error("S.accepts-services", "empty: leave the field out")
+        twice = sorted({s for s in self.services if self.services.count(s) > 1})
+        if twice:
+            raise _rule_error("S.accepts-services", f"twice: {twice}")
+        return self
 
 
 class Report(Strict):
@@ -1322,6 +1343,23 @@ def _s_entries(stack: Product | Service) -> list[Problem]:
     return out
 
 
+def _s_accepts_services(stack: Product | Service) -> list[Problem]:
+    """``accepts.<kind>.services`` of jobs alone (DM-100): a job runs again
+    only when ``up`` of its entry acts, and ``up`` acts by a service that is
+    no job -- a list of jobs alone would never run them on new data. The
+    entry is the service's own (``stacks.env.own_entry``): the data goes to
+    it."""
+    if not isinstance(stack, Service):
+        return []
+    own = stack.name if stack.name in stack.stacks else next(iter(stack.stacks))
+    jobs = {job.service for job in stack.stacks[own].jobs.values()}
+    return [
+        problem_at(("accepts", kind, "services"), "S.accepts-services", "jobs alone")
+        for kind, accepted in stack.accepts.items()
+        if accepted.services and set(accepted.services) <= jobs
+    ]
+
+
 def _s_types_one(stack: Product | Service) -> list[Problem]:
     """``types`` on one entry at most (DM-63 FIX): the step makes the types of
     one entry; a second would be left without a word."""
@@ -1354,6 +1392,7 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _s_verbs,
     _s_types_one,
     _s_reserved,
+    _s_accepts_services,
 )
 
 
