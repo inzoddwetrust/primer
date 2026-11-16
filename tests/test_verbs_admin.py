@@ -33,7 +33,7 @@ from pridem.steps.compose import ComposeStack
 from pridem.steps.gc import CONNECT_DIR, CONNECT_KEEP_DAYS, Gc
 from pridem.steps.passport import Fetched
 
-LOGS = ("logs", "--no-color", "--no-log-prefix")
+LOGS = ("logs", "--no-color", "--no-log-prefix", "--timestamps")  # DM-107
 RECORDS = [
     json.dumps({"level": "error", "status": 500, "event": "a", "msg": "boom"}),
     json.dumps({"level": "error", "status": 404, "event": "b"}),
@@ -79,7 +79,11 @@ def test_probe_DM_22_logs_filter_by_json_fields(tmp_path: Path) -> None:
     hold -- a number compared by its JSON text -- and none other; a line
     without a field, a line that is no JSON object, are not printed and are
     counted; the box's secret in a printed line is cleaned out (contract 2
-    rule 2: the console of the machine). No verdict: nothing in ``history/``."""
+    rule 2: the console of the machine). No verdict: nothing in ``history/``.
+
+    Changed by DM-107 (on the dispatcher's word): ``logs`` asks compose for
+    ``--timestamps`` to put the lines of every service in time order; the stamp is
+    taken off before the filter -- the assertions are the same."""
     cs = _box(tmp_path)
     with FakeRunner(_logs(cs)) as runner:
         code, out, err = _out(

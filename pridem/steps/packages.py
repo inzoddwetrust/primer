@@ -324,6 +324,7 @@ class Packages(Step):
     """The instance's packages: in the release, mountable, validated."""
 
     name = "packages"
+    title = "Mount packages"
     order = 9
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

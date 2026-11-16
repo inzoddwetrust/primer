@@ -29,12 +29,13 @@ Such a 128, in ``check``, ``act`` or any poll of the wait, is
 (DM-81). Any other 128 is the server's refusal: the ceremony waits.
 """
 
+import re
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import ClassVar
 
-from pridem.events import Json
+from pridem.events import Json, KeyNeeded
 from pridem.files import atomic_write, commit_set, private_dir, temp_of
 from pridem.runner import Stream
 from pridem.steps.base import (
@@ -197,10 +198,26 @@ def has_access(ctx: StepContext, root: Path, found: Repo) -> bool:
     return code == 0
 
 
+GITHUB = re.compile(
+    r"^(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)"
+    r"(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
+)
+
+
+def keys_page(address: str) -> str | None:
+    """The page of deploy keys of a GitHub repository; ``None`` for another
+    host -- the console shows the address alone (DM-107)."""
+    found = GITHUB.match(address)
+    if found is None:
+        return None
+    return f"https://github.com/{found['owner']}/{found['repo']}/settings/keys"
+
+
 class DeployKey(Step):
     """The key of one repository; ``name`` is the step, ``repo`` its address."""
 
     name = "deploy_key"  # the class's own: the report's catalog finds its codes (DM-92)
+    title = "Repository key"
     order = 1
     modes = ALL_MODES
     waits_always = True
@@ -258,6 +275,10 @@ class DeployKey(Step):
             return CheckResult(False)
         return mint
 
+    writes: ClassVar[bool] = False
+    """The key must be allowed to write (the console's words, DM-107)."""
+    why_write: ClassVar[str | None] = None
+
     def _access(self, ctx: StepContext) -> bool:
         """The key works for what it is for: read, ``git ls-remote``."""
         return has_access(ctx, self.root, self.repo)
@@ -276,6 +297,16 @@ class DeployKey(Step):
         ctx.on_line(Stream.STDOUT, f"{self._title} for {self.repo.address}:", False)
         ctx.on_line(Stream.STDOUT, self._public(), False)
         waits = minted or self.waits_always
+        ctx.notice(  # the console's block: the key, its page, its rights (DM-107)
+            KeyNeeded(
+                repo=self.repo.address,
+                key=self._public(),
+                page=keys_page(self.repo.address),
+                write=self.writes,
+                why=self.why_write,
+                wait_s=self.wait_s if waits else 0,
+            )
+        )
         deadline = self.clock() + (self.wait_s if waits else 0)
         while not self._access(ctx):
             if self.clock() >= deadline:
@@ -401,6 +432,9 @@ class WriteKey(LeftUndone, DeployKey):
     hour on every deploy."""
 
     name = "write_key"
+    title = "Write key for the types"
+    writes = True
+    why_write = "the box pushes the generated types to the product's repository"
     order = 3  # in the root stack: after final_check and finalize
     waits_always = False
     codes: ClassVar[dict[str, str]] = {

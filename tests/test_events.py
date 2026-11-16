@@ -1,6 +1,7 @@
 """Console rendering of plan events (DM-6): only what the records carry."""
 
 import io
+from datetime import datetime
 
 from plan_support import Journal, ScriptedStep, plan, red
 
@@ -21,13 +22,21 @@ from pridem.report.codes import ExitCode
 NO_SECRETS = Secrets(())
 
 
+TEN = datetime(2026, 11, 16, 10, 0, 0)
+"""The console's clock in these tests: a line's time is literal (DM-107)."""
+
+
 def test_console_prints_the_ladder() -> None:
     """One line per finished step and nothing after the last one.
 
     Until DM-7 the sink also printed ``deploy → red`` at the end; the closing
     line is now the summary line of the verdict (contract 2 section 4). Since
     DM-42 a reason is a code and the console puts it in the plan's catalog's
-    words (v1.6).
+    words (v1.6). Changed by DM-107 (the console for a person, the gate): a
+    line has its time, the beginning of a step is said off a terminal, a fact
+    is said only by the step's ``said`` (these steps have none: the journal
+    has it), a skipped step is its mark and name -- what the test holds, one
+    line per step and nothing after the last, is the same.
     """
     journal = Journal()
     out = io.StringIO()
@@ -49,14 +58,16 @@ def test_console_prints_the_ladder() -> None:
             )
         ]
     )
-    console = ConsoleSink(out, NO_SECRETS, run.catalog)
+    console = ConsoleSink(out, NO_SECRETS, run.catalog, now=lambda: TEN)
     run.run()
     for event in sink.events:
         console.emit(event)
     assert out.getvalue().splitlines() == [
-        "✓ aivis · build · 1.0 s · image_id=sha256:ab, ports=[80]",
-        "✗ aivis · up · 1.0 s · seen=x — read back x",
-        "– aivis · health — after the failure of main aivis · up",
+        "[10:00:00] → aivis · build…",
+        "[10:00:00] ✓ aivis · build · 1 s",
+        "[10:00:00] → aivis · up…",
+        "[10:00:00] ✗ aivis · up · 1 s — read back x",
+        "[10:00:00] – aivis · health",
     ]
 
 
@@ -79,11 +90,11 @@ def test_console_leaves_the_outcome_to_the_verdict() -> None:
         interrupted=True,
     )
     out = io.StringIO()
-    sink = ConsoleSink(out, NO_SECRETS)
+    sink = ConsoleSink(out, NO_SECRETS, now=lambda: TEN)  # DM-107: a line's time
     sink.emit(PlanFinished(outcome))
     assert out.getvalue() == ""
     sink.emit(StepFinished("main", record))
-    assert out.getvalue() == "✗ aivis · migrate — interrupted\n"
+    assert out.getvalue() == "[10:00:00] ✗ aivis · migrate — interrupted\n"
 
 
 def test_console_ignores_command_output_lines() -> None:

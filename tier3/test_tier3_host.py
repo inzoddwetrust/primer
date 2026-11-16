@@ -163,6 +163,9 @@ def test_probe_DM_12_planted_dpkg_lock_waits_then_passes() -> None:
 
 
 def test_probe_DM_12_planted_dpkg_lock_over_timeout_is_red_without_checkmark() -> None:
+    """Changed by DM-107 (on the dispatcher's word at the gate): a line of the
+    console has its time and no stack of the machine -- the step's line is looked
+    for by its mark and name; the pair: the red mark is there."""
     _absent("cowsay")
     timer = _held(60)
     try:
@@ -172,5 +175,6 @@ def test_probe_DM_12_planted_dpkg_lock_over_timeout_is_red_without_checkmark() -
     assert verdict.result == "red", lines
     provision = [step for step in verdict.steps if step.name == "provision_host"]
     assert provision[0].status == "failed"
-    assert not any(line.startswith("✓ host · provision_host") for line in lines)
+    assert not any("✓ provision_host" in line for line in lines)
+    assert any("✗ provision_host" in line for line in lines), lines
     assert not _installed("cowsay")

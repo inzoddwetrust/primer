@@ -149,6 +149,7 @@ class SeamsCheck(Step):
     removed: the fact names it (``left``)."""
 
     name = "seams_check"
+    title = "Check the seams"
     order = 1
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
@@ -298,6 +299,7 @@ class RenderEnv(Step):
     ``derive_env`` (below) puts the value of this run's image there."""
 
     name = "render_env"
+    title = "Write the environment"
     order = 2
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
@@ -595,6 +597,7 @@ class DeriveEnv(Step):
     """
 
     name = "derive_env"
+    title = "Derive keys"
     order = 8  # after build (7), before packages, data_copy (9) and the rest
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

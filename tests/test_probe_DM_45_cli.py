@@ -99,18 +99,26 @@ def test_probe_DM_45_doctor_prints_full_plan_without_act(
     """``doctor`` runs ``check`` of every step of the plan -- the deferred
     stack's too, made while it runs -- prints a line for each step that would
     act, in the ladder's order, and acts on nothing; the pair: ``deploy`` of
-    the same plan calls ``act`` of every step."""
+    the same plan calls ``act`` of every step.
+
+    Changed by DM-107 (on the dispatcher's word): the console opens with the run's
+    head, and a line of doctor says a step by its title, the stack only for a
+    product's or a service's -- one line per step that would act, in the ladder's
+    order, as before; the lines are looked for after the head, not at a fixed
+    place."""
     journal = Journal()
     monkeypatch.setattr(deploy_verbs, "deploy_plan", _fake_plan(journal))
     file = _passport(tmp_path)
     code, out, _ = _cli(tmp_path, ["doctor", "--passport", str(file)])
     assert code == ExitCode.INCOMPLETE
     lines = out.splitlines()
-    assert lines[:4] == [
-        "- pridem-host · preflight — would do preflight",
+    rules = [at for at, line in enumerate(lines) if set(line) == {"═"}]
+    after_head = lines[rules[1] + 1 :]  # the head is between the first two rules
+    assert after_head[:4] == [
+        "- preflight — would do preflight",
         "- blank · build — would do build",
         "- blank · up — would do up",
-        "- pridem-finalize · finalize — would do finalize",
+        "- finalize — would do finalize",
     ]
     assert [entry.rpartition(":")[2] for entry in journal] == ["check"] * 4
     # the pair: deploy acts on every step of the same plan, then verifies

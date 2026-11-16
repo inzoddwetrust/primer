@@ -216,7 +216,10 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
     DM-42 (contract 2 v1.6): reasons, incomplete and doctor entries are codes
     with parameters, not phrases; this probe's data changed form only, each
     assertion keeps its strength.
-    """
+
+    Changed by DM-107 (on the dispatcher's word): the console says a step's fact
+    only through its ``said``; the pair keeps the fact in the console that way, so
+    what is checked is the cleaning of ``said``."""
     output = "leaked-output-4f2a"
 
     class Up(ScriptedStep):
@@ -233,7 +236,11 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
             ),
         )
     )
-    seen = ScriptedStep("seen", 1, Journal(), fact={"key": MARKER, "v": VISIBLE})
+
+    class Seen(ScriptedStep):
+        said = "{key} and {v}"  # the fact in the console: through said (DM-107)
+
+    seen = Seen("seen", 1, Journal(), fact={"key": MARKER, "v": VISIBLE})
     up = Up("up", 2, Journal(), act_argv=["make", "deploy", f"TOKEN={MARKER}"])
     with runner:
         run, sink = plan([StackSteps("aivis", [seen, up], root=True)], runner=runner)
@@ -256,7 +263,7 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
     assert '["make","deploy","TOKEN=[redacted]"]' in verdict.model_dump_json()
 
     out = io.StringIO()
-    console = ConsoleSink(out, secrets)
+    console = ConsoleSink(out, secrets, run.catalog)  # the plan's: its said
     for event in sink.events:
         console.emit(event)
     printed = out.getvalue()

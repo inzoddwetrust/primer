@@ -23,6 +23,8 @@ writes are built here.
 import json
 import os
 import re
+import threading
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -367,6 +369,19 @@ def _fact_line(fact: Fact, catalog: Catalog) -> str:
     return say(catalog, "@fact.sep").join(parts)
 
 
+COLORS = {
+    "red": "\x1b[31m",
+    "green": "\x1b[32m",
+    "yellow": "\x1b[33m",
+    "blue": "\x1b[34m",
+    "dim": "\x1b[2m",
+}
+
+
+def _short(found: re.Match[str]) -> str:
+    return found.group(0)[:7]
+
+
 def muted(stream: TextIO) -> None:
     """The terminal of ``stream`` is gone -- an ssh session dropped, a write
     is ``EIO`` or ``EPIPE`` (measured on a live pty, DM-92): its descriptor
@@ -393,14 +408,85 @@ def said(stream: TextIO, text: str) -> None:
         muted(stream)
 
 
-class ConsoleSink:
-    """The step ladder as it runs: one line per finished step.
+HASH = re.compile(r"\b[0-9a-f]{40}\b")
+"""A full commit in a fact: the console says its first seven characters."""
 
-    Output lines of commands are not printed here; they belong to the journal.
-    The closing line is the summary line of the verdict (contract 2 section 4),
-    printed by whoever holds the verdict, not by this sink. Every word and mark
-    of a line comes from ``catalog``, the step's ``reason`` included; the line's
-    ``reason`` and ``verify`` are cleaned of known secrets.
+INTERNAL_STACKS = frozenset(
+    {
+        "sources",
+        "dependencies",
+        "seams",
+        "edge",
+        "frontend",
+        "finalize",
+        "types",
+        "box",
+        "stopped",
+        "host",
+        "passport",
+        "network",
+        "timers",
+        "destroy",
+        "rollback",
+        "verdict",
+    }
+)
+"""Stacks of the machine itself: their steps are said by their title alone."""
+
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+@dataclass(frozen=True)
+class KeyNeeded:
+    """A step needs a person to add a key (DM-107): the console shows the key,
+    the repository it goes to and its page, with which rights, and that it
+    waits."""
+
+    repo: str
+    """The repository's address."""
+    key: str
+    """The public key, whole."""
+    page: str | None
+    """The repository's page of deploy keys; ``None`` -- not a GitHub address."""
+    write: bool
+    """The key must be allowed to write."""
+    why: str | None
+    """Why it must write."""
+    wait_s: float
+    """How long the step waits for the key to work."""
+
+
+Notice = KeyNeeded
+"""What a step tells the console alone -- never the journal (DM-107)."""
+
+
+def _spent(catalog: Catalog, seconds: float) -> str:
+    """How long, in the catalog's words: ``@seconds`` under a minute, then
+    ``@duration.m`` / ``@duration.h`` -- every unit is the catalog's (DM-42)."""
+    whole = int(seconds)
+    if whole < 60:
+        return say(catalog, "@seconds", s=whole)
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return say(catalog, "@duration.h", h=hours, m=f"{minutes:02d}", s=f"{secs:02d}")
+    return say(catalog, "@duration.m", m=minutes, s=f"{secs:02d}")
+
+
+class ConsoleSink:
+    """The run as a person reads it (DM-107; the form of velo's old install).
+
+    One line per finished step -- the time, a mark, the step's title (the
+    stack's name only for a product's or a service's stack), how long, its
+    fact in one sentence when the step has one (``said``), the reason of a
+    failure in the catalog's words; never the step's internal name, a fact
+    in JSON or a whole commit -- those are the journal's. While a step runs,
+    a terminal shows it live (a spinner and its time), redrawn by a ticker
+    that ends with the step, on ``close`` and when the terminal is gone;
+    elsewhere one line says it began. ``notice`` shows what a person must do
+    (a key to add) and that the run waits. Colors only on a terminal, never
+    under ``NO_COLOR`` or ``TERM=dumb``. Every word comes from ``catalog``;
+    lines are cleaned of known secrets.
     """
 
     def __init__(
@@ -408,33 +494,186 @@ class ConsoleSink:
         stream: TextIO,
         secrets: Secrets,
         catalog: Catalog | Callable[[], Catalog] = ENGLISH,
+        *,
+        tty: bool | None = None,
+        environ: Mapping[str, str] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] = datetime.now,
+        tick_s: float = 1.0,
     ) -> None:
         """``catalog`` may be given as a function: the texts of a plan whose
         deferred stacks add their steps' codes while it runs."""
         self._stream = stream
         self._secrets = secrets
         self._catalog = catalog
+        env = os.environ if environ is None else environ
+        if tty is None:
+            isatty = getattr(stream, "isatty", None)
+            tty = bool(isatty()) if callable(isatty) else False
+        self.tty = tty
+        self.color = tty and "NO_COLOR" not in env and env.get("TERM") != "dumb"
+        self._clock = clock
+        self._now = now
+        self._tick_s = tick_s
+        self._lock = threading.Lock()
+        self._live: tuple[str, float] | None = None
+        self._waiting: tuple[str, float] | None = None
+        self._stop = threading.Event()
+        self._ticker: threading.Thread | None = None
+        self.dead = False
+
+    # --- what the plan hands it --------------------------------------------
 
     def emit(self, event: Event) -> None:
-        if isinstance(event, StepFinished):
-            self._step(event.record)
+        if isinstance(event, StepStarted):
+            self._started(event)
+        elif isinstance(event, StepFinished):
+            self._finished(event.record)
 
-    def _write(self, line: str) -> None:
-        said(self._stream, line + "\n")
+    def notice(self, notice: Notice) -> None:
+        """A key to add: the block, then the live line waits for it."""
+        catalog = self._words()
+        self._clear()
+        rule = "═" * 60
+        lines = [
+            "",
+            rule,
+            say(catalog, "@key.title", repo=notice.repo),
+            rule,
+            notice.key,
+            "",
+        ]
+        if notice.page is not None:
+            lines.append(say(catalog, "@key.go", page=notice.page))
+        lines.append(say(catalog, "@key.add"))
+        if notice.write:
+            lines.append(
+                self._paint("red", say(catalog, "@key.write", why=notice.why or ""))
+            )
+        else:
+            lines.append(self._paint("green", say(catalog, "@key.read")))
+        lines += [say(catalog, "@key.already"), ""]
+        self._write("\n".join(lines) + "\n")
+        with self._lock:
+            self._waiting = (notice.repo, notice.wait_s)
+        if not self.tty:
+            wait = _spent(catalog, notice.wait_s)
+            self._line(say(catalog, "@key.waits", repo=notice.repo, wait=wait))
 
-    def _step(self, record: StepRecord) -> None:
-        catalog = self._catalog() if callable(self._catalog) else self._catalog
+    def close(self) -> None:
+        """No ticker outlives the plan."""
+        self._halt()
+
+    def header(self, verb: str, version: str, server: str | None) -> None:
+        """The run's head between rules, as velo's old install had it."""
+        catalog = self._words()
+        rule = "═" * 60
+        where = say(catalog, "@header.on", server=server) if server else ""
+        head = say(catalog, "@header", version=version, verb=verb, where=where)
+        self._write(f"{rule}\n{self._paint('blue', head)}\n{rule}\n")
+
+    # --- the step's lines ----------------------------------------------------
+
+    def _words(self) -> Catalog:
+        return self._catalog() if callable(self._catalog) else self._catalog
+
+    def _label(self, stack: str, name: str) -> str:
+        catalog = self._words()
+        title = catalog.get(f"@title.{name}") or name
+        if stack in INTERNAL_STACKS or stack.startswith("pridem-"):
+            return title
+        return say(catalog, "@console.of", stack=stack, title=title)
+
+    def _started(self, event: StepStarted) -> None:
+        self._halt()
+        label = self._label(event.stack, event.name)
+        with self._lock:
+            self._live = (label, self._clock())
+            self._waiting = None
+        if not self.tty:
+            self._line(say(self._words(), "@console.begins", label=label))
+            return
+        self._stop = threading.Event()
+        self._ticker = threading.Thread(target=self._tick, daemon=True)
+        self._ticker.start()
+
+    def _tick(self) -> None:
+        turn = 0
+        while not self._stop.is_set() and not self.dead:
+            with self._lock:
+                live, waiting = self._live, self._waiting
+            if live is None:
+                return
+            label, began = live
+            spent = _spent(self._words(), self._clock() - began)
+            if waiting is not None:
+                text_ = say(
+                    self._words(),
+                    "@key.waiting",
+                    repo=waiting[0],
+                    spent=spent,
+                    wait=_spent(self._words(), waiting[1]),
+                )
+            else:
+                text_ = say(self._words(), "@console.live", label=label, spent=spent)
+            self._write(f"\r\x1b[2K{SPINNER[turn % len(SPINNER)]} {text_}")
+            turn += 1
+            self._stop.wait(self._tick_s)
+
+    def _halt(self) -> None:
+        self._stop.set()
+        ticker = self._ticker
+        if ticker is not None and ticker is not threading.current_thread():
+            ticker.join(timeout=5)
+        self._ticker = None
+
+    def _clear(self) -> None:
+        self._halt()
+        if self.tty:
+            self._write("\r\x1b[2K")
+
+    def _finished(self, record: StepRecord) -> None:
+        self._clear()
+        with self._lock:
+            self._live = None
+            self._waiting = None
+        catalog = self._words()
+        label = self._label(record.stack, record.name)
         mark = say(catalog, f"@mark.{record.status}")
-        line = say(
-            catalog, "@console.step", mark=mark, stack=record.stack, name=record.name
-        )
-        if record.duration_s is not None:
-            seconds = say(catalog, "@seconds", s=f"{record.duration_s:.1f}")
+        color = {"ok": "green", "failed": "red", "skipped": "dim"}.get(record.status)
+        line = say(catalog, "@console.step", mark=self._paint(color, mark), label=label)
+        if record.duration_s is not None and record.status != "skipped":
+            seconds = _spent(catalog, record.duration_s)
             line += say(catalog, "@console.duration", seconds=seconds)
-        if record.verify:
-            fact = _fact_line(self._secrets.fact(record.verify), catalog)
-            line += say(catalog, "@console.fact", fact=fact)
-        if record.reason is not None:
+        said_ = catalog.get(f"@said.{record.name}")
+        if said_ and record.verify and record.status == "ok":
+            try:
+                fact = said_.format_map(self._secrets.fact(record.verify))
+            except (KeyError, IndexError, TypeError, ValueError):
+                fact = ""
+            if fact:
+                line += say(catalog, "@console.fact", fact=HASH.sub(_short, fact))
+        if record.reason is not None and record.status == "failed":
             words = text(catalog, record.reason.code, record.reason.params)
-            line += say(catalog, "@console.reason", reason=self._secrets.text(words))
-        self._write(line)
+            reason = self._secrets.text(HASH.sub(_short, words))
+            line += say(catalog, "@console.reason", reason=reason)
+        self._line(line)
+
+    def _line(self, line: str) -> None:
+        stamp = self._paint("dim", f"[{self._now():%H:%M:%S}]")
+        self._write(f"{stamp} {line}\n")
+
+    def _paint(self, color: str | None, words: str) -> str:
+        if not self.color or color is None:
+            return words
+        return f"{COLORS[color]}{words}\x1b[0m"
+
+    def _write(self, text_: str) -> None:
+        if self.dead:
+            return
+        try:
+            self._stream.write(text_)
+            self._stream.flush()
+        except OSError:  # the terminal is gone (DM-92): silent from now on
+            self.dead = True
+            muted(self._stream)

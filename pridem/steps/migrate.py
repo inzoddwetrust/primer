@@ -120,6 +120,8 @@ class Migrate(Step):
     """The stack's migrations, once, on the image of the new commit."""
 
     name = "migrate"
+    title = "Migrate the database"
+    said = "database at {alembic_head}"
     order = 12  # after stop_for_migrate (11, DM-22)
     modes = ALL_MODES
     point_of_no_return = True
@@ -323,6 +325,7 @@ class StopForMigrate(Step):
     """The services of ``stop_for_migrate``, stopped before ``migrate`` acts."""
 
     name = "stop_for_migrate"
+    title = "Stop services for the migration"
     order = 11
     modes = ALL_MODES | {"command"}  # db migrate stops too (DM-86)
     rechecked = False  # ``up`` brings the stopped back: the final check would
@@ -399,6 +402,7 @@ class StartStopped(Step):
     """
 
     name = "start_stopped"
+    title = "Start the stopped services"
     order = 1
     modes = ALL_MODES | {"command"}  # db restore stops too (DM-86)
     codes: ClassVar[dict[str, str]] = {

@@ -63,6 +63,9 @@ def verdicts(fs_root: Path) -> list[Verdict]:
 
 
 def test_gc_writes_one_verdict_and_its_journal(tmp_path: Path) -> None:
+    """Changed by DM-107 (the console for a person, the gate): the run ends with
+    its closing -- ``<verb>: done in ...`` -- not the summary line of contract 2
+    section 4; what the test holds is the same."""
     root, fetched = passport_box(tmp_path, passport_data())
     with FakeRunner(*empty_gc()) as runner:
         code, out, err = cli(["gc"], root, runner)
@@ -75,7 +78,7 @@ def test_gc_writes_one_verdict_and_its_journal(tmp_path: Path) -> None:
     assert [(s.stack, s.name, s.phase) for s in verdict.steps] == [
         ("pridem-box", "gc", "main")
     ]
-    assert out.startswith("gc → green · ")
+    assert "gc: done in " in out
     assert verdict.log_ref is not None  # gc keeps a journal
     journal = root / "opt" / "pridem" / verdict.log_ref
     header = json.loads(journal.read_text(encoding="utf-8").splitlines()[0])
@@ -133,6 +136,9 @@ def test_gc_without_a_passport_removes_nothing_with_its_code(tmp_path: Path) -> 
 
 
 def test_ssl_renew_on_a_self_signed_box(tmp_path: Path) -> None:
+    """Changed by DM-107 (the console for a person, the gate): the run ends with
+    its closing -- ``<verb>: done in ...`` -- not the summary line of contract 2
+    section 4; what the test holds is the same."""
     root, _ = passport(tmp_path, ssl="self-signed")
     cert, key = self_signed_pair(tmp_path, list(DOMAINS.values()))
     cert_path(root).parent.mkdir(parents=True)
@@ -142,7 +148,7 @@ def test_ssl_renew_on_a_self_signed_box(tmp_path: Path) -> None:
     with Mixed() as runner:
         code, out, err = cli(["--timer", "ssl", "renew"], root, runner)
     assert (code, err) == (0, "")
-    assert out.startswith("ssl renew → green · ")
+    assert "ssl renew: done in " in out
     [verdict] = verdicts(root)
     assert (verdict.verb, verdict.actor.via) == ("ssl renew", "timer")
     [step] = verdict.steps

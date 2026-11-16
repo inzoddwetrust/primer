@@ -222,6 +222,8 @@ class Tests(Step):
 
     __test__ = False  # not a pytest class
     name = "tests"
+    title = "Run the tests"
+    said = "{junit[total]} tests, {junit[failed]} failed"
     order = 10
     modes = ALL_MODES
     roles = TEST_ROLES

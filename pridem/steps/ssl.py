@@ -314,6 +314,7 @@ class TlsFiles(Step):
     """The certificate pair nginx reads, from the mode of ``policies.ssl``."""
 
     name = "tls_files"
+    title = "Certificates"
     order = 1
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
@@ -411,6 +412,8 @@ class Ssl(Step):
     """The certificate of the mode: issued, deferred, or as placed."""
 
     name = "ssl"
+    title = "TLS certificate"
+    said = "{mode}, {days_left} days left"
     order = 3
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
@@ -496,6 +499,7 @@ class SslRenew(Step):
     again; every mode reads back what nginx serves and judges its end."""
 
     name = "ssl_renew"
+    title = "Renew the certificate"
     order = 1
     modes = RENEW_MODES
     codes: ClassVar[dict[str, str]] = {

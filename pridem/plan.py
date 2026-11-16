@@ -83,6 +83,7 @@ from pridem.events import (
     Fact,
     Incomplete,
     LogLine,
+    Notice,
     Phase,
     PlanFinished,
     PlanMode,
@@ -191,6 +192,7 @@ class Unresolved(Step):
     """The one step of a deferred stack whose steps cannot be made yet."""
 
     name = "ladder"
+    title = "Resolve the steps"
     order = 0
     modes = MODES
     codes: ClassVar[dict[str, str]] = {
@@ -219,6 +221,7 @@ class Unbuilt(Step):
     either."""
 
     name = "ladder"
+    title = "Resolve the steps"
     order = 0
     modes = MODES
     codes: ClassVar[dict[str, str]] = {}
@@ -312,7 +315,9 @@ class Plan:
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         interrupt: Interrupt | None = None,
+        notice: Callable[[Notice], None] = lambda notice: None,
     ) -> None:
+        self._notice = notice  # the console's, for a key to add (DM-107)
         self._selected: Mode = "deploy" if mode == "doctor" else mode
         self._mode = mode
         self._role_of = role
@@ -355,9 +360,14 @@ class Plan:
     def catalog(self) -> Catalog:
         """The machine's texts and those of the plan's steps -- the steps of a
         deferred stack once the ladder made them."""
-        return with_steps(
+        merged = with_steps(
             ENGLISH, ((step.name, type(step).codes) for step in self._named)
         )
+        for step in self._named:  # a person's words for the console (DM-107)
+            merged[f"@title.{step.name}"] = type(step).title or step.name
+            if type(step).said is not None:
+                merged[f"@said.{step.name}"] = str(type(step).said)
+        return merged
 
     # --- events ---------------------------------------------------------------
 
@@ -408,7 +418,13 @@ class Plan:
             self._emit(LogLine(phase, stack, step.name, stream, line, continued))
 
         return StepContext(
-            self._runner, self._selected, self._role, stack, on_line, self._interrupt
+            self._runner,
+            self._selected,
+            self._role,
+            stack,
+            on_line,
+            self._interrupt,
+            self._notice,
         )
 
     def _record(self, phase: Phase, record: StepRecord) -> StepRecord:

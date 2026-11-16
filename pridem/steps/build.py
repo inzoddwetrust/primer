@@ -144,6 +144,8 @@ class Build(Step):
     package versions for a service a package is built into."""
 
     name = "build"
+    title = "Build images"
+    said = "release {release}"
     order = 7
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

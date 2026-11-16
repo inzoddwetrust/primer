@@ -225,6 +225,8 @@ def dns_table(
 
 class Preflight(_HostStep):
     name = "preflight"
+    title = "Check the server"
+    said = "{os}, {free_gib} GB free, docker {docker}"
     order = 1
     codes: ClassVar[dict[str, str]] = {
         "not-ubuntu": "needs Ubuntu 24.04, found {found}",
@@ -300,6 +302,7 @@ class WaitHostQuiet(_HostStep):
     ``restore_timers`` in ``finally`` starts them again (``for_the_run``)."""
 
     name = "wait_host_quiet"
+    title = "Wait for apt to finish"
     order = 2
     for_the_run = True
     codes: ClassVar[dict[str, str]] = {
@@ -422,6 +425,7 @@ class RestoreTimers(_HostStep):
     """``finally``: start exactly the timers ``wait_host_quiet`` recorded."""
 
     name = "restore_timers"
+    title = "Start the apt timers again"
     order = 1
     codes: ClassVar[dict[str, str]] = {
         "restore": "start {timers}",
@@ -454,6 +458,7 @@ class RestoreTimers(_HostStep):
 
 class ProvisionHost(_HostStep):
     name = "provision_host"
+    title = "Install host packages"
     order = 3
     codes: ClassVar[dict[str, str]] = {
         "install": "install {packages}",
@@ -526,6 +531,7 @@ class DaemonJson(_HostStep):
     """
 
     name = "daemon_json"
+    title = "Configure docker"
     order = 4
     codes: ClassVar[dict[str, str]] = {
         "log-driver": "set docker's log driver to local",
@@ -596,6 +602,7 @@ class DaemonJson(_HostStep):
 
 class EnsureNetwork(_HostStep):
     name = "ensure_network"
+    title = "Create the networks"
     order = 5
     codes: ClassVar[dict[str, str]] = {
         "create": "create the internal docker networks {networks}",
@@ -657,6 +664,7 @@ class EnsureNetwork(_HostStep):
 
 class Locale(_HostStep):
     name = "locale"
+    title = "Set the locale"
     order = 6
     codes: ClassVar[dict[str, str]] = {
         "set": "set LANG={lang}",

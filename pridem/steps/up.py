@@ -168,6 +168,8 @@ class Up(Step):
     """One stack entry up on the images of this commit and key, checked live."""
 
     name = "up"
+    title = "Start the containers"
+    said = "health {health}"
     order = 14  # after egress (13): the application starts with its proxy ready
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

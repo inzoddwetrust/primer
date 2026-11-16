@@ -64,12 +64,20 @@ def test_an_image_named_like_an_option_is_an_operand_of_docker_run(
 
 
 def test_logs_of_a_service_named_like_an_option(tmp_path: Path) -> None:
-    """The operator's ``logs blank -x``: ``-x`` is the service, after ``--``."""
+    """The operator's ``logs blank -x``: ``-x`` is the service, after ``--``.
+
+    Changed by DM-107 (the gate): ``logs`` asks compose for ``--timestamps`` -- the
+    lines of every service are put in time order; ``-x`` is the service after
+    ``--`` as before."""
     from test_verbs_admin import _out
     from test_verbs_project import _box
 
     cs = _box(tmp_path)
-    argv = tuple(cs.argv("logs", "--no-color", "--no-log-prefix", operands=("-x",)))
+    argv = tuple(
+        cs.argv(
+            "logs", "--no-color", "--no-log-prefix", "--timestamps", operands=("-x",)
+        )
+    )
     assert argv[-2:] == ("--", "-x")
     with FakeRunner(FakeCall(argv, lines=())) as runner:
         code, _, err = _out(tmp_path, ["logs", STACK, "-x"], runner)

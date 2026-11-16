@@ -111,6 +111,7 @@ class Types(LeftUndone, Step):
     ``finalize``, so whatever is refused is left undone."""
 
     name = "types"
+    title = "Generate the types"
     order = 4  # in the root stack: after final_check, finalize, write_key
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

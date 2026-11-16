@@ -58,10 +58,11 @@ from pridem.events import (
     StepFinished,
     StepRecord,
     after_failure,
+    said,
 )
 from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.codes import ExitCode
-from pridem.report.render import render_json, summary_line
+from pridem.report.render import closing, render_json
 from pridem.report.schema import build_verdict
 from pridem.runner import CommandFailed, CommandNotStarted, CommandTimedOut, Stream
 from pridem.stacks.egress import UNLISTED, unlisted
@@ -443,7 +444,7 @@ def _run(args: Strict, ctx: Context) -> int:
         console = ConsoleSink(ctx.out, NO_SECRETS, catalog)
         for record in checked.steps:
             console.emit(StepFinished("main", record))
-        ctx.out.write(summary_line(verdict, catalog) + "\n")
+        said(ctx.out, "\n".join(closing(verdict, catalog)) + "\n")  # DM-107
     return int(verdict.exit_code)
 
 

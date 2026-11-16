@@ -21,6 +21,7 @@ and the dump is the way back -- said before ``pg_restore`` and in the fact.
 """
 
 import json
+import re
 import shlex
 import sys
 from collections.abc import Callable
@@ -665,6 +666,16 @@ def _entry(ctx: Context, entry: str) -> ComposeStack:
     raise Refused(f"the box runs no entry {entry}")
 
 
+STAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\S+) (.*)$", re.S)
+"""``compose logs --timestamps``: an RFC 3339 time, a space, the line."""
+
+
+def _stamped(line: str) -> tuple[str, str]:
+    """The stamp and the line without it -- a line with none sorts first."""
+    found = STAMP.match(line)
+    return (found[1], found[2]) if found else ("", line)
+
+
 def _logs(args: Strict, ctx: Context) -> int:
     """``logs <entry> [<service>] [-f] [--tail N] [<field>=<value> ...]``: the
     entry's logs through compose, filtered by the fields of each JSON line, the
@@ -676,25 +687,46 @@ def _logs(args: Strict, ctx: Context) -> int:
     words = list(args.words)
     service = words.pop(0) if words and "=" not in words[0] else None
     filters = _filters(words)
+    filters_said = list(words)
     if args.tail is not None and not args.tail.isdigit():
         raise Refused("logs: --tail is a number of lines")
+    tail = int(args.tail) if args.tail is not None else None
     compose = _entry(ctx, args.stack)
     secrets = Secrets(
         SecretStr(s) for s in box_secrets(ctx) if len(s) >= SECRET_MIN_LENGTH
     )
-    argv = ["logs", "--no-color", "--no-log-prefix"]
+    argv = ["logs", "--no-color", "--no-log-prefix", "--timestamps"]
     if args.follow:
+        # KNOWN CEILING (DM-107): with -f, --tail N is N lines of each service.
+        # 1. mechanics: compose prints each service's last N, then follows;
+        #    the machine cannot tell where the first part ends to cut it to N
+        #    in all, as it does without -f (merged by time, the newest N).
+        # 2. status: acknowledged by design.
+        # 3. task: none -- velo-test asked for the last lines of a box, which
+        #    is logs without -f.
+        # 4. unfreeze when: an operator asks for -f with N lines in all.
+        # 5. agreed fix: follow without --tail after the merged last N of a
+        #    run without -f, printing only lines past the newest stamp.
+        # 6. rejected: buffering -f's first lines for a time -- a guess at
+        #    when compose stops replaying, wrong on a slow box.
         argv.append("-f")
     if args.tail is not None:
         argv += ["--tail", str(args.tail)]
+    shown = 0
     dropped = 0
+    kept: list[tuple[str, str]] = []  # without -f: every service's, by time
 
     def line(stream: Stream, text: str, cut: bool) -> None:
-        nonlocal dropped
-        if matches(text, filters):
-            print(secrets.text(text), file=ctx.out, flush=True)
-        elif filters:
+        nonlocal shown, dropped
+        stamp, plain = _stamped(text)  # the stamp off before the filter (DM-107)
+        if not matches(plain, filters):
             dropped += 1
+            return
+        if args.follow:
+            shown += 1
+            print(secrets.text(plain), file=ctx.out, flush=True)
+        else:
+            kept.append((stamp, plain))
 
     try:
         ctx.runner.run(
@@ -706,7 +738,18 @@ def _logs(args: Strict, ctx: Context) -> int:
         pass  # (DM-92: under the command's interrupt the runner raises Interrupted)
     except RunnerError as error:
         raise Refused(f"logs: {error}") from None
-    if filters:
+    if not args.follow:
+        # --tail N is N lines in all, the newest by their stamps (DM-107):
+        # compose gives N of each service
+        ordered = [plain for _, plain in sorted(kept, key=lambda item: item[0])]
+        if tail is not None:
+            ordered = ordered[-tail:] if tail else []
+        for plain in ordered:
+            print(secrets.text(plain), file=ctx.out, flush=True)
+        shown = len(ordered)
+    if filters and not shown:  # none matched: say so, not a count (DM-107)
+        print(f"logs: no lines match {' '.join(filters_said)}", file=ctx.err)
+    elif filters:
         print(f"logs: {dropped} line(s) not matching", file=ctx.err)
     return 0
 

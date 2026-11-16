@@ -71,6 +71,7 @@ class Stand(Step):
     """A red stand refuses a deploy of another task (TZ 9.3)."""
 
     name = STAND
+    title = "Check the stand"
     order = 3
     """After ``fetch_root`` (2) and before ``fetch_packages`` (5) in ``sources``:
     an order is unique in its stack (``plan.ladder``), so not ``fetch_root``'s."""
@@ -128,6 +129,7 @@ class RollbackCheck(Step):
     """``rollback`` refuses before any act when the database moved forward."""
 
     name = ROLLBACK_CHECK
+    title = "Check the roll-back"
     order = 1
     modes = DEPLOY
     codes: ClassVar[dict[str, str]] = {

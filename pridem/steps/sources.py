@@ -386,6 +386,8 @@ class FetchRoot(_SourceStep):
     made -- in ``check`` on a box that has the commit, in ``act`` once fetched."""
 
     name = "fetch_root"
+    title = "Fetch the product"
+    said = "at {release}"
     order = 2
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
@@ -505,6 +507,7 @@ class CheckLock(_SourceStep):
     does not use is never asked."""
 
     name = "check_lock"
+    title = "Check the lock"
     order = 3
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
@@ -600,6 +603,7 @@ class FetchServices(_SourceStep):
     dependency is never fetched (rule 13), nor one the edition leaves out."""
 
     name = "fetch_services"
+    title = "Fetch the services"
     order = 4
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
@@ -724,6 +728,7 @@ class FetchPackages(_SourceStep):
     """The instance's packages at ``v<version>``, their contract checked first."""
 
     name = "fetch_packages"
+    title = "Fetch the packages"
     order = 5
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,

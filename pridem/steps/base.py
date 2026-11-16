@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal, TypeVar
 
-from pridem.events import Code, Fact, Json
+from pridem.events import Code, Fact, Json, Notice
 from pridem.interrupt import Interrupt
 from pridem.report.codes import LOCAL_CODE
 from pridem.runner import OnLine, Runner, RunnerError
@@ -112,6 +112,9 @@ class StepContext:
     stack: str
     on_line: OnLine
     interrupt: Interrupt = field(default_factory=Interrupt)
+    notice: Callable[[Notice], None] = field(default=lambda notice: None)
+    """What the step tells the console alone -- a key a person must add
+    (DM-107); the journal never sees it."""
 
 
 _T = TypeVar("_T")
@@ -158,6 +161,13 @@ class Step(ABC):
     """
 
     name: str
+    title: ClassVar[str] = ""
+    """The step's name for a person (the console, DM-107); its ``name`` is the
+    journal's and the verdict's."""
+    said: ClassVar[str | None] = None
+    """A short sentence of the step's fact for the console, over keys of its
+    ``verify`` (DM-107); ``None`` -- the console says no fact, the journal has
+    it."""
     order: int
     modes: frozenset[Mode]
     codes: ClassVar[Mapping[str, str]] = {}

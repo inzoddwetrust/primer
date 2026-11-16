@@ -79,6 +79,7 @@ class Nginx(Step):
     """The box's nginx: rendered, tested aside, then put in place and reloaded."""
 
     name = "nginx"
+    title = "Configure nginx"
     order = 2
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

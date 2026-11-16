@@ -230,6 +230,7 @@ class DbDump(Step):
     """The database of one entry, dumped to ``backups/<run_id>/<entry>.dump``."""
 
     name = "db_dump"
+    title = "Dump the database"
     order = 1
     modes = COMMAND
     codes: ClassVar[dict[str, str]] = {
@@ -352,6 +353,7 @@ class DbRestore(Step):
     return of ``db restore``."""
 
     name = "db_restore"
+    title = "Restore the database"
     order = 2
     modes = COMMAND
     point_of_no_return = True
@@ -456,6 +458,7 @@ class StopForRestore(Step):
     ``--clean`` and ``DROP DATABASE``."""
 
     name = "stop_for_restore"
+    title = "Stop services for the restore"
     order = 1
     modes = COMMAND
     rechecked = False  # ``start_restored`` brings them back by design
@@ -513,6 +516,7 @@ class StartRestored(Step):
     their configuration."""
 
     name = "start_restored"
+    title = "Start services after the restore"
     order = 3
     modes = COMMAND
     codes: ClassVar[dict[str, str]] = {
@@ -574,6 +578,7 @@ class BackupScope(Step):
     (the verdict says why)."""
 
     name = "backup_scope"
+    title = "Read what the backup holds"
     order = 1
     modes = COMMAND
 
@@ -725,6 +730,7 @@ class DbReset(Step):
     of its release -- the point of no return of ``db reset``."""
 
     name = "db_reset"
+    title = "Reset the database"
     order = 2
     modes = COMMAND
     point_of_no_return = True
@@ -795,6 +801,7 @@ class DbMigrate(Step):
     migrate``. Nothing to do when the database is at the code's head."""
 
     name = "db_migrate"
+    title = "Migrate the database"
     order = 12
     modes = COMMAND
     point_of_no_return = True
@@ -861,6 +868,7 @@ class Seeds(Step):
     is not run and is named (DM-86)."""
 
     name = "seeds"
+    title = "Seed the database"
     order = 15
     modes: frozenset[Mode] = frozenset({"install", "reinstall"})
 
@@ -911,6 +919,7 @@ class SeedRun(Step):
     app of the current release (DM-86)."""
 
     name = "seed"
+    title = "Seed the database"
     order = 4
     modes = COMMAND
     codes: ClassVar[dict[str, str]] = {
@@ -975,6 +984,7 @@ class ProjectVerb(Step):
     fact: the machine runs it, knowing nothing of what it does (DM-86)."""
 
     name = "project_verb"
+    title = "Run the project's command"
     order = 1
     modes = COMMAND
     codes: ClassVar[dict[str, str]] = {
@@ -1118,6 +1128,7 @@ class _ServiceAction(Step):
 
 class ServiceStart(_ServiceAction):
     name = "service_start"
+    title = "Start services"
     action = "start"
     codes: ClassVar[dict[str, str]] = {
         "start": "start {services} of {entry}",
@@ -1127,6 +1138,7 @@ class ServiceStart(_ServiceAction):
 
 class ServiceStop(_ServiceAction):
     name = "service_stop"
+    title = "Stop services"
     action = "stop"
     codes: ClassVar[dict[str, str]] = {
         "stop": "stop {services} of {entry}",
@@ -1136,6 +1148,7 @@ class ServiceStop(_ServiceAction):
 
 class ServiceRestart(_ServiceAction):
     name = "service_restart"
+    title = "Restart services"
     action = "restart"
     codes: ClassVar[dict[str, str]] = {
         "restart": "restart {services} of {entry}",

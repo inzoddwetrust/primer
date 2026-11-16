@@ -163,6 +163,7 @@ class RemoveObjects(Step):
     """Every labelled docker object but the persistent volumes."""
 
     name = "remove_objects"
+    title = "Remove containers, images and networks"
     order = 1
     modes = MODES
     point_of_no_return = True
@@ -315,6 +316,7 @@ class RemoveFiles(Step):
     """``/opt/<stack>`` but ``env/minted.yaml``; the edge's and the proxy's."""
 
     name = "remove_files"
+    title = "Remove the box's files"
     order = 2
     modes = MODES
     codes: ClassVar[dict[str, str]] = {
@@ -393,6 +395,7 @@ class RemoveTimers(Step):
     """The box's own timers and their services."""
 
     name = "remove_timers"
+    title = "Remove the timers"
     order = 3
     modes = MODES
     codes: ClassVar[dict[str, str]] = {
@@ -431,6 +434,7 @@ class ForgetState(Step):
     """``state.json``, last: the box has no composition left."""
 
     name = "forget_state"
+    title = "Forget the box's state"
     order = 4
     modes = MODES
     codes: ClassVar[dict[str, str]] = {

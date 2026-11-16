@@ -98,6 +98,89 @@ def summary_line(verdict: Verdict, catalog: Catalog = ENGLISH) -> str:
     )
 
 
+FULL_HASH = re.compile(r"\b[0-9a-f]{40}\b")
+POSITIONAL = frozenset(
+    {"ref", "stack", "entry", "profile", "name", "dump", "verb", "path"}
+)
+"""Arguments a person types without a flag."""
+
+
+def _short(value: str) -> str:
+    return FULL_HASH.sub(lambda found: found.group(0)[:7], value)
+
+
+def said_args(args: Mapping[str, Json]) -> str:
+    """A verb's arguments as a person types them: ``--confirm velo-dev --all``,
+    never the values alone (DM-107)."""
+    words: list[str] = []
+    for key, value in args.items():
+        flag = "--" + key.replace("_", "-")
+        if value is True:
+            words.append(flag)
+        elif value is False or value is None:
+            continue
+        elif key in POSITIONAL:
+            words.append(_short(_value(value)))
+        else:
+            words += [flag, _short(_value(value))]
+    return " ".join(words)
+
+
+def closing(verdict: Verdict, catalog: Catalog = ENGLISH) -> list[str]:
+    """The end of a run as a person reads it (DM-107; the form of velo's old
+    install): done or failed and in how long; the failed step by its title
+    and the reason in the catalog's words, the log and what to run next; what
+    is left undone; the sites; the versions that changed, commits short."""
+    head = " ".join(w for w in (verdict.verb, said_args(verdict.args)) if w)
+    spent = duration((verdict.finished - verdict.started).total_seconds(), catalog)
+    lines = ["", "═" * 60]
+    failed = [(s, s.reason) for s in verdict.steps if s.status == "failed" and s.reason]
+    if verdict.result == "red" and failed:
+        step, why = failed[0]
+        reason = text(catalog, why.code, why.model_dump(exclude={"code"}))
+        title = catalog.get(f"@title.{step.name}") or step.name
+        lines.append(
+            say(
+                catalog,
+                "@end.red",
+                head=head,
+                duration=spent,
+                title=title,
+                reason=_short(reason),
+            )
+        )
+    elif verdict.result == "red":
+        lines.append(say(catalog, "@end.stopped", head=head, duration=spent))
+    elif verdict.report.doctor_diff and not verdict.report.incomplete:
+        count = len(verdict.report.doctor_diff)
+        lines.append(
+            say(catalog, "@end.doctor", head=head, duration=spent, count=count)
+        )
+    else:
+        key = "@end.green" if verdict.result == "green" else "@end.incomplete"
+        lines.append(say(catalog, key, head=head, duration=spent))
+    for item in verdict.report.incomplete:
+        lines.append(say(catalog, "@end.left", words=_short(words(catalog, item))))
+    if verdict.result != "red":
+        for domain in sorted({check.domain for check in verdict.report.dns or []}):
+            lines.append(say(catalog, "@end.site", domain=domain))
+    changed = []
+    before, after = verdict.composition_before, verdict.composition_after
+    for key in after:
+        if key == "pridem" or before.get(key) == after[key]:
+            continue
+        if key in before:
+            changed.append(f"{key} {_short(before[key])} → {_short(after[key])}")
+        else:
+            changed.append(f"{key} {_short(after[key])}")
+    if changed:
+        lines.append(say(catalog, "@end.versions", versions=", ".join(changed)))
+    if verdict.result == "red":
+        lines.append(say(catalog, "@end.log", log_ref=verdict.log_ref))
+        lines.append(say(catalog, "@end.next", run_id=verdict.run_id))
+    return lines
+
+
 def render_json(verdict: Verdict) -> str:
     """The verdict object of contract 2 section 1."""
     return verdict.model_dump_json(indent=2)

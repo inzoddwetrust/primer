@@ -302,6 +302,7 @@ class Gc(Step):
     """Remove what the box no longer needs, by labels, and measure it."""
 
     name = "gc"
+    title = "Clean up"
     order = 1
     modes = GC_MODES
     codes: ClassVar[dict[str, str]] = {

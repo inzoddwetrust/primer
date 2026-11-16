@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 
 from pridem import __version__
 from pridem.events import (
+    INTERNAL_STACKS,
     Code,
     ConsoleSink,
     Event,
@@ -51,7 +52,7 @@ from pridem.events import (
 from pridem.plan import Plan, Stack, StackSteps
 from pridem.report.catalog import ENGLISH, Catalog, say
 from pridem.report.codes import ExitCode, worst
-from pridem.report.render import render_json, summary_line, words
+from pridem.report.render import closing, render_json, words
 from pridem.report.schema import Actor, Verdict, build_verdict
 from pridem.runner import Holding, Stream
 from pridem.stacks import names as machine
@@ -245,7 +246,7 @@ def _verdict(
                     return found.passport.server.role
             return ROLE_WITHOUT_PASSPORT
 
-        console: EventSink | None = None
+        console: ConsoleSink | None = None
         if ladder:
             stream = ctx.err if ctx.json else ctx.out
             console = ConsoleSink(stream, secrets, lambda: plan.catalog)
@@ -257,8 +258,16 @@ def _verdict(
             sink=_Sinks(journal, console),
             finally_=planned.finally_,
             interrupt=ctx.interrupt,
+            notice=console.notice if console is not None else lambda notice: None,
         )
-        outcome = plan.run()
+        if console is not None:
+            server = passport.server.name if passport is not None else None
+            console.header(verb, __version__, server)
+        try:
+            outcome = plan.run()
+        finally:
+            if console is not None:
+                console.close()  # no ticker outlives the plan (DM-107)
         restore = planned.restore_on
         if any(_failed_by(record, restore) for record in outcome.steps):
             outcome = replace(outcome, needs_restore=True)
@@ -365,17 +374,18 @@ def _failed_by(record: StepRecord, codes: frozenset[str]) -> bool:
 
 
 def _diff_lines(verdict: Verdict, catalog: Catalog) -> list[str]:
-    """What ``doctor`` would do, step by step, in the ladder's order."""
-    return [
-        say(
-            catalog,
-            "@doctor.item",
-            stack=item.stack,
-            name=item.name,
-            words=words(catalog, item),
+    """What ``doctor`` would do, step by step, in the ladder's order -- each
+    step by its title, the stack named only for a product's or a service's
+    (DM-107: no internal name in the console)."""
+    lines = []
+    for item in verdict.report.doctor_diff or []:
+        title = catalog.get(f"@title.{item.name}") or item.name
+        if item.stack not in INTERNAL_STACKS and not item.stack.startswith("pridem-"):
+            title = say(catalog, "@console.of", stack=item.stack, title=title)
+        lines.append(
+            say(catalog, "@doctor.line", title=title, words=words(catalog, item))
         )
-        for item in verdict.report.doctor_diff or []
-    ]
+    return lines
 
 
 def run_plan_verb(
@@ -412,7 +422,7 @@ def run_plan_verb(
         said(ctx.out, render_json(verdict) + "\n")
     else:
         noted = list(notes(verdict, catalog)) if notes is not None else []
-        lines = [*_diff_lines(verdict, catalog), *noted, summary_line(verdict)]
+        lines = [*_diff_lines(verdict, catalog), *noted, *closing(verdict, catalog)]
         said(ctx.out, "\n".join(lines) + "\n")  # a console gone: the verdict is written
     return int(verdict.exit_code)
 

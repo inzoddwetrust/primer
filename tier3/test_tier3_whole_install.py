@@ -67,6 +67,7 @@ name): docker is on the runner only after the host steps.
 
 import json
 import os
+import re
 import shutil
 import time
 import warnings
@@ -556,6 +557,21 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     assert (env["EDITION"], env["API_BASE_URL"]) == ("core", API), printed
     assert (env["LANGUAGES"], env["DEFAULT_LANGUAGE"]) == ("en,ru", "en"), printed
     assert password not in printed  # neither the console nor the verdict
+    # the console for a person (DM-107): titles, no fact in JSON, no whole
+    # commit; status and logs measured into the run's output (par0 14.3)
+    steps = [line for line in printed.splitlines() if line.startswith("[")]
+    assert any("✓ Check the server" in line for line in steps), printed
+    assert not any("{" in line for line in steps), printed
+    assert not re.search(r"\b[0-9a-f]{40}\b", "\n".join(steps)), printed
+    code, said_status, _ = _pridem("status")
+    _, said_logs, _ = _pridem("logs", STACK, "--tail", "3")
+    print("DM-107 measure:", {"status": said_status, "logs": said_logs})
+    assert code == 0 and any(
+        STACK in line and "running" in line for line in said_status
+    )
+    assert said_logs and not any(
+        re.match(r"^\d{4}-\d\d-\d\dT", line) for line in said_logs
+    )
     # build, migrate, up (U1-U3)
     up, build = facts[(STACK, "up")], facts[(STACK, "build")]
     assert (up["release"], up["commit"]) == (REF, BLANK_COMMIT), printed

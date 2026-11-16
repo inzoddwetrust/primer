@@ -54,6 +54,8 @@ class FinalCheck(Step):
     """Marker of the final check; the plan does its work."""
 
     name = "final_check"
+    title = "Final check"
+    said = "{verified} facts checked"
     order = 1
     modes = ALL_MODES
     final_check = True
@@ -79,6 +81,7 @@ class Finalize(Step):
     """``current`` of every stack and ``state.json``, after the final check."""
 
     name = "finalize"
+    title = "Switch to the new release"
     order = 2
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

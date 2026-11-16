@@ -259,6 +259,7 @@ class Egress(Step):
     """The proxy of one product: there exactly when its ``egress`` is not empty."""
 
     name = "egress"
+    title = "Open the egress proxy"
     order = 13
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

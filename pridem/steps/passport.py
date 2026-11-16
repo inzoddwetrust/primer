@@ -198,6 +198,7 @@ class AgeKey(Step):
     """The box's age pair: minted once, never re-moded, never replaced."""
 
     name = "age_key"
+    title = "Passport key"
     order = 1
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
@@ -258,6 +259,7 @@ class _OpsKey(DeployKey):
     """The ops repository's deploy key, after the age key in the ladder."""
 
     name = "ops_key"  # the class's own: the report's catalog finds its codes
+    title = "Ops repository key"
     order = 2
 
 
@@ -435,6 +437,8 @@ class FetchPassport(Step):
     """The passport from the ops repository (``ops``) or from a file (``file``)."""
 
     name = "fetch_passport"
+    title = "Read the passport"
+    said = "passport v{version}"
     order = 3
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

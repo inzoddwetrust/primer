@@ -286,6 +286,7 @@ class DataCopy(Step):
     service's new image before it restarts on it (form D)."""
 
     name = "data_copy"
+    title = "Copy the data"
     order = 9
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
@@ -461,6 +462,7 @@ class SeamsVerify(Step):
     """Every seam of the box is held by its live provider."""
 
     name = "seams_verify"
+    title = "Check the seams live"
     order = 15
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

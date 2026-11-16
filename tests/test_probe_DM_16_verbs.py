@@ -38,6 +38,9 @@ def _verdicts(root: Path) -> list[Verdict]:
 
 
 def test_probe_DM_16_status_writes_one_verdict(tmp_path: Path) -> None:
+    """Changed by DM-107 (on the dispatcher's word): the console's closing --
+    ``<verb>: done in ...`` -- replaces the summary line of contract 2 section 4;
+    status says green and no passport as before."""
     root = tmp_path / "opt" / "pridem"
     code, out, err = _run(["status"], root)
     assert (code, err) == (0, "")
@@ -51,7 +54,7 @@ def test_probe_DM_16_status_writes_one_verdict(tmp_path: Path) -> None:
     )
     assert "passport_version" not in verdict.model_dump_json()
     assert [p.name for p in (root / "journal").iterdir()] == [f"{verdict.run_id}.jsonl"]
-    assert out.startswith("status → green · ") and "passport" not in out
+    assert "status: done in " in out and "passport" not in out
 
     # the pair: a run that ended without a verdict gets its own red one first
     other = tmp_path / "other"

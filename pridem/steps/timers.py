@@ -131,6 +131,7 @@ class Timers(Step):
     """The ``gc`` and renewal timers, enabled and active."""
 
     name = "timers"
+    title = "Set the timers"
     order = 1
     modes = TIMER_MODES
     codes: ClassVar[dict[str, str]] = {

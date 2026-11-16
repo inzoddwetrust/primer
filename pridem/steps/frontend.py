@@ -44,6 +44,8 @@ class Frontend(Step):
     """The front, reloaded and answering 200 on its domain."""
 
     name = "frontend"
+    title = "Check the site"
+    said = "{domain} answers {status}"
     order = 1
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
