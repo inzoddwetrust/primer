@@ -278,7 +278,7 @@ def test_destroy_all_wipes_the_persistent_volume_its_record_and_minted(
         *seen,
         docker(),
         *seen,
-        FakeCall(("docker", "rm", "-f", "c1")),
+        FakeCall(("docker", "rm", "-f", "-v", "c1")),
         FakeCall(("docker", "volume", "rm", "db", "files")),
         FakeCall(("docker", "network", "rm", "pridem")),
         FakeCall(("docker", "image", "rm", "-f", "sha256:1")),

@@ -368,7 +368,7 @@ def test_probe_DM_22_persistent_volumes_survive_destroy_and_reinstall(
         *seen,
         docker(),
         *seen,
-        FakeCall(("docker", "rm", "-f", "c1")),
+        FakeCall(("docker", "rm", "-f", "-v", "c1")),
         FakeCall(("docker", "volume", "rm", "db")),  # never "files"
         FakeCall(("docker", "network", "rm", "pridem")),
         FakeCall(("docker", "image", "rm", "-f", "sha256:1")),

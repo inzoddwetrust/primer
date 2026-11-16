@@ -1028,6 +1028,10 @@ def test_probe_DM_64_product_reaches_only_its_egress_hosts(
     assert facts[(STACK, "egress")] == {"hosts": [], "proxy": "absent"}, facts
     assert _proxies() == []
     assert not Path("/opt/pridem/egress/squid.conf").exists()
+    # DM-106: the proxy's own network went with it (``rm`` then ``down``)
+    nets = _stdout(["docker", "network", "ls", "--format", "{{.Name}}"])
+    print("DM-106 measure: networks after the proxy", nets)
+    assert "pridem-egress_default" not in nets, nets
     last = _reach()
     assert last["HTTPS_PROXY"] is None, last
     for key in ("direct_allowed", "direct_address", "via_allowed", "via_other"):
@@ -1548,6 +1552,17 @@ def _container(project: str, service: str) -> str:
         ]
     )
     return container
+
+
+def _volumes() -> dict[str, bool]:
+    """Every volume on the box, and whether docker made it anonymous."""
+    found: dict[str, bool] = {}
+    for name in _stdout(["docker", "volume", "ls", "-q"]):
+        labels = _stdout(
+            ["docker", "volume", "inspect", "-f", "{{json .Labels}}", name]
+        )
+        found[name] = "com.docker.volume.anonymous" in "".join(labels)
+    return found
 
 
 def _box_db_head() -> str | None:
@@ -3077,8 +3092,15 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     files = _container(FILES, "files")
     [image] = _stdout(["docker", "inspect", "-f", "{{.Config.Image}}", files])
     _stdout(["docker", "exec", files, "sh", "-c", f"echo {MARK} > /srv/files/mark"])
+    before = _volumes()
+    print("DM-106 measure: volumes before destroy", before)
     verdict, printed = _verdict_of("destroy")
     assert verdict.result == "green", printed
+    after = _volumes()
+    print("DM-106 measure: volumes after destroy", after)
+    # DM-106: the anonymous volume of the service files (postgres:16-alpine
+    # declares VOLUME /var/lib/postgresql/data) went with its container
+    assert [v for v, anon in after.items() if anon] == [], after
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
     kept = facts[("pridem-destroy", "remove_objects")]["kept_volumes"]
     assert kept == [FILES_VOLUME], facts
@@ -3297,6 +3319,10 @@ def test_tier3_destroy_all_wipes_the_persistent_volume() -> None:
         == []
     )
     assert not Path("/opt/pridem/kept-volumes.json").exists()
+    # DM-106: no volume of the machine's stacks is left, anonymous included
+    left = _volumes()
+    print("DM-106 measure: volumes after destroy --all", left)
+    assert left == {}, left
 
 
 GOLDEN_DOCKERFILE_CHECK = """COPY . .

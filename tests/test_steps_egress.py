@@ -727,18 +727,26 @@ def test_empty_egress_on_a_clean_box_is_no_proxy(tmp_path: Path) -> None:
     assert not compose_file(tmp_path).exists()
 
 
+def _project(tmp: Path, *args: str) -> FakeCall:
+    """The proxy's compose command, written out as docker gets it."""
+    return call(
+        "docker", "compose", "-p", "pridem-egress", "-f", str(compose_file(tmp)), *args
+    )  # fmt: skip
+
+
 def test_empty_egress_removes_the_proxy_a_release_left(tmp_path: Path) -> None:
+    """The container and its anonymous volumes first (``rm -s -f -v``), then
+    the project's own network (``down``, no ``-v``: it would take named
+    volumes too) -- in that order (DM-106).
+
+    Changed by DM-106: ``down`` alone left the proxy's anonymous volumes."""
     write(tmp_path, ZOOM)
-    down = call(
-        "docker",
-        "compose",
-        "-p",
-        "pridem-egress",
-        "-f",
-        str(compose_file(tmp_path)),
-        "down",
-    )
-    script = [ps(PROXY, every=True), down, ps(every=True)]
+    script = [
+        ps(PROXY, every=True),
+        _project(tmp_path, "rm", "-s", "-f", "-v"),
+        _project(tmp_path, "down"),
+        ps(every=True),
+    ]
     with FakeRunner(*script) as runner:
         outcome, _ = run([step(tmp_path, [], Proxy([]))], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
@@ -749,7 +757,7 @@ def test_a_proxy_left_without_its_file_goes_by_label(tmp_path: Path) -> None:
     script = [
         ps(PROXY, every=True),
         ps(PROXY, every=True),
-        call("docker", "rm", "-f", PROXY),
+        call("docker", "rm", "-f", "-v", PROXY),
         ps(every=True),
     ]
     with FakeRunner(*script) as runner:
@@ -759,16 +767,8 @@ def test_a_proxy_left_without_its_file_goes_by_label(tmp_path: Path) -> None:
 
 def test_a_proxy_still_there_after_removal_is_red(tmp_path: Path) -> None:
     write(tmp_path, ZOOM)
-    down = call(
-        "docker",
-        "compose",
-        "-p",
-        "pridem-egress",
-        "-f",
-        str(compose_file(tmp_path)),
-        "down",
-    )
-    with FakeRunner(ps(PROXY, every=True), down, ps(PROXY, every=True)) as runner:
+    rm, down = _project(tmp_path, "rm", "-s", "-f", "-v"), _project(tmp_path, "down")
+    with FakeRunner(ps(PROXY, every=True), rm, down, ps(PROXY, every=True)) as runner:
         outcome, _ = run([step(tmp_path, [], Proxy([]))], runner)
     assert outcome.steps[0].reason == Code("egress:proxy-left", {"found": [PROXY]})
 

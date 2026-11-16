@@ -109,7 +109,7 @@ def test_persistent_volumes_stay_and_are_named(tmp_path: Path) -> None:
         *seen,
         docker(),
         *seen,
-        FakeCall(("docker", "rm", "-f", "c1")),
+        FakeCall(("docker", "rm", "-f", "-v", "c1")),
         FakeCall(("docker", "volume", "rm", "db")),
         FakeCall(("docker", "network", "rm", "pridem")),
         FakeCall(("docker", "image", "rm", "-f", "sha256:1")),
@@ -146,7 +146,13 @@ def test_a_volume_the_box_cannot_place_is_never_removed(
     assert reason.params == {"volumes": ["db"]}
     # the pair: nothing to place, the container goes
     seen = listed(("c1",))
-    script = [docker(), *seen, docker(), *seen, FakeCall(("docker", "rm", "-f", "c1"))]
+    script = [
+        docker(),
+        *seen,
+        docker(),
+        *seen,
+        FakeCall(("docker", "rm", "-f", "-v", "c1")),
+    ]
     script += listed()
     with box.lock("destroy"), FakeRunner(*script) as runner:
         outcome = run(root, box, runner)
@@ -321,7 +327,7 @@ def test_the_kept_volumes_outlive_destroy(tmp_path: Path) -> None:
         *seen,
         docker(),
         *seen,
-        FakeCall(("docker", "rm", "-f", "c1")),
+        FakeCall(("docker", "rm", "-f", "-v", "c1")),
         *listed(volumes=("files\tstorage",)),
     ]
     with box.lock("destroy"), FakeRunner(*script) as runner:
@@ -346,7 +352,7 @@ def test_the_file_is_written_before_the_first_removal(tmp_path: Path) -> None:
         *seen,
         docker(),
         *seen,
-        FakeCall(("docker", "rm", "-f", "c1"), code=1),
+        FakeCall(("docker", "rm", "-f", "-v", "c1"), code=1),
     ]
     with box.lock("destroy"), FakeRunner(*script) as runner:
         outcome = run(root, box, runner)
@@ -370,7 +376,7 @@ def test_a_repeat_after_the_release_is_gone_keeps_the_volume(tmp_path: Path) -> 
         *seen,
         docker(),
         *seen,
-        FakeCall(("docker", "rm", "-f", "c1")),
+        FakeCall(("docker", "rm", "-f", "-v", "c1")),
         *listed(volumes=("files\tstorage",)),
         failing,
     ]
@@ -427,7 +433,13 @@ def test_persistent_wins_where_the_sources_differ(tmp_path: Path) -> None:
         json.dumps({"schema": 1, "volumes": {"db": "aivis"}})
     )
     seen = listed(("c1",), (), ("db\taivis",))
-    script = [docker(), *seen, docker(), *seen, FakeCall(("docker", "rm", "-f", "c1"))]
+    script = [
+        docker(),
+        *seen,
+        docker(),
+        *seen,
+        FakeCall(("docker", "rm", "-f", "-v", "c1")),
+    ]
     script += listed(volumes=("db\taivis",))
     with box.lock("destroy"), FakeRunner(*script) as runner:
         outcome = run(root, box, runner)

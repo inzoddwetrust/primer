@@ -384,11 +384,15 @@ class Egress(Step):
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         if check.data.get("remove") is True:
             if compose_file(self.root).exists():
+                # the container and its anonymous volumes first, then the
+                # project's own network ``default`` -- never ``down -v``,
+                # which takes named volumes too (DM-106, measured)
+                out(ctx, argv(self.root, "rm", "-s", "-f", "-v"))
                 out(ctx, argv(self.root, "down"))
             else:
                 found = self._containers(ctx, running=False)
                 if found:
-                    out(ctx, ["docker", "rm", "-f", *found])
+                    out(ctx, ["docker", "rm", "-f", "-v", *found])
             for path in self._files():
                 path.unlink()
             return

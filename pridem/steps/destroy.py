@@ -256,7 +256,10 @@ class RemoveObjects(Step):
         if self.everything:  # nothing is kept: the record of the kept goes too
             (self.box.root / KEPT).unlink()
         if seen.containers:
-            out(ctx, ["docker", "rm", "-f", *seen.containers])
+            # -v: a container's anonymous volumes go with it (an image's
+            # VOLUME no compose path covers); a named one -- persistent among
+            # them -- is never one of them (DM-106, measured: rm -v keeps it)
+            out(ctx, ["docker", "rm", "-f", "-v", *seen.containers])
         if gone:
             out(ctx, ["docker", "volume", "rm", *gone])
         if seen.networks:
