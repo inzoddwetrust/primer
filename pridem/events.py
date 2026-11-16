@@ -456,7 +456,22 @@ class KeyNeeded:
     """How long the step waits for the key to work."""
 
 
-Notice = KeyNeeded
+@dataclass(frozen=True)
+class RecipientNeeded:
+    """The box's age key must become a recipient of its passport in the ops
+    repository (contract 1 section 3: the passport is encrypted by sops with
+    age for the owner's key and each box's; the box prints its public part --
+    the same ceremony as a deploy key). DM-107 FIX."""
+
+    key: str
+    """The box's public age key, whole."""
+    path: str | None
+    """The passport's file in the ops repository; ``None`` -- not known yet."""
+    wait_s: float
+    """How long the step waits for it; 0 -- it does not wait."""
+
+
+Notice = KeyNeeded | RecipientNeeded
 """What a step tells the console alone -- never the journal (DM-107)."""
 
 
@@ -517,7 +532,7 @@ class ConsoleSink:
         self._tick_s = tick_s
         self._lock = threading.Lock()
         self._live: tuple[str, float] | None = None
-        self._waiting: tuple[str, float] | None = None
+        self._waiting: tuple[str, str, float] | None = None
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
         self.dead = False
@@ -532,6 +547,9 @@ class ConsoleSink:
 
     def notice(self, notice: Notice) -> None:
         """A key to add: the block, then the live line waits for it."""
+        if isinstance(notice, RecipientNeeded):
+            self._recipient(notice)
+            return
         catalog = self._words()
         self._clear()
         rule = "═" * 60
@@ -555,10 +573,29 @@ class ConsoleSink:
         lines += [say(catalog, "@key.already"), ""]
         self._write("\n".join(lines) + "\n")
         with self._lock:
-            self._waiting = (notice.repo, notice.wait_s)
+            self._waiting = ("@key.waiting", notice.repo, notice.wait_s)
         if not self.tty:
             wait = _spent(catalog, notice.wait_s)
             self._line(say(catalog, "@key.waits", repo=notice.repo, wait=wait))
+
+    def _recipient(self, notice: RecipientNeeded) -> None:
+        """The box's age key to add to its passport's recipients: the block,
+        then -- when the step waits for it -- the live line."""
+        catalog = self._words()
+        self._clear()
+        rule = "═" * 60
+        where = notice.path or say(catalog, "@recipient.any")
+        lines = ["", rule, say(catalog, "@recipient.title"), rule, notice.key, ""]
+        lines.append(say(catalog, "@recipient.add", path=where))
+        lines += [say(catalog, "@recipient.then"), ""]
+        self._write("\n".join(lines) + "\n")
+        if notice.wait_s <= 0:
+            return
+        with self._lock:
+            self._waiting = ("@recipient.waiting", where, notice.wait_s)
+        if not self.tty:
+            wait = _spent(catalog, notice.wait_s)
+            self._line(say(catalog, "@recipient.waits", path=where, wait=wait))
 
     def close(self) -> None:
         """No ticker outlives the plan."""
@@ -607,12 +644,13 @@ class ConsoleSink:
             label, began = live
             spent = _spent(self._words(), self._clock() - began)
             if waiting is not None:
+                key, subject, wait_s = waiting
                 text_ = say(
                     self._words(),
-                    "@key.waiting",
-                    repo=waiting[0],
+                    key,
+                    subject=subject,
                     spent=spent,
-                    wait=_spent(self._words(), waiting[1]),
+                    wait=_spent(self._words(), wait_s),
                 )
             else:
                 text_ = say(self._words(), "@console.live", label=label, spent=spent)

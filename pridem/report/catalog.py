@@ -123,7 +123,17 @@ ENGLISH: Catalog = {
     "@key.already": "Already added? The box goes on by itself as soon as the key "
     "works.",
     "@key.waits": "Waiting for access to {repo}, up to {wait}…",
-    "@key.waiting": "Waiting for access to {repo} · {spent} of {wait}",
+    "@key.waiting": "Waiting for access to {subject} · {spent} of {wait}",
+    "@recipient.title": "Passport key of this box — add it to the ops repository",
+    "@recipient.add": "Add it as a recipient of {path} in the ops repository and "
+    "encrypt the passport again (sops with age).",
+    "@recipient.any": "this box's passport, passports/<server name>.yaml,",
+    "@recipient.then": "The box reads its passport as soon as it is encrypted for "
+    "this key.",
+    "@recipient.waits": "Waiting for {path} to be encrypted for this box, up to "
+    "{wait}…",
+    "@recipient.waiting": "Waiting for {subject} to be encrypted for this box · "
+    "{spent} of {wait}",
     "@mark.ok": "✓",
     "@mark.failed": "✗",
     "@mark.skipped": "–",

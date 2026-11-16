@@ -25,6 +25,7 @@ from pridem.events import (
     Code,
     ConsoleSink,
     KeyNeeded,
+    RecipientNeeded,
     Secrets,
     StepFinished,
     StepRecord,
@@ -346,3 +347,122 @@ def test_the_key_step_hands_the_console_its_block(tmp_path: Path) -> None:
         again,
     )
     assert again == []
+
+
+def test_the_box_s_age_key_is_a_block_once_and_a_sentence_after(tmp_path: Path) -> None:
+    """DM-107 FIX: the box's public age key is what the owner adds to its
+    passport's recipients (contract 1 section 3). Minted: a block -- the key
+    and where it goes; every later run: no block, the key in the step's line
+    (``said``), so a person sees it on each run (the probe of tier 3)."""
+    from itertools import count
+
+    from plan_support import ListSink
+    from test_steps_passport import Recording
+
+    from pridem.events import RecipientNeeded
+    from pridem.plan import Plan, StackSteps
+    from pridem.steps.passport import AgeKey
+
+    root = tmp_path / "box"
+
+    def once() -> tuple[list[object], str]:
+        got: list[object] = []
+        out = io.StringIO()
+        ticks = count()
+        plan = Plan(
+            [StackSteps("pridem-passport", [AgeKey(root)], root=True)],
+            mode="install",
+            role="test",
+            runner=Recording(),
+            sink=ListSink(),
+            clock=lambda: float(next(ticks)),
+            notice=got.append,
+        )
+        console = ConsoleSink(out, Secrets(()), plan.catalog, now=lambda: TEN)
+        outcome = plan.run()
+        for record in outcome.steps:
+            console.emit(StepFinished("main", record))
+        return got, out.getvalue()
+
+    got, printed = once()
+    [notice] = got
+    assert isinstance(notice, RecipientNeeded) and notice.key.startswith("age1")
+    assert (notice.path, notice.wait_s) == (None, 0)
+    assert f"public key {notice.key}" in printed
+    again, printed = once()
+    assert again == [] and f"public key {notice.key}" in printed
+
+
+def test_the_recipient_block_says_where_the_key_goes() -> None:
+    out = io.StringIO()
+    _console(out).notice(RecipientNeeded("age1abc", "passports/velo-dev.yaml", 1800))
+    printed = out.getvalue()
+    assert "Passport key of this box — add it to the ops repository" in printed
+    assert "\nage1abc\n" in printed
+    assert (
+        "Add it as a recipient of passports/velo-dev.yaml in the ops repository and "
+        "encrypt the passport again (sops with age)."
+    ) in printed
+    assert (
+        "Waiting for passports/velo-dev.yaml to be encrypted for this box, up to 30m00s"
+        in printed
+    )
+    out = io.StringIO()
+    _console(out).notice(RecipientNeeded("age1abc", None, 0))
+    assert "this box's passport, passports/<server name>.yaml," in out.getvalue()
+    assert "Waiting" not in out.getvalue()
+
+
+def test_the_wait_for_the_passport_s_recipient_is_a_block(tmp_path: Path) -> None:
+    """DM-107 FIX: ``fetch_passport`` waits for the owner to encrypt the
+    passport for this box -- it tells the console the box's key, the passport's
+    file and how long it waits, once; the pair: a box already a recipient
+    tells nothing."""
+    from itertools import count
+
+    from plan_support import ListSink
+    from test_steps_passport import (
+        SERVER,
+        Ops,
+        Recording,
+        box_key,
+        encrypt,
+        mint,
+        ops_steps,
+        passport,
+    )
+
+    from pridem.plan import Plan, StackSteps
+
+    def run(steps: list[object], got: list[object]) -> None:
+        ticks = count()
+        Plan(
+            [StackSteps("pridem-passport", steps, root=True)],  # type: ignore[arg-type]
+            mode="install",
+            role="test",
+            runner=Recording(),
+            sink=ListSink(),
+            clock=lambda: float(next(ticks)),
+            notice=got.append,
+        ).run()
+
+    root = tmp_path / "box"
+    public = box_key(root)
+    owner = mint(tmp_path / "owner.key")
+    ops = Ops(tmp_path)
+    ops.put(SERVER, encrypt(tmp_path, passport(), owner))
+
+    def owner_adds_the_box(seconds: float) -> None:
+        ops.put(SERVER, encrypt(tmp_path, passport(), owner, public))
+
+    _, steps = ops_steps(root, ops, wait_s=100, sleep=owner_adds_the_box)
+    got: list[object] = []
+    run(list(steps), got)
+    waited = [n for n in got if isinstance(n, RecipientNeeded) and n.wait_s]
+    assert waited == [
+        RecipientNeeded(key=public, path=f"passports/{SERVER}.yaml", wait_s=100)
+    ]
+    _, steps = ops_steps(root, ops)
+    again: list[object] = []
+    run(list(steps), again)
+    assert [n for n in again if isinstance(n, RecipientNeeded) and n.wait_s] == []

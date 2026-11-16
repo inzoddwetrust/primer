@@ -62,7 +62,7 @@ from typing import ClassVar
 import yaml
 from pydantic import SecretStr, ValidationError
 
-from pridem.events import Fact, Json, Secrets
+from pridem.events import Fact, Json, RecipientNeeded, Secrets
 from pridem.files import (
     PathOutside,
     commit_set,
@@ -199,6 +199,7 @@ class AgeKey(Step):
 
     name = "age_key"
     title = "Passport key"
+    said = "public key {public_key}"  # on every run: what the owner adds (DM-107 FIX)
     order = 1
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
@@ -245,8 +246,11 @@ class AgeKey(Step):
             raise
         # the key's bytes are fsynced before its name (DM-80)
         commit_set([(temp, self._key)])
+        public = self._read(ctx)
         ctx.on_line(Stream.STDOUT, "age key of this box:", False)
-        ctx.on_line(Stream.STDOUT, self._read(ctx), False)
+        ctx.on_line(Stream.STDOUT, public, False)
+        # the console's block: the key, where it goes (DM-107 FIX)
+        ctx.notice(RecipientNeeded(key=public, path=None, wait_s=0))
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         public = self._read(ctx)
@@ -756,6 +760,10 @@ class FetchPassport(Step):
                     False,
                 )
                 ctx.on_line(Stream.STDOUT, shown, False)
+                # the console's block and its wait (DM-107 FIX)
+                ctx.notice(
+                    RecipientNeeded(key=shown, path=self._path, wait_s=self.wait_s)
+                )
             if self.clock() >= deadline:
                 raise StepFailed(
                     "not-recipient",
