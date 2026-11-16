@@ -59,7 +59,7 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.compose import out
+from pridem.steps.compose import anonymous_mounts, drop_dangling, out
 from pridem.steps.edge import STACK_LABEL as EDGE_LABEL
 from pridem.steps.egress import STACK_LABEL as EGRESS_LABEL
 from pridem.steps.finalize import current_link
@@ -196,6 +196,10 @@ class RemoveObjects(Step):
         self.new_secrets = new_secrets
         self.everything = everything
         self.wiped: list[str] = []
+        self.anonymous: list[str] = []
+        """The anonymous volumes of the removed containers that ``act`` took."""
+        self.held: list[str] = []
+        """Those another container still mounts: left, named in the fact."""
         """``destroy --all``: the persistent volumes go too, and
         ``kept-volumes.json`` with them -- the one way to wipe people's files
         (contract 3 rule 14, DM-86)."""
@@ -255,11 +259,15 @@ class RemoveObjects(Step):
         atomic_write(self.box.root / KEPT, json.dumps(document, indent=2) + "\n", 0o600)
         if self.everything:  # nothing is kept: the record of the kept goes too
             (self.box.root / KEPT).unlink()
+        # a container's anonymous volumes, read before it goes: -v takes its
+        # own, not one compose handed over when it recreated it (DM-106)
+        anonymous = anonymous_mounts(ctx, seen.containers)
         if seen.containers:
             # -v: a container's anonymous volumes go with it (an image's
             # VOLUME no compose path covers); a named one -- persistent among
             # them -- is never one of them (DM-106, measured: rm -v keeps it)
             out(ctx, ["docker", "rm", "-f", "-v", *seen.containers])
+        self.anonymous, self.held = drop_dangling(ctx, anonymous)
         if gone:
             out(ctx, ["docker", "volume", "rm", *gone])
         if seen.networks:
@@ -275,6 +283,9 @@ class RemoveObjects(Step):
         expected = strings(check.data.get("kept"))
         left = [*seen.containers, *seen.networks, *seen.images]
         left += [name for name in kept if name not in expected]
+        if self.anonymous:  # read back: the anonymous volumes act took are gone
+            _, there = out(ctx, ["docker", "volume", "ls", "-q"], passed_on=False)
+            left += [name for name in self.anonymous if name in there]
         if left:
             raise StepFailed("left", {"objects": _j(left)})
         fact: dict[str, Json] = {
@@ -283,6 +294,10 @@ class RemoveObjects(Step):
             "images": 0,
             "kept_volumes": _j(kept),
         }
+        if self.anonymous:
+            fact["anonymous_volumes"] = _j(self.anonymous)
+        if self.held:  # another container mounts them: not the machine's to take
+            fact["anonymous_held"] = _j(self.held)
         if self.everything:
             if (self.box.root / KEPT).exists():
                 raise StepFailed("left", {"objects": [str(self.box.root / KEPT)]})

@@ -727,6 +727,16 @@ def test_empty_egress_on_a_clean_box_is_no_proxy(tmp_path: Path) -> None:
     assert not compose_file(tmp_path).exists()
 
 
+MOUNTS = '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}'
+
+
+def _mounts(*names: str) -> FakeCall:
+    """The proxy's volumes, read before it goes (DM-106 FIX)."""
+    return call(
+        "docker", "inspect", "-f", MOUNTS, "--", PROXY, lines=(" ".join(names),)
+    )
+
+
 def _project(tmp: Path, *args: str) -> FakeCall:
     """The proxy's compose command, written out as docker gets it."""
     return call(
@@ -743,6 +753,8 @@ def test_empty_egress_removes_the_proxy_a_release_left(tmp_path: Path) -> None:
     write(tmp_path, ZOOM)
     script = [
         ps(PROXY, every=True),
+        ps(PROXY, every=True),
+        _mounts(),
         _project(tmp_path, "rm", "-s", "-f", "-v"),
         _project(tmp_path, "down"),
         ps(every=True),
@@ -757,6 +769,7 @@ def test_a_proxy_left_without_its_file_goes_by_label(tmp_path: Path) -> None:
     script = [
         ps(PROXY, every=True),
         ps(PROXY, every=True),
+        _mounts(),
         call("docker", "rm", "-f", "-v", PROXY),
         ps(every=True),
     ]
@@ -768,7 +781,8 @@ def test_a_proxy_left_without_its_file_goes_by_label(tmp_path: Path) -> None:
 def test_a_proxy_still_there_after_removal_is_red(tmp_path: Path) -> None:
     write(tmp_path, ZOOM)
     rm, down = _project(tmp_path, "rm", "-s", "-f", "-v"), _project(tmp_path, "down")
-    with FakeRunner(ps(PROXY, every=True), rm, down, ps(PROXY, every=True)) as runner:
+    script = [ps(PROXY, every=True), ps(PROXY, every=True), _mounts(), rm, down]
+    with FakeRunner(*script, ps(PROXY, every=True)) as runner:
         outcome, _ = run([step(tmp_path, [], Proxy([]))], runner)
     assert outcome.steps[0].reason == Code("egress:proxy-left", {"found": [PROXY]})
 

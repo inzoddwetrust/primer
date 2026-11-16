@@ -261,7 +261,7 @@ def test_destroy_all_wipes_the_persistent_volume_its_record_and_minted(
     ``docker volume rm`` with the others, ``kept-volumes.json`` goes, the fact
     names it wiped; ``remove_files`` takes ``minted.yaml`` too. The pair --
     ``destroy`` without ``--all`` -- is the probe of pass 3, the volume kept."""
-    from test_steps_destroy import box_with_release, docker, listed
+    from test_steps_destroy import box_with_release, docker, listed, mounts
 
     from pridem.steps.destroy import KEPT, destroy_steps
 
@@ -278,6 +278,7 @@ def test_destroy_all_wipes_the_persistent_volume_its_record_and_minted(
         *seen,
         docker(),
         *seen,
+        mounts("c1"),
         FakeCall(("docker", "rm", "-f", "-v", "c1")),
         FakeCall(("docker", "volume", "rm", "db", "files")),
         FakeCall(("docker", "network", "rm", "pridem")),

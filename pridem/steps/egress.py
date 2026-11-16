@@ -85,7 +85,14 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.compose import EGRESS_NETWORK, PROXY_ALIAS, PROXY_PORT, out
+from pridem.steps.compose import (
+    EGRESS_NETWORK,
+    PROXY_ALIAS,
+    PROXY_PORT,
+    anonymous_mounts,
+    drop_dangling,
+    out,
+)
 from pridem.steps.edge import confined, write_file
 from pridem.steps.passport import NO_PASSPORT, Fetched
 
@@ -383,16 +390,20 @@ class Egress(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         if check.data.get("remove") is True:
+            found = self._containers(ctx, running=False)
+            # read before the proxy goes: it is recreated by every ``up``,
+            # and the anonymous volume compose handed over is not its own --
+            # ``rm -v`` leaves it (DM-106, measured)
+            anonymous = anonymous_mounts(ctx, found)
             if compose_file(self.root).exists():
                 # the container and its anonymous volumes first, then the
                 # project's own network ``default`` -- never ``down -v``,
                 # which takes named volumes too (DM-106, measured)
                 out(ctx, argv(self.root, "rm", "-s", "-f", "-v"))
                 out(ctx, argv(self.root, "down"))
-            else:
-                found = self._containers(ctx, running=False)
-                if found:
-                    out(ctx, ["docker", "rm", "-f", "-v", *found])
+            elif found:
+                out(ctx, ["docker", "rm", "-f", "-v", *found])
+            drop_dangling(ctx, anonymous)
             for path in self._files():
                 path.unlink()
             return

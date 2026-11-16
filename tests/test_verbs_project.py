@@ -355,7 +355,7 @@ def test_probe_DM_22_persistent_volumes_survive_destroy_and_reinstall(
     from itertools import count
 
     from plan_support import ListSink
-    from test_steps_destroy import box_with_release, docker, listed
+    from test_steps_destroy import box_with_release, docker, listed, mounts
 
     from pridem.plan import Plan, StackSteps
     from pridem.report.codes import ExitCode
@@ -368,6 +368,7 @@ def test_probe_DM_22_persistent_volumes_survive_destroy_and_reinstall(
         *seen,
         docker(),
         *seen,
+        mounts("c1"),
         FakeCall(("docker", "rm", "-f", "-v", "c1")),
         FakeCall(("docker", "volume", "rm", "db")),  # never "files"
         FakeCall(("docker", "network", "rm", "pridem")),

@@ -59,6 +59,16 @@ def listed(
     ]
 
 
+MOUNTS = '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}'
+
+
+def mounts(*containers: str, names: tuple[str, ...] = ()) -> FakeCall:
+    """``remove_objects`` reads the volumes its containers mount before ``rm``
+    (DM-106 FIX): none by default."""
+    lines = _out(" ".join(names)) if names else ()
+    return FakeCall(("docker", "inspect", "-f", MOUNTS, "--", *containers), lines=lines)
+
+
 def docker(installed: bool = True) -> FakeCall:
     return FakeCall(DPKG, lines=_out("install ok installed") if installed else ())
 
@@ -109,6 +119,7 @@ def test_persistent_volumes_stay_and_are_named(tmp_path: Path) -> None:
         *seen,
         docker(),
         *seen,
+        mounts("c1"),
         FakeCall(("docker", "rm", "-f", "-v", "c1")),
         FakeCall(("docker", "volume", "rm", "db")),
         FakeCall(("docker", "network", "rm", "pridem")),
@@ -151,6 +162,7 @@ def test_a_volume_the_box_cannot_place_is_never_removed(
         *seen,
         docker(),
         *seen,
+        mounts("c1"),
         FakeCall(("docker", "rm", "-f", "-v", "c1")),
     ]
     script += listed()
@@ -327,6 +339,7 @@ def test_the_kept_volumes_outlive_destroy(tmp_path: Path) -> None:
         *seen,
         docker(),
         *seen,
+        mounts("c1"),
         FakeCall(("docker", "rm", "-f", "-v", "c1")),
         *listed(volumes=("files\tstorage",)),
     ]
@@ -352,6 +365,7 @@ def test_the_file_is_written_before_the_first_removal(tmp_path: Path) -> None:
         *seen,
         docker(),
         *seen,
+        mounts("c1"),
         FakeCall(("docker", "rm", "-f", "-v", "c1"), code=1),
     ]
     with box.lock("destroy"), FakeRunner(*script) as runner:
@@ -376,6 +390,7 @@ def test_a_repeat_after_the_release_is_gone_keeps_the_volume(tmp_path: Path) -> 
         *seen,
         docker(),
         *seen,
+        mounts("c1"),
         FakeCall(("docker", "rm", "-f", "-v", "c1")),
         *listed(volumes=("files\tstorage",)),
         failing,
@@ -438,6 +453,7 @@ def test_persistent_wins_where_the_sources_differ(tmp_path: Path) -> None:
         *seen,
         docker(),
         *seen,
+        mounts("c1"),
         FakeCall(("docker", "rm", "-f", "-v", "c1")),
     ]
     script += listed(volumes=("db\taivis",))

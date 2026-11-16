@@ -260,6 +260,48 @@ def bind(source: Path | str, target: str) -> dict[str, Json]:
     return {"type": "bind", "source": str(source), "target": target, "read_only": True}
 
 
+ANONYMOUS_LABEL = "com.docker.volume.anonymous"
+"""The label docker gives a volume it made for an image's ``VOLUME``."""
+
+
+def anonymous_mounts(ctx: StepContext, containers: Sequence[str]) -> list[str]:
+    """The anonymous volumes ``containers`` mount -- read before they are
+    removed. ``rm -v`` takes a container's own; one compose handed over from
+    the container it recreated is not its own any more, and ``rm -v`` leaves
+    it (DM-106, measured). A named volume -- ``persistent`` among them -- has
+    no anonymous label and is never in the list."""
+    if not containers:
+        return []
+    mounts = '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}'
+    _, lines = out(ctx, ["docker", "inspect", "-f", mounts, "--", *containers])
+    mounted = {name for line in lines for name in line.split()}
+    if not mounted:
+        return []
+    _, lines = out(
+        ctx, ["docker", "volume", "ls", "-q", "--filter", f"label={ANONYMOUS_LABEL}"]
+    )
+    return sorted(mounted & {line.strip() for line in lines if line.strip()})
+
+
+def drop_dangling(
+    ctx: StepContext, volumes: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    """After their containers are gone: ``volumes`` no container mounts any
+    more are removed; one another container still mounts (``volumes_from``,
+    someone else's on a product's box) is left and named -- ``volume rm``
+    would refuse it, and the machine did nothing wrong (DM-106). Returns
+    ``(removed, held)``."""
+    if not volumes:
+        return [], []
+    _, lines = out(ctx, ["docker", "volume", "ls", "-q", "--filter", "dangling=true"])
+    dangling = {line.strip() for line in lines}
+    removed = [name for name in volumes if name in dangling]
+    held = [name for name in volumes if name not in dangling]
+    if removed:
+        out(ctx, ["docker", "volume", "rm", "--", *removed])
+    return removed, held
+
+
 def out(
     ctx: StepContext,
     argv: Sequence[str],

@@ -3094,6 +3094,23 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     _stdout(["docker", "exec", files, "sh", "-c", f"echo {MARK} > /srv/files/mark"])
     before = _volumes()
     print("DM-106 measure: volumes before destroy", before)
+    # DM-106 FIX: who holds each anonymous volume, made when; the container of
+    # files, its mounts, made when -- if the class comes back, the next red is
+    # not blind (the dispatcher's word: the measure stays)
+    for volume in (v for v, anon in before.items() if anon):
+        holders = _stdout(["docker", "ps", "-a", "--filter", f"volume={volume}", "-q"])
+        created = _stdout(
+            ["docker", "volume", "inspect", "-f", "{{.CreatedAt}}", volume]
+        )
+        print(
+            "DM-106 measure: anonymous",
+            volume,
+            {"held by": holders, "created": created},
+        )
+    mounted = _stdout(
+        ["docker", "inspect", "-f", "{{.Created}} {{json .Mounts}}", files]
+    )
+    print("DM-106 measure: the container of files", mounted)
     verdict, printed = _verdict_of("destroy")
     assert verdict.result == "green", printed
     after = _volumes()
