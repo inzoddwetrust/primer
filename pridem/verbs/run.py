@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from pridem import __version__
 from pridem.events import (
     INTERNAL_STACKS,
+    Attachable,
     Code,
     ConsoleSink,
     Event,
@@ -43,6 +44,7 @@ from pridem.events import (
     Incomplete,
     Json,
     LogLine,
+    Notice,
     PlanMode,
     PlanOutcome,
     Secrets,
@@ -193,6 +195,16 @@ class _Sinks:
                 self.console = None
         self.journal.emit(event)
 
+    def attach(self, catalog: Callable[[], Catalog]) -> None:
+        """The plan's catalog to the console (DM-107 FIX 2)."""
+        if isinstance(self.console, Attachable):
+            self.console.attach(catalog)
+
+    def notice(self, notice: Notice) -> None:
+        """What a step tells the console alone, to the console."""
+        if isinstance(self.console, Attachable):
+            self.console.notice(notice)
+
 
 def _verdict(
     box: Box,
@@ -249,7 +261,7 @@ def _verdict(
         console: ConsoleSink | None = None
         if ladder:
             stream = ctx.err if ctx.json else ctx.out
-            console = ConsoleSink(stream, secrets, lambda: plan.catalog)
+            console = ConsoleSink(stream, secrets)  # the plan attaches its catalog
         plan = Plan(
             planned.stacks,
             mode=mode,
@@ -258,7 +270,6 @@ def _verdict(
             sink=_Sinks(journal, console),
             finally_=planned.finally_,
             interrupt=ctx.interrupt,
-            notice=console.notice if console is not None else lambda notice: None,
         )
         if console is not None:
             server = passport.server.name if passport is not None else None

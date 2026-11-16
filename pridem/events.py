@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Protocol, TextIO
+from typing import Literal, Protocol, TextIO, runtime_checkable
 
 from pydantic import SecretStr
 
@@ -359,6 +359,22 @@ class EventSink(Protocol):
         ...
 
 
+@runtime_checkable
+class Attachable(Protocol):
+    """A sink the plan itself connects (DM-107 FIX 2): it takes the plan's
+    catalog -- the steps' titles and ``said`` -- and what the steps tell the
+    console alone (``notice``). Any builder of a plan -- the CLI, a script of
+    tier 3 -- gets the same console by the same path."""
+
+    def attach(self, catalog: Callable[[], Catalog]) -> None:
+        """The plan's catalog, unless the sink was given its own."""
+        ...
+
+    def notice(self, notice: "Notice") -> None:
+        """What a step tells the console alone."""
+        ...
+
+
 def _fact_line(fact: Fact, catalog: Catalog) -> str:
     parts = []
     for key, value in fact.items():
@@ -508,7 +524,7 @@ class ConsoleSink:
         self,
         stream: TextIO,
         secrets: Secrets,
-        catalog: Catalog | Callable[[], Catalog] = ENGLISH,
+        catalog: Catalog | Callable[[], Catalog] | None = None,
         *,
         tty: bool | None = None,
         environ: Mapping[str, str] | None = None,
@@ -517,7 +533,9 @@ class ConsoleSink:
         tick_s: float = 1.0,
     ) -> None:
         """``catalog`` may be given as a function: the texts of a plan whose
-        deferred stacks add their steps' codes while it runs."""
+        deferred stacks add their steps' codes while it runs; not given, the
+        plan attaches its own (``attach``), and before that the words are
+        ``ENGLISH``."""
         self._stream = stream
         self._secrets = secrets
         self._catalog = catalog
@@ -611,7 +629,14 @@ class ConsoleSink:
 
     # --- the step's lines ----------------------------------------------------
 
+    def attach(self, catalog: Callable[[], Catalog]) -> None:
+        """The plan's catalog -- only when none was given (DM-107 FIX 2)."""
+        if self._catalog is None:
+            self._catalog = catalog
+
     def _words(self) -> Catalog:
+        if self._catalog is None:
+            return ENGLISH
         return self._catalog() if callable(self._catalog) else self._catalog
 
     def _label(self, stack: str, name: str) -> str:

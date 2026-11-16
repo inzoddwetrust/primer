@@ -466,3 +466,94 @@ def test_the_wait_for_the_passport_s_recipient_is_a_block(tmp_path: Path) -> Non
     again: list[object] = []
     run(list(steps), again)
     assert [n for n in again if isinstance(n, RecipientNeeded) and n.wait_s] == []
+
+
+def _as_tier3_builds_it(root: Path, catalog: dict[str, str] | None = None) -> str:
+    """A plan built as the scripts of tier 3 build it -- not through
+    ``run.py``: a console with no catalog, no ``notice`` given (DM-107 FIX 2)."""
+    from itertools import count
+
+    from test_steps_passport import Recording
+
+    from pridem.plan import Plan, StackSteps
+    from pridem.steps.passport import AgeKey
+
+    out = io.StringIO()
+    ticks = count()
+    console = (
+        ConsoleSink(out, Secrets(()), now=lambda: TEN)
+        if catalog is None
+        else ConsoleSink(out, Secrets(()), catalog, now=lambda: TEN)
+    )
+    Plan(
+        [StackSteps("passport", [AgeKey(root)], root=True)],
+        mode="install",
+        role="test",
+        runner=Recording(),
+        sink=console,
+        clock=lambda: float(next(ticks)),
+    ).run()
+    return out.getvalue()
+
+
+def test_a_plan_built_as_tier_3_builds_it_attaches_its_console(tmp_path: Path) -> None:
+    """F1 (DM-107 FIX 2): the plan connects its console itself -- its catalog
+    (the title, ``said``) and ``notice``: minted, the block and the key in the
+    step's line; again, the key in the line and no block."""
+    root = tmp_path / "box"
+    first = _as_tier3_builds_it(root)
+    key = (
+        (root / "opt" / "pridem" / "keys" / "age.key")
+        .read_text()
+        .split("public key: ")[1]
+        .split()[0]
+    )
+    assert "Passport key of this box — add it to the ops repository" in first
+    assert f"\n{key}\n" in first
+    assert f"[10:00:00] ✓ Passport key · 1 s · public key {key}" in first
+    again = _as_tier3_builds_it(root)
+    assert f"[10:00:00] ✓ Passport key · 1 s · public key {key}" in again
+    assert "Passport key of this box" not in again
+
+
+def test_a_catalog_given_to_the_console_is_kept(tmp_path: Path) -> None:
+    """F3: the plan attaches its catalog only to a console given none."""
+    printed = _as_tier3_builds_it(
+        tmp_path / "box", {**ENGLISH, "@title.age_key": "MINE"}
+    )
+    assert "✓ MINE" in printed and "Passport key ·" not in printed
+
+
+def test_the_cli_s_console_is_attached_through_its_sinks(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """F4: through ``run.py`` -- the journal and the console in one sink --
+    the console gets the plan's catalog and the block."""
+    import pytest as _pytest
+    from test_steps_passport import Recording
+
+    from pridem.cli import run
+    from pridem.plan import StackSteps
+    from pridem.steps.passport import AgeKey
+    from pridem.verbs import deploy as deploy_verbs
+    from pridem.verbs.run import Planned
+
+    assert isinstance(monkeypatch, _pytest.MonkeyPatch)
+    blank_box(tmp_path)
+
+    def make(*_: object) -> Planned:
+        return Planned([StackSteps("pridem-passport", [AgeKey(tmp_path)], root=True)])
+
+    monkeypatch.setattr(deploy_verbs, "deploy_plan", make)
+    out, err = io.StringIO(), io.StringIO()
+    code = run(
+        ["update"],
+        root=tmp_path / "opt" / "pridem",
+        out=out,
+        err=err,
+        runner=Recording(),
+        fs_root=tmp_path,
+    )
+    assert code == 0, err.getvalue()
+    assert "Passport key of this box — add it to the ops repository" in out.getvalue()
+    assert "✓ Passport key ·" in out.getvalue() and "public key age1" in out.getvalue()

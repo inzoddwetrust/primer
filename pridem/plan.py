@@ -76,6 +76,7 @@ from pridem.events import (
     AFTER_INTERRUPT,
     INTERRUPTED,
     NO_FACT,
+    Attachable,
     Code,
     DoctorItem,
     Event,
@@ -315,9 +316,14 @@ class Plan:
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         interrupt: Interrupt | None = None,
-        notice: Callable[[Notice], None] = lambda notice: None,
+        notice: Callable[[Notice], None] | None = None,
     ) -> None:
-        self._notice = notice  # the console's, for a key to add (DM-107)
+        # the plan connects its console itself, whoever builds it (DM-107 FIX 2)
+        if isinstance(sink, Attachable):
+            sink.attach(lambda: self.catalog)
+            if notice is None:
+                notice = sink.notice
+        self._notice: Callable[[Notice], None] = notice or (lambda notice: None)
         self._selected: Mode = "deploy" if mode == "doctor" else mode
         self._mode = mode
         self._role_of = role
