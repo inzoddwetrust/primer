@@ -3385,3 +3385,45 @@ def test_tier3_an_entry_named_frontend_is_the_product_s_own(
     assert facts[("frontend", "up")]["stack"] == "frontend", facts
     assert "domain" in facts[("pridem-frontend", "frontend")], facts
     assert _container("frontend", "idle")
+
+
+APT_TIMERS = ("apt-daily.timer", "apt-daily-upgrade.timer")
+
+
+def _timers_state() -> list[str]:
+    """``is-enabled`` and ``is-active`` of each apt timer, as systemctl says."""
+    said = []
+    for timer in APT_TIMERS:
+        enabled = _run(["systemctl", "is-enabled", timer], expect=(0, 1, 4))
+        running = _run(["systemctl", "is-active", timer], expect=(0, 3, 4))
+        said.append(f"{timer}: {' '.join(enabled) or '-'} / {' '.join(running) or '-'}")
+    return said
+
+
+def test_tier3_doctor_is_empty_with_the_apt_timers_on(tmp_path: Path) -> None:
+    """DM-105 on the box group ``d`` left: the apt timers on, as on a live
+    Ubuntu (velo-dev) -- after a green ``update``, ``doctor`` is code 0 with no
+    difference: the pause of ``wait_host_quiet`` is for the time of a run. The
+    last of group ``d``: a timer of ``Persistent=true`` may start
+    ``apt-daily.service`` at once and hold ``dpkg`` for what would come after.
+    Measured into the run's output (par0 14.3): the timers' state on the
+    runner before, after starting them and after the test's ``finally``."""
+    assert (OPT / "current").is_symlink(), "group d installs first"
+    passport = _passport(tmp_path, version=42)
+    verdict, printed = _install(passport, "update")
+    assert verdict.result == "green", printed
+    print("DM-105 measure, before:", _timers_state())
+    try:
+        _run(["systemctl", "unmask", *APT_TIMERS], expect=(0, 1))
+        started = _run(["systemctl", "start", *APT_TIMERS], expect=(0, 1, 5))
+        state = _timers_state()
+        print("DM-105 measure, started:", started, state)
+        # the pair: the timers do run -- a doctor with none on proves nothing
+        assert all(line.endswith(" / active") for line in state), state
+        diff, failed, doctor = _doctor(passport)
+        assert (diff, failed) == ([], []), (diff, failed)
+        assert doctor.exit_code == 0, doctor.result
+    finally:
+        _run(["systemctl", "stop", *APT_TIMERS], expect=(0, 5))
+        _run(["systemctl", "mask", *APT_TIMERS], expect=(0, 1))
+        print("DM-105 measure, after:", _timers_state())

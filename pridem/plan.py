@@ -23,6 +23,8 @@ restore is needed.
 a failed ``finally`` step never stops the others.
 ``doctor`` runs only ``check`` of the ``deploy`` steps and reports what would be
 done; a step that refuses in ``check`` is recorded by its own code, as in a run.
+What a step ``for_the_run`` would do -- a pause of the host a run gives back in
+``finally`` -- is no difference (DM-105).
 
 A step never crashes a plan: any exception from a phase is that step's failure.
 
@@ -736,5 +738,7 @@ class Plan:
                 fact,
             )
             records.append(self._record("main", record))
+        elif step.for_the_run:
+            pass  # a pause for the time of a run: no difference (DM-105)
         elif check is not None and check.needed and check.would is not None:
             diff.append(DoctorItem(stack, step.name, _qualified(step, check.would)))

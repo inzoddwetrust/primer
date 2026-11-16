@@ -296,8 +296,12 @@ class Preflight(_HostStep):
 
 
 class WaitHostQuiet(_HostStep):
+    """Pauses the apt timers and waits for apt for the time of the run;
+    ``restore_timers`` in ``finally`` starts them again (``for_the_run``)."""
+
     name = "wait_host_quiet"
     order = 2
+    for_the_run = True
     codes: ClassVar[dict[str, str]] = {
         "pause": "stop {timers} and wait for {services}",
         "host-busy": "{services} still running after {timeout_s} s",

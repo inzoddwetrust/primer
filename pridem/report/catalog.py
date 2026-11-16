@@ -98,14 +98,16 @@ ENGLISH: Catalog = {
     "@mark.ok": "✓",
     "@mark.failed": "✗",
     "@mark.skipped": "–",
+    "@empty": "none",
 }
 
 
 def _present(catalog: Catalog, name: str, value: Value) -> str:
     if value is None:
         return catalog[f"@null:{name}"]
-    if isinstance(value, list):
-        return shlex.join(str(item) for item in value)
+    if isinstance(value, list):  # an empty one is a word: no text ends on a
+        # dangling preposition ("wait for ", DM-105)
+        return shlex.join(str(item) for item in value) or catalog["@empty"]
     if isinstance(value, dict):
         return catalog["@at"].format(**{k: str(v) for k, v in value.items()})
     return str(value)

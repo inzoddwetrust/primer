@@ -69,6 +69,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_destroy_all_wipes_the_persistent_volume", "c"),
     # d -- a clean box: the blank without its service, then with it
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),
+    # the last of d: the apt timers on (DM-105) -- apt may hold dpkg after it
+    ("test_tier3_doctor_is_empty_with_the_apt_timers_on", "d"),
     # e -- an install of its own: the build mode of packages
     ("test_tier3_build_mode_of_the_blank", "e"),
     (

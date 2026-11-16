@@ -150,7 +150,11 @@ class Step(ABC):
     ``rechecked`` -- the final check calls this step's ``verify`` again: a step
     whose ``act`` a later step undoes by design (``stop_for_migrate``, whose
     stopped services ``up`` brings back) is ``False`` -- its fact stays in the
-    verdict as it was read (DM-22 FIX).
+    verdict as it was read (DM-22 FIX); ``for_the_run`` -- its ``act`` pauses
+    something of the host for the time of the run and ``finally`` gives it
+    back (``wait_host_quiet``: the apt timers): what it would do is no
+    difference of the box from its passport, and ``doctor`` names none
+    (DM-105).
     """
 
     name: str
@@ -162,6 +166,7 @@ class Step(ABC):
     roles: frozenset[Role] | None = None
     final_check: bool = False
     rechecked: bool = True
+    for_the_run: bool = False
 
     @abstractmethod
     def check(self, ctx: StepContext) -> CheckResult:
