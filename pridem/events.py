@@ -394,6 +394,17 @@ COLORS = {
 }
 
 
+EMPTY = frozenset({"none", "absent", "not needed"})
+"""A fact's word for nothing."""
+
+
+def _empty(value: object) -> bool:
+    """A fact's value that says nothing was there to do (DM-112)."""
+    if isinstance(value, str):
+        return value in EMPTY
+    return value == [] or value == {}
+
+
 def _short(found: re.Match[str]) -> str:
     return found.group(0)[:7]
 
@@ -720,6 +731,20 @@ class ConsoleSink:
             self._waiting = None
         catalog = self._words()
         label = self._label(record.stack, record.name)
+        idle = catalog.get(f"@idle.{record.name}")
+        if (
+            record.status == "ok"
+            and idle
+            and record.verify
+            and _empty(record.verify.get(idle))
+        ):
+            # nothing to do, by the step's fact -- never by its check (DM-112)
+            mark = self._paint("dim", say(catalog, "@mark.skipped"))
+            self._line(
+                say(catalog, "@console.step", mark=mark, label=label)
+                + say(catalog, "@console.idle")
+            )
+            return
         mark = say(catalog, f"@mark.{record.status}")
         color = {"ok": "green", "failed": "red", "skipped": "dim"}.get(record.status)
         line = say(catalog, "@console.step", mark=self._paint(color, mark), label=label)

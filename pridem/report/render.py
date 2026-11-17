@@ -151,6 +151,9 @@ def closing(verdict: Verdict, catalog: Catalog = ENGLISH) -> list[str]:
         )
     elif verdict.result == "red":
         lines.append(say(catalog, "@end.stopped", head=head, duration=spent))
+    elif verdict.verb == "doctor" and verdict.result == "green":
+        lines.append(say(catalog, "@end.green", head=head, duration=spent))
+        lines.append(say(catalog, "@end.clean"))  # an empty doctor says so (DM-112)
     elif verdict.report.doctor_diff and not verdict.report.incomplete:
         count = len(verdict.report.doctor_diff)
         lines.append(

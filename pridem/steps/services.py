@@ -287,6 +287,7 @@ class DataCopy(Step):
 
     name = "data_copy"
     title = "Copy the data"
+    idle = "data"
     order = 9
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
@@ -463,6 +464,7 @@ class SeamsVerify(Step):
 
     name = "seams_verify"
     title = "Check the seams live"
+    idle = "seams"
     order = 15
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

@@ -869,6 +869,7 @@ class Seeds(Step):
 
     name = "seeds"
     title = "Seed the database"
+    idle = "ran"
     order = 15
     modes: frozenset[Mode] = frozenset({"install", "reinstall"})
 

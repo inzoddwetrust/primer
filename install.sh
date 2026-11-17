@@ -16,7 +16,15 @@
 # Every fetch over the network is tried again: one 504 of a server outside must
 # not fail an install (DM-80). curl by its own retries, git clone by a loop,
 # apt by Acquire::Retries; the sha256 of every download is checked after it.
+#
+# The screen gets this script's own lines, 1/5 ... 5/5, and nothing else: what
+# apt, git, curl and pip print goes to the install's log,
+# /var/log/pridem-install.log (0600, written anew on every run; /opt/pridem may
+# not be there yet). A refusal says why, then the log's last lines and its path
+# (DM-112). fd 3 and 4 are the screen's stdout and stderr.
 set -euo pipefail
+set -E # the ERR trap below in functions too
+exec 3>&1 4>&2
 
 TAG="@PRIDEM_TAG@"
 COMMIT="@PRIDEM_COMMIT@"
@@ -31,10 +39,34 @@ HOME_DIR="$ROOT/opt/pridem"
 TARGET="$HOME_DIR/versions/$TAG"
 BIN="$ROOT/usr/local/bin"
 
+LOG="" # the install's log, once it is open
+
+say() { # a line of this script: the screen, and the log once it is open
+    printf '%s\n' "$*" >&3
+    if [[ -n ${LOG:-} ]]; then
+        printf '%s\n' "$*"
+    fi
+}
+
+# a refusal: before the log opens stderr is the screen; after, fd 4 is
 fail() {
-    echo "install.sh: $*" >&2
+    if [[ -z ${LOG:-} ]]; then
+        echo "install.sh: $*" >&2
+        exit 1
+    fi
+    echo "install.sh: $*"
+    {
+        echo "install.sh: $*"
+        echo "--- the last lines of $LOG ---"
+        tail -n 20 "$LOG"
+        echo "Full log: $LOG"
+    } >&4
     exit 1
 }
+
+# a command that failed outside a condition -- apt, pip, a checksum: the same
+# refusal, with the log's tail (set -E: in functions too)
+trap 'fail "a command failed (exit $?, line $LINENO)"' ERR
 
 # curl with its retries: 5 more tries, on any error, 2 s apart
 curl_get=(curl -fsSL --retry 5 --retry-all-errors --retry-delay 2)
@@ -75,10 +107,17 @@ done <"$ROOT/etc/os-release"
 arch=$(uname -m)
 [[ $arch == "x86_64" ]] || fail "needs x86_64, found ${arch}"
 [[ $(id -u) == "0" ]] || fail "needs root"
-echo "1/5 host: Ubuntu 24.04 x86_64, root"
+
+# The log, once the host is known and the user is root: everything printed from
+# here on is its, but for say and fail.
+mkdir -p "$ROOT/var/log"
+(umask 077 && : >"$ROOT/var/log/pridem-install.log")
+exec >>"$ROOT/var/log/pridem-install.log" 2>&1
+LOG="$ROOT/var/log/pridem-install.log"
+say "1/5 host: Ubuntu 24.04 x86_64, root"
 
 if [[ -x $TARGET/venv/bin/pridem && $("$TARGET/venv/bin/pridem" version) == "pridem ${TAG#v}" ]]; then
-    echo "2-4/5 pridem $TAG is installed already"
+    say "2-4/5 pridem $TAG is installed already"
 else
     # 2. Packages: apt waits for the dpkg lock instead of breaking it and asks
     #    nothing (no debconf dialog, needrestart restarts by itself) -- the two
@@ -95,13 +134,13 @@ else
         "$work/sops"
     echo "$SOPS_SHA256  $work/sops" | sha256sum -c --strict
     install -m 0755 "$work/sops" "$BIN/sops"
-    echo "2/5 packages: python3 python3-venv git curl age sops $SOPS_VERSION"
+    say "2/5 packages: python3 python3-venv git curl age sops $SOPS_VERSION"
 
     # 3. The pinned clone: the tag must be the commit the release was built from.
     clone "$TAG" "$REPO.git" "$work/pridem"
     head=$(git -C "$work/pridem" rev-parse HEAD)
     [[ $head == "$COMMIT" ]] || fail "tag $TAG is $head, the pin is $COMMIT"
-    echo "3/5 clone: $TAG at $COMMIT"
+    say "3/5 clone: $TAG at $COMMIT"
 
     # 4. The venv without an index: the runtime from wheels/ by the lock, the
     #    wheel of pridem from the Release; nothing is built here. A venv cannot
@@ -119,10 +158,10 @@ else
         "$work/pridem-${TAG#v}-py3-none-any.whl"
     version=$("$TARGET/venv/bin/pridem" version)
     [[ $version == "pridem ${TAG#v}" ]] || fail "installed pridem says '$version'"
-    echo "4/5 venv: $TARGET/venv, $version"
+    say "4/5 venv: $TARGET/venv, $version"
 fi
 
 # 5. The links: `current` to this version, `pridem` on the PATH.
 ln -sfn "$TARGET" "$HOME_DIR/current"
 ln -sfn "$HOME_DIR/current/venv/bin/pridem" "$BIN/pridem"
-echo "5/5 links: $HOME_DIR/current -> $TARGET, $BIN/pridem"
+say "5/5 links: $HOME_DIR/current -> $TARGET, $BIN/pridem"

@@ -150,6 +150,7 @@ class SeamsCheck(Step):
 
     name = "seams_check"
     title = "Check the seams"
+    idle = "order"
     order = 1
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

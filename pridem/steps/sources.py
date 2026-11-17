@@ -523,6 +523,7 @@ class CheckLock(_SourceStep):
 
     name = "check_lock"
     title = "Check the lock"
+    idle = "services"
     order = 3
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
@@ -623,6 +624,7 @@ class FetchServices(_SourceStep):
 
     name = "fetch_services"
     title = "Fetch the services"
+    idle = "services"
     order = 4
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
@@ -751,6 +753,7 @@ class FetchPackages(_SourceStep):
 
     name = "fetch_packages"
     title = "Fetch the packages"
+    idle = "packages"
     order = 5
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,

@@ -373,6 +373,8 @@ class Plan:
             merged[f"@title.{step.name}"] = type(step).title or step.name
             if type(step).said is not None:
                 merged[f"@said.{step.name}"] = str(type(step).said)
+            if type(step).idle is not None:
+                merged[f"@idle.{step.name}"] = str(type(step).idle)
         return merged
 
     # --- events ---------------------------------------------------------------

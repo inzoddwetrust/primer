@@ -260,6 +260,7 @@ class Egress(Step):
 
     name = "egress"
     title = "Open the egress proxy"
+    idle = "hosts"
     order = 13
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

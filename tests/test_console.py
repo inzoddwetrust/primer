@@ -24,6 +24,7 @@ from pridem.events import (
     INTERNAL_STACKS,
     Code,
     ConsoleSink,
+    Json,
     KeyNeeded,
     RecipientNeeded,
     Secrets,
@@ -33,6 +34,7 @@ from pridem.events import (
 )
 from pridem.report.catalog import ENGLISH
 from pridem.report.render import closing, said_args
+from pridem.report.schema import Verdict
 from pridem.runner import FakeCall, FakeRunner, Stream
 from pridem.steps.base import Step
 from pridem.steps.keys import keys_page
@@ -557,3 +559,77 @@ def test_the_cli_s_console_is_attached_through_its_sinks(
     assert code == 0, err.getvalue()
     assert "Passport key of this box — add it to the ops repository" in out.getvalue()
     assert "✓ Passport key ·" in out.getvalue() and "public key age1" in out.getvalue()
+
+
+def _doctor(diff: list[Json]) -> Verdict:
+    from report_support import example, load
+
+    data = example()
+    data.pop("junit", None)
+    data.update({"verb": "doctor", "args": {}, "steps": []})
+    data["exit_code"], data["result"] = (2, "incomplete") if diff else (0, "green")
+    report = data["report"]
+    assert isinstance(report, dict)
+    report.update({"failures": [], "incomplete": [], "doctor_diff": diff})
+    return load(data)
+
+
+def test_an_empty_doctor_says_there_is_nothing_to_fix() -> None:
+    """DM-112: a green ``doctor`` says in words the box is as its passport
+    says; the pair: a ``doctor`` with work to do does not."""
+    clean = closing(_doctor([]), ENGLISH)
+    assert clean[2].startswith("doctor: done in ")
+    assert clean[3] == "Nothing to fix: the box is as its passport says."
+    entry: Json = {"stack": "sources", "name": "fetch_root", "code": "fetch_root:fetch"}
+    work = closing(_doctor([entry]), ENGLISH)
+    assert "Nothing to fix: the box is as its passport says." not in work
+
+
+def test_the_certificate_steps_have_two_names() -> None:
+    from pridem.steps.ssl import Ssl, TlsFiles
+
+    assert (TlsFiles.title, Ssl.title) == (
+        "Place the certificate files",
+        "Issue the TLS certificate",
+    )
+
+
+IDLE = {
+    **ENGLISH,
+    "@title.types": "Generate the types",
+    "@idle.types": "types",
+    "@title.build": "Build images",
+}
+
+
+def test_a_step_with_nothing_to_do_says_so_by_its_fact() -> None:
+    """DM-112: ``types`` with no types (its fact ``types: none``) -- one line,
+    nothing to do. The pairs: ``types`` that did generate is its usual line;
+    ``build`` with nothing new to build is no idle step -- its fact says what
+    is in place; a failed step with ``idle`` is its failure, with the cause of
+    DM-111."""
+    out = io.StringIO()
+    console = ConsoleSink(out, Secrets(()), IDLE, now=lambda: TEN)
+    console.emit(_finished("aivis", "types", verify={"types": "none"}))
+    console.emit(_finished("aivis", "types", verify={"types": "current", "path": "x"}))
+    console.emit(_finished("aivis", "build", verify={"release": "main", "images": {}}))
+    console.emit(
+        StepStarted("main", "aivis", "types", 1, datetime.now(UTC)),
+    )
+    from pridem.events import LogLine
+
+    console.emit(LogLine("main", "aivis", "types", Stream.STDERR, "error: no openapi"))
+    console.emit(
+        _finished(
+            "aivis",
+            "types",
+            "failed",
+            reason=Code("command-failed", {"argv": ["gen"], "exit_code": 1}),
+        )
+    )
+    lines = out.getvalue().splitlines()
+    assert lines[0] == "[10:00:00] – aivis · Generate the types · nothing to do"
+    assert lines[1] == "[10:00:00] ✓ aivis · Generate the types · 1m12s"
+    assert lines[2] == "[10:00:00] ✓ aivis · Build images · 1m12s"
+    assert lines[-1].startswith("[10:00:00] ✗ aivis · Generate the types · 1m12s — ")
+    assert "error: no openapi" in lines[-1]

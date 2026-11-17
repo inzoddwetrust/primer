@@ -93,7 +93,9 @@ jobs:
             echo "a pin was not substituted"
             exit 1
           fi
-          sudo bash /tmp/tier3/install.sh
+          # the screen of the install, for the probe of DM-112: its own lines alone
+          set -o pipefail
+          sudo bash /tmp/tier3/install.sh | tee /tmp/tier3/install.out
       - name: the probes' venv, by the locks with hashes
         run: |
           python3 -m venv /tmp/t3

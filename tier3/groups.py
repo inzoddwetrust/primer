@@ -33,6 +33,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     # a -- no install: the box, the host, the passport, the sources, checks
     ("test_probe_DM_16_status_on_a_fresh_box_is_green", "a"),
     ("test_probe_DM_16_box_files_are_private_on_the_runner", "a"),
+    ("test_tier3_install_sh_shows_its_own_lines_alone", "a"),
+    ("test_tier3_install_sh_refused_shows_why_the_tail_and_the_log", "a"),
     ("test_probe_DM_12_host_steps_on_a_clean_runner", "a"),
     ("test_probe_DM_12_planted_dpkg_lock_waits_then_passes", "a"),
     ("test_probe_DM_12_planted_dpkg_lock_over_timeout_is_red_without_checkmark", "a"),

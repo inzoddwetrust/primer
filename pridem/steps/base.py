@@ -164,6 +164,12 @@ class Step(ABC):
     title: ClassVar[str] = ""
     """The step's name for a person (the console, DM-107); its ``name`` is the
     journal's and the verdict's."""
+    idle: ClassVar[str | None] = None
+    """The key of the step's fact whose emptiness -- ``none``, ``absent``,
+    ``not needed``, an empty list or mapping -- says it had nothing to do
+    (DM-112: a product without types, a box with no service); the console says
+    "nothing to do". A step that did nothing because all was in place is not
+    idle: its fact says what is in place."""
     said: ClassVar[str | None] = None
     """A short sentence of the step's fact for the console, over keys of its
     ``verify`` (DM-107); ``None`` -- the console says no fact, the journal has

@@ -426,6 +426,7 @@ class RestoreTimers(_HostStep):
 
     name = "restore_timers"
     title = "Start the apt timers again"
+    idle = "restored"
     order = 1
     codes: ClassVar[dict[str, str]] = {
         "restore": "start {timers}",

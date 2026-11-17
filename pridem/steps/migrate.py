@@ -326,6 +326,7 @@ class StopForMigrate(Step):
 
     name = "stop_for_migrate"
     title = "Stop services for the migration"
+    idle = "stopped"
     order = 11
     modes = ALL_MODES | {"command"}  # db migrate stops too (DM-86)
     rechecked = False  # ``up`` brings the stopped back: the final check would
@@ -403,6 +404,7 @@ class StartStopped(Step):
 
     name = "start_stopped"
     title = "Start the stopped services"
+    idle = "started"
     order = 1
     modes = ALL_MODES | {"command"}  # db restore stops too (DM-86)
     codes: ClassVar[dict[str, str]] = {

@@ -112,6 +112,7 @@ class Types(LeftUndone, Step):
 
     name = "types"
     title = "Generate the types"
+    idle = "types"
     order = 4  # in the root stack: after final_check, finalize, write_key
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {

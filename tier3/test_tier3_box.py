@@ -79,3 +79,55 @@ def test_probe_DM_16_box_files_are_private_on_the_runner() -> None:
     assert code == 1 and out == [] and any("busy" in line for line in err), err
     assert len(list((BOX / "history").iterdir())) == 2
     assert os.geteuid() == 0  # the box is root's; the probe ran as root
+
+
+STEPS = re.compile(r"^(1/5|2/5|3/5|4/5|5/5|2-4/5) ")
+RUN = Path("/tmp/tier3")  # noqa: S108 -- the workflow's own directory (tier3.yml)
+LOG = Path("/var/log/pridem-install.log")
+
+
+def test_tier3_install_sh_shows_its_own_lines_alone() -> None:
+    """DM-112: the screen of ``install.sh`` on this runner (the workflow kept
+    it, ``tee``) -- its own lines, 1/5 to 5/5, nothing of apt, git or pip;
+    their lines are in the install's log, 0600. Measured into the run's
+    output (par0 14.3): the screen and the log's size."""
+    screen = (RUN / "install.out").read_text(encoding="utf-8").splitlines()
+    print("DM-112 measure:", {"screen": screen, "log_bytes": LOG.stat().st_size})
+    assert [line.split(" ", 1)[0] for line in screen] == [
+        "1/5",
+        "2/5",
+        "3/5",
+        "4/5",
+        "5/5",
+    ]
+    assert all(STEPS.match(line) for line in screen), screen
+    assert _mode(LOG) == 0o600
+    assert "1/5 host" in LOG.read_text(encoding="utf-8")
+
+
+def test_tier3_install_sh_refused_shows_why_the_tail_and_the_log() -> None:
+    """DM-112: ``install.sh`` of a tag its repository has not -- the clone
+    fails five times: the screen says why, the log's last lines and its path;
+    the machine installed before is left as it was (the target of that tag is
+    another directory)."""
+    script = (RUN / "install.sh").read_text(encoding="utf-8")
+    tag = re.search(r'^TAG="(v[0-9.]+)"$', script, re.M)
+    assert tag is not None
+    broken = RUN / "install-v9.9.9.sh"
+    broken.write_text(script.replace(f'TAG="{tag[1]}"', 'TAG="v9.9.9"', 1))
+    seen: dict[Stream, list[str]] = {Stream.STDOUT: [], Stream.STDERR: []}
+    result = SubprocessRunner().run(
+        ["bash", str(broken)],
+        timeout=600,
+        expect=(1,),
+        on_line=lambda s, line, cut: seen[s].append(line),
+    )
+    print("DM-112 measure:", seen)
+    assert result.code == 1
+    assert [line.split(" ", 1)[0] for line in seen[Stream.STDOUT]] == ["1/5", "2/5"]
+    errors = seen[Stream.STDERR]
+    assert errors[0].startswith("install.sh: cannot clone "), errors
+    assert errors[1] == f"--- the last lines of {LOG} ---", errors
+    assert errors[-1] == f"Full log: {LOG}", errors
+    code, out, _ = _pridem("version")
+    assert code == 0 and out == [f"pridem {tag[1][1:]}"], out
