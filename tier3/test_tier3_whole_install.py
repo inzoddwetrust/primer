@@ -1466,7 +1466,15 @@ def test_tier3_reinstall_keeps_the_persistent_volume(tmp_path: Path) -> None:
     files = _container(FILES, "files")
     _stdout(["docker", "exec", files, "sh", "-c", f"echo {MARK} > /srv/files/mark"])
     _psql("INSERT INTO app_settings (key, value) VALUES ('dm86-gone', 'x')")
-    verdict, printed = _install(_passport(tmp_path, version=15), "reinstall")
+    # DM-110, on the dispatcher's word: the owner's decision of 17.11 --
+    # reinstall confirms the server's name on any role
+    verdict, printed = _verdict_of(
+        "reinstall",
+        "--passport",
+        str(_passport(tmp_path, version=15)),
+        "--confirm",
+        "tier3-env",
+    )
     assert verdict.result == "green", printed
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
     assert facts[("pridem-destroy", "remove_objects")]["kept_volumes"] == [FILES_VOLUME]
@@ -3127,7 +3135,9 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
         ["docker", "inspect", "-f", "{{.Created}} {{json .Mounts}}", files]
     )
     print("DM-106 measure: the container of files", mounted)
-    verdict, printed = _verdict_of("destroy")
+    # DM-110, on the dispatcher's word: the owner's decision of 17.11 --
+    # destroy confirms the server's name on any role
+    verdict, printed = _verdict_of("destroy", "--confirm", "tier3-env")
     assert verdict.result == "green", printed
     after = _volumes()
     print("DM-106 measure: volumes after destroy", after)
@@ -3154,7 +3164,7 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     assert not Path("/etc/systemd/system/pridem-gc.timer").exists()
     assert Path("/opt/pridem/passport.yaml").is_file()
     assert any(Path("/opt/pridem/history").glob("*.json"))
-    again, printed = _verdict_of("destroy")
+    again, printed = _verdict_of("destroy", "--confirm", "tier3-env")
     assert again.result == "green", printed
 
 

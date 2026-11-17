@@ -96,12 +96,36 @@ def _given(args: Strict) -> dict[str, Json]:
     return found
 
 
-def _confirmed(passport: Passport | None, verb: str, confirm: str | None) -> None:
-    """On prod a destructive verb names the server it destroys."""
-    if passport is None or passport.server.role != "prod":
-        return
+def _asked_name(
+    ctx: Context, verb: str, confirm: str | None, passport: Passport | None
+) -> str:
+    """The server's name a verb that takes the box down is given: ``--confirm``
+    (the Panel), else asked at the terminal -- before the lock: a person
+    thinking does not hold the box. No passport, no terminal, nothing typed --
+    refused (the owner's decision of 17.11, DM-110: ``destroy`` and
+    ``reinstall`` on any role)."""
+    if confirm is not None:
+        return confirm
+    if passport is None:
+        raise Refused(f"{verb}: the box has no passport to confirm against")
+    name = passport.server.name
+    answer = ctx.ask(f"Type the server's name to {verb.split()[0]} {name}: ")
+    if answer is None:
+        raise Refused(f"{verb}: --confirm {name}, or answer on a terminal")
+    if not answer:  # Ctrl-C, a closed terminal, an empty line
+        raise Refused(f"{verb}: not confirmed")
+    return answer
+
+
+def _named(verb: str, confirm: str, passport: Passport | None) -> None:
+    """Under the lock, against the copy read now (DM-24): the name given is the
+    server's -- on any role (DM-110)."""
+    if passport is None:
+        raise Refused(f"{verb}: the box has no passport to confirm against")
     if confirm != passport.server.name:
-        raise Refused(f"{verb} on prod: --confirm {passport.server.name} to go on")
+        name = passport.server.name
+        said = f"{verb}: {confirm!r} is not the server's name -- --confirm {name}"
+        raise Refused(said)
 
 
 def _tries(given: list[str]) -> dict[str, str]:
@@ -131,11 +155,11 @@ def _plan_verb(name: str, mode: PlanMode) -> Callable[[Strict, Context], int]:
         new_secrets = False
         before: Callable[[Box], None] | None = None
         if isinstance(args, ReinstallArgs):
-            confirm = args.confirm
+            confirm = _asked_name(ctx, name, args.confirm, copy.passport or preread)
 
             def before(box: Box) -> None:
-                """The role under the lock (DM-24): the copy read now."""
-                _confirmed(read_copy(ctx).passport or preread, name, confirm)
+                """The server's name under the lock (DM-24), any role (DM-110)."""
+                _named(name, confirm, read_copy(ctx).passport or preread)
 
             new_secrets = args.new_secrets
         wanted = Wanted(
@@ -230,18 +254,13 @@ def _destroy(args: Strict, ctx: Context) -> int:
         raise TypeError("destroy takes DestroyArgs")
     copy = read_copy(ctx)
     confirm = args.confirm
+    verb = "destroy --all" if args.all else "destroy"
+    named = _asked_name(ctx, verb, confirm, copy.passport)
 
     def before(box: Box) -> None:
-        """The role under the lock (DM-24): the copy read now. ``--all`` wipes
-        people's files: the server's name on any role (protocol 1.12, 8.2)."""
-        passport = read_copy(ctx).passport
-        if not args.all:
-            _confirmed(passport, "destroy", confirm)
-        elif passport is None:
-            raise Refused("destroy --all: the box has no passport to confirm against")
-        elif confirm != passport.server.name:
-            name = passport.server.name
-            raise Refused(f"destroy --all wipes people's files: --confirm {name}")
+        """The server's name under the lock, on any role (the owner's decision
+        of 17.11, DM-110; ``--all`` since DM-86): the copy read now (DM-24)."""
+        _named(verb, named, read_copy(ctx).passport)
 
     def make(session: Session) -> Planned:
         return destroy_plan(session, ctx.fs_root, everything=args.all)

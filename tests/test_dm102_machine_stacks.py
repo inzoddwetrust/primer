@@ -120,6 +120,8 @@ def test_every_stack_of_a_verdict_is_an_entry_or_the_machine_s(
     section(data, "server")["role"] = "test"
     file = write_passport(tmp_path, data)
     argv = [str(file) if word == PASSPORT else word for word in ARGV[name]]
+    if "--confirm" in argv:  # DM-110: the name of the box built here
+        argv[argv.index("--confirm") + 1] = "tier1-box"
     seeded: set[str] = set()
     if name == "verb":
         from test_verbs_project import _box

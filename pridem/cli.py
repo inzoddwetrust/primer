@@ -24,7 +24,7 @@ verb writes its verdict. A signal that stops a command outside a plan
 
 import errno
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
 
@@ -45,7 +45,7 @@ from pridem.state import (
     VerdictDamaged,
 )
 from pridem.verbs import VERBS, Context, Refused, Verb
-from pridem.verbs.base import BOX_ROOT
+from pridem.verbs.base import BOX_ROOT, ask_terminal
 
 
 @click.command(
@@ -117,8 +117,10 @@ def run(
     runner: Runner | None = None,
     fs_root: Path = Path("/"),
     interrupt: Interrupt | None = None,
+    ask: Callable[[str], str | None] = ask_terminal,
 ) -> int:
-    """Parse ``argv``, run the verb, return the exit code."""
+    """Parse ``argv``, run the verb, return the exit code; ``ask`` -- the
+    question to the person at the terminal (DM-110)."""
     interrupt = interrupt if interrupt is not None else Interrupt()
     try:
         try:
@@ -149,6 +151,7 @@ def run(
             fs_root,
             by_timer,
             interrupt,
+            ask,
         )
         return verb.run(args, context)
     except Refused as refused:

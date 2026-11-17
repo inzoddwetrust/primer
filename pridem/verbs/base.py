@@ -1,5 +1,6 @@
 """What every verb is: a name, a strict argument model and a run."""
 
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,22 @@ class NoArgs(Strict):
     """The arguments of a verb that takes none."""
 
 
+def ask_terminal(question: str) -> str | None:
+    """``question`` on stderr, the answer from stdin -- when stdin is a
+    terminal; ``None`` otherwise. Ctrl-C and a closed terminal answer
+    nothing: ``""``."""
+    if not sys.stdin.isatty():
+        return None
+    sys.stderr.write(question)
+    sys.stderr.flush()
+    try:
+        line = sys.stdin.readline()
+    except KeyboardInterrupt:
+        sys.stderr.write("\n")
+        return ""
+    return line.strip()
+
+
 @dataclass(frozen=True)
 class Context:
     """Where a verb runs: the box's root, the streams it answers on, the runner
@@ -35,6 +52,9 @@ class Context:
     fs_root: Path = Path("/")
     timer: bool = False
     interrupt: Interrupt = field(default_factory=Interrupt)
+    ask: Callable[[str], str | None] = ask_terminal
+    """A question to the person at the terminal; ``None`` -- no terminal (a
+    pipe, the Panel). ``destroy`` asks the server's name with it (DM-110)."""
 
 
 OptionKind = Literal["flag", "value", "list"]

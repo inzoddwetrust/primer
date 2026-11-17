@@ -65,6 +65,19 @@ def _passport(tmp: Path, role: str = "test", name: str = "aivis-test") -> Path:
     return write_passport(tmp, data)
 
 
+NAMED = "velo-test"
+"""The server's name ``destroy`` is confirmed with (DM-110)."""
+DESTROY = ["destroy", "--confirm", NAMED]
+
+
+def _named(tmp: Path) -> None:
+    """The passport's copy of a ``test`` box named ``NAMED``: ``destroy`` asks
+    the server's name on any role (the owner's decision of 17.11, DM-110)."""
+    copy = tmp / PASSPORT_COPY
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_text(_passport(tmp / "named", role="test", name=NAMED).read_text())
+
+
 def _cli(
     tmp: Path, argv: list[str], runner: object | None = None
 ) -> tuple[int, str, str]:
@@ -235,8 +248,8 @@ def test_a_wrong_command_line_is_refused_before_the_run(
 
 def test_destroy_on_prod_names_the_server(tmp_path: Path) -> None:
     """On a box whose passport says prod, ``destroy`` and ``reinstall`` run
-    only with ``--confirm <server.name>``; the pair: with it, and on test with
-    nothing, the run happens (a verdict)."""
+    only with ``--confirm <server.name>``; the pair: with it, the run happens
+    (a verdict). (DM-110: on any role since -- ``test_dm110_confirm``.)"""
     copy = tmp_path / PASSPORT_COPY
     copy.parent.mkdir(parents=True)
     copy.write_text(
@@ -258,7 +271,10 @@ def test_destroy_on_prod_names_the_server(tmp_path: Path) -> None:
 
 
 def test_report_reads_a_stored_run_and_writes_no_verdict(tmp_path: Path) -> None:
-    code, _, _ = _cli(tmp_path, ["destroy"])
+    """Changed by DM-110, on the dispatcher's word: the owner's decision of
+    17.11 -- ``destroy`` confirms the server's name on any role."""
+    _named(tmp_path)
+    code, _, _ = _cli(tmp_path, DESTROY)
     [stored] = _history(tmp_path)
     run_ = stored.stem
     code, out, _ = _cli(tmp_path, ["report", run_])
@@ -293,10 +309,13 @@ def _quarantined_journal(tmp: Path) -> str:
     return run
 
 
-@pytest.mark.parametrize("verb", [["destroy"], ["status"]])
+@pytest.mark.parametrize("verb", [DESTROY, ["status"]])
 def test_a_quarantined_journal_is_in_the_verdict_of_the_command_that_found_it(
     tmp_path: Path, verb: list[str]
 ) -> None:
+    """Changed by DM-110, on the dispatcher's word: the owner's decision of
+    17.11 -- ``destroy`` confirms the server's name on any role."""
+    _named(tmp_path)
     run = _quarantined_journal(tmp_path)
     code, out, _ = _cli(
         tmp_path, ["--json", *verb], _clean() if verb != ["status"] else None
@@ -326,7 +345,8 @@ def test_a_journal_that_does_not_close_is_write_failed(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(JournalSink, "close", full)
-    code, out, _ = _cli(tmp_path, ["--json", "destroy"], _clean())
+    _named(tmp_path)  # DM-110: destroy confirms the server's name on any role
+    code, out, _ = _cli(tmp_path, ["--json", *DESTROY], _clean())
     verdict = Verdict.model_validate_json(out)
     assert [i.model_dump() for i in verdict.report.incomplete] == [
         {"what": "journal", "code": "write-failed"}
@@ -339,14 +359,14 @@ def test_a_journal_that_does_not_close_is_write_failed(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(JournalSink, "emit", lost)
-    code, out, _ = _cli(tmp_path, ["--json", "destroy"], _clean())
+    code, out, _ = _cli(tmp_path, ["--json", *DESTROY], _clean())
     verdict = Verdict.model_validate_json(out)
     assert [i.model_dump() for i in verdict.report.incomplete] == [
         {"what": "journal", "code": "write-failed"}
     ]
     monkeypatch.setattr(JournalSink, "emit", real_emit)
     monkeypatch.setattr(JournalSink, "close", real)  # the pair: it closes
-    code, out, _ = _cli(tmp_path, ["--json", "destroy"], _clean())
+    code, out, _ = _cli(tmp_path, ["--json", *DESTROY], _clean())
     assert Verdict.model_validate_json(out).report.incomplete == []
 
 

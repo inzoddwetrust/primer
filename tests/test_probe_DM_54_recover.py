@@ -26,10 +26,14 @@ from pridem.report.catalog import ENGLISH, Catalog
 from pridem.report.schema import Verdict
 from pridem.runner import CommandNotStarted, FakeRunner, OnLine, Result
 from pridem.state import Box, JournalHeader, JournalSink, Recovery
+from pridem.steps.passport import PASSPORT_COPY
 from pridem.verbs import VERBS
 
 NO_SECRETS = Secrets(())
 PASSPORT = "<passport>"
+NAMED = str(passport_example()["server"]["name"])  # type: ignore[index]
+"""The server's name ``destroy`` and ``reinstall`` confirm on any role
+(DM-110, on the dispatcher's word: the owner's decision of 17.11)."""
 """Stands for a passport file of a test box the test writes."""
 ARGV = {
     "status": ["status"],
@@ -39,8 +43,8 @@ ARGV = {
     "update": ["update", "--passport", PASSPORT],
     "deploy": ["deploy", "main", "--passport", PASSPORT],
     "doctor": ["doctor", "--passport", PASSPORT],
-    "reinstall": ["reinstall", "--passport", PASSPORT],
-    "destroy": ["destroy"],
+    "reinstall": ["reinstall", "--passport", PASSPORT, "--confirm", NAMED],
+    "destroy": ["destroy", "--confirm", NAMED],
     "db": ["db", "dump", "blank"],
     "backup": ["backup"],
     "seed": ["seed", "--list"],
@@ -142,6 +146,10 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
         _box(tmp_path)
     elif name in ON_A_BOX:
         blank_box(tmp_path)
+    elif name == "destroy":  # DM-110: the name is the passport's copy's
+        copy = tmp_path / PASSPORT_COPY
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text(file.read_text())
     seeded: set[str] = set()
     if name in ROLLBACK:  # a previous release to go back to (DM-24)
         release_box(tmp_path, "prod", NEW, released(1, OLD), released(2, NEW))

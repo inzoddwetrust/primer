@@ -47,6 +47,24 @@ def _turns_prod(fs_root: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return order
 
 
+def _renamed(fs_root: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Under the lock, before anything else, the copy names another server
+    (``box-2``): the name confirmed at the start is not the copy's any more."""
+    order: list[str] = []
+    real = Box.recover
+
+    def recover(self: Box, secrets: Secrets, version: str, *rest: object) -> object:
+        copy = fs_root / PASSPORT_COPY
+        data = yaml.safe_load(copy.read_text(encoding="utf-8"))
+        data["server"]["name"] = "box-2"
+        copy.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+        order.append("recover")
+        return real(self, secrets, version, *rest)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Box, "recover", recover)
+    return order
+
+
 def _cli(fs_root: Path, argv: list[str]) -> tuple[int, str, list[str]]:
     out, err = io.StringIO(), io.StringIO()
     box = Box(fs_root / "opt" / "pridem")
@@ -71,41 +89,55 @@ def _file(fs_root: Path) -> Path:
     return write_passport(fs_root, data)
 
 
-def test_reinstall_reads_the_role_under_the_lock(
+def test_reinstall_reads_the_server_s_name_under_the_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``reinstall`` without ``--confirm``: the copy is ``test`` when the
-    command starts and ``prod`` under the lock -- refused, naming the server,
-    after ``recover``; no verdict."""
+    """``reinstall --confirm box-1``: the copy names ``box-1`` when the command
+    starts and ``box-2`` under the lock -- refused, naming the server, after
+    ``recover``; no verdict.
+
+    Changed by DM-110, on the dispatcher's word: the owner's decision of 17.11
+    -- the name on any role; the invariant of DM-24 "checked against the copy
+    read under the lock" holds by a change of the name (it was of the role)."""
     blank_box(tmp_path, name=NAME)
     file = _file(tmp_path)
     monkeypatch.setattr(deploy_verbs, "deploy_plan", _plan)
-    order = _turns_prod(tmp_path, monkeypatch)
-    code, err, added = _cli(tmp_path, ["reinstall", "--passport", str(file)])
+    order = _renamed(tmp_path, monkeypatch)
+    argv = ["reinstall", "--passport", str(file), "--confirm", NAME]
+    code, err, added = _cli(tmp_path, argv)
     assert (code, added, order) == (1, [], ["recover"])
-    assert f"--confirm {NAME} to go on" in err
+    assert "--confirm box-2" in err
 
 
-def test_reinstall_on_a_test_box_goes_on(
+def test_reinstall_with_the_server_s_name_goes_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The pair: the copy stays ``test`` -- ``reinstall`` runs its plan."""
+    """The pair: the copy keeps its name -- ``reinstall --confirm`` runs its
+    plan.
+
+    Changed by DM-110, on the dispatcher's word: the assertion of DM-24 "on
+    ``test`` without ``--confirm`` it goes on" is withdrawn by the owner's
+    decision of 17.11."""
     blank_box(tmp_path, name=NAME)
     file = _file(tmp_path)
     monkeypatch.setattr(deploy_verbs, "deploy_plan", _plan)
-    code, err, added = _cli(tmp_path, ["reinstall", "--passport", str(file)])
+    argv = ["reinstall", "--passport", str(file), "--confirm", NAME]
+    code, err, added = _cli(tmp_path, argv)
     assert code == 0, err
     assert len(added) == 1
 
 
-def test_destroy_reads_the_role_under_the_lock(
+def test_destroy_reads_the_server_s_name_under_the_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Changed by DM-110, on the dispatcher's word: the owner's decision of
+    17.11 -- the name on any role; the invariant of DM-24 "checked against the
+    copy read under the lock" holds by a change of the name."""
     blank_box(tmp_path, name=NAME)
-    order = _turns_prod(tmp_path, monkeypatch)
-    code, err, added = _cli(tmp_path, ["destroy"])
+    order = _renamed(tmp_path, monkeypatch)
+    code, err, added = _cli(tmp_path, ["destroy", "--confirm", NAME])
     assert (code, added, order) == (1, [], ["recover"])
-    assert f"destroy on prod: --confirm {NAME} to go on" in err
+    assert "--confirm box-2" in err
 
 
 def test_db_reset_reads_the_role_under_the_lock(
