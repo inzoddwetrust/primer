@@ -27,6 +27,16 @@ Such a 128, in ``check``, ``act`` or any poll of the wait, is
 ``unreachable`` at once: no key the owner adds can answer it, and waiting
 ``KEY_WAIT_S`` under the box's lock for it would end in a false ``no-access``
 (DM-81). Any other 128 is the server's refusal: the ceremony waits.
+
+GitHub spreads a new deploy key server by server: the key answers one look
+and is refused by the next request (velo-dev 17.11). So a key the step waited
+for counts as working after ``STEADY`` looks in a row, and the pauses between
+looks grow (``PAUSES_S``) -- never a look without a pause (``wait_for_access``,
+DM-111). A key minted in this run goes into the run's ``FreshKeys`` with the
+end of its wait: a ``Permission denied (publickey)`` of the next command to
+its repository (``ls-remote``, ``fetch``) is the key's block again and a wait
+again up to that same end, then the command again -- never a red step while
+the key's half hour lasts. A key of an earlier run is refused at once.
 """
 
 import re
@@ -37,7 +47,7 @@ from typing import ClassVar
 
 from pridem.events import Json, KeyNeeded
 from pridem.files import atomic_write, commit_set, private_dir, temp_of
-from pridem.runner import Stream
+from pridem.runner import CommandFailed, Stream
 from pridem.steps.base import (
     CheckResult,
     LeftUndone,
@@ -51,6 +61,15 @@ from pridem.steps.base import (
 from pridem.steps.git import KEYS, Repo, collisions, repo, run_git
 
 KEY_WAIT_S = 1800
+PAUSES_S = (10.0, 30.0, 60.0)
+"""The pauses between looks at a key that does not work yet, growing, the
+last kept: never a look without a pause, and GitHub is asked at most once a
+minute after the first two (DM-111)."""
+STEADY = 3
+STEADY_PAUSE_S = 15.0
+"""A key GitHub has just taken works for a moment and not for the next
+request (its servers learn it one by one, velo-dev 17.11): ``STEADY`` looks
+in a row, ``STEADY_PAUSE_S`` apart, before the key counts as working."""
 """How long the ceremony waits for the owner to add the public part."""
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
@@ -204,6 +223,111 @@ GITHUB = re.compile(
 )
 
 
+def wait_for_access(
+    ctx: StepContext,
+    access: Callable[[], bool],
+    deadline: float,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> bool:
+    """Until ``access`` answers ``STEADY`` times in a row, ``STEADY_PAUSE_S``
+    apart -- ``True``; ``False`` at ``deadline``. A refusal starts the row
+    again and pauses as ``PAUSES_S`` say, growing: one policy for the step of
+    the key and for every command that goes to its repository (DM-111). A
+    signal ends the wait."""
+    pauses = iter(PAUSES_S)
+    row = 0
+    while True:
+        if access():
+            row += 1
+            if row >= STEADY:
+                return True
+            pause = STEADY_PAUSE_S
+        else:
+            row = 0
+            pause = next(pauses, PAUSES_S[-1])
+        if clock() >= deadline:
+            return False
+        ctx.interrupt.check()
+        sleep(pause)
+        ctx.interrupt.check()
+
+
+REFUSED = "Permission denied (publickey)"
+"""What ssh says when the server does not take the key."""
+
+
+class FreshKeys:
+    """The keys minted in this run, by alias, with the end of their wait
+    (DM-111): a key minted now may be refused by the next request to its
+    repository though it was just taken -- such a refusal is a wait again,
+    within the same ``KEY_WAIT_S`` from the minting, never a red step. A key
+    of an earlier run is not here: its refusal stays a refusal. One object
+    for the run, in memory: the plan makes it, ``DeployKey`` fills it, the
+    steps that go to a repository read it."""
+
+    def __init__(
+        self,
+        root: Path = Path("/"),
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.root = root
+        self.clock = clock
+        self.sleep = sleep
+        self._ends: dict[str, float] = {}
+        self._keys: dict[str, str] = {}
+
+    def minted(self, found: Repo, public: str, deadline: float) -> None:
+        self._ends[found.alias] = deadline
+        self._keys[found.alias] = public
+
+    def deadline(self, found: Repo) -> float | None:
+        return self._ends.get(found.alias)
+
+    def retried[T](self, ctx: StepContext, found: Repo, call: Callable[[], T]) -> T:
+        """``call`` -- a command to the repository ``found`` -- and, while
+        its key is fresh and the server refuses it, the key's block again and
+        the wait of ``wait_for_access`` up to the key's own deadline, then the
+        command again. Any other failure, a key not minted in this run, or the
+        deadline passed -- the failure as it is."""
+        while True:
+            try:
+                return call()
+            except CommandFailed as error:
+                deadline = self.deadline(found)
+                said = any(REFUSED in line for _, line in error.tail)
+                if deadline is None or not said or self.clock() >= deadline:
+                    raise
+                ctx.notice(
+                    KeyNeeded(
+                        repo=found.address,
+                        key=self._keys[found.alias],
+                        page=keys_page(found.address),
+                        write=False,
+                        why=None,
+                        wait_s=max(deadline - self.clock(), 0.0),
+                        again=True,
+                    )
+                )
+                if not wait_for_access(
+                    ctx,
+                    lambda: has_access(ctx, self.root, found),
+                    deadline,
+                    self.clock,
+                    self.sleep,
+                ):
+                    raise
+
+
+def by_key[T](
+    ctx: StepContext, fresh: FreshKeys | None, found: Repo, call: Callable[[], T]
+) -> T:
+    """A command to the repository ``found``: through ``fresh`` when the run
+    has one (DM-111), as it is otherwise."""
+    return call() if fresh is None else fresh.retried(ctx, found, call)
+
+
 def keys_page(address: str) -> str | None:
     """The page of deploy keys of a GitHub repository; ``None`` for another
     host -- the console shows the address alone (DM-107)."""
@@ -228,7 +352,8 @@ class DeployKey(Step):
         "alias-clash": "repositories share one key: {aliases}",
         "ssh-config": "draw {repo} into {files}",
         "ssh-config-differs": "{path} is not as drawn after the write",
-        "no-access": "no read access to {repo} with key {public_key} after {wait_s} s",
+        "no-access": "no read access to {repo} with key {public_key} after {wait_s} s "
+        "-- check that the key is added to {repo}",
         "unreachable": "ssh does not reach {repo}: no key can answer before it does",
     }
 
@@ -240,18 +365,20 @@ class DeployKey(Step):
         name: str = "deploy_key",
         others: Sequence[str] = (),
         wait_s: float = KEY_WAIT_S,
-        poll_s: float = 10.0,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        fresh: FreshKeys | None = None,
     ) -> None:
         self.repo = repo(address)
         self.root = root
         self.name = name
         self.others = tuple(others)
         self.wait_s = wait_s
-        self.poll_s = poll_s
         self.clock = clock
         self.sleep = sleep
+        self.fresh = fresh
+        """The run's keys minted now: a key this step mints goes there, with
+        the end of its wait (DM-111)."""
 
     @property
     def _key(self) -> Path:
@@ -308,19 +435,21 @@ class DeployKey(Step):
             )
         )
         deadline = self.clock() + (self.wait_s if waits else 0)
-        while not self._access(ctx):
-            if self.clock() >= deadline:
-                raise StepFailed(
-                    "no-access",
-                    {
-                        "repo": self.repo.address,
-                        "public_key": self._public(),
-                        "wait_s": self.wait_s,
-                    },
-                )
-            ctx.interrupt.check()  # a signal ends the wait (DM-45)
-            self.sleep(self.poll_s)
-            ctx.interrupt.check()
+        if minted and self.fresh is not None:
+            self.fresh.minted(self.repo, self._public(), deadline)
+        # the key works only when it works a few times in a row (DM-111);
+        # a signal ends the wait (DM-45)
+        if not wait_for_access(
+            ctx, lambda: self._access(ctx), deadline, self.clock, self.sleep
+        ):
+            raise StepFailed(
+                "no-access",
+                {
+                    "repo": self.repo.address,
+                    "public_key": self._public(),
+                    "wait_s": self.wait_s,
+                },
+            )
 
     def _mint(self, ctx: StepContext) -> None:
         """A new pair as one change (DM-80): ``ssh-keygen`` writes both parts
@@ -454,7 +583,6 @@ class WriteKey(LeftUndone, DeployKey):
         commit: str,
         others: Sequence[str] = (),
         wait_s: float = KEY_WAIT_S,
-        poll_s: float = 10.0,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -464,7 +592,6 @@ class WriteKey(LeftUndone, DeployKey):
             name="write_key",
             others=others,
             wait_s=wait_s,
-            poll_s=poll_s,
             clock=clock,
             sleep=sleep,
         )

@@ -84,7 +84,7 @@ from pridem.steps.frontend import Frontend
 from pridem.steps.gc import GC_STACK, gc_steps
 from pridem.steps.git import repo
 from pridem.steps.host import EnsureNetwork, host_steps
-from pridem.steps.keys import DeployKey, WriteKey
+from pridem.steps.keys import DeployKey, FreshKeys, WriteKey
 from pridem.steps.migrate import Migrate, StartStopped, StopForMigrate, Stopped
 from pridem.steps.nginx import Nginx
 from pridem.steps.packages import Packages
@@ -188,6 +188,9 @@ class _Known:
     memory: SeamMemory = field(default_factory=SeamMemory)
     stopped: Stopped = field(default_factory=Stopped)
     """What ``stop_for_migrate`` stopped; ``start_stopped`` reads it (DM-22)."""
+    fresh: FreshKeys | None = None
+    """The keys minted in this run (DM-111): ``deploy_key`` fills it, the steps
+    that go to a repository read it."""
 
 
 @dataclass(frozen=True)
@@ -235,7 +238,7 @@ def deploy_plan(
     """The plan of ``install``, ``update``, ``deploy``, ``reinstall``, ``doctor``."""
     root, box, secrets = fs_root, session.box, session.secrets
     report = TestReport()
-    known = _Known()
+    known = _Known(fresh=FreshKeys(root))
     host, final = host_steps(root, domains=_domains(preread), network=False)
     source = wanted.source
     fetched, first = passport_steps(
@@ -244,6 +247,7 @@ def deploy_plan(
         server=source.server,
         ops=OpsSource(source.ops) if source.ops is not None else None,
         file=source.file,
+        fresh=known.fresh,
     )
 
     def sources() -> Sequence[StackSteps] | None:
@@ -269,6 +273,7 @@ def deploy_plan(
             packages=passport.packages,
             tries=wanted.tries,
             chosen=chosen,
+            fresh=known.fresh,
         )
         known.resolved = resolved
         known.fetch_root = next(s for s in steps if isinstance(s, FetchRoot))
@@ -281,7 +286,7 @@ def deploy_plan(
                 own.append(step)
             if isinstance(step, FetchRoot) and _guards_stand(wanted, role):
                 own.append(Stand(step, box, root))  # right after it: DM-24
-        key = DeployKey(passport.product.repo, root)  # none for file://
+        key = DeployKey(passport.product.repo, root, fresh=known.fresh)  # file:// none
         return [StackSteps(machine.SOURCES, [key, *own])]
 
     def dependencies() -> Sequence[StackSteps] | None:
@@ -300,7 +305,8 @@ def deploy_plan(
         for name in [n for n in product.dependencies if n in used]:
             address = product.dependencies[name].repo
             others = [a for a in addresses if a != address]
-            made.append(StackSteps(name, [DeployKey(address, root, others=others)]))
+            key = DeployKey(address, root, others=others, fresh=known.fresh)
+            made.append(StackSteps(name, [key]))
         made.append(StackSteps(machine.DEPENDENCIES, list(known.dependencies)))
         return made
 

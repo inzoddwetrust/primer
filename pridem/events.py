@@ -33,7 +33,7 @@ from typing import Literal, Protocol, TextIO, runtime_checkable
 from pydantic import SecretStr
 
 from pridem.contract import SECRET_MIN_LENGTH
-from pridem.report.catalog import ENGLISH, Catalog, say, text
+from pridem.report.catalog import ENGLISH, Catalog, is_a_cause, say, text
 from pridem.report.codes import RESERVED_PARAMS, ExitCode
 from pridem.runner import Stream
 
@@ -470,6 +470,9 @@ class KeyNeeded:
     """Why it must write."""
     wait_s: float
     """How long the step waits for the key to work."""
+    again: bool = False
+    """The key was taken and the next request refused it: GitHub has not
+    spread it yet -- the block again, the box waits again (DM-111)."""
 
 
 @dataclass(frozen=True)
@@ -554,14 +557,27 @@ class ConsoleSink:
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
         self.dead = False
+        self._causes: dict[Stream, str] = {}
 
     # --- what the plan hands it --------------------------------------------
 
     def emit(self, event: Event) -> None:
         if isinstance(event, StepStarted):
+            self._causes.clear()
             self._started(event)
+        elif isinstance(event, LogLine):
+            self._heard(event)
         elif isinstance(event, StepFinished):
             self._finished(event.record)
+
+    def _heard(self, line: LogLine) -> None:
+        """The last line of the running step's commands that can say why one
+        failed (DM-111): stderr's, else stdout's; never git's set phrases
+        (``catalog.NOT_A_CAUSE``)."""
+        said = line.line.strip()
+        if not said or not is_a_cause(said):
+            return
+        self._causes[line.stream] = said
 
     def notice(self, notice: Notice) -> None:
         """A key to add: the block, then the live line waits for it."""
@@ -579,6 +595,8 @@ class ConsoleSink:
             notice.key,
             "",
         ]
+        if notice.again:  # taken, then refused: GitHub spreads it (DM-111)
+            lines.insert(4, say(catalog, "@key.again", repo=notice.repo))
         if notice.page is not None:
             lines.append(say(catalog, "@key.go", page=notice.page))
         lines.append(say(catalog, "@key.add"))
@@ -720,6 +738,11 @@ class ConsoleSink:
             words = text(catalog, record.reason.code, record.reason.params)
             reason = self._secrets.text(HASH.sub(_short, words))
             line += say(catalog, "@console.reason", reason=reason)
+            cause = self._causes.get(Stream.STDERR) or self._causes.get(Stream.STDOUT)
+            if record.reason.code == "command-failed" and cause:
+                # what the command said, cleaned as the journal is (DM-111)
+                line += say(catalog, "@console.cause", cause=self._secrets.text(cause))
+        self._causes.clear()
         self._line(line)
 
     def _line(self, line: str) -> None:

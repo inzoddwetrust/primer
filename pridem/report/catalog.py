@@ -96,6 +96,7 @@ ENGLISH: Catalog = {
     "@console.duration": " · {seconds}",
     "@console.fact": " · {fact}",
     "@console.reason": " — {reason}",
+    "@console.cause": " — {cause}",
     "@console.begins": "→ {label}…",
     "@console.live": "{label} · {spent}",
     "@doctor.line": "- {title} — {words}",
@@ -122,6 +123,8 @@ ENGLISH: Catalog = {
     "@key.write": "IMPORTANT: tick 'Allow write access' — {why}.",
     "@key.already": "Already added? The box goes on by itself as soon as the key "
     "works.",
+    "@key.again": "GitHub has not taken the key yet: it worked, then {repo} "
+    "refused it. The box waits again.",
     "@key.waits": "Waiting for access to {repo}, up to {wait}…",
     "@key.waiting": "Waiting for access to {subject} · {spent} of {wait}",
     "@recipient.title": "Passport key of this box — add it to the ops repository",
@@ -167,6 +170,24 @@ def text(
     return template.format(
         **{name: _present(catalog, name, value) for name, value in params.items()}
     )
+
+
+NOT_A_CAUSE: tuple[str, ...] = (
+    "fatal: Could not read from remote repository.",
+    "Please make sure you have the correct access rights",
+    "and the repository exists.",
+)
+"""Lines a command prints after its failure that never say why: git's set
+phrases after an ssh refusal (git 2.43; DM-111). The console shows the last
+line of a failed command that is none of these and starts with none of
+``NOT_A_CAUSE_STARTS`` -- ``Permission denied (publickey)``, not ``and the
+repository exists.``"""
+NOT_A_CAUSE_STARTS: tuple[str, ...] = ("hint:",)
+
+
+def is_a_cause(line: str) -> bool:
+    """``line`` (stripped) can say why a command failed."""
+    return line not in NOT_A_CAUSE and not line.startswith(NOT_A_CAUSE_STARTS)
 
 
 def say(catalog: Catalog, key: str, /, **values: object) -> str:

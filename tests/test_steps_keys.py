@@ -113,15 +113,19 @@ def keygen(root: Path) -> FakeCall:
 
 
 def test_ceremony_mints_waits_and_never_shows_the_private_part(tmp_path: Path) -> None:
-    clock = iter([0.0, 1.0, 2.0])
+    """Changed by DM-111: the key minted counts as working after three looks
+    in a row (``STEADY``), not one -- GitHub spreads a new key server by
+    server; then ``verify``'s look."""
     step = DeployKey(
-        ADDRESS, tmp_path, wait_s=100, clock=lambda: next(clock), sleep=lambda s: None
+        ADDRESS, tmp_path, wait_s=100, clock=lambda: 0.0, sleep=lambda s: None
     )
     calls = [
         keygen(tmp_path),
         lsremote(tmp_path, 128),
         lsremote(tmp_path, 0),
         lsremote(tmp_path, 0),
+        lsremote(tmp_path, 0),
+        lsremote(tmp_path, 0),  # verify
     ]
     outcome, sink = run(tmp_path, step, calls)
     assert outcome.code is ExitCode.OK, outcome.steps

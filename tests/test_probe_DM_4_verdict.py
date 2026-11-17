@@ -219,7 +219,13 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
 
     Changed by DM-107 (on the dispatcher's word): the console says a step's fact
     only through its ``said``; the pair keeps the fact in the console that way, so
-    what is checked is the cleaning of ``said``."""
+    what is checked is the cleaning of ``said``.
+
+    Changed by DM-111, on the dispatcher's word: the console shows the last
+    meaningful line of a failed command, cleaned as the journal (owner's
+    decision 17.11); the verdict's reason still carries no output. The line
+    carries ``MARKER``: in the console it is ``[redacted]``, the rest of the
+    line is there."""
     output = "leaked-output-4f2a"
 
     class Up(ScriptedStep):
@@ -232,6 +238,7 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
             code=2,
             lines=(
                 (Stream.STDERR, f"{output} line 1"),
+                (Stream.STDERR, f"{output} cause TOKEN={MARKER}"),
                 (Stream.STDOUT, f"{output} line 2"),
             ),
         )
@@ -253,6 +260,7 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
     )
     assert [line.line for line in sink.lines()] == [
         f"{output} line 1",
+        f"{output} cause TOKEN={MARKER}",
         f"{output} line 2",
     ]
 
@@ -267,5 +275,7 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
     for event in sink.events:
         console.emit(event)
     printed = out.getvalue()
-    assert MARKER not in printed and output not in printed
+    assert MARKER not in printed
     assert VISIBLE in printed and "TOKEN=[redacted] — exit code 2" in printed
+    # the last line of stderr that says why, cleaned; the rest of it is there
+    assert f"exit code 2 — {output} cause TOKEN=[redacted]" in printed

@@ -45,13 +45,14 @@ def _host(tmp: Path, sleep: Callable[[float], None], mp: pytest.MonkeyPatch) -> 
 
 
 def _key(tmp: Path, sleep: Callable[[float], None], mp: pytest.MonkeyPatch) -> Wait:
+    """Changed by DM-111: the key's pauses are the policy's (``PAUSES_S``,
+    growing), not a ``poll_s`` of the step."""
     mp.setattr(keys, "has_access", lambda ctx, root, found: False)
     ticks = count()
     step = DeployKey(
         "git@github.com:o/r.git",
         tmp,
         wait_s=3,
-        poll_s=1,
         clock=lambda: float(next(ticks)),
         sleep=sleep,
     )

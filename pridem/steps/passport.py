@@ -84,7 +84,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.git import KEYS, git_env, repo, run_git
-from pridem.steps.keys import DeployKey
+from pridem.steps.keys import DeployKey, FreshKeys
 from pridem.steps.sources import NOT_A_COMMIT, Checkout, remote_target
 
 AGE_KEY = KEYS / "age.key"
@@ -497,6 +497,8 @@ class FetchPassport(Step):
         self.ask = ask
         self.wait_s = wait_s
         self.poll_s = poll_s
+        self.fresh: FreshKeys | None = None
+        """The run's keys minted now (DM-111): ``passport_steps`` sets it."""
         self.clock = clock
         self.sleep = sleep
 
@@ -521,13 +523,15 @@ class FetchPassport(Step):
         return self.ops
 
     def _checkout(self) -> Checkout:
-        return Checkout(self.root, OPS_STACK, repo(self._ops.address))
+        return Checkout(self.root, OPS_STACK, repo(self._ops.address), fresh=self.fresh)
 
     # --- the ops repository ---------------------------------------------------
 
     def _remote_head(self, ctx: StepContext) -> str:
         found = repo(self._ops.address)
-        target = remote_target(ctx, self.root, found, self._ops.ref, tag=False)
+        target = remote_target(
+            ctx, self.root, found, self._ops.ref, tag=False, fresh=self.fresh
+        )
         if target is None:
             raise StepFailed(
                 "no-ref", {"repo": self._ops.address, "ref": self._ops.ref}
@@ -825,9 +829,11 @@ def passport_steps(
     ask: Ask | None = None,
     wait_s: float = RECIPIENT_WAIT_S,
     poll_s: float = 10.0,
+    fresh: FreshKeys | None = None,
 ) -> tuple[Fetched, list[Step]]:
     """The passport ladder: from the ops repository -- the age key, the ops
-    repository's deploy key, the passport; from a file -- the passport only."""
+    repository's deploy key, the passport; from a file -- the passport only.
+    ``fresh`` -- the run's keys minted now (DM-111)."""
     fetched = Fetched()
     fetch = FetchPassport(
         fetched,
@@ -842,5 +848,6 @@ def passport_steps(
     )
     if ops is None:
         return fetched, [fetch]
-    key = _OpsKey(ops.address, root, name="ops_key", wait_s=wait_s, poll_s=poll_s)
+    key = _OpsKey(ops.address, root, name="ops_key", wait_s=wait_s, fresh=fresh)
+    fetch.fresh = fresh
     return fetched, [AgeKey(root), key, fetch]

@@ -61,6 +61,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.git import Repo, repo, run_git
+from pridem.steps.keys import FreshKeys, by_key
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
@@ -90,6 +91,9 @@ class Resolved:
     tries: dict[str, str] = field(default_factory=dict)
     """``update --try <service>=<version>``: the version a test box runs in
     place of the lock's; ``check_lock`` puts it in ``lock``."""
+    fresh: FreshKeys | None = None
+    """The run's keys minted now: a refusal of one of them by its repository
+    is a wait again, not a red step (DM-111)."""
 
 
 @dataclass(frozen=True)
@@ -129,7 +133,12 @@ answered is checked before it reaches a git command or a release path."""
 
 
 def remote_target(
-    ctx: StepContext, root: Path, found: Repo, ref: str, tag: bool
+    ctx: StepContext,
+    root: Path,
+    found: Repo,
+    ref: str,
+    tag: bool,
+    fresh: FreshKeys | None = None,
 ) -> Target | None:
     """The commit of ``ref`` on the remote (``git ls-remote``); ``None`` if missing.
 
@@ -138,7 +147,8 @@ def remote_target(
     name of a release directory.
     """
     full = f"refs/tags/{ref}" if tag else f"refs/heads/{ref}"
-    _, lines = run_git(ctx, root, ["ls-remote", found.url(), full, f"{full}^{{}}"])
+    argv = ["ls-remote", found.url(), full, f"{full}^{{}}"]
+    _, lines = by_key(ctx, fresh, found, lambda: run_git(ctx, root, argv))
     commits: dict[str, str] = {}
     for line in lines:
         commit, _, name = line.partition("\t")
@@ -217,11 +227,17 @@ class Checkout:
     """A bare repository and its release worktrees under ``/opt/<stack>``."""
 
     def __init__(
-        self, root: Path, stack: str, found: Repo, bare: Path | None = None
+        self,
+        root: Path,
+        stack: str,
+        found: Repo,
+        bare: Path | None = None,
+        fresh: FreshKeys | None = None,
     ) -> None:
         self.root = root
         self.stack = stack
         self.repo = found
+        self.fresh = fresh
         self.home = root / "opt" / stack
         self.bare = bare or self.home / "git"
         self.releases = self.home / "releases"
@@ -248,15 +264,12 @@ class Checkout:
         # the address as given: the remote holds the ssh alias, not the address
         # (``pridem/verbs/plans.py`` reads where a box's passport comes from)
         self.git(ctx, "config", ADDRESS_KEY, self.repo.address)
-        self.git(
+        args = ("fetch", "--quiet", "--prune", "--tags", "--force", "origin")
+        by_key(
             ctx,
-            "fetch",
-            "--quiet",
-            "--prune",
-            "--tags",
-            "--force",
-            "origin",
-            "+refs/heads/*:refs/heads/*",
+            self.fresh,
+            self.repo,
+            lambda: self.git(ctx, *args, "+refs/heads/*:refs/heads/*"),
         )
 
     def show(self, ctx: StepContext, commit: str, path: str) -> str | None:
@@ -418,7 +431,7 @@ class FetchRoot(_SourceStep):
         branch."""
         super().__init__(resolved, root)
         self.stack = stack
-        self.checkout = Checkout(root, stack, repo(address))
+        self.checkout = Checkout(root, stack, repo(address), fresh=resolved.fresh)
         self.ref = ref
         self.tag = tag
         self.target: Target | None = None
@@ -426,7 +439,9 @@ class FetchRoot(_SourceStep):
     def _target(self, ctx: StepContext) -> Target | None:
         kinds = (True, False) if self.tag is None else (self.tag,)
         for tag in kinds:
-            found = remote_target(ctx, self.root, self.checkout.repo, self.ref, tag)
+            found = remote_target(
+                ctx, self.root, self.checkout.repo, self.ref, tag, self.resolved.fresh
+            )
             if found is not None:
                 return found
         return None
@@ -536,7 +551,9 @@ class CheckLock(_SourceStep):
             if dependency is None:
                 raise StepFailed("try-unknown", {"service": name})
             tag = f"v{version}"
-            target = remote_target(ctx, self.root, repo(dependency.repo), tag, True)
+            target = remote_target(
+                ctx, self.root, repo(dependency.repo), tag, True, self.resolved.fresh
+            )
             if target is None:
                 raise StepFailed(
                     "missing-tag",
@@ -573,7 +590,9 @@ class CheckLock(_SourceStep):
             dependency = product.dependencies[name]
             entry = lock.dependencies[name]
             found = repo(dependency.repo)
-            target = remote_target(ctx, self.root, found, entry.tag, True)
+            target = remote_target(
+                ctx, self.root, found, entry.tag, True, self.resolved.fresh
+            )
             if target is None:
                 raise StepFailed(
                     "missing-tag",
@@ -627,7 +646,9 @@ class FetchServices(_SourceStep):
             dependency = product.dependencies[name]
             entry = lock.dependencies[name]
             found = repo(dependency.repo)
-            target = remote_target(ctx, self.root, found, entry.tag, True)
+            target = remote_target(
+                ctx, self.root, found, entry.tag, True, self.resolved.fresh
+            )
             if target is None:  # check_lock says it in its verify; doctor runs
                 # none -- the remote holds no such tag: this step's code, never
                 # an exception (DM-92 FIX)
@@ -635,7 +656,8 @@ class FetchServices(_SourceStep):
                     "missing-tag",
                     {"service": name, "tag": entry.tag, "repo": dependency.repo},
                 )
-            out.append((Checkout(self.root, name, found), target))
+            fresh = self.resolved.fresh
+            out.append((Checkout(self.root, name, found, fresh=fresh), target))
         return out
 
     def _read(self, ctx: StepContext, checkout: Checkout, target: Target) -> None:
@@ -771,8 +793,12 @@ class FetchPackages(_SourceStep):
                     "dir-clash", {"slots": _j([other[1], slot]), "release": release}
                 )
             bare = self.root / "opt" / self.stack / "packages" / f"{found.alias}.git"
-            checkout = Checkout(self.root, self.stack, found, bare=bare)
-            target = remote_target(ctx, self.root, found, tag, True)
+            checkout = Checkout(
+                self.root, self.stack, found, bare=bare, fresh=self.resolved.fresh
+            )
+            target = remote_target(
+                ctx, self.root, found, tag, True, self.resolved.fresh
+            )
             if target is None:
                 raise StepFailed(
                     "missing-tag", {"slot": slot, "tag": tag, "repo": package.repo}
@@ -845,10 +871,12 @@ def source_steps(
     packages: Mapping[str, Package] | None = None,
     tries: Mapping[str, str] | None = None,
     chosen: Chosen | None = None,
+    fresh: FreshKeys | None = None,
 ) -> tuple[Resolved, list[Step]]:
     """The ``sources`` ladder a plan builder puts after ``host``; ``chosen`` --
-    the dependencies the box uses (``None`` -- every one)."""
-    resolved = Resolved(tries=dict(tries or {}))
+    the dependencies the box uses (``None`` -- every one); ``fresh`` -- the
+    run's keys minted now (DM-111)."""
+    resolved = Resolved(tries=dict(tries or {}), fresh=fresh)
     steps: list[Step] = [
         FetchRoot(resolved, root, stack=stack, address=address, ref=ref, tag=tag),
         CheckLock(resolved, root, chosen),
