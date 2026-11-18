@@ -461,7 +461,10 @@ class FetchPassport(Step):
         ),
         "invalid": "the passport is rejected: {problems}",
         "name-mismatch": "the passport is for server {found}, not {expected}",
-        "missing": "the passport lacks {fields} and they are not asked here",
+        "missing": (
+            "the passport lacks {fields}: add them to the passport, or run on a "
+            "terminal to be asked"
+        ),
         "no-answer": "no answer for {field}",
         "copy-mode": "the passport copy {path} is {mode}, not 0o600",
         "key-unreadable": "the age key {path} cannot be read as an age key",

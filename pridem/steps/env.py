@@ -307,7 +307,10 @@ class RenderEnv(Step):
         **NO_PASSPORT,
         **READ_BACK_CODES,
         "render": "render the env of {entry}",
-        "missing": "the passport lacks {fields} and nobody can be asked",
+        "missing": (
+            "the passport lacks {fields}: add them to the passport, or run on a "
+            "terminal to be asked"
+        ),
         "no-answer": "no answer for {field}",
         "invalid": "the answer is rejected: {problems}",
         "minted-mode": "{path} is {mode}, not 0o600; it is left as it is",
@@ -605,7 +608,10 @@ class DeriveEnv(Step):
         **NO_PASSPORT,
         **READ_BACK_CODES,
         "derive": "derive {keys} of {entry}",
-        "missing": "the passport lacks {fields} and nobody can be asked",
+        "missing": (
+            "the passport lacks {fields}: add them to the passport, or run on a "
+            "terminal to be asked"
+        ),
         "address-no-app": "{stack} has no app of its own to give an address of",
         "seam-before-health": "{names} of {from} are asked before its health",
         "derive-no-image": NO_IMAGE,

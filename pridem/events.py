@@ -20,12 +20,14 @@ its parameters, never a phrase (contract 2 v1.6). The words come from a catalog
 writes are built here.
 """
 
+import contextlib
 import json
 import os
 import re
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+import weakref
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Protocol, TextIO, runtime_checkable
@@ -518,6 +520,23 @@ def _spent(catalog: Catalog, seconds: float) -> str:
     return say(catalog, "@duration.m", m=minutes, s=f"{secs:02d}")
 
 
+CONSOLES: "weakref.WeakSet[ConsoleSink]" = weakref.WeakSet()
+"""The consoles of this process: a question pauses their live lines."""
+
+
+@contextlib.contextmanager
+def paused() -> Iterator[None]:
+    """Every console's live line stopped while the person answers (DM-118)."""
+    live = list(CONSOLES)
+    for console in live:
+        console.pause()
+    try:
+        yield
+    finally:
+        for console in live:
+            console.resume()
+
+
 class ConsoleSink:
     """The run as a person reads it (DM-107; the form of velo's old install).
 
@@ -569,6 +588,7 @@ class ConsoleSink:
         self._ticker: threading.Thread | None = None
         self.dead = False
         self._causes: dict[Stream, str] = {}
+        CONSOLES.add(self)
 
     # --- what the plan hands it --------------------------------------------
 
@@ -711,6 +731,22 @@ class ConsoleSink:
             self._write(f"\r\x1b[2K{SPINNER[turn % len(SPINNER)]} {text_}")
             turn += 1
             self._stop.wait(self._tick_s)
+
+    def pause(self) -> None:
+        """The live line stopped and wiped -- a question takes the terminal
+        (DM-118); ``resume`` brings it back."""
+        if not self.tty or self._ticker is None:
+            return
+        self._halt()
+        with self._lock:
+            self._write("\r\x1b[2K")
+
+    def resume(self) -> None:
+        if not self.tty or self._ticker is not None or self._live is None:
+            return
+        self._stop = threading.Event()
+        self._ticker = threading.Thread(target=self._tick, daemon=True)
+        self._ticker.start()
 
     def _halt(self) -> None:
         self._stop.set()

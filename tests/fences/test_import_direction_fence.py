@@ -117,6 +117,7 @@ LAYERS: Layers = (
         "verbs",
         (
             "pridem.verbs",
+            "pridem.verbs.asker",
             "pridem.verbs.base",
             "pridem.verbs.check",
             "pridem.verbs.data",

@@ -91,6 +91,7 @@ from pridem.steps.packages import Packages
 from pridem.steps.passport import (
     OPS_STACK,
     PASSPORT_COPY,
+    Ask,
     Fetched,
     OpsSource,
     passport_steps,
@@ -207,6 +208,9 @@ class Wanted:
     rollback: bool = False
     """``rollback`` on prod: ``ref`` is the previous release, and
     ``rollback_check`` measures the migrations before any step acts (DM-24)."""
+    ask: Ask | None = None
+    """Who the steps ask what the passport lacks (contract 1 rule 3): the
+    person at the terminal; ``None`` -- nobody (the Panel, ``doctor``)."""
 
 
 def _derives(stack: Product | Service) -> bool:
@@ -248,6 +252,7 @@ def deploy_plan(
         ops=OpsSource(source.ops) if source.ops is not None else None,
         file=source.file,
         fresh=known.fresh,
+        ask=wanted.ask,
     )
 
     def sources() -> Sequence[StackSteps] | None:
@@ -431,6 +436,7 @@ def deploy_plan(
             secrets=secrets,
             memory=known.memory,
             root=root,
+            ask=wanted.ask,
         )
         first = own_entry(service)
         names = [first, *(n for n in service.stacks if n != first)]
@@ -540,6 +546,7 @@ def deploy_plan(
             secrets=secrets,
             memory=known.memory,
             root=root,
+            ask=wanted.ask,
         )
         first = own_entry(product)
         names = [first, *(n for n in product.stacks if n != first)]

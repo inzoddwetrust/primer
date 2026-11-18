@@ -45,7 +45,9 @@ from pridem.state import Box
 from pridem.steps.finalize import current_link
 from pridem.steps.git import repo
 from pridem.steps.history import last_deployed, previous_releases
+from pridem.steps.passport import Ask
 from pridem.steps.stand import ROLLBACK_CHECK
+from pridem.verbs.asker import terminal_asker
 from pridem.verbs.base import Context, OptionKind, Refused, Verb
 from pridem.verbs.plans import Wanted, deploy_plan, destroy_plan, source_of
 from pridem.verbs.run import Planned, Session, read_copy, run_plan_verb
@@ -94,6 +96,15 @@ def _given(args: Strict) -> dict[str, Json]:
             continue
         found[name] = value
     return found
+
+
+def _asker(ctx: Context, verb: str) -> Ask | None:
+    """Who is asked what the passport lacks: the person at the terminal --
+    never for ``doctor``, which writes nothing; nobody without a terminal
+    (the Panel): the steps then say what to add to the passport (DM-118)."""
+    if verb == "doctor" or not ctx.terminal():
+        return None
+    return terminal_asker(ctx.interrupt)
 
 
 def _asked_name(
@@ -168,6 +179,7 @@ def _plan_verb(name: str, mode: PlanMode) -> Callable[[Strict, Context], int]:
             ref=ref,
             tries=tries,
             new_secrets=new_secrets,
+            ask=_asker(ctx, name),
         )
 
         def make(session: Session) -> Planned:
@@ -221,7 +233,13 @@ def _rollback(args: Strict, ctx: Context) -> int:
         chosen["ref"] = previous
 
     def make(session: Session) -> Planned:
-        wanted = Wanted(mode="deploy", source=source, ref=chosen["ref"], rollback=True)
+        wanted = Wanted(
+            mode="deploy",
+            source=source,
+            ref=chosen["ref"],
+            rollback=True,
+            ask=_asker(ctx, "rollback"),
+        )
         return deploy_plan(session, ctx.fs_root, wanted, preread)
 
     def notes(verdict: Verdict, catalog: Catalog) -> list[str]:
