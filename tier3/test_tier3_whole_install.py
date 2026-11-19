@@ -2004,55 +2004,69 @@ def test_tier3_types_are_made_by_the_products_commands(
     assert '"/dm63"' in text[1], text
 
 
-REFUSING_ENV = """\
+REVISION = "backend/migrations/versions/2026_10_25_0001_app_settings.py"
+"""The blank's first revision: ``alembic heads`` loads every revision module,
+never ``env.py`` (FIX 2, measured with alembic 1.20.1, the blank's pin)."""
+REFUSING_REVISION = """\
 import os
 
-if not os.environ.get("DATABASE_URL"):  # as comms does (DM-124)
+if not os.environ.get("DATABASE_URL"):  # as comms' revisions do (DM-124)
     raise SystemExit("blank: startup refused -- DATABASE_URL is required.")
+
 """
 
 
 def test_tier3_alembic_runs_with_the_apps_environment(
     tmp_path: Path, mirror: Path
 ) -> None:
-    """DM-124, on the box of group e: a copy of the blank whose ``alembic``
-    ``env.py`` refuses to load without ``DATABASE_URL``, as comms does. An
-    update -- green: ``stop_for_migrate`` and ``migrate`` read the head with
-    the app's environment. Measured into the run's log first (par0 14.3): the
-    same image without the environment refuses, with the line that says why.
+    """DM-124, on the box of group e: a copy of the blank whose first alembic
+    revision refuses to load without ``DATABASE_URL`` -- empty or absent --
+    as comms' do. An update -- green: ``stop_for_migrate`` and ``migrate`` read
+    the head with the app's environment, and the migration ran. Measured into
+    the run's log first (par0 14.3), on the image of the fact of ``build`` of
+    the update: its ``ENV``, where alembic's scripts are, the refusal in the
+    revision module, and the whole output of ``alembic heads`` without the
+    environment -- which refuses, with the line that says why.
 
     FIX: the image of the pair is ``app_image`` of the fact of ``build`` of the
     update, run by its id -- not a name the test makes: group e names its
-    images with the key of the build."""
+    images with the key of the build. FIX 2: the refusal is in a revision
+    module, not ``env.py`` -- ``alembic heads`` never loads ``env.py``."""
     assert (OPT / "current").is_symlink(), "the group's box is installed"
     copy = _copy_of_blank(tmp_path, mirror, "env-alembic")
-    _replace_once(
-        copy / "backend" / "migrations" / "env.py",
-        "from primer_report import configure_logging\n",
-        "from primer_report import configure_logging\n" + REFUSING_ENV,
+    revision = copy / REVISION
+    revision.write_text(
+        REFUSING_REVISION + revision.read_text(encoding="utf-8"), encoding="utf-8"
     )
-    _push(copy, mirror, "DM-124: alembic refuses without DATABASE_URL")
+    _push(copy, mirror, "DM-124: alembic's revisions refuse without DATABASE_URL")
     verdict, printed = _install(_passport(tmp_path, version=63), "update")
     # the image of the pair is the one the machine found and ran -- the fact of
     # build of this update -- never a name the test makes (FIX: group e names
     # its images with the key of the build, <commit12>-<key12>, DM-90/101)
     [build] = [s for s in verdict.steps if s.stack == STACK and s.name == "build"]
-    image = (build.verify or {}).get("app_image")
-    bare = (
-        _run(
-            ["docker", "run", "--rm", "--network", "none", "--", str(image),
-             "python", "-m", "alembic", "heads"],
+    image = str((build.verify or {}).get("app_image") or "")
+    measured: dict[str, object] = {"image": image, "build": build.verify}
+    bare: list[str] = []
+    if image:
+        inside = ["docker", "run", "--rm", "--network", "none", "--", image]
+        measured["env"] = _run(
+            ["docker", "image", "inspect", "-f", "{{json .Config.Env}}", image]
+        )
+        measured["script_location"] = _run(
+            [*inside, "grep", "-n", "script_location", "/app/alembic.ini"],
             expect=tuple(range(256)),
         )
-        if image
-        else []
-    )  # fmt: skip
-    print(
-        "DM-124 measure:",
-        {"image": image, "build": build.verify, "without the environment": bare[-3:]},
-    )
+        measured["refusal"] = _run(
+            [*inside, "grep", "-n", "DATABASE_URL", f"/app/{REVISION[8:]}"],
+            expect=tuple(range(256)),
+        )
+        bare = _run(
+            [*inside, "python", "-m", "alembic", "heads"], expect=tuple(range(256))
+        )
+        measured["without the environment"] = bare
+    print("DM-124 measure:", measured)
     assert verdict.result == "green", printed
-    assert isinstance(image, str) and image.startswith("sha256:"), build.verify
+    assert image.startswith("sha256:"), build.verify
     facts = {s.name: s for s in verdict.steps if s.stack == STACK}
     assert facts["migrate"].status == "ok", facts["migrate"]
     assert any("DATABASE_URL is required" in line for line in bare), bare
