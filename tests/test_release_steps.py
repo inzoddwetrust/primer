@@ -2,9 +2,13 @@
 runs them -- their ``run`` text under ``bash -eo pipefail`` -- against the
 inputs that broke them.
 
-- The tag: only ``vX.Y.Z`` passes, before any step uses it; a tag of another
-  form (``v1/e``, ``v1.2``, ``1.2.3``, with a space, with a suffix) stops the
-  release there.
+- The tag and the commit (DM-119): the first step names them -- ``TAG`` and
+  ``SHA`` for every later step -- a pushed tag and its commit, or the
+  button's ``v{__version__}`` and the head of ``main``; only it reads
+  ``GITHUB_REF_NAME`` and ``GITHUB_SHA``. Only ``vX.Y.Z`` passes, before any
+  step uses it; a tag of another form (``v1/e``, ``v1.2``, ``1.2.3``, with a
+  space, with a suffix) stops the release there. The button refuses a run
+  off ``main``, a tag that exists, a version not after the last tag.
 - The first parent: ``git rev-list`` goes into a file, not into ``grep -q``
   through a pipe -- on a history longer than a pipe holds, ``grep`` leaving at
   the first match killed ``rev-list`` with SIGPIPE and ``pipefail`` refused a
@@ -19,13 +23,14 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
 import yaml
 
 from pridem.runner import Stream, SubprocessRunner
 
 REPO = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO / ".github" / "workflows"
-TAG_STEP = "the tag is vX.Y.Z"
+TAG_STEP = "the tag and the commit of this release"
 FIRST_PARENT_STEP = "tag is v{__version__} on the first parent of main"
 KEY_STEP = "the deploy key of primer-blank, from the CI secrets (DM-10)"
 # Longer than a pipe holds: 41 bytes a commit, 64 KiB a pipe.
@@ -57,24 +62,50 @@ def _bash(script: str, env: dict[str, str], cwd: Path | None = None) -> tuple[in
     return done.code, "\n".join(said)
 
 
-def test_only_a_tag_of_the_form_vxyz_is_released() -> None:
+def _pushed(tmp: Path, tag: str) -> dict[str, str]:
+    return {
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REF_NAME": tag,
+        "GITHUB_SHA": "a" * 40,
+        "GITHUB_ENV": str(tmp / "env"),
+        "RUNNER_TEMP": str(tmp),
+    }
+
+
+def test_only_a_tag_of_the_form_vxyz_is_released(tmp_path: Path) -> None:
+    """Changed by DM-119: the form is checked in the step that names the tag
+    and the commit; a pushed tag that passes becomes ``TAG``, its commit
+    ``SHA``."""
     step = _step("release.yml", "release", TAG_STEP)
     for tag in ("v1.2.3", "v0.0.0", "v10.20.30"):
-        assert _bash(step, {"GITHUB_REF_NAME": tag})[0] == 0, tag
+        (tmp_path / "env").write_text("")
+        assert _bash(step, _pushed(tmp_path, tag))[0] == 0, tag
+        named = (tmp_path / "env").read_text().splitlines()
+        assert named == [f"TAG={tag}", f"SHA={'a' * 40}"]
     for tag in ("v1/e", "v1.2", "1.2.3", "v1.2.3 x", "v1.2.3-rc1", "v1.2.3\nv", ""):
-        code, said = _bash(step, {"GITHUB_REF_NAME": tag})
+        (tmp_path / "env").write_text("")
+        code, said = _bash(step, _pushed(tmp_path, tag))
         assert code == 1 and "is not vX.Y.Z" in said, (tag, said)
+        assert (tmp_path / "env").read_text() == ""
 
 
-def test_the_tag_is_checked_before_any_step_uses_it() -> None:
+def test_only_the_first_step_reads_the_event_s_tag_and_commit() -> None:
+    """Changed by DM-119 (was: the tag's form is checked before any step
+    uses it): one logic for both ways -- the first step reads
+    ``GITHUB_REF_NAME`` and ``GITHUB_SHA`` and checks the form; every later
+    step reads ``TAG`` and ``SHA`` (the pair: at least three do)."""
     document = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
     steps = document["jobs"]["release"]["steps"]
-    users = [
-        i for i, s in enumerate(steps) if "GITHUB_REF_NAME" in str(s.get("run", ""))
+    runs = [str(s.get("run", "")) for s in steps]
+    raw = [
+        i
+        for i, run in enumerate(runs)
+        if "GITHUB_REF_NAME" in run or "GITHUB_SHA" in run
     ]
     names = [s.get("name") for s in steps]
-    assert users and names.index(TAG_STEP) == min(users)  # the pair: it is used
-    assert len(users) >= 3
+    assert raw == [names.index(TAG_STEP)]
+    named = [i for i, run in enumerate(runs) if "$TAG" in run or "$SHA" in run]
+    assert len(named) >= 4 and min(named) > raw[0]
 
 
 def _history(root: Path, *, merged: bool) -> dict[str, str]:
@@ -141,16 +172,14 @@ def test_a_commit_on_the_first_parent_of_a_long_main_is_released(
     step = _step("release.yml", "release", FIRST_PARENT_STEP)
     repo = tmp_path / "long"
     marks = _history(repo, merged=False)
-    env = {"GITHUB_REF_NAME": f"v{VERSION}", "RUNNER_TEMP": str(tmp_path)}
+    env = {"TAG": f"v{VERSION}", "RUNNER_TEMP": str(tmp_path)}
     # the tip: the first line rev-list writes, so grep stops at once
     for sha in (marks["tip"], marks["below"]):
-        code, said = _bash(step, {**env, "GITHUB_SHA": sha}, cwd=repo)
+        code, said = _bash(step, {**env, "SHA": sha}, cwd=repo)
         assert code == 0, said
-    code, said = _bash(step, {**env, "GITHUB_SHA": "0" * 40}, cwd=repo)
+    code, said = _bash(step, {**env, "SHA": "0" * 40}, cwd=repo)
     assert code == 1 and "is not on the first parent of main" in said, said
-    code, said = _bash(
-        step, {**env, "GITHUB_REF_NAME": "v9.9.9", "GITHUB_SHA": marks["tip"]}, cwd=repo
-    )
+    code, said = _bash(step, {**env, "TAG": "v9.9.9", "SHA": marks["tip"]}, cwd=repo)
     assert code == 1 and "is not v1.2.3" in said, said
 
 
@@ -158,11 +187,74 @@ def test_a_second_parent_of_main_is_not_released(tmp_path: Path) -> None:
     step = _step("release.yml", "release", FIRST_PARENT_STEP)
     repo = tmp_path / "merged"
     marks = _history(repo, merged=True)
-    env = {"GITHUB_REF_NAME": f"v{VERSION}", "RUNNER_TEMP": str(tmp_path)}
-    code, said = _bash(step, {**env, "GITHUB_SHA": marks["side"]}, cwd=repo)
+    env = {"TAG": f"v{VERSION}", "RUNNER_TEMP": str(tmp_path)}
+    code, said = _bash(step, {**env, "SHA": marks["side"]}, cwd=repo)
     assert code == 1 and "is not on the first parent of main" in said, said
-    code, said = _bash(step, {**env, "GITHUB_SHA": marks["tip"]}, cwd=repo)
+    code, said = _bash(step, {**env, "SHA": marks["tip"]}, cwd=repo)
     assert code == 0, said  # the pair: the merge itself is
+
+
+def _released(root: Path, version: str, *tags: str) -> str:
+    """A repository at ``root``: ``pridem/__init__.py`` at ``version`` on
+    ``main``, with ``tags`` on it; the head back."""
+    init = root / "pridem" / "__init__.py"
+    init.parent.mkdir(parents=True)
+    init.write_text(f'"""pridem."""\n\n__version__ = "{version}"\n')
+    script = (
+        f"git init -q -b main {root} && cd {root} && git add -A"
+        " && git -c user.name=t -c user.email=t@t commit -q -m c"
+        + "".join(f" && git tag {tag}" for tag in tags)
+        + " && git rev-parse HEAD"
+    )
+    code, said = _bash(script, {})
+    assert code == 0, said
+    return said.split()[-1]
+
+
+def _button(tmp: Path, head: str, ref: str = "refs/heads/main") -> dict[str, str]:
+    return {
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REF": ref,
+        "GITHUB_SHA": head,
+        "GITHUB_ENV": str(tmp / "env"),
+        "RUNNER_TEMP": str(tmp),
+    }
+
+
+def test_the_button_releases_the_head_of_main_as_its_version(tmp_path: Path) -> None:
+    """DM-119: on ``main``, a version after every tag -- ``TAG`` is
+    ``v{__version__}``, ``SHA`` the head."""
+    repo = tmp_path / "repo"
+    head = _released(repo, "0.1.3", "v0.1.0", "v0.1.2")
+    (tmp_path / "env").write_text("")
+    code, said = _bash(
+        _step("release.yml", "release", TAG_STEP), _button(tmp_path, head), cwd=repo
+    )
+    assert code == 0, said
+    assert (tmp_path / "env").read_text().splitlines() == ["TAG=v0.1.3", f"SHA={head}"]
+
+
+@pytest.mark.parametrize(
+    ("version", "ref", "said"),
+    [
+        ("0.1.2", "refs/heads/main", "v0.1.2 exists: this version is released"),
+        ("0.1.1", "refs/heads/main", "v0.1.1 is not after v0.1.2"),
+        ("0.1.3", "refs/heads/side", "the release is run on main, not refs/heads/side"),
+    ],
+    ids=["exists", "not-after", "off-main"],
+)
+def test_the_button_refuses_before_anything_is_made(
+    tmp_path: Path, version: str, ref: str, said: str
+) -> None:
+    """A tag that exists, a version not after the last tag, a run off
+    ``main``: refused in the first step -- nothing named, nothing built."""
+    repo = tmp_path / "repo"
+    head = _released(repo, version, "v0.1.0", "v0.1.2")
+    (tmp_path / "env").write_text("")
+    step = _step("release.yml", "release", TAG_STEP)
+    code, out = _bash(step, _button(tmp_path, head, ref), cwd=repo)
+    assert code == 1 and said in out, out
+    assert (tmp_path / "env").read_text() == ""
 
 
 def test_an_empty_deploy_key_is_a_refusal_with_no_value(tmp_path: Path) -> None:

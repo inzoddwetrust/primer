@@ -384,9 +384,13 @@ def _runs(job: object) -> list[str]:
 
 
 def test_release_builds_only_after_tier1_of_the_same_commit() -> None:
+    """Changed by DM-119, on the dispatcher's word: the owner's decision -- the
+    button of the release; one logic of both ways through ``TAG`` and ``SHA``.
+    The triggers stay an exact equality: a third way to a release, not agreed
+    -- a push to a branch, say -- turns this red."""
     document = _release()
     triggers = document.get(True, document.get("on"))  # YAML reads `on` as true
-    assert triggers == {"push": {"tags": ["v*"]}}
+    assert triggers == {"push": {"tags": ["v*"]}, "workflow_dispatch": None}
     jobs = document["jobs"]
     assert isinstance(jobs, dict)
     release = jobs["release"]
@@ -407,10 +411,13 @@ def test_release_builds_only_after_tier1_of_the_same_commit() -> None:
 
 
 def test_release_checks_the_tag_builds_pinned_and_publishes_two_assets() -> None:
+    """Changed by DM-119, on the dispatcher's word: the owner's decision -- the
+    button of the release; one logic of both ways through ``TAG`` and ``SHA``:
+    the tag is checked against the version by ``$TAG``."""
     jobs = _release()["jobs"]
     assert isinstance(jobs, dict)
     runs = "\n".join(_runs(jobs["release"]))
-    assert 'if [ "$GITHUB_REF_NAME" != "v$version" ]' in runs
+    assert 'if [ "$TAG" != "v$version" ]' in runs
     assert "git rev-list --first-parent origin/main" in runs
     assert "pip install --require-hashes -r requirements-build.lock" in runs
     assert "pip wheel --no-deps --no-build-isolation --no-index" in runs

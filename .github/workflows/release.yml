@@ -1,18 +1,29 @@
 name: release
 
 # A release of the machine is a tag v{__version__} on the first parent of main
-# (TZ section 10.2). Tier 1 runs on the tag's commit first, with every check
-# of ci.yml. The release job first refuses a tag not of the form vX.Y.Z,
-# before the tag is used anywhere; it installs the pinned build backend before
-# any step holds the job token, then asks the runs of ci.yml and of tier3.yml
-# on that commit (pushes to main only): the latest of each must have finished
-# green -- no waiting, the tag is set after them. Only then the wheel is built
-# and two assets are published: the wheel and install.sh with its three pins
-# substituted. No checkout keeps the job token in .git/config (DM-82).
+# (TZ section 10.2). Two ways in, one logic (DM-119): the button -- Actions,
+# release, Run workflow on main -- releases the head of main as v{__version__}
+# in this run alone (a tag the job token makes starts no other workflow), and
+# a pushed tag vX.Y.Z releases its commit. The first step of the release job
+# names the tag and the commit -- TAG and SHA, every later step reads them --
+# and refuses, before anything is made: a tag not of the form vX.Y.Z; on the
+# button, a run off main, a tag that exists, a version not after the last.
+# Tier 1 runs on the commit first, with every check of ci.yml. The pinned
+# build backend is installed before any step holds the job token; the runs of
+# ci.yml and of tier3.yml on that commit (pushes to main only) must have
+# finished green -- no waiting. Only then the wheel is built and install.sh
+# gets its pins; the release is published last, and it makes the tag on the
+# button's way: a build that fails leaves no tag and no release. No checkout
+# keeps the job token in .git/config (DM-82).
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -72,34 +83,70 @@ jobs:
       contents: write
       actions: read
     steps:
-      # The tag is a name anyone who can push a tag chooses: its form is checked
-      # before any step uses it -- in a sed expression, a path, an asset name.
-      - name: the tag is vX.Y.Z
-        run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "tag '$GITHUB_REF_NAME' is not vX.Y.Z"
-            exit 1
-          fi
+      # checked out with every tag: the button reads the version and the tags
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      # The tag and the commit of this release, for every later step (DM-119):
+      # a pushed tag and its commit, or the button's v{__version__} and the
+      # head of main. The tag is a name anyone who can push a tag chooses: its
+      # form is checked here, before any step uses it -- in a sed expression,
+      # a path, an asset name.
+      - name: the tag and the commit of this release
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              tag="$GITHUB_REF_NAME"
+              ;;
+            workflow_dispatch)
+              if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+                echo "the release is run on main, not $GITHUB_REF"
+                exit 1
+              fi
+              version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' pridem/__init__.py)
+              tag="v$version"
+              ;;
+            *)
+              echo "a release by $GITHUB_EVENT_NAME is none"
+              exit 1
+              ;;
+          esac
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag '$tag' is not vX.Y.Z"
+            exit 1
+          fi
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+              echo "$tag exists: this version is released -- raise __version__"
+              exit 1
+            fi
+            git tag --list "v*" > "$RUNNER_TEMP/tags"
+            last=$({ grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' "$RUNNER_TEMP/tags" || true; } | sort -V | tail -n 1)
+            if [ -n "$last" ] && [ "$(printf '%s\n%s\n' "$last" "$tag" | sort -V | tail -n 1)" != "$tag" ]; then
+              echo "$tag is not after $last"
+              exit 1
+            fi
+          fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          echo "release $tag at $GITHUB_SHA ($GITHUB_EVENT_NAME)"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: tag is v{__version__} on the first parent of main
         run: |
           version=$(python -c 'import re, pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("pridem/__init__.py").read_text()).group(1))')
-          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "tag $GITHUB_REF_NAME is not v$version (pridem/__init__.py)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "tag $TAG is not v$version (pridem/__init__.py)"
             exit 1
           fi
           # into a file, not a pipe: grep -q stops at the first match, and
           # rev-list writing a long history into the closed pipe dies of
           # SIGPIPE, which pipefail turns into a refusal
           git rev-list --first-parent origin/main > "$RUNNER_TEMP/first-parent"
-          if ! grep -qx "$GITHUB_SHA" "$RUNNER_TEMP/first-parent"; then
-            echo "$GITHUB_SHA is not on the first parent of main"
+          if ! grep -qx "$SHA" "$RUNNER_TEMP/first-parent"; then
+            echo "$SHA is not on the first parent of main"
             exit 1
           fi
       - run: python -m pip install --require-hashes -r requirements-build.lock
@@ -108,7 +155,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for workflow in ci.yml tier3.yml; do
-            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$GITHUB_SHA&event=push&per_page=100" > "$RUNNER_TEMP/runs-$workflow.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$SHA&event=push&per_page=100" > "$RUNNER_TEMP/runs-$workflow.json"
             python3 - "$workflow" "$RUNNER_TEMP/runs-$workflow.json" <<'EOF'
           import json
           import sys
@@ -128,23 +175,25 @@ jobs:
       - run: python -m pip wheel --no-deps --no-build-isolation --no-index -w dist .
       - name: install.sh with its pins
         run: |
-          wheel="dist/pridem-${GITHUB_REF_NAME#v}-py3-none-any.whl"
+          wheel="dist/pridem-${TAG#v}-py3-none-any.whl"
           sha=$(sha256sum "$wheel" | cut -d " " -f 1)
-          sed -e "s/@PRIDEM_TAG@/$GITHUB_REF_NAME/" \
-            -e "s/@PRIDEM_COMMIT@/$GITHUB_SHA/" \
+          sed -e "s/@PRIDEM_TAG@/$TAG/" \
+            -e "s/@PRIDEM_COMMIT@/$SHA/" \
             -e "s/@PRIDEM_WHEEL_SHA256@/$sha/" \
             -e "s|@PRIDEM_REPO@|https://github.com/$GITHUB_REPOSITORY|" \
-            -e "s|@PRIDEM_WHEEL_URL@|https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/pridem-${GITHUB_REF_NAME#v}-py3-none-any.whl|" \
+            -e "s|@PRIDEM_WHEEL_URL@|https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/pridem-${TAG#v}-py3-none-any.whl|" \
             install.sh > dist/install.sh
           if grep -n "@PRIDEM_" dist/install.sh; then
             echo "a pin was not substituted"
             exit 1
           fi
       - run: shellcheck dist/install.sh
+      # Last: the release, and with it the tag on the button's way (--target);
+      # a pushed tag is there already, and --target leaves it as it is.
       - name: GitHub Release with the wheel and install.sh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "dist/pridem-${GITHUB_REF_NAME#v}-py3-none-any.whl" dist/install.sh \
-            --title "pridem $GITHUB_REF_NAME" --notes "pridem $GITHUB_REF_NAME at $GITHUB_SHA"
+          gh release create "$TAG" --target "$SHA" \
+            "dist/pridem-${TAG#v}-py3-none-any.whl" dist/install.sh \
+            --title "pridem $TAG" --notes "pridem $TAG at $SHA"

@@ -140,7 +140,7 @@ def _gate(
     env = {
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "GITHUB_REPOSITORY": "inzoddwetrust/primer",
-        "GITHUB_SHA": SHA,
+        "SHA": SHA,  # DM-119: named by the first step of the release job
         "RUNNER_TEMP": str(tmp_path),
         "STUB_RUNS": str(answers),
         "STUB_LOG": str(log),
@@ -171,6 +171,8 @@ def _run(number: int, status: str, conclusion: str | None) -> dict[str, object]:
 
 
 def test_a_release_needs_the_latest_tier_3_of_its_commit_green(tmp_path: Path) -> None:
+    """Changed by DM-119: the gate reads the commit as ``SHA`` -- the first step
+    of the release job names it for both ways (the button, a pushed tag)."""
     code, said, calls = _gate(tmp_path, [_run(7, "completed", "success")])
     assert (code, calls) == (
         0,
