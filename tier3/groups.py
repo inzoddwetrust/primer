@@ -105,6 +105,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_product_derive_reaches_nothing", "f"),
     ("test_tier3_only_the_declared_consumer_reaches_a_point", "f"),
     ("test_tier3_every_listed_service_reads_the_data", "f"),  # DM-100
+    ("test_tier3_a_service_takes_a_point_of_the_product", "f"),  # DM-23
     ("test_tier3_an_entry_named_frontend_is_the_product_s_own", "f"),  # DM-102
 )
 

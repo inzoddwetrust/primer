@@ -21,6 +21,8 @@ TIMERS = "pridem-timers"
 SOURCES = "pridem-sources"
 DEPENDENCIES = "pridem-dependencies"
 ROLLBACK = "pridem-rollback"
+POINTS = "pridem-points"
+"""Deferred: the networks of the pairs of the box, before any stack (DM-23)."""
 SERVICES = "pridem-services"
 """Deferred: becomes the entries of the services and ``SEAMS``."""
 PRODUCT = "pridem-product"
@@ -40,7 +42,7 @@ VERDICT = "pridem-verdict"
 MACHINE_STACKS: frozenset[str] = frozenset(
     {
         HOST, PASSPORT, NETWORK, TIMERS, SOURCES, DEPENDENCIES, ROLLBACK,
-        SERVICES, PRODUCT, SEAMS, EDGE, FRONTEND, FINALIZE, DESTROY, STOPPED,
+        POINTS, SERVICES, PRODUCT, SEAMS, EDGE, FRONTEND, FINALIZE, DESTROY, STOPPED,
         BOX, BACKUP, SEED, VERDICT,
     }
 )  # fmt: skip

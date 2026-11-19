@@ -10,15 +10,17 @@ from pathlib import Path
 import pytest
 from compose_support import stdout
 from contract_support import yaml_problems
+from env_support import context
 from passport_support import passport_example
 
 from pridem.events import Json
-from pridem.runner import FakeCall, FakeRunner
+from pridem.runner import FakeCall, FakeRunner, Stream
 from pridem.stacks.env import point_address
 from pridem.stacks.passport import PASSPORT
 from pridem.stacks.schema import PRIMER_YAML, Product, Service
 from pridem.stacks.seams import Pair, network_collisions, pairs, product_value
 from pridem.steps.compose import NETWORK, ComposeStack, override_text
+from pridem.steps.points import PairNetworks
 from pridem.steps.up import INSPECT_FORMAT, Up
 
 REPORT = {"health": "/health", "ready": "/ready", "logs": "json", "junit": True}
@@ -321,7 +323,13 @@ def test_probe_DM_62_only_the_declared_consumer_reaches_an_exposed_point(
     on ``pridem``; of the consumer, the service whose environment names the
     variable joins that network, the others do not; a stack that declared
     nothing has no service on it. The pair: the consumer's ``.env`` value is
-    the point's address."""
+    the point's address.
+
+    Changed by DM-23, on the dispatcher's word: the network of a pair is made
+    by the machine before any stack (``pair_networks``) -- internal, its
+    labels -- and both sides declare it external; so internal and the labels
+    are asserted at that step, by the literal argv of ``docker network
+    create``, and the provider's override declares the network external."""
     found = _pairs()
     comms_pair = next(p for p in found if p.provider == "comms")
     provider = _override(
@@ -334,8 +342,38 @@ def test_probe_DM_62_only_the_declared_consumer_reaches_an_exposed_point(
     assert redis[key] == {"aliases": ["comms-comms-redis"]}
     assert NETWORK not in redis
     declared = _part(provider, "networks", key)
-    assert declared["name"] == comms_pair.network and declared["internal"] is True
-    assert _part(declared, "labels")["pridem.point"] == "comms/events"
+    assert declared == {"name": comms_pair.network, "external": True}
+    # internal and labelled: the machine's step makes it, before any stack
+    create = FakeCall(
+        (
+            "docker", "network", "create", "--internal",
+            "--label", "pridem.stack=comms",
+            "--label", "pridem.point=comms/events",
+            "--label", "pridem.consumer=velo",
+            "--", comms_pair.network,
+        )
+    )  # fmt: skip
+    inspect = (
+        "docker", "network", "inspect", "--format",
+        "{{.Internal}} {{json .Labels}}", "--", comms_pair.network,
+    )  # fmt: skip
+    labels = json.dumps(
+        {
+            "pridem.consumer": "velo",
+            "pridem.point": "comms/events",
+            "pridem.stack": "comms",
+        }
+    )
+    with FakeRunner(
+        FakeCall(inspect, code=1),
+        create,
+        FakeCall(inspect, lines=((Stream.STDOUT, f"true {labels}"),)),
+    ) as runner:
+        step = PairNetworks([comms_pair])
+        ctx = context(runner)
+        check = step.check(ctx)
+        step.act(ctx, check)
+        assert step.verify(ctx, check).fact == {"networks": [comms_pair.network]}
     consumer = _override(
         _compose(_velo(), "velo", tmp_path),
         {

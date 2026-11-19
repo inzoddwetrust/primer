@@ -885,10 +885,14 @@ def _pair_networks(
 ) -> tuple[dict[str, dict[str, Json]], dict[str, Json]]:
     """This entry's side of the pairs of the box (DM-62), by service and the
     networks to declare. As the provider: the point's service joins each of
-    its pairs' networks under the one alias, and the entry declares them --
-    internal, labelled. As the consumer: each service whose ``environment``
-    names the pair's variable joins it; the network is the provider's
-    (``external``) unless this very entry provides it.
+    its pairs' networks under the one alias. As the consumer: each service
+    whose ``environment`` names the pair's variable joins it. Either side
+    declares the network ``external``: the machine makes every network of the
+    box's pairs before any stack (``pair_networks``, DM-23) -- internal,
+    labelled -- so a consumer that runs before its provider (a service that
+    takes a point of the product: comms, ``velo-storage``) finds it; and a
+    network compose did not make, declared not external, compose refuses on
+    its labels (compose 2.40.3, ``resolveOrCreateNetwork``).
 
     ``references`` is the product's ``config --no-interpolate``: there a
     variable is ``${VAR:?}``; in the interpolated document its value already
@@ -901,15 +905,7 @@ def _pair_networks(
         key = pair.network.removeprefix("pridem-")
         if pair.provider == compose.entry:
             joins.setdefault(pair.service, {})[key] = {"aliases": [pair.alias]}
-            declared[key] = {
-                "name": pair.network,
-                "internal": True,
-                "labels": {
-                    **compose.stack_labels(),
-                    "pridem.point": f"{pair.provider}/{pair.endpoint}",
-                    "pridem.consumer": pair.consumer,
-                },
-            }
+            declared[key] = {"name": pair.network, "external": True}
         if pair.consumer == own:
             reference = _REFERENCE.format(pair.variable)
             for name, body in _mapping(references.get("services")).items():

@@ -2494,6 +2494,156 @@ def test_tier3_every_listed_service_reads_the_data(
         assert env == ["/primer/data/profile"], (name, env)
 
 
+STORE_TAG = "v1.3.0"
+"""The tag of the copy of the service that takes a point of the product
+(DM-23, velo-dev 19.11): pushed beside ``v1.0.0``, which stays."""
+STORE = """\
+  store:
+    build:
+      context: ./backend
+      target: runtime
+    command: ["python", "-m", "http.server", "7002"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket as s; s.create_connection(('127.0.0.1', 7002), 3)"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+"""
+
+
+def _service_taking_a_point(tmp: Path) -> str:
+    """A copy of the service at ``v1.0.0`` that takes ``STORE_ADDRESS``, the
+    point ``files`` of the product's entry -- comms and ``velo-storage`` on
+    velo-dev: its app names the variable, so it joins the pair's network.
+    Tagged ``STORE_TAG``; the commit back."""
+    copy = tmp / "service-store"
+    _run(["git", "clone", "-q", str(SERVICE_MIRROR), str(copy)], env=GIT_ENV)
+    _run(["git", "-C", str(copy), "checkout", "-q", "v1.0.0"], env=GIT_ENV)
+    _replace_once(
+        copy / "primer.yaml",
+        "  PRODUCT_WEBHOOK_URL: { source: seam, from: product }\n",
+        "  PRODUCT_WEBHOOK_URL: { source: seam, from: product }\n"
+        "  STORE_ADDRESS:       { source: seam, from: product }\n",
+    )
+    _replace_once(
+        copy / "primer.yaml",
+        "requires: [PRODUCT_WEBHOOK_URL]\n",
+        "requires: [PRODUCT_WEBHOOK_URL, STORE_ADDRESS]\n",
+    )
+    _replace_once(
+        copy / "docker-compose.yml",
+        "      PRODUCT_WEBHOOK_URL: ${PRODUCT_WEBHOOK_URL:?}\n",
+        "      PRODUCT_WEBHOOK_URL: ${PRODUCT_WEBHOOK_URL:?}\n"
+        "      STORE_ADDRESS: ${STORE_ADDRESS:?}\n",
+    )
+    _git("-C", str(copy), "add", "-A")
+    _git("-C", str(copy), "commit", "-q", "-m", "DM-23: the service takes a point")
+    _git("-C", str(copy), "tag", "-f", STORE_TAG)
+    _git(
+        "-C", str(copy), "push", "-q", "--force", str(SERVICE_MIRROR),
+        f"refs/tags/{STORE_TAG}",
+    )  # fmt: skip
+    [commit] = _git("-C", str(copy), "rev-parse", "HEAD")
+    return commit
+
+
+def _blank_giving_a_point(tmp: Path, mirror: Path, commit: str) -> None:
+    """The blank at its pin with a point ``files`` on its entry -- a service
+    ``store`` -- given to its service as ``STORE_ADDRESS``; the service locked
+    at ``STORE_TAG``. Consistent as a whole (par0 14.3)."""
+    copy = _copy_of_blank(tmp, mirror, "store")
+    compose = copy / "docker-compose.yml"
+    text = compose.read_text(encoding="utf-8")
+    _replace_once(compose, "  postgres:\n", STORE + "  postgres:\n")
+    assert compose.read_text(encoding="utf-8") != text
+    _replace_once(
+        copy / "primer.yaml",
+        "    migrate:  python -m alembic upgrade head\n",
+        "    migrate:  python -m alembic upgrade head\n"
+        "    expose:   { files: { service: store, port: 7002, scheme: http } }\n",
+    )
+    _replace_once(
+        copy / "primer.yaml",
+        "provides:                             # what the product gives its service\n",
+        "provides:                             # what the product gives its service\n"
+        "  STORE_ADDRESS: { stack: primer-blank, endpoint: files }\n",
+    )
+    _replace_once(
+        copy / "primer.lock",
+        f'{{ version: "1.0.0", tag: v1.0.0, commit: {SERVICE_PINS["v1.0.0"]} }}',
+        f'{{ version: "1.3.0", tag: {STORE_TAG}, commit: {commit} }}',
+    )
+    _push(copy, mirror, "DM-23: the blank gives its service a point")
+
+
+def test_tier3_a_service_takes_a_point_of_the_product(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-23 (velo-dev 19.11) on the box the earlier tests left: the service
+    takes a point of the product's entry -- its ladder runs before the
+    product's. The network of the pair is made by ``pair_networks`` before
+    any stack; the update is green; the service's app is on that network, the
+    product's ``store`` too. Measured into the run's log first (par0 14.3):
+    the order of the steps and the network as docker has it."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    commit = _service_taking_a_point(tmp_path)
+    _blank_giving_a_point(tmp_path, mirror, commit)
+    verdict, printed = _install(_passport(tmp_path, version=71), "update")
+    order = [(s.stack, s.name) for s in verdict.steps]
+    names = [
+        line
+        for line in _run(
+            [
+                "docker",
+                "network",
+                "ls",
+                "--filter",
+                "label=pridem.point",
+                "--format",
+                "{{.Name}}",
+            ],
+        )  # fmt: skip
+        if line.startswith("pridem-pt-")
+    ]
+    seen = {
+        name: _run(
+            [
+                "docker",
+                "network",
+                "inspect",
+                "--format",
+                "{{.Internal}} {{json .Labels}}",
+                name,
+            ],
+        )  # fmt: skip
+        for name in names
+    }
+    print("DM-23 measure:", {"order": order, "networks": seen})
+    assert verdict.result == "green", printed
+    made = order.index(("pridem-points", "pair_networks"))
+    first_service = min(i for i, (stack, _) in enumerate(order) if stack == SERVICE)
+    assert made < first_service, order
+    [network] = [
+        name
+        for name, lines in seen.items()
+        if '"pridem.point":"primer-blank/files"' in lines[0]
+        and '"pridem.consumer":"primer-blank-service"' in lines[0]
+    ]
+    assert seen[network][0].startswith("true "), seen[network]
+    for stack, service in ((SERVICE, "app"), (STACK, "store")):
+        running = _container(stack, service)
+        [attached] = _stdout(
+            ["docker", "inspect", "-f", "{{json .NetworkSettings.Networks}}", running]
+        )
+        assert network in json.loads(attached), (stack, service, attached)
+
+
 JOB_RUN = (
     'python -c "import datetime; '
     "open('/tmp/runs', 'a').write(datetime.datetime.now().isoformat() + chr(10))\""

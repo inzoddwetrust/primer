@@ -284,7 +284,10 @@ def test_no_entry_that_migrates_is_green_with_the_ref(tmp_path: Path) -> None:
 def test_the_plan_of_a_rollback(tmp_path: Path, rollback: bool) -> None:
     """``rollback_check`` stands after the dependencies and before the services
     -- before any stack acts -- and leaves a restore after ``migrated``; a
-    deploy has neither."""
+    deploy has neither.
+
+    Changed by DM-23: the networks of the box's pairs (``pridem-points``) come
+    between it and the services -- a rollback makes them too."""
     data = passport_example()
     section(data, "server")["role"] = "prod"
     section(data, "product")["ref"] = NEW
@@ -296,9 +299,10 @@ def test_the_plan_of_a_rollback(tmp_path: Path, rollback: bool) -> None:
     names = [stack.name for stack in planned.stacks]
     if rollback:
         at = names.index("pridem-rollback")
-        assert names[at - 1 : at + 2] == [
+        assert names[at - 1 : at + 3] == [
             "pridem-dependencies",
             "pridem-rollback",
+            "pridem-points",
             "pridem-services",
         ]
         assert isinstance(planned.stacks[at], Deferred)

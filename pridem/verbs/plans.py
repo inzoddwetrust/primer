@@ -96,6 +96,7 @@ from pridem.steps.passport import (
     OpsSource,
     passport_steps,
 )
+from pridem.steps.points import PairNetworks
 from pridem.steps.services import (
     DataCopy,
     DataItem,
@@ -521,6 +522,15 @@ def deploy_plan(
         on = switched_on(passport)
         return pairs(product, resolved.services, passport.edition, on=on)
 
+    def pair_networks() -> Sequence[StackSteps] | None:
+        """The networks of the box's pairs, before any stack (DM-23): a
+        consumer that runs before its provider -- a service taking a point of
+        the product -- finds its network made."""
+        found = target()
+        if found is None:
+            return None
+        return [StackSteps(machine.POINTS, [PairNetworks(points(found[0]))])]
+
     def target() -> tuple[Product, Path, str, str] | None:
         """The product, its release, ref and commit, once ``fetch_root`` read
         them."""
@@ -791,6 +801,8 @@ def deploy_plan(
             if wanted.rollback
             else []
         ),
+        # the networks of the points before the first stack (DM-23)
+        Deferred(machine.POINTS, pair_networks, after="fetch_services"),
         Deferred(machine.SERVICES, services, after="fetch_services"),
         Deferred(PRODUCT, entries, after="fetch_root"),
         Deferred(machine.EDGE, edge, after="fetch_root"),

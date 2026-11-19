@@ -418,7 +418,11 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
 
     Changed by DM-63: ``types`` is no stack of its own before the edge any
     more -- ``write_key`` and ``types`` are steps of the root stack after
-    ``finalize``: a red deploy pushes no types."""
+    ``finalize``: a red deploy pushes no types.
+
+    Changed by DM-23 (velo-dev 19.11): ``pridem-points`` -- the networks of the
+    box's pairs -- stands before the services: a service that takes a point of
+    the product runs first and finds its network."""
     box = Box(tmp_path / "opt" / "pridem")
     wanted = Wanted(mode=mode, source=Source(file=tmp_path / "x"))
     planned = deploy_plan(
@@ -434,6 +438,7 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
         "pridem-timers",
         "pridem-sources",
         "pridem-dependencies",
+        "pridem-points",
         "pridem-services",
         "pridem-product",
         "pridem-edge",
@@ -450,6 +455,7 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
     assert deferred == {
         "pridem-sources",
         "pridem-dependencies",
+        "pridem-points",
         "pridem-services",
         "pridem-product",
         "pridem-edge",
