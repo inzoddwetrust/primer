@@ -41,9 +41,15 @@ STUB = f"""#!{sys.executable}
 import json, os, sys
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
+if "/actions/runs/" in sys.argv[2]:  # the jobs of a run (DM-125)
+    run = sys.argv[2].split("/actions/runs/")[1].split("/")[0]
+    sys.stdout.write(open(os.path.join(os.environ["STUB_RUNS"], "jobs-" + run)).read())
+    raise SystemExit(0)
 workflow = sys.argv[2].split("/actions/workflows/")[1].split("/")[0]
 sys.stdout.write(open(os.path.join(os.environ["STUB_RUNS"], workflow)).read())
 """
+GROUPS = ("a", "b", "c", "d", "e", "f")
+"""Every group of tier 3: a full run (DM-125)."""
 
 
 def _text(name: str) -> str:
@@ -96,8 +102,10 @@ def gate_problems(text: str) -> list[str]:
     gate = names.index(GATE)
     run = str(release["steps"][gate].get("run", ""))
     for workflow in GATED:
-        if workflow not in run:
+        if f"actions/workflows/{workflow}/runs" not in run:
             problems.append(f"release: the gate does not ask {workflow}")
+    if "tier3/groups.py --full-run" not in run:  # DM-125: every group green
+        problems.append("release: the gate takes a run of some groups of tier 3")
     later = [
         i
         for i, step in enumerate(release["steps"])
@@ -115,9 +123,11 @@ def _gate(
     tmp_path: Path,
     runs: list[dict[str, object]],
     ci: list[dict[str, object]] | None = None,
+    groups: dict[int, tuple[str, ...]] | None = None,
 ) -> tuple[int, str, list[list[str]]]:
     """The gate with ``runs`` for tier 3 and ``ci`` for ci.yml (the same runs
-    when not given)."""
+    when not given); ``groups`` -- the groups each run of tier 3 ran (every
+    group when not given, DM-125)."""
     [step] = [
         s for s in _steps(_text("release.yml"), "release") if s.get("name") == GATE
     ]
@@ -135,6 +145,14 @@ def _gate(
         (answers / workflow).write_text(
             json.dumps({"total_count": len(given), "workflow_runs": given})
         )
+    for run in runs:
+        number = run["run_number"]
+        assert isinstance(number, int)
+        ran = (groups or {}).get(number, GROUPS)
+        jobs = [{"name": "plan", "conclusion": "success"}] + [
+            {"name": f"box ({group})", "conclusion": run["conclusion"]} for group in ran
+        ]
+        (answers / f"jobs-{number}").write_text(json.dumps({"jobs": jobs}))
     log = tmp_path / "gh.log"
     log.write_text("")
     env = {
@@ -155,6 +173,7 @@ def _gate(
         expect=(0, 1),
         timeout=60,
         env=env,
+        cwd=REPO,  # the workflow's steps run in the clone (tier3/groups.py)
         on_line=keep,
     )
     calls = [json.loads(line) for line in log.read_text().splitlines()]
@@ -163,6 +182,8 @@ def _gate(
 
 def _run(number: int, status: str, conclusion: str | None) -> dict[str, object]:
     return {
+        "id": number,
+        "event": "push",
         "run_number": number,
         "status": status,
         "conclusion": conclusion,
@@ -172,25 +193,42 @@ def _run(number: int, status: str, conclusion: str | None) -> dict[str, object]:
 
 def test_a_release_needs_the_latest_tier_3_of_its_commit_green(tmp_path: Path) -> None:
     """Changed by DM-119: the gate reads the commit as ``SHA`` -- the first step
-    of the release job names it for both ways (the button, a pushed tag)."""
+    of the release job names it for both ways (the button, a pushed tag).
+
+    Changed by DM-125 (on the dispatcher's word): tier 3 runs the groups a
+    push touches, so a release takes the newest run of tier 3 where every
+    group ran -- by a push or by hand -- and it must be green; the gate asks
+    the runs of tier 3 of every event and the jobs of each. Every refusal of
+    before and the pair stay, on full runs; a green run of some groups is a
+    new refusal. ci.yml as before."""
     code, said, calls = _gate(tmp_path, [_run(7, "completed", "success")])
     assert (code, calls) == (
         0,
         [
             [
                 "api",
-                f"repos/inzoddwetrust/primer/actions/workflows/{workflow}/runs?head_sha={SHA}&event=push&per_page=100",
-            ]
-            for workflow in GATED
+                f"repos/inzoddwetrust/primer/actions/workflows/ci.yml/runs?head_sha={SHA}&event=push&per_page=100",
+            ],
+            [
+                "api",
+                f"repos/inzoddwetrust/primer/actions/workflows/tier3.yml/runs?head_sha={SHA}&per_page=100",
+            ],
+            ["api", "repos/inzoddwetrust/primer/actions/runs/7/jobs?per_page=100"],
         ],
     )
-    for workflow in GATED:
-        assert f"{workflow} on this commit is green" in said
+    assert "ci.yml on this commit is green" in said
+    assert "tier3.yml in full on this commit is green" in said
     refused = {
         "red": ([_run(7, "completed", "failure")], "is failure"),
         "running": ([_run(7, "in_progress", None)], "is in_progress"),
         "queued": ([_run(7, "queued", None)], "is queued"),
-        "not run": ([], "has not run on this commit"),
+        "not run": (
+            [],
+            {
+                "ci.yml": "has not run on this commit",
+                "tier3.yml": "has no run of every group",
+            },
+        ),
         "red after green": (
             [_run(7, "completed", "success"), _run(8, "completed", "failure")],
             "is failure",
@@ -203,17 +241,35 @@ def test_a_release_needs_the_latest_tier_3_of_its_commit_green(tmp_path: Path) -
             ("ci.yml", green, runs),
             ("tier3.yml", runs, green),
         ):
+            expected = str(words[workflow] if isinstance(words, dict) else words)
             code, said, _ = _gate(tmp_path, tier3, ci=ci)
-            [line] = [x for x in said.splitlines() if words in x]
+            [line] = [x for x in said.splitlines() if expected in x]
             assert code == 1 and line.startswith(workflow), (label, workflow, said)
     # the pair of "red after green": green after red is a release
     code, _, _ = _gate(
         tmp_path, [_run(8, "completed", "success"), _run(7, "completed", "failure")]
     )
     assert code == 0
+    # DM-125: a green run of some groups is no release; the pair -- a full run
+    # older than it, green, is
+    code, said, _ = _gate(
+        tmp_path, [_run(10, "completed", "success")], ci=green, groups={10: ("a", "c")}
+    )
+    assert code == 1 and "tier3.yml has no run of every group" in said, said
+    code, _, _ = _gate(
+        tmp_path,
+        [_run(10, "completed", "success"), _run(11, "completed", "success")],
+        ci=green,
+        groups={11: ("a",)},
+    )
+    assert code == 0
 
 
 def test_the_gate_comes_first_with_its_permission() -> None:
+    """Changed by DM-125 (on the dispatcher's word): the gate asks ci.yml and
+    tier3.yml by their runs' addresses, and decides tier 3 by tier3/groups.py
+    --full-run -- a planted gate without it, taking the newest run whatever groups
+    it ran, is refused; the defect without ci is planted in the new form."""
     text = _text("release.yml")
     assert gate_problems(text) == []
     planted = {
@@ -241,7 +297,11 @@ def test_the_gate_comes_first_with_its_permission() -> None:
         "  tier1:\n", "  tier1:\n    if: github.ref == 'refs/heads/x'\n"
     )
     planted["the gate without ci"] = text.replace(
-        "for workflow in ci.yml tier3.yml; do", "for workflow in tier3.yml; do"
+        "actions/workflows/ci.yml/runs", "actions/workflows/tier3.yml/runs"
+    )
+    # DM-125: the gate's main risk -- the newest run taken, full or not
+    planted["the gate without a full run"] = text.replace(
+        "tier3/groups.py --full-run", "tier3/groups.py --affected"
     )
     for label, defect in planted.items():
         assert defect != text, label

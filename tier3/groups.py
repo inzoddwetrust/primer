@@ -15,16 +15,34 @@ a group is not skipped quietly: tier 3 refuses to collect it (``select``).
 
     python tier3/groups.py
     python tier3/groups.py --selftest
+
+The groups a push runs (DM-125): ``affected`` maps the files a push changed to
+the groups that read them -- a file of tier 3 to the groups of its tests, the
+machine, the box's preparation and any path the map does not know to every
+group, tier 1, the documents and the contract's schemas to none. A pull
+request and a run by hand run every group. ``full_run`` is the gate of a
+release: a run of tier 3 on the commit where every group ran green -- a run of
+some groups is never a release's.
+
+    python tier3/groups.py --affected PATHS_FILE   (no file: every group)
+    python tier3/groups.py --full-run RUNS_JSON JOBS_DIR
+
+Only the standard library at the top: the job that plans the groups and the
+gate of a release run it with the runner's own Python.
 """
+
+from __future__ import annotations
 
 import argparse
 import ast
+import json
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pytest
-import yaml
+if TYPE_CHECKING:
+    import pytest
 
 HERE = Path(__file__).resolve().parent
 WORKFLOW = HERE.parent / ".github" / "workflows" / "tier3.yml"
@@ -119,6 +137,8 @@ def keep_group(config: pytest.Config, items: list[pytest.Item]) -> None:
     only the tests of this job's group, in the order of their files; a test
     in no group or in two is a usage error, not a skip (no quiet mode)."""
     group = str(config.getoption("--tier3-group"))
+    import pytest
+
     try:
         mine, _ = select([item.name for item in items], group)
     except LookupError as error:
@@ -144,11 +164,101 @@ def test_functions(directory: Path = HERE) -> list[str]:
     return out
 
 
+ALL = ("a", "b", "c", "d", "e", "f")
+"""Every group: the jobs of a full run of tier 3."""
+
+PLANNED = "${{ fromJSON(needs.plan.outputs.groups) }}"
+"""``jobs.box.strategy.matrix.group`` of ``tier3.yml``: the groups ``plan``
+gives (DM-125)."""
+
+
 def matrix(workflow: Path = WORKFLOW) -> list[str]:
-    """``jobs.box.strategy.matrix.group`` of ``tier3.yml``."""
+    """The groups the job ``box`` of ``tier3.yml`` can run: ``ALL``, when its
+    matrix is the plan's; anything else in the workflow is no group at all."""
+    import yaml
+
     document = yaml.safe_load(workflow.read_text(encoding="utf-8"))
     groups = document["jobs"]["box"]["strategy"]["matrix"]["group"]
-    return [str(group) for group in groups]
+    return list(ALL) if groups == PLANNED else []
+
+
+NONE_PREFIXES = ("tests/", "contract/", "docs/")
+"""Paths tier 3 does not run: tier 1, the contract's schemas (exports of the
+models, checked by tier 1; the wheel holds the package alone), documents."""
+
+NONE_FILES = frozenset({".github/workflows/ci.yml", ".github/workflows/release.yml"})
+
+
+def groups_of_files(directory: Path = HERE) -> dict[str, set[str]]:
+    """``tier3/test_*.py`` -> the groups of its tests (by ``GROUPS``)."""
+    out: dict[str, set[str]] = {}
+    for path in sorted(directory.glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = [
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("test")
+        ]
+        rel = f"tier3/{path.name}"
+        out[rel] = {group for test, group in GROUPS if test in names}
+    return out
+
+
+def affected(paths: Sequence[str] | None, files: Mapping[str, set[str]]) -> list[str]:
+    """The groups a push runs for the files it changed (DM-125); ``None`` --
+    the change is not known (a first push, a lost ``before``): every group. A
+    file of tier 3 -- its groups; tier 1, documents, schemas -- none; anything
+    else -- every group: an unknown path is never fewer checks."""
+    if paths is None:
+        return list(ALL)
+    found: set[str] = set()
+    for path in paths:
+        if path.endswith(".md") or path.startswith(NONE_PREFIXES) or path in NONE_FILES:
+            continue
+        if path in files:
+            found |= files[path] or set(ALL)
+            continue
+        found |= set(ALL)
+    return [group for group in ALL if group in found]
+
+
+def full_run(
+    runs: Sequence[Mapping[str, object]],
+    jobs: Mapping[int, Sequence[Mapping[str, object]]],
+) -> tuple[bool, str]:
+    """The gate of a release (DM-125): of the runs of tier 3 on the commit --
+    by a push or by hand -- those that ran every group; the newest of them
+    must have ended green. A run of some groups is never a release's; a red
+    full run after a green one refuses, as the newest run did before."""
+
+    def number(run: Mapping[str, object]) -> int:
+        value = run.get("run_number")
+        return value if isinstance(value, int) else -1
+
+    def full(run: Mapping[str, object]) -> bool:
+        run_id = run.get("id")
+        names = {
+            str(job.get("name"))
+            for job in (jobs.get(run_id, ()) if isinstance(run_id, int) else ())
+        }
+        return all(f"box ({group})" in names for group in ALL)
+
+    found = [
+        run
+        for run in runs
+        if run.get("event") in ("push", "workflow_dispatch") and full(run)
+    ]
+    if not found:
+        return False, "has no run of every group on this commit"
+    last = max(found, key=number)
+    state = (
+        last.get("conclusion")
+        if last.get("status") == "completed"
+        else last.get("status")
+    )
+    if state != "success":
+        return False, f"in full on this commit is {state}: {last.get('html_url')}"
+    return True, f"in full on this commit is green: {last.get('html_url')}"
 
 
 def problems(
@@ -231,10 +341,50 @@ def selftest() -> int:
     return 1 if passed else 0
 
 
+def _affected(paths_file: str | None) -> int:
+    """``plan`` of ``tier3.yml``: the groups as JSON on stdout, the reason of
+    each on stderr (the run's log)."""
+    files = groups_of_files()
+    if paths_file is None:
+        paths = None
+        print("plan: the change is not known -- every group", file=sys.stderr)
+    else:
+        paths = [line for line in Path(paths_file).read_text().splitlines() if line]
+        for path in paths:
+            print(
+                f"plan: {path} -> {affected([path], files) or 'none'}", file=sys.stderr
+            )
+    print(json.dumps(affected(paths, files)))
+    return 0
+
+
+def _full_run(runs_json: str, jobs_dir: str) -> int:
+    """The gate of a release (``release.yml``)."""
+    runs = json.loads(Path(runs_json).read_text())["workflow_runs"]
+    jobs = {
+        int(path.stem): json.loads(path.read_text())["jobs"]
+        for path in Path(jobs_dir).glob("*.json")
+    }
+    green, said = full_run(runs, jobs)
+    if not green:
+        print(f"tier3.yml {said} -- run it in full (Run workflow): no release")
+        return 1
+    print(f"tier3.yml {said}")
+    return 0
+
+
 def main(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(prog="python tier3/groups.py")
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument(
+        "--affected", nargs="?", const="", default=None, metavar="PATHS"
+    )
+    parser.add_argument("--full-run", nargs=2, metavar=("RUNS_JSON", "JOBS_DIR"))
     args = parser.parse_args(argv)
+    if args.full_run:
+        return _full_run(*args.full_run)
+    if args.affected is not None:
+        return _affected(args.affected or None)
     return selftest() if args.selftest else check()
 
 

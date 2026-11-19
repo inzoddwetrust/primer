@@ -9,9 +9,10 @@ name: release
 # and refuses, before anything is made: a tag not of the form vX.Y.Z; on the
 # button, a run off main, a tag that exists, a version not after the last.
 # Tier 1 runs on the commit first, with every check of ci.yml. The pinned
-# build backend is installed before any step holds the job token; the runs of
-# ci.yml and of tier3.yml on that commit (pushes to main only) must have
-# finished green -- no waiting. Only then the wheel is built and install.sh
+# build backend is installed before any step holds the job token; on that
+# commit the run of ci.yml (a push to main) must have finished green, and a run
+# of tier3.yml where every group ran green -- a push of some groups is never a
+# release's (DM-125; by a push or by Run workflow) -- no waiting. Only then the wheel is built and install.sh
 # gets its pins; the release is published last, and it makes the tag on the
 # button's way: a build that fails leaves no tag and no release. No checkout
 # keeps the job token in .git/config (DM-82).
@@ -154,24 +155,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for workflow in ci.yml tier3.yml; do
-            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$SHA&event=push&per_page=100" > "$RUNNER_TEMP/runs-$workflow.json"
-            python3 - "$workflow" "$RUNNER_TEMP/runs-$workflow.json" <<'EOF'
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=100" > "$RUNNER_TEMP/runs-ci.yml.json"
+          python3 - "$RUNNER_TEMP/runs-ci.yml.json" <<'EOF'
           import json
           import sys
 
-          workflow, path = sys.argv[1], sys.argv[2]
-          with open(path, encoding="utf-8") as handle:
+          with open(sys.argv[1], encoding="utf-8") as handle:
               runs = json.load(handle)["workflow_runs"]
           if not runs:
-              sys.exit(f"{workflow} has not run on this commit: no release")
+              sys.exit("ci.yml has not run on this commit: no release")
           last = max(runs, key=lambda run: run["run_number"])
           state = last["conclusion"] if last["status"] == "completed" else last["status"]
           if state != "success":
-              sys.exit(f"{workflow} on this commit is {state}: {last['html_url']}")
-          print(f"{workflow} on this commit is green: {last['html_url']}")
+              sys.exit(f"ci.yml on this commit is {state}: {last['html_url']}")
+          print(f"ci.yml on this commit is green: {last['html_url']}")
           EOF
+          # tier 3: a run where every group ran green -- a push of some groups
+          # is never a release's (DM-125); by a push or by hand
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/tier3.yml/runs?head_sha=$SHA&per_page=100" > "$RUNNER_TEMP/runs-tier3.json"
+          mkdir -p "$RUNNER_TEMP/tier3-jobs"
+          # the jobs of every run: which ran every group, red or green
+          for id in $(python3 -c 'import json, sys; print(" ".join(str(r["id"]) for r in json.load(open(sys.argv[1]))["workflow_runs"]))' "$RUNNER_TEMP/runs-tier3.json"); do
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" > "$RUNNER_TEMP/tier3-jobs/$id.json"
           done
+          python3 tier3/groups.py --full-run "$RUNNER_TEMP/runs-tier3.json" "$RUNNER_TEMP/tier3-jobs"
       - run: python -m pip wheel --no-deps --no-build-isolation --no-index -w dist .
       - name: install.sh with its pins
         run: |

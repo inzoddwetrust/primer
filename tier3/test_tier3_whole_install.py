@@ -488,6 +488,9 @@ def _install_at_pin(tmp: Path) -> None:
     tests need it (``NEEDS_BOX``), not a test: the assertions of the whole
     install stay in its own test (group ``b``)."""
     verdict, printed = _install(_passport(tmp))
+    # where the preparation of a group goes, step by step (DM-125, par0 14.3)
+    spent = [(s.stack, s.name, round(s.duration_s or 0.0, 1)) for s in verdict.steps]
+    print("DM-125 measure:", sorted(spent, key=lambda step: -step[2]))
     assert verdict.result == "green", printed
 
 
@@ -2004,9 +2007,7 @@ def test_tier3_types_are_made_by_the_products_commands(
     assert '"/dm63"' in text[1], text
 
 
-BLANK_FIRST_REVISION_PATH = (
-    "backend/migrations/versions/2026_10_25_0001_app_settings.py"
-)
+REVISION = "backend/migrations/versions/2026_10_25_0001_app_settings.py"
 """The blank's first revision: ``alembic heads`` loads every revision module,
 never ``env.py`` (FIX 2, measured with alembic 1.20.1, the blank's pin)."""
 REFUSING_REVISION = """\
@@ -2036,7 +2037,7 @@ def test_tier3_alembic_runs_with_the_apps_environment(
     module, not ``env.py`` -- ``alembic heads`` never loads ``env.py``."""
     assert (OPT / "current").is_symlink(), "the group's box is installed"
     copy = _copy_of_blank(tmp_path, mirror, "env-alembic")
-    revision = copy / BLANK_FIRST_REVISION_PATH
+    revision = copy / REVISION
     revision.write_text(
         REFUSING_REVISION + revision.read_text(encoding="utf-8"), encoding="utf-8"
     )
@@ -2059,13 +2060,7 @@ def test_tier3_alembic_runs_with_the_apps_environment(
             expect=tuple(range(256)),
         )
         measured["refusal"] = _run(
-            [
-                *inside,
-                "grep",
-                "-n",
-                "DATABASE_URL",
-                f"/app/{BLANK_FIRST_REVISION_PATH.removeprefix('backend/')}",
-            ],
+            [*inside, "grep", "-n", "DATABASE_URL", f"/app/{REVISION[8:]}"],
             expect=tuple(range(256)),
         )
         bare = _run(

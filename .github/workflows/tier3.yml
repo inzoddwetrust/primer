@@ -25,6 +25,20 @@ name: tier3
 # stop the others (fail-fast: false): one red hides no state of another. Tier
 # 3 is green when every group is.
 
+# A push runs the groups its files touch (DM-125): the job plan maps the files
+# between the push's before and its commit to groups (tier3/groups.py,
+# affected) -- a file of tier 3 to its groups, the machine and the box's
+# preparation and every unknown path to all, tier 1 and documents to none. A
+# pull request and a run by hand (Run workflow) run every group. A release
+# takes only a run where every group ran green (release.yml, full_run).
+
+# Between runs two caches, none of them the box's state: pip's downloads for
+# the venvs of the build and of the probes (by the hash of their locks), and
+# apt's downloaded .deb in /var/cache/apt/archives before install.sh -- apt
+# checks their signatures and versions and installs as on a box; nothing is
+# installed by the cache. Docker's images and its build cache are not cached:
+# pulling and building are the install under test.
+
 on:
   push:
     branches: [main]
@@ -40,13 +54,40 @@ defaults:
     shell: bash
 
 jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    outputs:
+      groups: ${{ steps.affected.outputs.groups }}
+    defaults: {run: {working-directory: "${{ github.workspace }}"}}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: affected
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # the files of the push; a pull request, a run by hand, a first push
+          # or a before not in the clone: every group (no file list)
+          if [ "$GITHUB_EVENT_NAME" = push ] && git rev-parse --verify --quiet "$BEFORE^{commit}"; then
+            git diff --name-only "$BEFORE" "$GITHUB_SHA" > "$RUNNER_TEMP/paths"
+            groups=$(python3 "$GITHUB_WORKSPACE/tier3/groups.py" --affected "$RUNNER_TEMP/paths")
+          else
+            groups=$(python3 "$GITHUB_WORKSPACE/tier3/groups.py" --affected)
+          fi
+          echo "groups=$groups" >> "$GITHUB_OUTPUT"
+          echo "groups of this run: $groups"
   box:
     name: box (${{ matrix.group }})
+    needs: plan
+    if: needs.plan.outputs.groups != '[]'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        group: [a, b, c, d, e, f]
+        group: ${{ fromJSON(needs.plan.outputs.groups) }}
     defaults:
       run:
         working-directory: ${{ github.workspace }}
@@ -75,6 +116,27 @@ jobs:
           python3 -m venv /tmp/build
           /tmp/build/bin/python -m pip install --require-hashes -r "$GITHUB_WORKSPACE/requirements-build.lock"
           /tmp/build/bin/python -m pip wheel --no-deps --no-build-isolation --no-index -w /tmp/tier3/dist "$GITHUB_WORKSPACE"
+      - name: the week, for the key of apt's cache
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/apt-cache
+          key: apt-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ steps.week.outputs.week }}-${{ matrix.group }}
+          restore-keys: apt-${{ env.ImageOS }}-${{ env.ImageVersion }}-
+      - name: apt's downloads from the cache (nothing installed)
+        run: |
+          mkdir -p "$RUNNER_TEMP/apt-cache"
+          shopt -s nullglob
+          debs=("$RUNNER_TEMP"/apt-cache/*.deb)
+          echo "apt cache: ${#debs[@]} .deb"
+          if [ "${#debs[@]}" -gt 0 ]; then
+            sudo cp "${debs[@]}" /var/cache/apt/archives/
+          fi
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ env.ImageOS }}-${{ hashFiles('requirements-dev.lock') }}
       - name: install.sh with this run's sources
         run: |
           version=$(python3 -c 'import re, pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("'"$GITHUB_WORKSPACE"'/pridem/__init__.py").read_text()).group(1))')
@@ -131,3 +193,22 @@ jobs:
             deselect=(-k "not test_probe_DM_10_blank_is_fetched_by_ref_over_ssh")
           fi
           sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE,PRIMER_GITHUB_API_HEADER_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --durations=0 --rootdir "$GITHUB_WORKSPACE" --tier3-group "$TIER3_GROUP" "${deselect[@]}" "$GITHUB_WORKSPACE/tier3"
+      - name: apt's downloads to the cache
+        if: always()
+        run: |
+          shopt -s nullglob
+          debs=(/var/cache/apt/archives/*.deb)
+          echo "apt cache: ${#debs[@]} .deb to keep"
+          if [ "${#debs[@]}" -gt 0 ]; then
+            cp "${debs[@]}" "$RUNNER_TEMP/apt-cache/"
+          fi
+      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        if: always() && github.event_name != 'pull_request'
+        with:
+          path: ${{ runner.temp }}/apt-cache
+          key: apt-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ steps.week.outputs.week }}-${{ matrix.group }}
+      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        if: always() && github.event_name != 'pull_request'
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ env.ImageOS }}-${{ hashFiles('requirements-dev.lock') }}

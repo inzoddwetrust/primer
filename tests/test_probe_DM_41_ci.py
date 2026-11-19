@@ -359,6 +359,9 @@ def test_probe_DM_41_ci_runs_on_locked_versions() -> None:
 
 
 def test_no_secret_before_the_last_install() -> None:
+    """Changed by DM-125: the caches of tier 3 (the week, apt's restore and copy,
+    pip's restore) are steps before install.sh -- the planted secret lands at step
+    8, not 4; what is held is the same."""
     files = {f.name: f.read_text() for f in sorted(WORKFLOWS.glob("*.yml"))}
     for name, workflow in files.items():
         assert secret_problems(workflow) == [], name
@@ -371,7 +374,7 @@ def test_no_secret_before_the_last_install() -> None:
     steps.remove(venv)
     steps.insert(steps.index(key) + 1, venv)
     planted = yaml.safe_dump(document, sort_keys=False)
-    assert secret_problems(planted) == ["box: step 4 holds a secret before an install"]
+    assert secret_problems(planted) == ["box: step 8 holds a secret before an install"]
 
 
 def test_the_dev_lock_pins_the_dev_tools_and_the_runtime() -> None:
@@ -474,13 +477,16 @@ def checkout_problems(text: str) -> tuple[int, list[str]]:
 
 def test_no_checkout_keeps_the_job_token() -> None:
     """DM-82: every checkout of every workflow leaves the token out of
-    ``.git/config``, where every later step could read it."""
+    ``.git/config``, where every later step could read it.
+
+    Changed by DM-125: tier 3 has a second checkout, in the job plan that maps the
+    push's files to groups; every checkout keeps no token, as before."""
     total = 0
     for file in sorted(WORKFLOWS.glob("*.yml")):
         count, problems = checkout_problems(file.read_text())
         assert problems == [], file.name
         total += count
-    assert total == 7  # the pair: ci 4, release 2, tier3 1
+    assert total == 8  # the pair: ci 4, release 2, tier3 2 (plan, box)
     text = CI.read_text()
     flag = "          persist-credentials: false\n"
     planted = {
