@@ -2019,7 +2019,11 @@ def test_tier3_alembic_runs_with_the_apps_environment(
     ``env.py`` refuses to load without ``DATABASE_URL``, as comms does. An
     update -- green: ``stop_for_migrate`` and ``migrate`` read the head with
     the app's environment. Measured into the run's log first (par0 14.3): the
-    same image without the environment refuses, with the line that says why."""
+    same image without the environment refuses, with the line that says why.
+
+    FIX: the image of the pair is ``app_image`` of the fact of ``build`` of the
+    update, run by its id -- not a name the test makes: group e names its
+    images with the key of the build."""
     assert (OPT / "current").is_symlink(), "the group's box is installed"
     copy = _copy_of_blank(tmp_path, mirror, "env-alembic")
     _replace_once(
@@ -2029,15 +2033,26 @@ def test_tier3_alembic_runs_with_the_apps_environment(
     )
     _push(copy, mirror, "DM-124: alembic refuses without DATABASE_URL")
     verdict, printed = _install(_passport(tmp_path, version=63), "update")
-    current = (OPT / "current").resolve()
-    image = f"{STACK}-app:{current.name[:12]}"
-    bare = _run(
-        ["docker", "run", "--rm", "--network", "none", "--", image,
-         "python", "-m", "alembic", "heads"],
-        expect=tuple(range(256)),
+    # the image of the pair is the one the machine found and ran -- the fact of
+    # build of this update -- never a name the test makes (FIX: group e names
+    # its images with the key of the build, <commit12>-<key12>, DM-90/101)
+    [build] = [s for s in verdict.steps if s.stack == STACK and s.name == "build"]
+    image = (build.verify or {}).get("app_image")
+    bare = (
+        _run(
+            ["docker", "run", "--rm", "--network", "none", "--", str(image),
+             "python", "-m", "alembic", "heads"],
+            expect=tuple(range(256)),
+        )
+        if image
+        else []
     )  # fmt: skip
-    print("DM-124 measure:", {"image": image, "without the environment": bare[-3:]})
+    print(
+        "DM-124 measure:",
+        {"image": image, "build": build.verify, "without the environment": bare[-3:]},
+    )
     assert verdict.result == "green", printed
+    assert isinstance(image, str) and image.startswith("sha256:"), build.verify
     facts = {s.name: s for s in verdict.steps if s.stack == STACK}
     assert facts["migrate"].status == "ok", facts["migrate"]
     assert any("DATABASE_URL is required" in line for line in bare), bare
