@@ -2579,6 +2579,22 @@ def _blank_giving_a_point(tmp: Path, mirror: Path, commit: str) -> None:
         f'{{ version: "1.0.0", tag: v1.0.0, commit: {SERVICE_PINS["v1.0.0"]} }}',
         f'{{ version: "1.3.0", tag: {STORE_TAG}, commit: {commit} }}',
     )
+    # FIX: the app says what it provides in /health (seams.provides), and the
+    # machine checks it live (seams_verify) -- the new seam goes there too, and
+    # into the blank's own tests of /health, which the step tests runs
+    _replace_once(
+        copy / "backend" / "app" / "main.py",
+        'PROVIDES = ["PRODUCT_WEBHOOK_URL"]\n',
+        'PROVIDES = ["PRODUCT_WEBHOOK_URL", "STORE_ADDRESS"]\n',
+    )
+    health = copy / "backend" / "tests" / "test_health.py"
+    text = health.read_text(encoding="utf-8")
+    pinned = '"provides": ["PRODUCT_WEBHOOK_URL"],'
+    assert text.count(pinned) == 2, text.count(pinned)
+    health.write_text(
+        text.replace(pinned, '"provides": ["PRODUCT_WEBHOOK_URL", "STORE_ADDRESS"],'),
+        encoding="utf-8",
+    )
     _push(copy, mirror, "DM-23: the blank gives its service a point")
 
 
@@ -2624,7 +2640,16 @@ def test_tier3_a_service_takes_a_point_of_the_product(
         )  # fmt: skip
         for name in names
     }
-    print("DM-23 measure:", {"order": order, "networks": seen})
+    app = _container(STACK, "app")
+    [health] = _stdout(
+        ["docker", "exec", app, "python", "-c",
+         "import urllib.request as u; "
+         "print(u.urlopen('http://127.0.0.1:8000/health').read().decode())"],
+    )  # fmt: skip
+    print(
+        "DM-23 measure:",
+        {"order": order, "networks": seen, "seams": json.loads(health).get("seams")},
+    )
     assert verdict.result == "green", printed
     made = order.index(("pridem-points", "pair_networks"))
     first_service = min(i for i, (stack, _) in enumerate(order) if stack == SERVICE)
