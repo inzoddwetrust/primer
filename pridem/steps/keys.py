@@ -36,7 +36,18 @@ DM-111). A key minted in this run goes into the run's ``FreshKeys`` with the
 end of its wait: a ``Permission denied (publickey)`` of the next command to
 its repository (``ls-remote``, ``fetch``) is the key's block again and a wait
 again up to that same end, then the command again -- never a red step while
-the key's half hour lasts. A key of an earlier run is refused at once.
+the key's half hour lasts.
+
+A key is fresh until a run has seen it work steadily, not until the run that
+minted it ends: a run cut while it waited (Ctrl-C, a closed terminal) leaves
+the key in place, and to the next run GitHub may answer once and refuse the
+next request just the same. So the pair is minted with a mark beside it,
+``keys/<alias>.fresh``, which goes only after ``STEADY`` looks in a row. A
+key with the mark is, in any later run, as one minted in it: ``check`` does
+not take one look for an answer (``steady``), ``act`` waits again from the
+start and puts the key into the run's ``FreshKeys`` (DM-126). A key without
+the mark -- one a run saw steady -- is refused at once. The write key keeps
+no mark: it waits only in the run that minted it (DM-63 FIX).
 """
 
 import re
@@ -46,7 +57,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json, KeyNeeded
-from pridem.files import atomic_write, commit_set, private_dir, temp_of
+from pridem.files import atomic_write, commit_set, fsync_dir, private_dir, temp_of
 from pridem.runner import CommandFailed, Stream
 from pridem.steps.base import (
     CheckResult,
@@ -253,16 +264,21 @@ def wait_for_access(
         ctx.interrupt.check()
 
 
+FRESH_SUFFIX = ".fresh"
+"""``keys/<alias>.fresh``: the key was minted and no run saw it work steadily."""
+
 REFUSED = "Permission denied (publickey)"
 """What ssh says when the server does not take the key."""
 
 
 class FreshKeys:
-    """The keys minted in this run, by alias, with the end of their wait
-    (DM-111): a key minted now may be refused by the next request to its
-    repository though it was just taken -- such a refusal is a wait again,
-    within the same ``KEY_WAIT_S`` from the minting, never a red step. A key
-    of an earlier run is not here: its refusal stays a refusal. One object
+    """The fresh keys of this run, by alias, with the end of their wait
+    (DM-111): a key minted now -- or minted by a run that never saw it work
+    steadily, and waited for again in this one (DM-126) -- may be refused by
+    the next request to its repository though it was just taken: such a
+    refusal is a wait again, within the same ``KEY_WAIT_S`` from the start of
+    its wait, never a red step. A key an earlier run saw steady is not here:
+    its refusal stays a refusal. One object
     for the run, in memory: the plan makes it, ``DeployKey`` fills it, the
     steps that go to a repository read it."""
 
@@ -289,8 +305,8 @@ class FreshKeys:
         """``call`` -- a command to the repository ``found`` -- and, while
         its key is fresh and the server refuses it, the key's block again and
         the wait of ``wait_for_access`` up to the key's own deadline, then the
-        command again. Any other failure, a key not minted in this run, or the
-        deadline passed -- the failure as it is."""
+        command again. Any other failure, a key that is not fresh in this
+        run, or the deadline passed -- the failure as it is."""
         while True:
             try:
                 return call()
@@ -349,6 +365,7 @@ class DeployKey(Step):
     on without it. ``WriteKey`` waits only for a key it minted."""
     codes: ClassVar[dict[str, str]] = {
         "mint": "mint a deploy key for {repo} and wait for access",
+        "steady": "wait until the key of {repo} works steadily: no run saw it yet",
         "alias-clash": "repositories share one key: {aliases}",
         "ssh-config": "draw {repo} into {files}",
         "ssh-config-differs": "{path} is not as drawn after the write",
@@ -384,6 +401,19 @@ class DeployKey(Step):
     def _key(self) -> Path:
         return self.root / KEYS / self.repo.alias
 
+    marks_fresh: ClassVar[bool] = True
+    """The key is minted with the mark ``<alias>.fresh`` and is fresh in every
+    run until one saw it steady (DM-126). ``WriteKey`` keeps none."""
+
+    @property
+    def _mark(self) -> Path:
+        return self._key.with_name(self._key.name + FRESH_SUFFIX)
+
+    def _marked(self) -> bool:
+        """No run saw the key work steadily yet. Asked of a key in place: a
+        mark without a key says nothing -- the key is minted then."""
+        return self.marks_fresh and self._mark.exists()
+
     def check(self, ctx: StepContext) -> CheckResult:
         clash = collisions([self.repo.address, *self.others])
         if clash:
@@ -398,9 +428,11 @@ class DeployKey(Step):
             files = list[Json](str(path) for path in differs)
             params: dict[str, Json] = {"repo": self.repo.address, "files": files}
             return CheckResult(True, local_code("ssh-config", params))
-        if self._access(ctx):
-            return CheckResult(False)
-        return mint
+        if not self._access(ctx):
+            return mint
+        if self._marked():  # one look of a fresh key is no answer (DM-126)
+            return CheckResult(True, local_code("steady", {"repo": self.repo.address}))
+        return CheckResult(False)
 
     writes: ClassVar[bool] = False
     """The key must be allowed to write (the console's words, DM-107)."""
@@ -416,7 +448,8 @@ class DeployKey(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         write_ssh_config(self.root, [self.repo])
-        if self._key.exists() and self._access(ctx):
+        fresh = self._marked()  # minted by a run that never saw it steady
+        if self._key.exists() and not fresh and self._access(ctx):
             return  # only the files were not as drawn
         minted = not self._key.exists()
         if minted:
@@ -435,7 +468,7 @@ class DeployKey(Step):
             )
         )
         deadline = self.clock() + (self.wait_s if waits else 0)
-        if minted and self.fresh is not None:
+        if (minted or fresh) and self.fresh is not None:
             self.fresh.minted(self.repo, self._public(), deadline)
         # the key works only when it works a few times in a row (DM-111);
         # a signal ends the wait (DM-45)
@@ -450,12 +483,17 @@ class DeployKey(Step):
                     "wait_s": self.wait_s,
                 },
             )
+        if self.marks_fresh and self._mark.exists():
+            self._mark.unlink()  # a run saw it steady: fresh no more
+            fsync_dir(self._mark.parent)
 
     def _mint(self, ctx: StepContext) -> None:
         """A new pair as one change (DM-80): ``ssh-keygen`` writes both parts
         into temporary files, the public part is renamed first and the private
         part last -- a key in place always has its ``.pub``, and a crash leaves
-        no key, so the next run mints again."""
+        no key, so the next run mints again. The mark of a fresh key goes
+        first of all (``marks_fresh``): a key in place that no run saw steady
+        always has it; a mark without a key says nothing."""
         private_dir(self._key.parent)
         temp = temp_of(self._key)
         public = self._key.with_name(self._key.name + ".pub")
@@ -471,6 +509,8 @@ class DeployKey(Step):
             temp.unlink(missing_ok=True)
             temp_public.unlink(missing_ok=True)
             raise
+        if self.marks_fresh:
+            atomic_write(self._mark, f"{comment}\n", 0o600)
         commit_set([(temp_public, public), (temp, self._key)])
 
     def _public(self) -> str:
@@ -566,6 +606,7 @@ class WriteKey(LeftUndone, DeployKey):
     why_write = "the box pushes the generated types to the product's repository"
     order = 3  # in the root stack: after final_check and finalize
     waits_always = False
+    marks_fresh = False
     codes: ClassVar[dict[str, str]] = {
         **DeployKey.codes,
         "mint": "mint a write key for {repo} and wait for write access",

@@ -4,7 +4,7 @@ seed, a healthcheck on every service but a job (protocol 3.4)."""
 
 import copy
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
@@ -66,7 +66,7 @@ from pridem.steps.base import (
 )
 from pridem.steps.compose import ComposeStack, forbidden, stale
 from pridem.steps.migrate import Migrate, StartStopped, StopForMigrate, Stopped
-from pridem.steps.up import Up, job_order, needed_by
+from pridem.steps.up import Up, job_order, job_record, needed_by
 
 ONCE = Waiting(deadline_s=0, poll_s=0)
 REPORT: dict[str, Json] = {
@@ -159,6 +159,16 @@ def run_argv(cs: ComposeStack, job: str) -> tuple[str, ...]:
     return tuple(cs.argv("run", "--rm", "--no-deps", operands=(job,)))
 
 
+def hashed(cs: ComposeStack, expected: Mapping[str, str] = JOB_HASHES) -> FakeCall:
+    """``config --hash``: the configuration a job's record is of (DM-126) --
+    read by ``act`` before the jobs run, and by ``check`` and ``verify`` to
+    tell which job has no record of a good run."""
+    return FakeCall(
+        tuple(cs.argv("config", "--hash", "*")),
+        lines=stdout(*(f"{name} {value}" for name, value in expected.items())),
+    )
+
+
 def acting(cs: ComposeStack, job_code: int = 0) -> list[FakeCall]:
     """``check`` finds nothing running, ``act`` with the job: what it needs
     up, the job, then every other service."""
@@ -166,6 +176,7 @@ def acting(cs: ComposeStack, job_code: int = 0) -> list[FakeCall]:
         image_call(cs, "app", APP_IMAGE),
         ps_call(cs),
         config_call(cs, JOBBED),
+        hashed(cs),
         FakeCall(up_argv(cs, "postgres")),
         FakeCall(run_argv(cs, "init"), code=job_code, lines=stdout("init: done")),
     ]
@@ -175,9 +186,11 @@ def acting(cs: ComposeStack, job_code: int = 0) -> list[FakeCall]:
 
 
 def verifying(cs: ComposeStack) -> list[FakeCall]:
-    """``verify``: the app on its image, every service but the job on its
-    configuration -- the job's hash is printed, it has no container."""
+    """``verify``: every job has the record of its configuration (DM-126);
+    the app on its image, every service but the job on its configuration --
+    the job's hash is printed, it has no container."""
     return [
+        hashed(cs),
         image_call(cs, "app", APP_IMAGE),
         ps_call(cs, CONTAINER),
         inspect_image_call(CONTAINER, APP_IMAGE),
@@ -195,15 +208,23 @@ def test_probe_DM_22_job_runs_on_every_deploy_and_red_on_nonzero(
     """Contract 3 rule 24: the job after the service it depends on is up and
     before the app that depends on it -- on every deploy that acts: twice,
     twice; its code 1 is red with its command and nothing after it comes up.
-    The pair: code 0 -- the dependent is brought up."""
+    The pair: code 0 -- the dependent is brought up.
+
+    Changed by DM-126 (owner's decision of 19.11; by the dispatcher's word,
+    before the change): ``up`` keeps a record of a job that ended with code 0
+    -- the hash of its configuration -- so the scenario reads that hash
+    (``config --hash``) in ``act`` and in ``verify``; the probe also holds
+    the record there after code 0 and gone after code 1."""
     stack = jobbed(app.port)
     cs = cs_of(stack, tmp_path)
+    record = job_record(cs, "init")
     for _ in range(2):
         with FakeRunner(*acting(cs), *verifying(cs)) as runner:
             outcome, _ = run([up_of(stack, tmp_path)], runner)
         assert outcome.code is ExitCode.OK, outcome.steps
         assert outcome.steps[0].verify is not None
         assert outcome.steps[0].verify["jobs"] == ["init"]
+        assert record.read_text() == JOB_HASHES["init"] + "\n"
 
     # code 1: red with the job's command; the final up is not in the script
     with FakeRunner(*acting(cs, job_code=1)) as runner:
@@ -212,6 +233,7 @@ def test_probe_DM_22_job_runs_on_every_deploy_and_red_on_nonzero(
     assert red.steps[0].reason == Code(
         "command-failed", {"argv": list(run_argv(cs, "init")), "exit_code": 1}
     )
+    assert not record.exists()  # the good run before it is not this one's
 
 
 def test_probe_DM_22_minted_length_40_is_exactly_40(tmp_path: Path) -> None:
@@ -242,15 +264,24 @@ def test_an_update_with_nothing_changed_runs_no_job_and_doctor_is_empty(
     its entry acts. Nothing changed -- the job's hash has no container to
     compare, ``stale`` leaves it out, ``check`` needs no ``act``: no ``run``
     (the strict script has none), and ``check`` alone -- ``doctor`` -- says
-    nothing. The pair is the probe: a new commit acts."""
+    nothing. The pair is the probe: a new commit acts.
+
+    Changed by DM-126: "nothing changed" is also "the job ended well on this
+    configuration" -- its record is there, and ``check`` reads the hash to
+    compare (the last call). Without the record ``up`` has the job to run:
+    ``test_probe_DM_126_first_install.py``."""
     stack = jobbed(app.port)
     cs = cs_of(stack, tmp_path)
+    record = job_record(cs, "init")
+    record.parent.mkdir(parents=True)
+    record.write_text(JOB_HASHES["init"] + "\n")
     checked = [
         image_call(cs, "app", APP_IMAGE),
         ps_call(cs, CONTAINER),
         inspect_image_call(CONTAINER, APP_IMAGE),
         *hash_calls(cs, running=HASHES, expected=JOB_HASHES),
         *observe_calls(cs),
+        hashed(cs),
     ]
     with FakeRunner(*checked, *verifying(cs)) as runner:
         outcome, _ = run([up_of(stack, tmp_path)], runner)
@@ -314,7 +345,10 @@ def test_two_jobs_each_after_what_it_needs_then_the_rest(
     tmp_path: Path, app: LiveApp
 ) -> None:
     """``first`` needs nothing -- no up before it; ``second`` needs ``first``
-    (a job: ran) and ``postgres``; then every service but the jobs."""
+    (a job: ran) and ``postgres``; then every service but the jobs.
+
+    Changed by DM-126: the scenario reads the jobs' hashes for their records
+    (``config --hash`` in ``act`` and in ``verify``)."""
     stack = made(
         data(
             app.port,
@@ -335,10 +369,12 @@ def test_two_jobs_each_after_what_it_needs_then_the_rest(
         image_call(cs, "app", APP_IMAGE),
         ps_call(cs),
         config_call(cs, document),
+        hashed(cs, {**HASHES, **jobs}),
         FakeCall(run_argv(cs, "first")),
         FakeCall(up_argv(cs, "postgres")),
         FakeCall(run_argv(cs, "second")),
         FakeCall(up_argv(cs, "app", "frontend", "postgres")),
+        hashed(cs, {**HASHES, **jobs}),
         image_call(cs, "app", APP_IMAGE),
         ps_call(cs, CONTAINER),
         inspect_image_call(CONTAINER, APP_IMAGE),
@@ -354,12 +390,19 @@ def test_two_jobs_each_after_what_it_needs_then_the_rest(
 
 def test_an_entry_of_jobs_alone_brings_nothing_else_up(tmp_path: Path) -> None:
     """Twin EMPTINESS: no service but the job -- the job runs, no ``up`` of an
-    empty list (a bare ``up`` would start the job as a service)."""
+    empty list (a bare ``up`` would start the job as a service).
+
+    Changed by DM-126: ``act`` reads the job's hash for its record."""
     stack = made(data(jobs={"init": {"service": "init"}}))
     cs = cs_of(stack, tmp_path)
     document: dict[str, Json] = {"services": {"init": {"image": "j@sha256:x"}}}
     step = up_of(stack, tmp_path)
-    with FakeRunner(config_call(cs, document), FakeCall(run_argv(cs, "init"))) as r:
+    calls = [
+        config_call(cs, document),
+        hashed(cs, {"init": "1" * 64}),
+        FakeCall(run_argv(cs, "init")),
+    ]
+    with FakeRunner(*calls) as r:
         assert step._with_jobs(context(r), frozenset({"init"})) == ["init"]
 
 
@@ -1010,7 +1053,9 @@ def test_a_service_on_another_configuration_acts_and_the_job_runs(
 ) -> None:
     """The pair of ``..._nothing_changed_runs_no_job...``: the app runs on a
     configuration hash the entry no longer has (another env, a new commit) --
-    ``up`` acts and the job runs; the same hash -- no act, no job."""
+    ``up`` acts and the job runs; the same hash -- no act, no job.
+
+    Changed by DM-126: ``act`` reads the job's hash for its record."""
     stack = jobbed(app.port)
     cs = cs_of(stack, tmp_path)
     behind = {**HASHES, "app": "9" * 64}
@@ -1020,6 +1065,7 @@ def test_a_service_on_another_configuration_acts_and_the_job_runs(
         inspect_image_call(CONTAINER, APP_IMAGE),
         *hash_calls(cs, running=behind, expected=JOB_HASHES),  # stale: act
         config_call(cs, JOBBED),
+        hashed(cs),
         FakeCall(up_argv(cs, "postgres")),
         FakeCall(run_argv(cs, "init")),
         FakeCall(up_argv(cs, "app", "frontend", "postgres")),

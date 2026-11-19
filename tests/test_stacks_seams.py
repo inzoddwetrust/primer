@@ -1,5 +1,6 @@
 """Seams (DM-14): the order of providers, half seams before ``act``, the plan's
-memory after health. A service's ``provides`` is the value of its own ``env``
+memory once the provider's environment is ready (DM-126; it was "after
+health"). A service's ``provides`` is the value of its own ``env``
 key of that name; the product's is a URL from the passport."""
 
 from pathlib import Path

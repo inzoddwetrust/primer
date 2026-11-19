@@ -1,9 +1,10 @@
 """``doctor`` of a product with a seam from a live service (DM-59 FIX).
 
 ``doctor`` runs ``check`` alone. The seams of a service reach the plan's
-memory from its ``up``: in a run from ``verify``, in ``doctor`` from
-``check`` where it found the service running on this commit and its live
-``/health`` conforming -- the values read from the service's ``.env``. The
+memory with its environment (DM-126; it was from its ``up``, after health):
+in a run from ``verify`` of the step that reads ``next.env`` back with no
+placeholder left, in ``doctor`` from that step's ``check`` where it found
+nothing to do -- the values read from the service's ``next.env``. The
 ladders are the plan builder's, on a box the DM-67 probe's install left.
 """
 
@@ -36,11 +37,13 @@ from test_probe_DM_67_derived import (
 )
 
 from pridem.events import PlanOutcome
-from pridem.plan import Plan, StackSteps
+from pridem.plan import Deferred, Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
+from pridem.stacks.env import DERIVED_PLACEHOLDER, env_text, parse_env, write_private
 from pridem.steps.build import Build
 from pridem.steps.compose import ComposeStack
+from pridem.steps.env import usable
 
 
 def _plan(
@@ -57,7 +60,9 @@ def _plan(
     services = {s.name: s for s in deferred(made, "pridem-services")}
     build = services["comms"].steps[1]
     assert isinstance(build, Build)
-    render = deferred(made, "pridem-product")[0].steps[0]
+    product = deferred(made, "pridem-product")
+    render = product[0].steps[0]
+    [later] = [s for s in product if s.name == "comms"]  # from up on (DM-126)
     ticks = count()
     given = calls or script(build.compose, root / "opt" / "comms" / "env")
     with FakeRunner(*given) as runner:
@@ -66,6 +71,8 @@ def _plan(
                 services["pridem-seams"],
                 services["comms"],
                 StackSteps("aivis", [render]),
+                # a second half of an entry is made by a deferred stack
+                Deferred("pridem-product", lambda: [later], after="fetch_root"),
                 StackSteps("root", [], root=True),
             ],
             mode=mode,  # type: ignore[arg-type]
@@ -117,9 +124,14 @@ def test_doctor_of_a_product_with_a_seam_from_a_healthy_service_is_empty(
 ) -> None:
     """The service runs on this commit and its /health conforms: ``doctor``
     finds nothing to do -- the product's ``render_env`` takes the seams. The
-    pair: the service not healthy (``degraded``) -- ``up`` names it, nothing
-    reaches the memory, and the product's ``render_env`` is the honest
-    ``seam-before-health``."""
+    pair: the service's environment is not whole -- a ``derived`` value still
+    to be computed: ``derive_env`` names it, nothing reaches the memory, and
+    the product's ``render_env`` is the honest ``seam-before-health``.
+
+    Changed by DM-126 (owner's decision of 19.11): a seam is ready with the
+    provider's environment, not its health. A service that is ``degraded``
+    no longer holds the product's ``render_env`` back -- ``up`` still names
+    it -- so the pair is the environment that is not ready."""
     app = LiveApp()
     try:
         made, _ = planned(
@@ -143,13 +155,27 @@ def test_doctor_of_a_product_with_a_seam_from_a_healthy_service_is_empty(
             r for r in doctor.steps if r.status == "failed"
         ]
 
-        # the pair: degraded -- up has something to do, the seams are not ready
+        # degraded: up has something to do, and the seams are ready all the same
         app.health["status"] = "degraded"
         doctor, _ = _plan(tmp_path, app.port, "doctor", _doctor_calls(cs), again=True)
+        diff = [(d.stack, d.name) for d in doctor.doctor_diff]
+        assert diff == [("comms", "up")], doctor.doctor_diff
+        assert not [r for r in doctor.steps if r.status == "failed"], doctor.steps
+        app.health["status"] = "ok"
+
+        # the pair: a derived value not computed -- the env is not ready
+        env = cs.env_file
+        values = parse_env(env.read_text(encoding="utf-8"))
+        assert usable(values["TELEGRAM_BOT_URL"])
+        values["TELEGRAM_BOT_URL"] = DERIVED_PLACEHOLDER
+        write_private(env, env_text(values))
+        calls = _doctor_calls(cs)
+        del calls[3:5]  # derive_env asks docker nothing: the value is to derive
+        doctor, _ = _plan(tmp_path, app.port, "doctor", calls, again=True)
     finally:
         app.close()
     diff = [(d.stack, d.name) for d in doctor.doctor_diff]
-    assert ("comms", "up") in diff, doctor.doctor_diff
+    assert diff == [("comms", "derive_env")], doctor.doctor_diff
     [failed] = [r for r in doctor.steps if r.status == "failed"]
     assert (failed.stack, failed.name) == ("aivis", "render_env"), doctor.steps
     assert failed.reason is not None

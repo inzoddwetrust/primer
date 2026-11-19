@@ -837,30 +837,30 @@ def test_a_services_ladder_validates_its_data_before_the_point_of_no_return(
     its ``build``; payments has none and no such step.
 
     Changed by DM-22: ``stop_for_migrate`` stands before every ``migrate``,
-    before the point of no return -- with no list it has nothing to do."""
+    before the point of no return -- with no list it has nothing to do.
+
+    Changed by DM-126 (owner's decision of 19.11): the ladder is in two
+    halves. ``pridem-services`` makes the first of every service, up to
+    ``data_copy``; the second, from ``stop_for_migrate`` on, runs after the
+    first half of the product's entries -- its tests -- and is made with
+    them."""
     made, _ = planned(tmp_path, "full")
     ladders = {
         s.name: [step.name for step in s.steps]
         for s in deferred(made, "pridem-services")
     }
-    assert ladders["comms"] == [
-        "render_env",
-        "build",
-        "derive_env",
-        "data_copy",
-        "stop_for_migrate",
-        "migrate",
-        "up",
-    ]
-    assert ladders["payments"] == [
-        "render_env",
-        "build",
-        "data_copy",
-        "stop_for_migrate",
-        "migrate",
-        "up",
-    ]
+    assert ladders["comms"] == ["render_env", "build", "derive_env", "data_copy"]
+    assert ladders["payments"] == ["render_env", "build", "data_copy"]
     assert list(ladders)[:3] == ["pridem-seams", "comms", "payments"]
+    later = [
+        (s.name, [step.name for step in s.steps])
+        for s in deferred(made, "pridem-product")
+        if s.name in ("comms", "payments")
+    ]
+    assert later == [
+        ("comms", ["stop_for_migrate", "migrate", "up"]),
+        ("payments", ["stop_for_migrate", "migrate", "up"]),
+    ]
 
 
 def test_a_product_with_derived_gets_derive_env_after_its_build(

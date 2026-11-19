@@ -295,7 +295,11 @@ def test_the_key_step_hands_the_console_its_block(tmp_path: Path) -> None:
     """The ceremony of a key (``deploy_key``): minted, not yet working -- the
     step tells the console the key whole, its page, read-only, and how long
     it waits; the journal keeps its lines as before. The pair: a key that
-    works tells the console nothing."""
+    works tells the console nothing.
+
+    Changed by DM-126: the key of the pair is one a run saw work steadily --
+    three looks in a row end the first ceremony; a key no run saw steady is
+    fresh in the next run and has its block again."""
     from itertools import count
 
     from plan_support import ListSink
@@ -318,7 +322,7 @@ def test_the_key_step_hands_the_console_its_block(tmp_path: Path) -> None:
             ).run()
 
     got: list[object] = []
-    clock = iter([0.0, 1.0, 2.0])
+    clock = iter([0.0, 1.0, 2.0, 3.0])
     step = DeployKey(
         ADDRESS, tmp_path, wait_s=100, clock=lambda: next(clock), sleep=lambda s: None
     )
@@ -327,6 +331,8 @@ def test_the_key_step_hands_the_console_its_block(tmp_path: Path) -> None:
         [
             keygen(tmp_path),
             lsremote(tmp_path, 128),
+            lsremote(tmp_path, 0),
+            lsremote(tmp_path, 0),
             lsremote(tmp_path, 0),
             lsremote(tmp_path, 0),
         ],

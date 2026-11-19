@@ -760,7 +760,8 @@ def test_the_final_check_reads_both_passes_green(tmp_path: Path) -> None:
 
 def test_derive_env_gives_the_provides_their_derived_value(tmp_path: Path) -> None:
     """D7: ``render_env``'s read back holds ``<derived>``; ``derive_env``'s
-    holds the value -- what ``up`` hands the plan's memory after health."""
+    holds the value -- what ``derive_env`` hands the plan's memory (DM-126;
+    it was ``up``, after health)."""
     made, _, root, fetched = comms_box(tmp_path)
     comms = service(tmp_path, comms_env(derived=True), provides=["TELEGRAM_BOT_URL"])
     env_file = root / "opt" / "comms" / "env" / "derive.env"

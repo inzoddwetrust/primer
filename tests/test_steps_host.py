@@ -135,6 +135,11 @@ def preflight_calls(
     return calls
 
 
+BUILDX_SAYS = "github.com/docker/buildx 0.30.1 0.30.1-0ubuntu1~24.04.1"
+BUILDX = call("docker", "buildx", "version", lines=(BUILDX_SAYS,))
+"""``verify`` of ``provision_host``: the plugin answers (DM-126)."""
+
+
 def ready_calls() -> list[FakeCall]:
     """A ready host: every check finds the fact, every verify reads it back."""
     quiet = [
@@ -153,6 +158,7 @@ def ready_calls() -> list[FakeCall]:
     provision.append(
         call("docker", "version", "--format", "{{.Server.Version}}", lines=("27.5.1",))
     )
+    provision.append(BUILDX)
     info = call("docker", "info", "--format", "{{.LoggingDriver}}", lines=("local",))
     networks = [internal(network) for network in NETWORKS]
     # daemon_json reads the running daemon's driver in check and in verify;
@@ -200,7 +206,12 @@ def test_probe_DM_12_second_run_calls_no_act(tmp_path: Path) -> None:
 
     The machine has two networks since DM-64, both internal: the scenario reads
     ``Internal`` of each (it read the name of ``pridem`` alone) and the pair
-    creates the missing one with ``--internal``."""
+    creates the missing one with ``--internal``.
+
+    Changed by DM-126 (owner's decision of 19.11): ``docker-buildx`` is one
+    of the host's packages, and ``verify`` of ``provision_host`` asks the
+    plugin its version (``docker buildx version``) after docker's -- the
+    scenario holds that command; what the probe asserts is as it was."""
     root = ready(tmp_path)
     main, final = host_steps(root, min_free_gib=0)
     outcome = run(main, ready_calls(), final)
@@ -312,7 +323,12 @@ def test_probe_DM_12_apt_always_passes_lock_timeout(
 ) -> None:
     """Every apt-get with the lock timeout. DM-54: the strict scenario holds the
     environment too -- both apt-get calls run with ``apt_get_env``, every other
-    command (``dpkg-query``, ``systemctl``, ``docker``) with none of its own."""
+    command (``dpkg-query``, ``systemctl``, ``docker``) with none of its own.
+
+    Changed by DM-126 (owner's decision of 19.11): ``docker-buildx`` is one
+    of the host's packages, and ``verify`` of ``provision_host`` asks the
+    plugin its version (``docker buildx version``) after docker's -- the
+    scenario holds that command; what the probe asserts is as it was."""
     root = box(tmp_path)
     env = apt_get_env(monkeypatch)
     timeout = f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_S}"
@@ -334,6 +350,7 @@ def test_probe_DM_12_apt_always_passes_lock_timeout(
     tail = [
         active("docker", True),
         call("docker", "version", "--format", "{{.Server.Version}}", lines=("27.5.1",)),
+        BUILDX,
     ]
     runner = FakeRunner(*before, *apt, *after, *tail)
     with runner:
@@ -466,7 +483,12 @@ def test_an_empty_record_of_paused_timers_starts_nothing(tmp_path: Path) -> None
 def test_probe_DM_12_package_verify_reads_dpkg_not_exit_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """apt-get exits 0 and the package is not there: verify is red."""
+    """apt-get exits 0 and the package is not there: verify is red.
+
+    Changed by DM-126 (owner's decision of 19.11): ``docker-buildx`` is one
+    of the host's packages, and ``verify`` of ``provision_host`` asks the
+    plugin its version (``docker buildx version``) after docker's -- the
+    scenario holds that command; what the probe asserts is as it was."""
     root = box(tmp_path)
     env = apt_get_env(monkeypatch)
     timeout = f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_S}"
@@ -499,6 +521,7 @@ def test_probe_DM_12_package_verify_reads_dpkg_not_exit_code(
     tail = [
         active("docker", True),
         call("docker", "version", "--format", "{{.Server.Version}}", lines=("27.5.1",)),
+        BUILDX,
     ]
     assert run([ProvisionHost(root)], [*before, *apt, *good, *tail]).code is ExitCode.OK
 

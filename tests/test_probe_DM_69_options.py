@@ -63,20 +63,32 @@ def _box(tmp: Path, options: list[str], token: str, *, gone: tuple[str, ...] = (
 
 def _render(made, root: Path):  # type: ignore[no-untyped-def]
     """``seams_check`` and comms' ``render_env``, then the product's with the
-    seams of comms in the plan's memory, as ``up`` of comms would put them."""
+    seams of comms in the plan's memory, as comms' environment read back
+    would put them.
+
+    Changed by DM-126 (owner's decision of 19.11; by the dispatcher's word,
+    before the change): the product's ladder is in two halves, and ``egress``
+    stands in the second, before ``up`` -- the helper takes it from there."""
     services = {s.name: s for s in deferred(made, "pridem-services")}
     outcome = run_stacks(
         [services["pridem-seams"], StackSteps("comms", [services["comms"].steps[0]])]
     )
     assert outcome.code is ExitCode.OK, outcome.steps
-    own = deferred(made, "pridem-product")[0]
+    entries = deferred(made, "pridem-product")
+    own = entries[0]
     render = own.steps[0]
     assert isinstance(render, RenderEnv) and isinstance(render.stack, Product)
     seams = [k for k, v in render.stack.env.items() if isinstance(v, Seam)]
     render.memory.healthy("comms", {k: f"value-of-{k.lower()}" for k in seams})
     outcome = run_stacks([StackSteps("aivis", [render])])
     assert outcome.code is ExitCode.OK, outcome.steps
-    [egress] = [step for step in own.steps if isinstance(step, Egress)]
+    [egress] = [
+        step
+        for stack in entries
+        if stack.name == own.name
+        for step in stack.steps
+        if isinstance(step, Egress)
+    ]
     return services, egress
 
 

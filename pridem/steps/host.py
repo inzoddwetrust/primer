@@ -70,7 +70,17 @@ MIN_FREE_DISK_GIB = 10
 QUIET_TIMEOUT_S = 1800
 """How long ``wait_host_quiet`` waits for ``apt-daily*`` services and cloud-init."""
 
-HOST_PACKAGES = ("docker.io", "docker-compose-v2", "ca-certificates", "locales")
+HOST_PACKAGES = (
+    "docker.io",
+    "docker-compose-v2",
+    "docker-buildx",
+    "ca-certificates",
+    "locales",
+)
+"""What the machine installs on the host. ``docker-buildx`` is not pulled in by
+``docker.io`` (a suggestion only): without it ``docker build`` -- the image of
+the tests -- is the classic builder, which reads no
+``<Dockerfile>.dockerignore`` (DM-126)."""
 APT_TIMERS = ("apt-daily.timer", "apt-daily-upgrade.timer")
 APT_SERVICES = ("apt-daily.service", "apt-daily-upgrade.service")
 ECHO_SERVICES = ("https://api.ipify.org", "https://checkip.amazonaws.com")
@@ -509,8 +519,15 @@ class ProvisionHost(_HostStep):
         if not _active(ctx, "docker"):
             raise StepFailed("docker-dead")
         _, version = _out(ctx, ["docker", "version", "--format", "{{.Server.Version}}"])
+        # the plugin answers, not only its package is there: what it says of
+        # itself, as it says it (DM-126)
+        _, buildx = _out(ctx, ["docker", "buildx", "version"])
         return Verified(
-            {"packages": _j(self.packages), "docker": version[0] if version else ""}
+            {
+                "packages": _j(self.packages),
+                "docker": version[0] if version else "",
+                "buildx": buildx[0] if buildx else "",
+            }
         )
 
 

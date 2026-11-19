@@ -20,8 +20,12 @@ compose's ``${VAR:?}`` for the build and is no value of anything. After it
 (``derive_env``, on the stack's own entry), ``derive`` runs in the ``app``
 image of this run, the file is written once with every key and read back with
 no placeholder left -- before ``packages``, ``data_copy``, ``tests``,
-``migrate`` and ``up`` start a container of the stack, and before its
-``provides`` reach the plan's memory after health. A stack with ``derived``
+``migrate`` and ``up`` start a container of the stack. Read back so, the file
+is what the stack will run on, and its ``provides`` reach the plan's memory
+there (``RenderEnv.provide``): from ``render_env`` of a stack with nothing to
+derive, else from ``derive_env`` -- before the stack's health, so that the
+product is built and tested ahead of any ``migrate`` (owner's decision of
+19.11, DM-126). A stack with ``derived``
 and no ``app`` in its own entry is refused by ``render_env``'s ``check``,
 before the stack's first ``act``.
 
@@ -118,6 +122,9 @@ from pridem.steps.passport import (
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 NO_IMAGE = "{key} is derived, and no image of the stack is given"
+SEAM_EARLY = "{names} of {from} are asked before its environment is read back"
+"""The text of ``seam-before-health``: the code keeps its name, a seam is
+ready with the provider's environment now, not its health (DM-126)."""
 OPTION_CODES: dict[str, str] = {
     "option-value": f"{{key}} is of an option that is off: its value is {LITERAL!r}",
     "option-literal": f"{{key}} is {LITERAL!r}, and its option is on or it has none",
@@ -322,7 +329,7 @@ class RenderEnv(Step):
         "edition-unknown": "{key}: edition {edition} is not in editions",
         "passport-key": "{key}: the passport has no source {passport_key}",
         "address-no-app": "{stack} has no app of its own to give an address of",
-        "seam-before-health": "{names} of {from} are asked before its health",
+        "seam-before-health": SEAM_EARLY,
         "derive-no-image": NO_IMAGE,
         **OPTION_CODES,
     }
@@ -471,6 +478,9 @@ class RenderEnv(Step):
         present = self._env.read_text(encoding="utf-8")
         if env_text({**resolved.values, **self._held(on_disk)}) != present:
             return needed
+        if not self._derivable():  # doctor runs check alone (DM-59 FIX)
+            self.read_back(waiting=())
+            self.provide()
         return CheckResult(False)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
@@ -560,12 +570,25 @@ class RenderEnv(Step):
         )
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        return self.read_back(waiting=self._derivable())
+        waiting = self._derivable()
+        verified = self.read_back(waiting=waiting)
+        if not waiting:  # nothing left to derive: the file is whole
+            self.provide()
+        return verified
 
     def provided(self) -> dict[str, str]:
         """The stack's ``provides`` as read back, for ``SeamMemory.healthy``."""
         names = self.stack.provides if isinstance(self.stack, Service) else []
         return {name: self.rendered[name] for name in names}
+
+    def provide(self) -> None:
+        """The stack's ``provides`` to the plan's memory, as just read back
+        with no placeholder left (contract 3 rule 21 as decided on 19.11,
+        DM-126). Called where the file is whole: by this step for a stack
+        with nothing to derive, by ``derive_env`` otherwise -- in ``verify``,
+        and in a ``check`` that found nothing to do, which is all ``doctor``
+        runs (DM-59 FIX)."""
+        self.memory.healthy(self.stack.name, self.provided())
 
 
 class AppImage(Protocol):
@@ -613,7 +636,7 @@ class DeriveEnv(Step):
             "terminal to be asked"
         ),
         "address-no-app": "{stack} has no app of its own to give an address of",
-        "seam-before-health": "{names} of {from} are asked before its health",
+        "seam-before-health": SEAM_EARLY,
         "derive-no-image": NO_IMAGE,
         "derive-failed": "deriving {key} failed — exit code {exit_code}",
         "derive-empty": "deriving {key} printed {lines} lines, not one value",
@@ -655,6 +678,8 @@ class DeriveEnv(Step):
         if running_image(ctx, self.build.compose, app) != image:
             return needed
         self._image = image
+        render.read_back(waiting=())
+        render.provide()  # doctor runs check alone (DM-59 FIX)
         return CheckResult(False)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
@@ -736,6 +761,7 @@ class DeriveEnv(Step):
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         verified = self.render.read_back(waiting=())
+        self.render.provide()  # the file is whole: the seams are ready
         fact: dict[str, Json] = {
             **verified.fact,
             "derived": list[Json](self.render._derivable()),

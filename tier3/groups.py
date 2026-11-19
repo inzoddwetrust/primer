@@ -84,10 +84,14 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_a_reset_of_the_blank_makes_its_database_new", "c"),
     ("test_tier3_a_project_verb_runs_in_its_service", "c"),
     ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "c"),
+    ("test_tier3_a_failed_job_runs_on_the_repeat", "c"),  # DM-126
     ("test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked", "c"),
     ("test_tier3_destroy_takes_the_blank_off_the_box", "c"),
     ("test_tier3_destroy_all_wipes_the_persistent_volume", "c"),
-    # d -- a clean box: the blank without its service, then with it
+    # d -- a clean box: a first install red at the product's tests and its
+    # destroy (DM-126), then the blank without its service, then with it
+    ("test_tier3_red_tests_stop_before_any_migrate", "d"),
+    ("test_tier3_destroy_after_an_interrupted_install", "d"),
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),
     # the last of d: the apt timers on (DM-105) -- apt may hold dpkg after it
     ("test_tier3_doctor_is_empty_with_the_apt_timers_on", "d"),

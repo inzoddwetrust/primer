@@ -314,17 +314,23 @@ def product_value(product: Product, passport: Passport, name: str) -> str:
 
 
 class SeamMemory:
-    """Values of the services' ``provides`` for the time of one plan."""
+    """Values of the services' ``provides`` for the time of one plan: a
+    provider's are there once its ``next.env`` is read back with no
+    placeholder left -- its environment is what it will run on (owner's
+    decision of 19.11, DM-126; it was "after its health")."""
 
     def __init__(self) -> None:
         self._values: dict[str, dict[str, str]] = {}
 
     def healthy(self, provider: str, values: Mapping[str, str]) -> None:
-        """``provider`` passed its health: its ``provides`` are ready."""
+        """``provider``'s environment is read back whole: its ``provides``
+        are ready. Its health is not asked here -- the consumer's ``up``
+        comes after the provider's in the ladder."""
         self._values[provider] = dict(values)
 
     def values(self, provider: str, names: list[str]) -> dict[str, str]:
-        """The seams ``names`` of ``provider``; ``SeamNotReady`` before health."""
+        """The seams ``names`` of ``provider``; ``SeamNotReady`` before its
+        environment is ready."""
         ready = self._values.get(provider)
         if ready is None:
             raise SeamNotReady(provider, names)

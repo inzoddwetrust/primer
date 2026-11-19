@@ -314,7 +314,7 @@ def test_a_verb_s_service_is_looked_for_in_the_compose_of_its_entry(
 
 def test_a_service_gives_its_asked_value_by_a_seam(tmp_path: Path) -> None:
     """Pass 4b: the provider's ``provides`` names a key of source ``asked``
-    -- its value is the passport's, it goes to the seam memory after health,
+    -- its value is the passport's, it goes to the seam memory with its env,
     and the product's ``.env`` gets it; the value is a secret of the run (the
     journal's text is cleaned of it). The live check is tier 3's."""
     from env_support import box, passport_data, printed, read_env, render, run, service

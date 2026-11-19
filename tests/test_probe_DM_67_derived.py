@@ -28,7 +28,7 @@ from plan_support import ListSink
 from services_support import deferred, planned
 
 from pridem.events import Json
-from pridem.plan import Plan, StackSteps
+from pridem.plan import Deferred, Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
 from pridem.steps.build import Build
@@ -194,7 +194,14 @@ def test_probe_DM_67_service_derived_seam_reaches_the_product(tmp_path: Path) ->
 
     Changed by DM-79 (``script``; by the dispatcher's word, before the change):
     throwaway containers drop every capability; an image of this run is never
-    pulled."""
+    pulled.
+
+    Changed by DM-126 (owner's decision of 19.11; by the dispatcher's word,
+    before the change): the ladder of comms is in two halves -- up to
+    ``data_copy``, and ``up`` after the product's first half -- and the
+    product takes the seam once comms' environment is read back whole, before
+    comms' health. The commands and their order are as they were; so is what
+    the probe asserts."""
     app = LiveApp()
     try:
         made, root = planned(
@@ -210,7 +217,6 @@ def test_probe_DM_67_service_derived_seam_reaches_the_product(tmp_path: Path) ->
             "build",
             "derive_env",
             "data_copy",
-            "up",
         ]
         build, derive = ladder[1], ladder[2]
         assert isinstance(build, Build) and isinstance(derive, DeriveEnv)
@@ -218,9 +224,12 @@ def test_probe_DM_67_service_derived_seam_reaches_the_product(tmp_path: Path) ->
         cs = build.compose
         app.health = health(service="comms", release=cs.ref, commit=cs.commit)
         app.health["alembic_head"] = None
-        product = deferred(made, "pridem-product")[0]
+        entries = deferred(made, "pridem-product")
+        product = entries[0]
         render = product.steps[0]
         assert isinstance(render, RenderEnv) and product.name == "aivis"
+        [later] = [stack for stack in entries if stack.name == "comms"]
+        assert [step.name for step in later.steps] == ["up"]
         ticks = count()
         with FakeRunner(*script(cs, root / "opt" / "comms" / "env")) as runner:
             outcome = Plan(
@@ -228,6 +237,8 @@ def test_probe_DM_67_service_derived_seam_reaches_the_product(tmp_path: Path) ->
                     services["pridem-seams"],
                     services["comms"],
                     StackSteps("aivis", [render]),
+                    # a second half of an entry is made by a deferred stack
+                    Deferred("pridem-product", lambda: [later], after="fetch_root"),
                     StackSteps("root", [], root=True),
                 ],
                 mode="install",

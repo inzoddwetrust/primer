@@ -138,15 +138,19 @@ def test_persistent_volumes_stay_and_are_named(tmp_path: Path) -> None:
 def test_a_volume_the_box_cannot_place_is_never_removed(
     tmp_path: Path, why: str
 ) -> None:
-    """No ``state.json``, or a ``current`` whose ``primer.yaml`` is gone: the
-    volumes cannot be told persistent or not -- red before any removal (no
-    ``rm`` in the script); the pair: the same box with no labelled volume
-    removes its containers."""
+    """No ``primer.yaml`` of a release to read -- with ``state.json`` or
+    without it: the volumes cannot be told persistent or not -- red before
+    any removal (no ``rm`` in the script); the pair: the same box with no
+    labelled volume removes its containers.
+
+    Changed by DM-126: ``no-state`` loses the release's ``primer.yaml`` too.
+    Without ``state.json`` alone the box is an install that never reached
+    ``finalize``: its release on the disk names the entries, and the volumes
+    are placed (``test_probe_DM_126_first_install.py``)."""
     root, box = box_with_release(tmp_path, set())
     if why == "no-state":
         (box.root / "state.json").unlink()
-    else:
-        (root / "opt" / "aivis" / "current" / "primer.yaml").unlink()
+    (root / "opt" / "aivis" / "current" / "primer.yaml").unlink()
     with (
         box.lock("destroy"),
         FakeRunner(docker(), *listed(volumes=("db\taivis",))) as r,

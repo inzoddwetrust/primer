@@ -1695,11 +1695,18 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     """DM-46 stage A on the blank's own service (DM-59), on the box the
     earlier tests left. ``primer-blank-service`` is in every edition of the
     blank: it goes up by its own ladder (``render_env -> build -> derive_env
-    -> data_copy -> up``) before the product, the product's ``profile/``
-    copied to it and validated by its image; a profile its ``validate``
-    refuses is red with the service and the product left running as they
-    were; an edition that leaves it out installs nothing of it and names it
-    as ``left``; ``doctor`` is empty on each green box.
+    -> data_copy``, then ``up``) before the product does, the product's
+    ``profile/`` copied to it and validated by its image; a profile its
+    ``validate`` refuses is red with the service and the product left running
+    as they were; an edition that leaves it out installs nothing of it and
+    names it as ``left``; ``doctor`` is empty on each green box.
+
+    Changed by DM-126 (owner's decision of 19.11; by the dispatcher's word,
+    before the change): the ladder is in two halves. It asserted every step
+    of the service, ``up`` among them, before the product's ``render_env``;
+    now the service's steps up to ``data_copy`` stand before it, the
+    product's tests before the first ``migrate`` and before the service's
+    ``up``, and the product's ``up`` after the service's.
 
     Changed by DM-59: the service was a copy of the blank as ``notes``; it is
     the blank's published service now, which the blank depends on in every
@@ -1720,8 +1727,13 @@ def test_tier3_a_service_of_the_edition_goes_up_before_the_product(
     )
     assert green.result == "green", printed
     order = [(s.stack, s.name) for s in green.steps if s.phase == "main"]
-    for name in ("render_env", "build", "derive_env", "data_copy", "up"):
+    for name in ("render_env", "build", "derive_env", "data_copy"):
         assert order.index((SERVICE, name)) < order.index((STACK, "render_env"))
+    # DM-126: the product's tests before the first migrate, its up after the
+    # service's
+    assert order.index((STACK, "tests")) < order.index((STACK, "migrate")), order
+    assert order.index((STACK, "tests")) < order.index((SERVICE, "up")), order
+    assert order.index((SERVICE, "up")) < order.index((STACK, "up")), order
     facts = {(s.stack, s.name): s.verify or {} for s in green.steps}
     data = facts[(SERVICE, "data_copy")]["data"]
     assert isinstance(data, dict) and set(data) == {"profile"}, data
@@ -3183,6 +3195,121 @@ BOT_TOKEN = "dm86-asked-" + "q" * 24
 """The service's ``asked`` value its seam gives the product (pass 4b)."""
 
 
+JOB_ONCE = "files-init"
+JOB_ONCE_MARK = "/srv/files/dm126-init"
+
+
+def _blank_with_a_job_that_fails_once(tmp: Path, mirror: Path) -> None:
+    """The blank, consistent as a whole: in the entry ``primer-blank-files``
+    the job ``files-init`` (the image the entry already runs, the volume
+    ``files``, no healthcheck, on ``files`` healthy) -- its first run leaves a
+    mark on the volume and exits 1, every later one finds the mark and exits
+    0. The entry's only other service is the one the job needs: it is up
+    before the job fails. And the measure of the builder: a test that fails,
+    kept out of the build's context by ``Dockerfile.dockerignore`` alone --
+    the file BuildKit reads in place of ``.dockerignore`` and the classic
+    builder does not read at all."""
+    copy = _copy_of_blank(tmp, mirror, "job-once")
+    _replace_once(
+        copy / "primer.yaml",
+        "    persistent: true\n",
+        f"    persistent: true\n    jobs: {{ init: {{ service: {JOB_ONCE} }} }}\n",
+    )
+    image = (
+        "postgres:16-alpine@sha256:"
+        "f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36"
+    )
+    run = f"test -e {JOB_ONCE_MARK} || {{ touch {JOB_ONCE_MARK}; exit 1; }}"
+    _replace_once(
+        copy / "deploy" / "files-compose.yml",
+        "\nvolumes:\n",
+        f"  {JOB_ONCE}:\n"
+        f"    image: {image}\n"
+        f"    command: {json.dumps(['sh', '-c', run])}\n"
+        "    volumes:\n      - files:/srv/files\n"
+        "    depends_on:\n      files: { condition: service_healthy }\n"
+        "\nvolumes:\n",
+    )
+    backend = copy / "backend"
+    (backend / "tests" / PLANTED_TEST).write_text(PLANTED_TEST_BODY, encoding="utf-8")
+    ignored = (backend / ".dockerignore").read_text(encoding="utf-8")
+    (backend / "Dockerfile.dockerignore").write_text(
+        ignored + f"tests/{PLANTED_TEST}\n", encoding="utf-8"
+    )
+    _push(copy, mirror, "DM-126: a job that fails once; Dockerfile.dockerignore")
+
+
+def _files_up(verdict: Verdict) -> dict[str, object]:
+    [up] = [s for s in verdict.steps if (s.stack, s.name) == (FILES, "up")]
+    return dict(up.verify or {})
+
+
+def test_tier3_a_failed_job_runs_on_the_repeat(tmp_path: Path, mirror: Path) -> None:
+    """DM-126, on the box the earlier tests left: a copy of the blank whose
+    entry ``primer-blank-files`` has a job that fails on its first run. The
+    update is red at ``up`` of that entry by the job's command -- its service
+    ``files`` up already, on the new commit's configuration. The same update
+    again: the job runs, alone -- the fact of ``up`` names it, ``files`` is
+    the container the red update left, not made anew -- and the box is
+    green; before DM-126 the repeat was green without the job. The pair: one
+    more update with nothing changed runs no job, and ``doctor`` is empty.
+
+    The builder, measured into the run's output first (par0 14.3): what the
+    plugin says of itself (the fact of ``provision_host``), the lines of
+    ``build`` in the journal that name provenance or bake, the totals of the
+    tests. Then asserted: the tests of the copy are green -- the test that
+    fails is kept out of the context by ``Dockerfile.dockerignore`` alone, so
+    the image of the tests was built by BuildKit."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    _blank_with_a_job_that_fails_once(tmp_path, mirror)
+    passport = _passport(tmp_path, version=48)
+    red, printed = _install(passport, "update")
+    facts = {(s.stack, s.name): s.verify or {} for s in red.steps}
+    journal = Path("/opt/pridem") / str(red.log_ref)
+    built = [
+        line[:300]
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if '"build"' in line and ("provenance" in line or "bake" in line)
+    ]
+    host = facts.get(("pridem-host", "provision_host"), {})
+    tests = facts.get((STACK, "tests"), {})
+    print(
+        "DM-126 measure: the builder",
+        {"buildx": host.get("buildx"), "docker": host.get("docker"),
+         "build lines": built[:4], "tests": tests.get("junit"),
+         "app image": facts.get((STACK, "build"), {}).get("app_image")},
+    )  # fmt: skip
+    assert host.get("buildx"), host
+    junit = tests.get("junit")
+    assert isinstance(junit, dict), printed
+    total, failed_tests = junit["total"], junit["failed"]
+    assert isinstance(total, int) and total > 0 and failed_tests == 0, (
+        f"the planted test ran: Dockerfile.dockerignore was not read\n{printed}"
+    )
+    assert red.result == "red", printed
+    [failed] = [s for s in red.steps if s.status == "failed"]
+    assert (failed.stack, failed.name) == (FILES, "up"), red.steps
+    assert failed.reason is not None
+    assert failed.reason.code == "command-failed", failed.reason
+    assert JOB_ONCE in failed.reason.model_dump()["argv"], failed.reason
+    assert not [i for i in red.report.incomplete if i.what == "restore"], printed
+    # the red update made ``files`` anew before the job -- a new commit is
+    # another configuration; the repeat finds it up and must leave it
+    files = _container(FILES, "files")
+
+    again, printed = _install(passport, "update")  # the same commit, repeated
+    print("DM-126 measure: the repeat", _files_up(again))
+    assert again.result == "green", printed
+    assert _files_up(again).get("jobs") == [JOB_ONCE], again.steps
+    assert _container(FILES, "files") == files
+    # the pair: the job ended well -- nothing to run, nothing to say
+    idle, printed = _install(passport, "update")
+    assert idle.result == "green", printed
+    assert "jobs" not in _files_up(idle), idle.steps
+    diff, failed_checks, doctor = _doctor(passport)
+    assert (diff, failed_checks) == ([], []), doctor.model_dump_json()
+
+
 def _service_giving_its_asked(tmp: Path) -> str:
     """A copy of the service at ``v1.0.0`` whose ``SERVICE_BOT_TOKEN`` --
     source ``asked`` -- is in ``provides``, consistent as a whole (par0
@@ -3423,18 +3550,122 @@ def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     assert again.result == "green", printed
 
 
+PLANTED_TEST = "test_planted_dm_126.py"
+PLANTED_TEST_BODY = """\
+def test_planted_dm_126() -> None:
+    raise AssertionError("planted by DM-126")
+"""
+"""A test of the blank's backend that fails, whatever the box."""
+
+
+def _blank_with_a_red_test(tmp: Path, mirror: Path) -> None:
+    """The blank with one more test, which fails: nothing else of it changes."""
+    copy = _copy_of_blank(tmp, mirror, "red-test")
+    planted = copy / "backend" / "tests" / PLANTED_TEST
+    planted.write_text(PLANTED_TEST_BODY, encoding="utf-8")
+    _push(copy, mirror, "DM-126: the blank with a red test")
+
+
+def _services_of(project: str) -> list[str]:
+    """The compose services of every container of ``project``, running or
+    not, sorted."""
+    label = '{{.Label "com.docker.compose.service"}}'
+    found = _stdout(
+        ["docker", "ps", "-a", "--format", label,
+         "--filter", f"label=com.docker.compose.project={project}"]
+    )  # fmt: skip
+    return sorted(found)
+
+
+def _labelled(kind: str) -> list[str]:
+    """What docker lists of ``kind`` under the machine's label."""
+    return _stdout(["docker", *kind.split(), "--filter", "label=pridem.stack"])
+
+
+def test_tier3_red_tests_stop_before_any_migrate(tmp_path: Path, mirror: Path) -> None:
+    """DM-126, the first of group ``d``, on a clean box: a first install of
+    the blank whose tests are red. The verdict is red at ``tests`` of the
+    product with one failed test; the service's environment was whole before
+    the product rendered its own; no ``stop_for_migrate``, ``migrate``,
+    ``up`` or ``seeds`` of any stack began; no restore is needed; no
+    container of the service, none of the product's app or frontend; no
+    ``current``, no ``state.json``. The pair is the probe of DM-59, next in
+    the group: the same ladder, green, goes through ``migrate`` and ``up``.
+    Measured into the run's output first (par0 14.3): the steps of the
+    verdict with their status, the containers the red install left."""
+    assert not (OPT / "current").exists(), "a clean box"
+    _blank_with_a_red_test(tmp_path, mirror)
+    red, printed = _install(_passport(tmp_path, version=30))
+    ladder = [(s.stack, s.name, s.status) for s in red.steps if s.phase == "main"]
+    left = {project: _services_of(project) for project in (STACK, SERVICE, FILES)}
+    print("DM-126 measure: the red install", ladder, "containers", left)
+    assert red.result == "red", printed
+    [failed] = [s for s in red.steps if s.status == "failed"]
+    assert (failed.stack, failed.name) == (STACK, "tests"), printed
+    assert failed.reason is not None and failed.reason.code == "tests:failed", printed
+    assert failed.reason.model_dump()["failed"] == 1, failed.reason
+    order = [(stack, name) for stack, name, _ in ladder]
+    assert order.index((SERVICE, "derive_env")) < order.index((STACK, "render_env"))
+    assert order.index((STACK, "render_env")) < order.index((STACK, "tests")), order
+    late = ("stop_for_migrate", "migrate", "up", "seeds")
+    begun = [step for step in ladder if step[1] in late and step[2] != "skipped"]
+    assert begun == [], begun
+    assert not [i for i in red.report.incomplete if i.what == "restore"], printed
+    assert left[SERVICE] == [], left
+    assert "app" not in left[STACK] and "frontend" not in left[STACK], left
+    assert not (OPT / "current").exists()
+    assert not Path("/opt/pridem/state.json").exists()
+
+
+def test_tier3_destroy_after_an_interrupted_install() -> None:
+    """DM-126, on the box the red install left: no ``state.json``, no
+    ``current``, a release on the disk and a labelled volume of the product
+    (the database the tests ran in). ``destroy`` takes it all: green, no
+    volume kept, nothing labelled left, ``/opt/primer-blank`` down to its
+    mark and ``minted.yaml`` -- the volume's entry is named by ``primer.yaml``
+    of the release on the disk. Before DM-126 this was
+    ``persistent-unknown``. The pair of the persistent side is
+    ``test_tier3_destroy_takes_the_blank_off_the_box`` (group ``c``)."""
+    assert not Path("/opt/pridem/state.json").exists(), "the red install runs first"
+    assert not (OPT / "current").exists()
+    releases = sorted(path.name for path in (OPT / "releases").iterdir())
+    before = _labelled("volume ls -q")
+    print("DM-126 measure: before destroy", {"releases": releases, "volumes": before})
+    assert releases and f"{STACK}_pgdata" in before, (releases, before)
+    verdict, printed = _verdict_of("destroy", "--confirm", "tier3-env")
+    assert verdict.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    assert facts[("pridem-destroy", "remove_objects")]["kept_volumes"] == [], facts
+    for kind in ("ps -aq", "network ls -q", "volume ls -q", "image ls -q"):
+        assert _labelled(kind) == [], kind
+    assert sorted(str(p) for p in OPT.rglob("*")) == [
+        str(OPT / ".pridem"),
+        str(OPT / "env"),
+        str(MINTED),
+    ]
+
+
 def test_probe_DM_59_product_gets_the_seams_of_its_service_after_health(
     tmp_path: Path, mirror: Path
 ) -> None:
     """DM-59 on the box ``destroy`` left -- clean of every stack. The pair
     first: the blank in an edition without its service installs nothing of
     it -- no release, no container, none of its seams in the product's env.
-    Then the blank at its pin: the service goes up, healthy, before the
-    product renders its env; the product's container holds the values of the
-    service's three seams -- its address, its minted token and the key its
-    ``derive`` computed in the service's own image -- equal to what the
-    service's env holds; ``seams_verify`` reads both ends live. The time of
-    both installs goes to the run's output (par0 14.3)."""
+    Then the blank at its pin: the service's environment is whole -- its
+    ``derive_env`` done -- before the product renders its env; the product's
+    tests run before the first ``migrate`` and before the service goes up,
+    and the product goes up after the service; the product's container holds
+    the values of the service's three seams -- its address, its minted token
+    and the key its ``derive`` computed in the service's own image -- equal
+    to what the service's env holds; ``seams_verify`` reads both ends live.
+    The time of both installs goes to the run's output (par0 14.3).
+
+    Changed by DM-126 (owner's decision of 19.11, which takes back the one of
+    31.10; by the dispatcher's word, before the change): it asserted "the
+    service goes up, healthy, before the product renders its env". A seam is
+    ready with the provider's environment now -- two halves of the ladder,
+    the tests of the product before the point of no return; the values the
+    product holds are asserted as before."""
     assert not (OPT / "current").exists(), "destroy runs first"
 
     _blank_without_service(tmp_path, mirror, step=10)
@@ -3458,7 +3689,10 @@ def test_probe_DM_59_product_gets_the_seams_of_its_service_after_health(
     )
     assert green.result == "green", printed
     order = [(s.stack, s.name) for s in green.steps if s.phase == "main"]
-    assert order.index((SERVICE, "up")) < order.index((STACK, "render_env")), order
+    assert order.index((SERVICE, "derive_env")) < order.index((STACK, "render_env"))
+    assert order.index((STACK, "tests")) < order.index((STACK, "migrate")), order
+    assert order.index((STACK, "tests")) < order.index((SERVICE, "up")), order
+    assert order.index((SERVICE, "up")) < order.index((STACK, "up")), order
     assert order.index((SERVICE, "derive_env")) < order.index((SERVICE, "up")), order
     facts = {(s.stack, s.name): s.verify or {} for s in green.steps}
     assert (

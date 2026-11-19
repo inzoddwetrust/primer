@@ -6,8 +6,10 @@ One function makes the plan of ``install``, ``update``, ``deploy``,
 ``primer.yaml`` has no steps of its own.
 
     host -> passport -> [destroy: reinstall] -> network -> timers -> sources ->
-    dependencies -> services -> <the product's entries> -> edge -> frontend ->
-    finalize -> types (DM-63: after the gate; refusals left undone)
+    dependencies -> <before the first migrate: the services' entries, then the
+    product's> -> <from the first migrate on: the services' entries, then the
+    product's> -> edge -> frontend -> finalize -> types (DM-63: after the
+    gate; refusals left undone)
     finally: stopped (what stop_for_migrate stopped, when migrate never
     acted), host (timers back), gc
 
@@ -25,15 +27,20 @@ What a stack needs and when it is known:
   never asked of its remote;
 - ``services`` -- deferred on ``fetch_services``, which read their
   ``primer.yaml``: ``seams_check`` first, before any ``act`` of a stack; then
-  each co-located service of the edition in the order of ``installed``, one
-  stack per entry, the ladder ``render_env -> build -> [derive_env] ->
-  data_copy -> stop_for_migrate -> migrate -> up`` (``steps/services.py``);
+  the first half of each co-located service of the edition in the order of
+  ``installed``, one stack per entry: ``render_env -> build -> [derive_env]
+  -> data_copy`` (``steps/services.py``);
 - the product -- deferred: its ``primer.yaml@target``, read by ``fetch_root``.
-  One stack per entry of ``stacks``: the entry named as the product first, with
-  ``render_env`` at its head and ``egress`` before its ``up``; then the other
-  entries; ``tests`` and ``migrate`` where the entry declares them, each
-  ``migrate`` after its ``stop_for_migrate`` (DM-22); then
-  ``seams_verify``, every seam read from the live providers;
+  One stack per entry of ``stacks``, the entry named as the product first,
+  then the others. The first half of every entry: ``render_env`` at the head
+  of the first, ``build -> [derive_env] -> packages -> tests``. Then the
+  second half of every service's entry, ``stop_for_migrate -> migrate -> up
+  -> seeds``, and of every entry of the product, ``stop_for_migrate ->
+  migrate -> egress -> up -> seeds`` -- ``migrate`` where the entry declares
+  it, each after its ``stop_for_migrate`` (DM-22), ``egress`` on the first;
+  then ``seams_verify``, every seam read from the live providers. An entry
+  is one stack of the verdict in both halves: the steps of a half are its
+  own, so a pair ``(stack, name)`` is still one step;
 - ``derive_env`` -- on the own entry of a stack (service or product) with a
   ``derived`` value, right after its ``build``: ``derive`` runs in the ``app``
   image ``build`` found or made in this run, before anything starts a
@@ -53,9 +60,12 @@ repository is fetched there -- and its ``name`` is that name, or ``fetch_root``
 refuses it (``name-mismatch``): the env and the override are under
 ``/opt/<name>`` of ``primer.yaml``, and one product has one directory.
 
-The point of no return of a plan is the first ``migrate`` that acts -- a
-service's, when its head changes, before the product's tests (see the KNOWN
-CEILING at ``services``).
+The point of no return of a plan is the first ``migrate`` that acts, of a
+service or of the product. The tests of every entry of the product run before
+it (owner's decision of 19.11, DM-126): red tests leave every stack as it ran.
+The product's ``render_env`` takes a seam's value once the provider's
+``next.env`` is read back with no placeholder left -- before the provider's
+health; the product's ``up`` still comes after the provider's.
 """
 
 import configparser
@@ -191,8 +201,12 @@ class _Known:
     stopped: Stopped = field(default_factory=Stopped)
     """What ``stop_for_migrate`` stopped; ``start_stopped`` reads it (DM-22)."""
     fresh: FreshKeys | None = None
-    """The keys minted in this run (DM-111): ``deploy_key`` fills it, the steps
-    that go to a repository read it."""
+    """The fresh keys of this run (DM-111, DM-126): ``deploy_key`` fills it,
+    the steps that go to a repository read it."""
+    later: list[StackSteps] = field(default_factory=list)
+    """The second half of the services' entries -- from ``stop_for_migrate``
+    on: made by ``services`` with the first, run after the first half of the
+    product's entries (DM-126)."""
 
 
 @dataclass(frozen=True)
@@ -362,7 +376,8 @@ def deploy_plan(
         return [StackSteps(machine.ROLLBACK, [check])]
 
     def services() -> Sequence[StackSteps] | None:
-        """``seams_check`` and the ladder of each service."""
+        """``seams_check`` and the first half of each service's ladder; the
+        second goes to ``known.later``, for ``entries`` to run."""
         found = target()
         passport = _passport(fetched)
         resolved = known.resolved
@@ -381,29 +396,10 @@ def deploy_plan(
                 [SeamsCheck(product, resolved.services, fetched, root)],
             )
         ]
-        # KNOWN CEILING (DM-46): a service migrates before the product's tests.
-        # 1. Mechanism: the product's render_env takes the seams of the live
-        #    services, and its build reads that env; so each service runs
-        #    render_env -> build -> [derive_env] -> data_copy ->
-        #    stop_for_migrate -> migrate -> up
-        #    before the product's build and tests (TZ 6.2, protocol 4.5). Red
-        #    tests of the product after a service's migrate that acted are
-        #    past the point of no return: "restore needed".
-        # 2. Status: acknowledged by design.
-        # 3. Task: none -- tests run on the role test only, where a restore is
-        #    cheap; no card yet.
-        # 4. Trigger: red tests of the product after a service's migrate acted
-        #    on a test box (the verdict: migrate of a service ok and acted,
-        #    tests of the product failed).
-        # 5. Agreed fix: on update, while the service already runs, build and
-        #    test the product on the seams' previous values before the
-        #    service's migrate.
-        # 6. Rejected: the product's build and tests first -- its env needs the
-        #    live service's seams; placeholders in env -- a build on values
-        #    that are not the instance's.
+        known.later = []
         for name in here:
             service = resolved.services[name]
-            made += _service_stacks(
+            before, after = _service_stacks(
                 service,
                 release=resolved.releases[name],
                 tag=resolved.lock.dependencies[name].tag if resolved.lock else "",
@@ -418,6 +414,8 @@ def deploy_plan(
                 ),
                 product=product,
             )
+            made += before
+            known.later += after
         return made
 
     def _service_stacks(
@@ -428,8 +426,10 @@ def deploy_plan(
         commit: str,
         items: Sequence[DataItem],
         product: Product,
-    ) -> list[StackSteps]:
-        """One stack per entry of a service: its ladder (``steps/services.py``)."""
+    ) -> tuple[list[StackSteps], list[StackSteps]]:
+        """One stack per entry of a service, in two halves: up to
+        ``data_copy``, and from ``stop_for_migrate`` on
+        (``steps/services.py``)."""
         render = RenderEnv(
             service,
             product=product,
@@ -441,7 +441,8 @@ def deploy_plan(
         )
         first = own_entry(service)
         names = [first, *(n for n in service.stacks if n != first)]
-        made: list[StackSteps] = []
+        before: list[StackSteps] = []
+        after: list[StackSteps] = []
         for index, entry in enumerate(names):
             stage = service.stacks[entry]
             mine = items if index == 0 else ()
@@ -471,6 +472,8 @@ def deploy_plan(
                     root=root,
                 ),
             ]
+            before.append(StackSteps(entry, steps))
+            steps = []
             if stage.migrate is not None and stage.app is not None:
                 migrate = Migrate(
                     service,
@@ -490,15 +493,13 @@ def deploy_plan(
                     ref=tag,
                     commit=commit,
                     root=root,
-                    memory=known.memory,
-                    render=render,
                     fetched=fetched,
                     points=points(product),
                 )
             )
             steps += _seeds(service, entry, release, tag, commit)
-            made.append(StackSteps(entry, steps))
-        return made
+            after.append(StackSteps(entry, steps))
+        return before, after
 
     def _seeds(
         stack: Product | Service, entry: str, release: Path, ref: str, commit: str
@@ -561,6 +562,7 @@ def deploy_plan(
         first = own_entry(product)
         names = [first, *(n for n in product.stacks if n != first)]
         made: list[StackSteps] = []
+        after: list[StackSteps] = []
         for index, entry in enumerate(names):
             stage = product.stacks[entry]
             build = Build(
@@ -604,6 +606,8 @@ def deploy_plan(
                         fetched=fetched,
                     )
                 )
+            made.append(StackSteps(entry, steps))
+            steps = []
             if stage.migrate is not None and stage.app is not None:
                 migrate = Migrate(
                     product,
@@ -625,14 +629,15 @@ def deploy_plan(
                     ref=ref,
                     commit=commit,
                     root=root,
-                    memory=known.memory,
-                    render=render,
                     fetched=fetched,
                     points=points(product),
                 )
             )
             steps += _seeds(product, entry, release, ref, commit)
-            made.append(StackSteps(entry, steps))
+            after.append(StackSteps(entry, steps))
+        # every test of the product is behind, no migrate has run: the
+        # services from stop_for_migrate on, then the product (DM-126)
+        made += [*known.later, *after]
         made.append(
             StackSteps(machine.SEAMS, [_seams_verify(product, release, ref, commit)])
         )

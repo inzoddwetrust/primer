@@ -13,12 +13,16 @@ Everything else goes, in this order:
 - ``remove_objects`` -- the point of no return: every container, network,
   volume and image labelled ``pridem.stack`` (the stacks', the edge's, the
   proxy's, the machine's networks), but the persistent volumes, chosen by
-  their label ``pridem.stack=<entry>``. An entry is persistent when
-  ``primer.yaml`` of ``current`` of a stack ``state.json`` names says so, or
+  their label ``pridem.stack=<entry>``. An entry is persistent when a
+  ``primer.yaml`` of its stack on the box says so -- of ``current`` of a stack
+  ``state.json`` names, or of any release on the disk of a stack with the
+  machine's mark (``/opt/<stack>/releases/*``: a first install that stopped
+  before ``finalize`` left no ``state.json`` and no ``current``, and its
+  volumes are still the entries' of the release it fetched, DM-126) -- or
   ``/opt/pridem/kept-volumes.json`` -- written before the first ``docker rm``
   and kept by ``forget_state`` -- names its volume: a repeat after a failure
   and the next ``destroy`` know what stays. A labelled volume whose entry
-  neither source names refuses the step before anything is removed
+  no source names refuses the step before anything is removed
   (``persistent-unknown``): a volume of people's files is never removed by
   guess; where the sources differ, persistent wins. ``--new-secrets`` with a
   volume kept refuses too (``new-secrets-kept``): a new password against the
@@ -77,6 +81,8 @@ UNITS = (*TIMERS, "pridem-gc.service", "pridem-ssl-renew.service")
 KEPT = "kept-volumes.json"
 """``/opt/pridem/kept-volumes.json``: the volumes ``destroy`` keeps and their
 entries, ``{"schema": 1, "volumes": {volume: entry}}``."""
+RELEASES = "releases"
+"""``/opt/<stack>/releases``: the worktrees of a stack (``steps/sources.py``)."""
 MACHINE_DIRS = ("edge", "egress")
 """The machine's own stacks' directories under ``/opt/pridem``."""
 MACHINE_ENTRIES = frozenset(
@@ -124,23 +130,49 @@ class _Objects:
         )
 
 
-def _entries(root: Path, box: Box) -> tuple[set[str], set[str]]:
-    """The entries of every stack ``state.json`` names, by ``primer.yaml`` of
-    its ``current``: the persistent ones and the others -- with the
-    machine's own stacks (``MACHINE_ENTRIES``) among the others. A stack
-    whose release cannot be read gives neither -- its volumes stay
-    unplaced."""
-    persistent: set[str] = set()
-    others: set[str] = set(MACHINE_ENTRIES)
+def _releases(root: Path, box: Box) -> list[tuple[str, Path]]:
+    """Every release of the box a stack's ``primer.yaml`` may be read from,
+    with its stack: ``current`` of each stack ``state.json`` names, and each
+    release on the disk of each stack with the machine's mark -- the only
+    ones a box has whose first install never reached ``finalize`` (DM-126).
+    A package of the instance lies among the releases as ``<name>@<version>``
+    (``steps.sources.package_release``): it is not the stack's code, and what
+    a file ``primer.yaml`` in it would say is never read."""
     state = box.read_state()
-    for stack in state.current if state is not None else ():
+    found = [
+        (stack, current_link(root, stack)) for stack in (state.current if state else ())
+    ]
+    for home in machine_stacks(root):
+        releases = home / RELEASES
+        if not releases.is_dir():
+            continue
+        found += [
+            (home.name, path)
+            for path in sorted(releases.iterdir())
+            if path.is_dir() and "@" not in path.name
+        ]
+    return found
+
+
+def _entries(root: Path, box: Box) -> tuple[set[str], set[str]]:
+    """The entries the box's releases name (``_releases``), by ``primer.yaml``
+    of each: the persistent ones and the others -- with the machine's own
+    stacks (``MACHINE_ENTRIES``) among the others. An entry persistent in one
+    release and not in another is persistent. A release that cannot be read,
+    or whose ``primer.yaml`` is of another stack than its directory, gives
+    nothing -- volumes only it would name stay unplaced."""
+    persistent: set[str] = set()
+    named: set[str] = set()
+    for stack, release in _releases(root, box):
         try:
-            config = load_primer_yaml(current_link(root, stack) / "primer.yaml")
+            config = load_primer_yaml(release / "primer.yaml")
         except (ContractError, OSError):
             continue
+        if config.name != stack:
+            continue
         for name, entry in config.stacks.items():
-            (persistent if entry.persistent else others).add(name)
-    return persistent, others
+            (persistent if entry.persistent else named).add(name)
+    return persistent, (named - persistent) | set(MACHINE_ENTRIES)
 
 
 def read_kept(box: Box) -> dict[str, str]:
@@ -174,7 +206,8 @@ class RemoveObjects(Step):
         ),
         "persistent-unknown": (
             "volumes {volumes} cannot be told persistent or not: no entry of a "
-            "readable primer.yaml of current nor kept-volumes.json names them"
+            "readable primer.yaml of a release on the box nor kept-volumes.json "
+            "names them"
         ),
         "new-secrets-kept": (
             "--new-secrets with volumes kept {volumes}: a new password against "

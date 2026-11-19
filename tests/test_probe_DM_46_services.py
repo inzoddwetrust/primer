@@ -22,18 +22,33 @@ from pridem.steps.base import StepFailed
 from pridem.steps.compose import ComposeStack, write_override
 from pridem.steps.env import RenderEnv
 from pridem.steps.services import DataCopy, DataItem
+from pridem.verbs.run import Planned
 
 
 def _ladder(stacks: list[StackSteps]) -> list[tuple[str, str]]:
     return [(stack.name, step.name) for stack in stacks for step in stack.steps]
 
 
+def _both_halves(made: Planned) -> list[tuple[str, str]]:
+    """The ladder as it runs: the services' first halves, then what the
+    product's stack makes -- its entries' first halves, the services' second,
+    its own second (DM-126)."""
+    return _ladder(
+        [*deferred(made, "pridem-services"), *deferred(made, "pridem-product")]
+    )
+
+
 def test_probe_DM_46_edition_installs_only_its_services(tmp_path: Path) -> None:
     """``core`` leaves ``payments`` out: no key, no tag asked of its remote, no
-    clone, no ladder; the pair: ``full`` installs it."""
+    clone, no ladder; the pair: ``full`` installs it.
+
+    Changed by DM-126 (owner's decision of 19.11): a service's ladder is in
+    two halves -- up to ``data_copy`` in ``pridem-services``, from
+    ``stop_for_migrate`` on with the product's entries. ``up`` of a service
+    is looked for in both; what the probe asserts is as it was."""
     made, root = planned(tmp_path / "core", "core", gone=["payments"])
     keys = [s.name for s in deferred(made, "pridem-dependencies")]
-    ladders = _ladder(deferred(made, "pridem-services"))
+    ladders = _both_halves(made)
     assert keys == ["comms", "pridem-dependencies"]
     assert ("comms", "up") in ladders
     assert not any(stack == "payments" for stack, _ in ladders)
@@ -46,24 +61,36 @@ def test_probe_DM_46_edition_installs_only_its_services(tmp_path: Path) -> None:
         "payments",
         "pridem-dependencies",
     ]
-    ladders = _ladder(deferred(made, "pridem-services"))
+    ladders = _both_halves(made)
+    assert ("payments", "render_env") in ladders
     assert ("payments", "up") in ladders
     assert (root / "opt" / "payments" / "releases" / "v1.0.0").is_dir()
 
 
 def test_probe_DM_46_product_waits_for_all_provides(tmp_path: Path) -> None:
-    """Every service of the edition is up -- its provides in the memory after
-    its health -- before the product renders its env; the product cannot
-    render before (``seam-before-health``); the pair: with them, it does."""
+    """The product's tests run before the first ``migrate`` of any stack, and
+    its ``up`` after ``up`` of every service of the edition; the product
+    cannot render its env before a provider's is ready
+    (``seam-before-health``); the pair: with the provides, it does.
+
+    Changed by DM-126 (owner's decision of 19.11, which takes back the one of
+    31.10): it asserted "every service is up before the product renders its
+    env". A seam is ready with the provider's environment now, so that the
+    product is built and tested before the point of no return; the order the
+    probe holds is the new one. The refusal before the provider is ready is
+    as it was."""
     made, _ = planned(tmp_path, "full")
-    order = _ladder(
-        [*deferred(made, "pridem-services"), *deferred(made, "pridem-product")]
-    )
+    order = _both_halves(made)
     first = order.index(("aivis", "render_env"))
+    tests = order.index(("aivis", "tests"))
+    migrates = [at for at, (_, name) in enumerate(order) if name == "migrate"]
+    assert len(migrates) == 3, order  # comms, payments, the product: not none
+    assert tests < min(migrates), order
+    for name in ("comms", "payments"):  # each env before the product's
+        assert order.index((name, "render_env")) < first, order
     ups = [order.index((name, "up")) for name in ("comms", "payments")]
-    assert all(up < first for up in ups)
-    assert order[first + 1 :] and ("aivis", "up") in order[first + 1 :]
-    # the product's env before the service's health is refused by name
+    assert all(up < order.index(("aivis", "up")) for up in ups), order
+    # the product's env before the service's is ready is refused by name
     render = next(
         step
         for stack in deferred(made, "pridem-product")
@@ -83,7 +110,7 @@ def test_probe_DM_46_product_waits_for_all_provides(tmp_path: Path) -> None:
             "TELEGRAM_BOT_URL": "https://t.me/bot",
         },
     )
-    assert render.check(context(FakeRunner())).needed  # from the live seams now
+    assert render.check(context(FakeRunner())).needed  # from the seams now
 
 
 # --- data_copy -----------------------------------------------------------------

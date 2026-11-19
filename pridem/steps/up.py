@@ -20,9 +20,9 @@ runtime) or another environment changes it on the same image (DM-58); the
 stack passes
 conformance (DM-15: ``/health`` by its form, ``/ready`` 200, JSON logs,
 ``max_body``, no ``logging``), and ``/health`` says
-the release and the commit the build got. Then the stack's ``provides`` reach
-the plan's seam memory -- after its health (TZ 7.1). ``check`` needs no
-``act`` when all of that already holds.
+the release and the commit the build got. ``check`` needs no ``act`` when all
+of that already holds. The stack's ``provides`` are not this step's: they
+reach the plan's memory with its environment (``steps/env.py``, DM-126).
 
 An entry with ``jobs`` (contract 3 rule 24, DM-22) comes up in the order of
 ``depends_on`` of its compose: for each job, in that order, the services it
@@ -37,8 +37,17 @@ its entry acts -- on a deploy that changes the entry: every service carries
 ``pridem.commit`` in its configuration, so a new commit acts, and so does a
 changed environment (a value the passport puts in it), new data or a package;
 the passport's number alone changes nothing in the entry (FIX 2). An update
-with nothing changed does not act, and ``doctor`` -- which ``stale`` leaves
-the jobs out of -- has nothing to say.
+with nothing changed does not act, and ``doctor`` has nothing to say.
+
+A job leaves no container to read its outcome from, so the step keeps it: a
+job that ended with code 0 has a record, ``/opt/<stack>/jobs/<entry>/<job>``
+-- the hash of the configuration it ran on (``config --hash``), written after
+its run and removed before it. A job without the record of its configuration
+now -- it failed, the run was cut, it never ran -- is run again though every
+service of the entry is up as it should be: ``check`` needs ``act`` for it,
+``act`` runs such jobs alone, in their order, and ``doctor`` says so
+(DM-126: ``storage-init`` failed on a first install, and the repeat was
+green without it). ``destroy`` takes the records with ``/opt/<stack>``.
 """
 
 import json
@@ -53,9 +62,10 @@ from pridem.conformance.stack import (
     problems_param,
 )
 from pridem.events import Json
+from pridem.files import atomic_write
 from pridem.runner import Stream
 from pridem.stacks.schema import Product, Service
-from pridem.stacks.seams import Pair, SeamMemory
+from pridem.stacks.seams import Pair
 from pridem.steps.base import (
     CheckResult,
     Mode,
@@ -72,13 +82,13 @@ from pridem.steps.compose import (
     UP_WAIT_S,
     ComposeStack,
     config,
+    config_hashes,
     image_of,
     job_services,
     out,
     running_image,
     stale,
 )
-from pridem.steps.env import RenderEnv
 from pridem.steps.packages import KEY_CODES, image_key
 from pridem.steps.passport import NO_PASSPORT, Fetched
 
@@ -93,6 +103,14 @@ connections, well inside two minutes (DM-80)."""
 INSPECT_FORMAT = "{{.Name}} {{len .Containers}}"
 JOB_TIMEOUT_S = UP_WAIT_S + 60
 """A job's ``run``: as long as ``up`` may wait, and a minute."""
+JOBS_DIR = "jobs"
+"""``/opt/<stack>/jobs``: the records of the jobs that ended well."""
+
+
+def job_record(compose: ComposeStack, job: str) -> Path:
+    """``/opt/<stack>/jobs/<entry>/<job>``: the configuration hash the job
+    last ended well on (DM-126)."""
+    return compose.root / "opt" / compose.name / JOBS_DIR / compose.entry / job
 
 
 def _depends(body: Json) -> list[str]:
@@ -139,6 +157,14 @@ def needed_by(document: dict[str, Json], job: str, jobs: frozenset[str]) -> list
     return sorted(seen)
 
 
+def _recorded(compose: ComposeStack, job: str) -> str | None:
+    """What the record of ``job`` holds; ``None`` without one."""
+    record = job_record(compose, job)
+    if not record.is_file():
+        return None
+    return record.read_text(encoding="utf-8").strip()
+
+
 def _lines(ctx: StepContext, argv: list[str]) -> list[str]:
     found: list[str] = []
 
@@ -179,6 +205,7 @@ class Up(Step):
         "up": "bring {entry} up at {commit}",
         "pair-networks": "remove {networks}: networks of pairs of {entry} no more",
         "pair-networks-left": "networks of pairs no more are still there: {networks}",
+        "jobs-undone": "jobs of {entry} have no record of a good run: {jobs}",
         "no-image": "no image of {service} at {commit}: build runs before up",
         "old-image": "{service} runs on {running}, not on {expected}",
         "old-config": "{service} runs on configuration {running}, not on {expected}",
@@ -198,8 +225,6 @@ class Up(Step):
         ref: str,
         commit: str,
         root: Path = Path("/"),
-        memory: SeamMemory | None = None,
-        render: RenderEnv | None = None,
         fetched: Fetched | None = None,
         waiting: Waiting = READY,
         points: Sequence[Pair] = (),
@@ -209,8 +234,6 @@ class Up(Step):
         )
         self.points = list(points)  # the pairs of the box (DM-62)
         self.fetched = fetched
-        self.memory = memory
-        self.render = render
         self.waiting = waiting
         self._ran: list[str] = []  # the jobs ``act`` ran, in order (DM-22)
 
@@ -302,6 +325,18 @@ class Up(Step):
             raise StepFailed("pair-networks-left", {"networks": list[Json](left)})
         return {"pair_networks_removed": len(gone)}
 
+    def _undone(self, ctx: StepContext) -> list[str]:
+        """The jobs of the entry with no record of a good run on their
+        configuration now, sorted; an entry without jobs asks compose
+        nothing."""
+        jobs = job_services(self.compose)
+        if not jobs:
+            return []
+        hashes = config_hashes(ctx, self.compose)
+        return sorted(
+            job for job in jobs if _recorded(self.compose, job) != hashes.get(job)
+        )
+
     def check(self, ctx: StepContext) -> CheckResult:
         params: dict[str, Json] = {
             "entry": self.compose.entry,
@@ -310,7 +345,16 @@ class Up(Step):
         gone = self._gone_pairs(ctx)
         needed = CheckResult(True, local_code("up", params), {"gone": list[Json](gone)})
         result = self._check(ctx, needed)
-        if result.needed or not gone:
+        if result.needed:
+            return result
+        undone = self._undone(ctx)
+        if undone:  # every service is up as it should be: these jobs alone
+            return CheckResult(
+                True,
+                local_code("up", params),
+                {"gone": list[Json](gone), "up": False, "jobs": list[Json](undone)},
+            )
+        if not gone:
             return result
         pairs_only: dict[str, Json] = {
             "entry": self.compose.entry,
@@ -335,23 +379,7 @@ class Up(Step):
         problems, document = self._problems(ctx)
         if problems or not self._same_release(document):
             return needed
-        self._provide()
         return CheckResult(False)
-
-    def _provide(self) -> None:
-        """The stack's ``provides`` to the plan's memory, read from the
-        deploy's ``next.env`` as ``render_env`` reads it back (DM-68).
-
-        ``check`` calls it only where it found nothing to do: the stack runs on
-        this commit's image and configuration, and its live ``/health`` passed
-        conformance -- the health rule 21 asks for. ``doctor`` runs ``check``
-        alone, and a product's seam from this stack is resolved from the
-        memory; without this its ``render_env`` is ``seam-before-health`` on
-        every box (DM-59 FIX). In a run, ``verify`` puts the same values again.
-        """
-        if self.memory is not None and self.render is not None:
-            self.render.read_back(waiting=())
-            self.memory.healthy(self.compose.stack.name, self.render.provided())
 
     def _same_release(self, document: dict[str, Json]) -> bool:
         if self.compose.app_service is None:
@@ -367,21 +395,36 @@ class Up(Step):
             argv.append("--no-deps")
         out(ctx, self.compose.argv(*argv, operands=services), timeout=UP_WAIT_S + 60)
 
-    def _with_jobs(self, ctx: StepContext, jobs: frozenset[str]) -> list[str]:
-        """The jobs, each after what it needs; then every other service. The
-        jobs run, in their order -- the fact of ``verify``."""
+    def _with_jobs(
+        self, ctx: StepContext, jobs: frozenset[str], only: Sequence[str] | None = None
+    ) -> list[str]:
+        """The jobs, each after what it needs; then every other service.
+        ``only`` -- these jobs alone, and no other service: the entry is up,
+        and they have no record of a good run (DM-126). A job's record goes
+        before its run and comes back after its code 0, with the hash of its
+        configuration. The jobs run, in their order -- the fact of
+        ``verify``."""
         document = config(ctx, self.compose)
+        hashes = config_hashes(ctx, self.compose)
         ran: list[str] = []
         for job in job_order(document, jobs):
+            if only is not None and job not in only:
+                continue
             needed = needed_by(document, job, jobs)
             if needed:
                 self._up(ctx, *needed)
+            record = job_record(self.compose, job)
+            record.unlink(missing_ok=True)
             out(
                 ctx,
                 self.compose.argv("run", "--rm", "--no-deps", operands=(job,)),
                 timeout=JOB_TIMEOUT_S,
             )
+            record.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write(record, hashes[job] + "\n", 0o644)
             ran.append(job)
+        if only is not None:
+            return ran
         services = document.get("services")
         rest = sorted(set(services) - jobs) if isinstance(services, dict) else []
         if rest:  # an entry of jobs alone has nothing to keep running
@@ -390,12 +433,15 @@ class Up(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         self._ran = []
+        jobs = job_services(self.compose)
         if check.data.get("up", True):
-            jobs = job_services(self.compose)
             if jobs:
                 self._ran = self._with_jobs(ctx, jobs)
             else:
                 self._up(ctx)
+        elif check.data.get("jobs"):  # the jobs without a good run, alone
+            undone = [str(job) for job in _json_list(check.data.get("jobs"))]
+            self._ran = self._with_jobs(ctx, jobs, undone)
         gone = [str(name) for name in _json_list(check.data.get("gone"))]
         if gone:  # exactly the ones check found (DM-62)
             out(ctx, ["docker", "network", "rm", *gone])
@@ -404,6 +450,12 @@ class Up(Step):
         fact: dict[str, Json] = {"stack": self.compose.entry, **self._taken(ctx, check)}
         if self._ran:  # each one's code 0, read by the runner (DM-22)
             fact["jobs"] = list[Json](self._ran)
+        undone = self._undone(ctx)  # read back: every job has its record
+        if undone:
+            raise StepFailed(
+                "jobs-undone",
+                {"entry": self.compose.entry, "jobs": list[Json](undone)},
+            )
         app = self.compose.app_service
         built: dict[str, Json] = {}
         for service in self._watched(ctx):
@@ -472,6 +524,4 @@ class Up(Step):
                     "ready": 200,
                 }
             )
-        if self.memory is not None and self.render is not None:
-            self.memory.healthy(self.compose.stack.name, self.render.provided())
         return Verified(fact)

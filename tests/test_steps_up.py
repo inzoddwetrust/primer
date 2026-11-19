@@ -37,7 +37,6 @@ from compose_support import (
 from pridem.events import Code
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result
-from pridem.stacks.seams import SeamMemory
 from pridem.steps.base import Waiting
 from pridem.steps.build import Build
 from pridem.steps.compose import NETWORK, ComposeStack, override_text
@@ -252,20 +251,6 @@ def test_conformance_red_is_up_conformance(tmp_path: Path, app: LiveApp) -> None
     assert outcome.steps[0].reason == Code(
         "up:conformance", {"stack": "blank", "problems": ["alembic-head-null"]}
     )
-
-
-def test_seams_reach_the_memory_after_health(tmp_path: Path, app: LiveApp) -> None:
-    class Provider:
-        def provided(self) -> dict[str, str]:
-            return {"BLANK_API_URL": "http://blank-app:8000"}
-
-    memory = SeamMemory()
-    step = up(tmp_path, app.port, memory=memory, render=Provider())
-    with FakeRunner(*first_up(tmp_path, app.port)) as runner:
-        assert run([step], runner)[0].code is ExitCode.OK
-    assert memory.values("blank", ["BLANK_API_URL"]) == {
-        "BLANK_API_URL": "http://blank-app:8000"
-    }
 
 
 def test_override_names_default_when_config_lists_no_network_of_app(
