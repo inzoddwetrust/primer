@@ -2652,7 +2652,7 @@ def test_tier3_a_service_takes_a_point_of_the_product(
     )
     assert verdict.result == "green", printed
     made = order.index(("pridem-points", "pair_networks"))
-    first_service = min(i for i, (stack, _) in enumerate(order) if stack == SERVICE)
+    first_service = order.index((SERVICE, "render_env"))
     assert made < first_service, order
     [network] = [
         name
