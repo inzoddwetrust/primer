@@ -1123,6 +1123,30 @@ def running_image(ctx: StepContext, compose: ComposeStack, service: str) -> str 
     return lines[0].strip() if lines else None
 
 
+def app_environment(ctx: StepContext, compose: ComposeStack) -> dict[str, str]:
+    """The environment ``compose run <app>`` gives the entry's app: its
+    ``environment`` in ``config`` of the stack's files -- the product's and
+    the machine's override, the values put in -- as ``migrate`` runs with it
+    (DM-124). Read without passing a line on: the values are the stack's
+    secrets. A key declared without a value is not there; a value of more
+    than one line cannot go into an env file -- ``env-multiline``."""
+    app = compose.app_service
+    _, lines = out(ctx, compose.argv("config", "--format", "json"), passed_on=False)
+    document = json.loads("\n".join(lines))
+    services = document.get("services") if isinstance(document, dict) else None
+    body = services.get(app) if isinstance(services, dict) and app else None
+    environment = body.get("environment") if isinstance(body, dict) else None
+    found: dict[str, str] = {}
+    for key, value in (environment if isinstance(environment, dict) else {}).items():
+        if value is None:
+            continue
+        text = str(value)
+        if "\n" in text or "\r" in text:
+            raise StepFailed("env-multiline", {"stack": compose.entry, "key": key})
+        found[key] = text
+    return found
+
+
 def config_hashes(ctx: StepContext, compose: ComposeStack) -> dict[str, str]:
     """The hash of each service's configuration -- the product's file with
     the machine's override, as ``up`` reads them: ``config --hash "*"``, one

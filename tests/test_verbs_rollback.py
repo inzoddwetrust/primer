@@ -114,7 +114,7 @@ def _measured(fs_root: Path, port: int) -> list[FakeCall]:
     cs = compose(fs_root, port)
     return [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs),
     ]
 
@@ -247,7 +247,7 @@ def test_a_head_the_app_does_not_say_is_refused(tmp_path: Path) -> None:
     )
     calls = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs, running=False),
     ]
     with FakeRunner(*calls) as runner:

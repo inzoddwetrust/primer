@@ -229,67 +229,51 @@ def alembic_call(cs: ComposeStack, what: str, *lines: str, deps: bool) -> FakeCa
     )
 
 
+APP_ENVIRONMENT = {"DATABASE_URL": "postgresql://blank@postgres/blank", "LEVEL": "1"}
+"""The environment of the app ``config`` gives the tests' alembic (DM-124)."""
+
+
+def app_config_call(cs: ComposeStack) -> FakeCall:
+    """``config`` of the stack's files, read for the app's environment."""
+    document = {"services": {"app": {"environment": {**APP_ENVIRONMENT}}}}
+    return FakeCall(
+        tuple(cs.argv("config", "--format", "json")), lines=stdout(json.dumps(document))
+    )
+
+
+def _alembic_argv(cs: ComposeStack, image: str, *args: str) -> tuple[str, ...]:
+    """``docker run`` of alembic in the image, no network, the app's
+    environment by its file (DM-124), literally."""
+    return (
+        "docker", "run", "--rm", "--network", "none",
+        "--label", f"pridem.stack={cs.entry}",
+        "--label", f"pridem.release={cs.ref}",
+        "--label", f"pridem.commit={cs.commit}",
+        "--env-file", f"{cs.root}/opt/{cs.name}/env/alembic.env",
+        "--", image, "python", "-m", "alembic", *args,
+    )  # fmt: skip
+
+
 def show_call(
     cs: ComposeStack, image: str, head: str, *, known: bool = True
-) -> FakeCall:
+) -> list[FakeCall]:
     """``alembic show <head>`` in the image of the release (DM-24): its code
-    knows ``head`` (exit 0) or not (exit 255, alembic's line, measured)."""
-    labels = (
-        "--label",
-        f"pridem.stack={cs.entry}",
-        "--label",
-        f"pridem.release={cs.ref}",
-        "--label",
-        f"pridem.commit={cs.commit}",
-    )
-    argv = (
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        *labels,
-        "--",
-        image,
-        "python",
-        "-m",
-        "alembic",
-        "show",
-        head,
-    )
+    knows ``head`` (exit 0) or not (exit 255, alembic's line, measured).
+    Changed by DM-124: the app's environment is read first (``config``) and
+    given by a file."""
+    argv = _alembic_argv(cs, image, "show", head)
     if known:
-        return FakeCall(argv, lines=stdout(f"Rev: {head}"))
+        return [app_config_call(cs), FakeCall(argv, lines=stdout(f"Rev: {head}"))]
     missing = f"FAILED: Can't locate revision identified by '{head}'"
-    return FakeCall(argv, code=255, lines=stdout(missing))
+    return [app_config_call(cs), FakeCall(argv, code=255, lines=stdout(missing))]
 
 
-def heads_call(cs: ComposeStack, image: str, *lines: str) -> FakeCall:
-    labels = (
-        "--label",
-        f"pridem.stack={cs.entry}",
-        "--label",
-        f"pridem.release={cs.ref}",
-        "--label",
-        f"pridem.commit={cs.commit}",
-    )
-    return FakeCall(
-        # no network: the heads are the image's scripts (DM-53)
-        (
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            *labels,
-            "--",
-            image,
-            "python",
-            "-m",
-            "alembic",
-            "heads",
-        ),  # fmt: skip
-        lines=stdout(*lines),
-    )
+def heads_call(cs: ComposeStack, image: str, *lines: str) -> list[FakeCall]:
+    """``alembic heads`` in the built image, no network (DM-53). Changed by
+    DM-124: the app's environment is read first (``config``) and given by a
+    file -- comms checks its settings when alembic loads ``env.py``."""
+    run = FakeCall(_alembic_argv(cs, image, "heads"), lines=stdout(*lines))
+    return [app_config_call(cs), run]
 
 
 def migrate_call(cs: ComposeStack, code: int = 0) -> FakeCall:

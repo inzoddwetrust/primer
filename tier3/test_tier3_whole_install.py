@@ -2004,6 +2004,46 @@ def test_tier3_types_are_made_by_the_products_commands(
     assert '"/dm63"' in text[1], text
 
 
+REFUSING_ENV = """\
+import os
+
+if not os.environ.get("DATABASE_URL"):  # as comms does (DM-124)
+    raise SystemExit("blank: startup refused -- DATABASE_URL is required.")
+"""
+
+
+def test_tier3_alembic_runs_with_the_apps_environment(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-124, on the box of group e: a copy of the blank whose ``alembic``
+    ``env.py`` refuses to load without ``DATABASE_URL``, as comms does. An
+    update -- green: ``stop_for_migrate`` and ``migrate`` read the head with
+    the app's environment. Measured into the run's log first (par0 14.3): the
+    same image without the environment refuses, with the line that says why."""
+    assert (OPT / "current").is_symlink(), "the group's box is installed"
+    copy = _copy_of_blank(tmp_path, mirror, "env-alembic")
+    _replace_once(
+        copy / "backend" / "migrations" / "env.py",
+        "from primer_report import configure_logging\n",
+        "from primer_report import configure_logging\n" + REFUSING_ENV,
+    )
+    _push(copy, mirror, "DM-124: alembic refuses without DATABASE_URL")
+    verdict, printed = _install(_passport(tmp_path, version=63), "update")
+    current = (OPT / "current").resolve()
+    image = f"{STACK}-app:{current.name[:12]}"
+    bare = _run(
+        ["docker", "run", "--rm", "--network", "none", "--", image,
+         "python", "-m", "alembic", "heads"],
+        expect=tuple(range(256)),
+    )  # fmt: skip
+    print("DM-124 measure:", {"image": image, "without the environment": bare[-3:]})
+    assert verdict.result == "green", printed
+    facts = {s.name: s for s in verdict.steps if s.stack == STACK}
+    assert facts["migrate"].status == "ok", facts["migrate"]
+    assert any("DATABASE_URL is required" in line for line in bare), bare
+    assert not (OPT / "env" / "alembic.env").exists()
+
+
 def test_tier3_an_option_off_is_the_literal_and_on_the_value(
     tmp_path: Path, mirror: Path
 ) -> None:

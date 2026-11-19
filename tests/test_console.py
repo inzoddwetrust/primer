@@ -607,7 +607,10 @@ def test_a_step_with_nothing_to_do_says_so_by_its_fact() -> None:
     nothing to do. The pairs: ``types`` that did generate is its usual line;
     ``build`` with nothing new to build is no idle step -- its fact says what
     is in place; a failed step with ``idle`` is its failure, with the cause of
-    DM-111."""
+    DM-111.
+
+    Changed by DM-124: the cause -- up to three lines -- is on rows of its own
+    under the step's line."""
     out = io.StringIO()
     console = ConsoleSink(out, Secrets(()), IDLE, now=lambda: TEN)
     console.emit(_finished("aivis", "types", verify={"types": "none"}))
@@ -631,5 +634,5 @@ def test_a_step_with_nothing_to_do_says_so_by_its_fact() -> None:
     assert lines[0] == "[10:00:00] – aivis · Generate the types · nothing to do"
     assert lines[1] == "[10:00:00] ✓ aivis · Generate the types · 1m12s"
     assert lines[2] == "[10:00:00] ✓ aivis · Build images · 1m12s"
-    assert lines[-1].startswith("[10:00:00] ✗ aivis · Generate the types · 1m12s — ")
-    assert "error: no openapi" in lines[-1]
+    assert lines[-2].startswith("[10:00:00] ✗ aivis · Generate the types · 1m12s — ")
+    assert lines[-1] == "           error: no openapi"

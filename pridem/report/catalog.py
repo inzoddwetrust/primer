@@ -96,7 +96,7 @@ ENGLISH: Catalog = {
     "@console.duration": " · {seconds}",
     "@console.fact": " · {fact}",
     "@console.reason": " — {reason}",
-    "@console.cause": " — {cause}",
+    "@console.cause": "           {cause}",
     "@console.idle": " · nothing to do",
     "@console.begins": "→ {label}…",
     "@console.live": "{label} · {spent}",
@@ -185,6 +185,10 @@ line of a failed command that is none of these and starts with none of
 ``NOT_A_CAUSE_STARTS`` -- ``Permission denied (publickey)``, not ``and the
 repository exists.``"""
 NOT_A_CAUSE_STARTS: tuple[str, ...] = ("hint:",)
+CAUSE_LINES = 3
+"""How many of the last lines of a failed command the console shows, each on
+a row of its own under the step's line (DM-124: the reason may be a line
+above the last)."""
 
 
 def is_a_cause(line: str) -> bool:

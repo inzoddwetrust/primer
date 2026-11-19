@@ -152,6 +152,9 @@ def test_build_release_and_commit_come_back_from_health(
 
 
 def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
+    """Changed by DM-124, on the dispatcher's word: ``heads_call`` is two calls
+    now -- ``config`` of the app's environment and ``docker run --env-file``;
+    the assertions are as they were."""
     cs = compose(tmp_path, app.port)
     parts = {
         "release": cs.release,
@@ -175,7 +178,7 @@ def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs, running=False),
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),

@@ -624,13 +624,13 @@ def migrate_check(cs: ComposeStack, behind: str | None = None) -> list[FakeCall]
     running app ``behind`` the head -- is it a head the code knows (DM-24:
     ``alembic show`` in the image, before the point of no return)."""
     known = (
-        [image_call(cs, "app", APP_IMAGE), show_call(cs, APP_IMAGE, behind)]
+        [image_call(cs, "app", APP_IMAGE), *show_call(cs, APP_IMAGE, behind)]
         if behind is not None
         else []
     )
     return [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs),
         *known,
     ]
@@ -687,10 +687,10 @@ def test_a_database_ahead_of_the_code_stops_nothing(
     cs = cs_of(stack, tmp_path)
     script = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs),
         image_call(cs, "app", APP_IMAGE),
-        show_call(cs, APP_IMAGE, "0002", known=False),
+        *show_call(cs, APP_IMAGE, "0002", known=False),
     ]
     with FakeRunner(*script) as runner:
         outcome = run_with_finally([stop, migrate], [start], runner)

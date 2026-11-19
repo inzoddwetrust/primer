@@ -12,6 +12,7 @@ the blank's (``compose_support.CONFIG``), its contexts in the release.
 import io
 import json
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from compose_support import (
     REF,
     SHA,
     LiveApp,
+    app_config_call,
     hash_calls,
     in_release,
     live,
@@ -622,7 +624,10 @@ def test_the_key_is_the_service_s_alone(tmp_path: Path) -> None:
 def test_up_and_migrate_find_the_image_of_app_by_its_key(tmp_path: Path) -> None:
     """A package built into ``app``: ``up`` and ``migrate`` ask for the image
     of the key -- the strict scenario holds the filter, two editions' images
-    of one commit are never confused."""
+    of one commit are never confused.
+
+    Changed by DM-124: ``alembic heads`` gets the app's environment, read by
+    ``config`` and given by a file."""
     stack = made(product_data(service="app"))
     root, fetched = skin_box(tmp_path)
     cs = compose(root, stack)
@@ -658,6 +663,8 @@ def test_up_and_migrate_find_the_image_of_app_by_its_key(tmp_path: Path) -> None
             "--network",
             "none",
             *labels,
+            "--env-file",
+            f"{root}/opt/{stack.name}/env/alembic.env",
             "--",
             APP_IMAGE,
             "python",
@@ -667,7 +674,10 @@ def test_up_and_migrate_find_the_image_of_app_by_its_key(tmp_path: Path) -> None
         ),
         lines=stdout("0001 (head)"),
     )
-    with FakeRunner(image_call(cs, "app", key_of(), APP_IMAGE), heads) as runner:
+    staged = replace(cs, staged=True)
+    with FakeRunner(
+        image_call(cs, "app", key_of(), APP_IMAGE), app_config_call(staged), heads
+    ) as runner:
         ctx = StepContext(runner, "install", "test", ENTRY, _drop)
         assert migrate._heads(ctx)[0] == ["0001"]
 

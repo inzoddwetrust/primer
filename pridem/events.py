@@ -35,7 +35,14 @@ from typing import Literal, Protocol, TextIO, runtime_checkable
 from pydantic import SecretStr
 
 from pridem.contract import SECRET_MIN_LENGTH
-from pridem.report.catalog import ENGLISH, Catalog, is_a_cause, say, text
+from pridem.report.catalog import (
+    CAUSE_LINES,
+    ENGLISH,
+    Catalog,
+    is_a_cause,
+    say,
+    text,
+)
 from pridem.report.codes import RESERVED_PARAMS, ExitCode
 from pridem.runner import Stream
 
@@ -587,7 +594,7 @@ class ConsoleSink:
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
         self.dead = False
-        self._causes: dict[Stream, str] = {}
+        self._causes: dict[Stream, list[str]] = {}
         CONSOLES.add(self)
 
     # --- what the plan hands it --------------------------------------------
@@ -602,13 +609,16 @@ class ConsoleSink:
             self._finished(event.record)
 
     def _heard(self, line: LogLine) -> None:
-        """The last line of the running step's commands that can say why one
-        failed (DM-111): stderr's, else stdout's; never git's set phrases
+        """The last lines of the running step's commands that can say why one
+        failed -- ``CAUSE_LINES`` of them (DM-111, DM-124: comms says why a line
+        above its last): stderr's, else stdout's; never git's set phrases
         (``catalog.NOT_A_CAUSE``)."""
         said = line.line.strip()
         if not said or not is_a_cause(said):
             return
-        self._causes[line.stream] = said
+        kept = self._causes.setdefault(line.stream, [])
+        kept.append(said)
+        del kept[:-CAUSE_LINES]  # the last few, never the whole output
 
     def notice(self, notice: Notice) -> None:
         """A key to add: the block, then the live line waits for it."""
@@ -799,12 +809,21 @@ class ConsoleSink:
             words = text(catalog, record.reason.code, record.reason.params)
             reason = self._secrets.text(HASH.sub(_short, words))
             line += say(catalog, "@console.reason", reason=reason)
-            cause = self._causes.get(Stream.STDERR) or self._causes.get(Stream.STDOUT)
-            if record.reason.code == "command-failed" and cause:
-                # what the command said, cleaned as the journal is (DM-111)
-                line += say(catalog, "@console.cause", cause=self._secrets.text(cause))
+        causes: list[str] = []
+        failed = record.reason is not None and record.status == "failed"
+        if (
+            failed
+            and record.reason is not None
+            and (record.reason.code == "command-failed")
+        ):
+            causes = self._causes.get(Stream.STDERR) or self._causes.get(
+                Stream.STDOUT, []
+            )
         self._causes.clear()
         self._line(line)
+        for cause in causes:  # what the command said, cleaned (DM-111, DM-124)
+            words = say(catalog, "@console.cause", cause=self._secrets.text(cause))
+            self._write(words + "\n")
 
     def _line(self, line: str) -> None:
         stamp = self._paint("dim", f"[{self._now():%H:%M:%S}]")

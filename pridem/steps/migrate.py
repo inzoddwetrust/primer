@@ -4,8 +4,10 @@ container -- the point of no return (TZ 7.3; contract 3 section 1).
 The stack is the blank's (TZ 2): its migrations are alembic's. ``check`` reads
 the heads of the image ``build`` made for this commit (found by its labels,
 the key of ``steps.packages.image_key`` among them)
-with ``docker run --rm --network none <image> python -m alembic heads`` -- no
-compose, no dependency, no network: the scripts of the image, nothing else. A stack that
+with ``docker run --rm --network none --env-file <the app's environment>
+<image> python -m alembic heads`` -- no compose, no dependency, no network: the
+scripts of the image, with the environment ``migrate`` runs with (DM-124: an
+``env.py`` may refuse to load without its settings). A stack that
 declares ``migrate`` has a head: none read is red (``no-heads``), never "no
 migration"; more than one is red too -- both before anything is written. One
 head is compared with the
@@ -32,7 +34,8 @@ service does.
 
 import json
 import shlex
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Protocol
@@ -40,6 +43,7 @@ from typing import ClassVar, Protocol
 from pridem.conformance.stack import observe
 from pridem.events import Json
 from pridem.runner import TAIL_LINES, CommandFailed, Stream
+from pridem.stacks.env import write_private
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
     CheckResult,
@@ -53,6 +57,7 @@ from pridem.steps.base import (
 from pridem.steps.compose import (
     COMMAND_TIMEOUT_S,
     ComposeStack,
+    app_environment,
     current,
     heads,
     image_of,
@@ -64,6 +69,9 @@ from pridem.steps.passport import NO_PASSPORT, Fetched
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 MIGRATE_TIMEOUT_S = 1800
 ALEMBIC = ("python", "-m", "alembic")
+ALEMBIC_ENV = "alembic.env"
+"""The app's environment for alembic's throwaway container (DM-124), in the
+stack's ``env/``, there only while the command runs."""
 
 
 def running_head(ctx: StepContext, compose: ComposeStack) -> str | None:
@@ -132,6 +140,8 @@ class Migrate(Step):
         "migrate": "migrate {entry} to {head}",
         "alembic-heads": "the migrations of {stack} have {count} heads: {heads}",
         "no-heads": "no alembic head read from the image of {stack} in {lines} lines",
+        "env-multiline": "{key} of the app of {stack} is more than one line: the "
+        "environment of alembic's container is an env file",
         "no-image": "no image of {service} at {commit}: build runs before migrate",
         "not-at-head": "the database of {stack} is at {current}, not at {head}",
     }
@@ -162,11 +172,18 @@ class Migrate(Step):
 
     def _heads(self, ctx: StepContext) -> tuple[list[str], int]:
         """Heads of the built image, by ``docker run`` on it; and the line count."""
-        _, lines = out(ctx, self._alembic(ctx, "heads"), timeout=COMMAND_TIMEOUT_S)
+        with self._alembic(ctx, "heads") as argv:
+            _, lines = out(ctx, argv, timeout=COMMAND_TIMEOUT_S)
         return heads(lines), len(lines)
 
-    def _alembic(self, ctx: StepContext, *args: str) -> list[str]:
-        """``alembic <args>`` in the built image of the release, no network."""
+    @contextmanager
+    def _alembic(self, ctx: StepContext, *args: str) -> Iterator[list[str]]:
+        """``alembic <args>`` in the built image of the release, no network,
+        with the environment of the entry's app -- the one ``migrate`` runs
+        with (DM-124: comms checks its settings when alembic imports
+        ``env.py``). The environment goes in a file of the stack's ``env/``
+        (0600, the docker form ``KEY=value``), there only while the command
+        runs; only its path is in the argv."""
         passport = None if self.fetched is None else self.fetched.passport
         key = image_key(self.compose.stack, self.app, passport)
         images = image_of(ctx, self.compose, self.app, key)
@@ -174,23 +191,32 @@ class Migrate(Step):
             raise StepFailed(
                 "no-image", {"service": self.app, "commit": self.compose.commit}
             )
+        environment = app_environment(ctx, self.compose)
         labels = [
             word
             for key, value in self.compose.release_labels().items()
             for word in ("--label", f"{key}={value}")
         ]
-        return [
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            *labels,
-            "--",  # the image is an operand, never an option (DM-93)
-            images[0],
-            *ALEMBIC,
-            *args,
-        ]
+        env_file = self.compose.env_file.parent / ALEMBIC_ENV
+        try:
+            text = "".join(f"{k}={v}\n" for k, v in environment.items())
+            write_private(env_file, text)
+            yield [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                *labels,
+                "--env-file",
+                str(env_file),
+                "--",  # the image is an operand, never an option (DM-93)
+                images[0],
+                *ALEMBIC,
+                *args,
+            ]
+        finally:
+            env_file.unlink(missing_ok=True)
 
     def _current(self, ctx: StepContext) -> list[str]:
         _, lines = out(
@@ -223,10 +249,13 @@ class Migrate(Step):
         live = running_head(ctx, self.compose)
         if live == head:
             return CheckResult(False, None, data)
-        if live is not None and unknown_head(
-            ctx, self._alembic(ctx, "show", live), live
-        ):
-            raise StepFailed("db-ahead", {"entry": self.compose.entry, "head": live})
+        if live is not None:
+            with self._alembic(ctx, "show", live) as argv:
+                ahead = unknown_head(ctx, argv, live)
+            if ahead:
+                raise StepFailed(
+                    "db-ahead", {"entry": self.compose.entry, "head": live}
+                )
         params: dict[str, Json] = {"entry": self.compose.entry, "head": head}
         return CheckResult(True, local_code("migrate", params), data)
 

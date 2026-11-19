@@ -80,6 +80,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
         "e",
     ),
     ("test_tier3_types_are_made_by_the_products_commands", "e"),  # DM-63
+    ("test_tier3_alembic_runs_with_the_apps_environment", "e"),  # DM-124
     # f -- an install of its own: options, derive, points (out of c, DM-85:
     # the longest group is the time of tier 3; the order of the file kept)
     ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "f"),

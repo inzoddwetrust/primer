@@ -225,7 +225,11 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
     meaningful line of a failed command, cleaned as the journal (owner's
     decision 17.11); the verdict's reason still carries no output. The line
     carries ``MARKER``: in the console it is ``[redacted]``, the rest of the
-    line is there."""
+    line is there.
+
+    Changed by DM-124, on the dispatcher's word: the cause is up to three
+    rows under the step's line, not the end of it -- here both lines of
+    stderr, each cleaned."""
     output = "leaked-output-4f2a"
 
     class Up(ScriptedStep):
@@ -277,5 +281,11 @@ def test_probe_DM_4_console_and_reason_carry_no_secret() -> None:
     printed = out.getvalue()
     assert MARKER not in printed
     assert VISIBLE in printed and "TOKEN=[redacted] — exit code 2" in printed
-    # the last line of stderr that says why, cleaned; the rest of it is there
-    assert f"exit code 2 — {output} cause TOKEN=[redacted]" in printed
+    # the last lines of stderr that say why, a row each, cleaned (DM-124)
+    rows = printed.splitlines()
+    step = next(i for i, row in enumerate(rows) if "exit code 2" in row)
+    assert rows[step].endswith("TOKEN=[redacted] — exit code 2"), rows[step]
+    assert rows[step + 1 : step + 3] == [
+        f"           {output} line 1",
+        f"           {output} cause TOKEN=[redacted]",
+    ]

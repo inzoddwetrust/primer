@@ -46,10 +46,13 @@ def migrate(root: Path, port: int) -> Migrate:
 
 
 def test_probe_DM_18_two_alembic_heads_red_before_up(tmp_path: Path) -> None:
+    """Changed by DM-124, on the dispatcher's word: ``heads_call`` is two calls
+    now -- ``config`` of the app's environment and ``docker run --env-file``;
+    the assertions are as they were."""
     cs = compose(tmp_path)
     heads = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, "0002a (head)", "0002b (head)"),
+        *heads_call(cs, APP_IMAGE, "0002a (head)", "0002b (head)"),
     ]
     later = ScriptedStep("up", 13, Journal())
     with FakeRunner(*heads) as runner:  # no migrate, no current, no up
@@ -65,11 +68,14 @@ def test_probe_DM_18_two_alembic_heads_red_before_up(tmp_path: Path) -> None:
 def test_probe_DM_18_migrate_is_point_of_no_return(
     tmp_path: Path, app: LiveApp
 ) -> None:
+    """Changed by DM-124, on the dispatcher's word: ``heads_call`` is two calls
+    now -- ``config`` of the app's environment and ``docker run --env-file``;
+    the assertions are as they were."""
     cs = compose(tmp_path, app.port)
     assert Migrate.point_of_no_return is True
     first_install = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs, running=False),
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
@@ -99,7 +105,7 @@ def test_the_running_head_is_the_new_head_no_act(tmp_path: Path, app: LiveApp) -
     cs = compose(tmp_path, app.port)
     same = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
@@ -112,10 +118,10 @@ def test_the_running_head_is_the_new_head_no_act(tmp_path: Path, app: LiveApp) -
     app.health = health(alembic_head="0000")
     behind = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs),
         image_call(cs, "app", APP_IMAGE),
-        show_call(cs, APP_IMAGE, "0000"),  # a head the code knows (DM-24)
+        *show_call(cs, APP_IMAGE, "0000"),  # a head the code knows (DM-24)
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
@@ -136,10 +142,10 @@ def test_a_database_ahead_of_the_code_is_red_before_act(
     app.health = health(alembic_head="0002")
     ahead = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs),
         image_call(cs, "app", APP_IMAGE),
-        show_call(cs, APP_IMAGE, "0002", known=False),
+        *show_call(cs, APP_IMAGE, "0002", known=False),
     ]
     with FakeRunner(*ahead) as runner:  # no migrate in the script
         outcome, _ = run([migrate(tmp_path, app.port)], runner)
@@ -156,13 +162,14 @@ def test_another_refusal_of_alembic_show_is_a_failed_command(
     ``db-ahead``."""
     cs = compose(tmp_path, app.port)
     app.health = health(alembic_head="0002")
-    show = show_call(cs, APP_IMAGE, "0002", known=False)
+    read, show = show_call(cs, APP_IMAGE, "0002", known=False)
     other = FakeCall(show.argv, code=255, lines=stdout("FAILED: No config file"))
     script = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs),
         image_call(cs, "app", APP_IMAGE),
+        read,  # DM-124: the app's environment
         other,
     ]
     with FakeRunner(*script) as runner:
@@ -179,7 +186,7 @@ def test_no_head_read_is_red_before_act(tmp_path: Path) -> None:
     cs = compose(tmp_path)
     script = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, "INFO  [x] y"),
+        *heads_call(cs, APP_IMAGE, "INFO  [x] y"),
     ]
     later = ScriptedStep("up", 13, Journal())
     with FakeRunner(*script) as runner:  # no migrate, no current
@@ -192,7 +199,7 @@ def test_no_head_read_is_red_before_act(tmp_path: Path) -> None:
     # the pair: one head read from the same image -- the check goes on
     with FakeRunner(
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs, running=False),
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
@@ -216,7 +223,7 @@ def test_database_not_at_head_after_migrate_is_red(
     cs = compose(tmp_path, app.port)
     script = [
         image_call(cs, "app", APP_IMAGE),
-        heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
+        *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs, running=False),
         migrate_call(cs),
         alembic_call(cs, "current", "0000", deps=True),
