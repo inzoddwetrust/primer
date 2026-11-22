@@ -13,9 +13,24 @@ and the size of ``journal/`` -- and decides what ``act`` removes:
   is not even listed. The key is the commit: ``pridem.release`` holds the
   ref, on test a branch that every commit shares. An image with tags loses
   them all and goes with the last; one without goes by its ID;
-- the build cache: ``docker builder prune --all --keep-storage <budget>`` when it
-  is over ``policies.gc.builder_cache_budget`` (without ``--all`` docker prunes
-  only dangling cache, which is never anything);
+- the build cache: ``docker builder prune --all --max-used-space <budget>``
+  when it is over ``policies.gc.builder_cache_budget``. The cache the budget
+  is of is what no image holds -- ``Reclaimable`` of docker's ``Build Cache``
+  line (owner's decision of 22.11, DM-126 FIX): ``Size`` counts the records
+  shared with images as well, which are the images' own layers, already
+  counted there, and which a prune with a limit neither counts nor has to
+  remove. Measured on docker 29.1.3 with buildx 0.30.1: one such prune stops
+  early -- it starts from the sum of the records no image holds and takes
+  off every record it removes, a shared one too -- so the prune is repeated
+  while the cache is over the budget and the last call made its ``Size``
+  smaller (a call may remove shared records alone: the cache no image holds
+  is the same after it, and the next call goes on); a ``Size`` that did not
+  shrink ends it, so the calls are as many as the cache can shrink; and
+  ``--keep-storage``, ``--reserved-space`` and ``--max-used-space`` trim
+  alike, the last is the one docker describes as the most the cache may
+  take. Removing an image leaves its layers to the cache alone: after images
+  went, a cache whose ``Size`` is over the budget is measured again before
+  the decision;
 - releases: per stack ``policies.gc.keep_releases`` worktrees stay -- the
   current and any directory a container mounts, whatever the number, then the
   previous, then the newest by mtime. A worktree goes
@@ -47,11 +62,12 @@ facts, else from its worktree. ``state.json`` is not read:
 it is a record of the box, not a basis of decisions.
 
 ``verify`` measures again. What ``act`` removed and is still there -- an image,
-a release, a journal it could evict, a build cache over budget that did not
-shrink -- is red, ``gc:not-removed``. A number over budget after everything
-allowed went -- the build cache, ``journal/`` holding the current journal alone,
-more protected releases than ``keep_releases`` -- is ``incomplete {what: gc,
-code: gc:over-budget}`` with the numbers, exit code 2. Sizes are docker's text
+a release, a journal it could evict, a build cache that was pruned and is no
+smaller than before the first prune -- is red, ``gc:not-removed``. A number
+over budget after everything allowed went -- the build cache, ``journal/``
+holding the current journal alone, more protected releases than
+``keep_releases`` -- is ``incomplete {what: gc, code: gc:over-budget}`` with
+the numbers, exit code 2. Sizes are docker's text
 (decimal units) turned into bytes; budgets are the passport's (binary units).
 
 The passport is the one ``fetch_passport`` read, else the box's copy. A
@@ -110,6 +126,9 @@ _CATEGORIES = {
     "Local Volumes": "volumes",
     "Build Cache": "build_cache",
 }
+CACHE = "build_cache"
+RECLAIMABLE = "reclaimable"
+"""The key of the build cache's own bytes in the measurement."""
 _UNITS = {
     "B": 1,
     "kB": 1000,
@@ -136,14 +155,17 @@ def docker_size(text: str) -> int:
 
 
 def system_df(ctx: StepContext) -> dict[str, Json]:
-    """``docker system df`` by category: ``{count, bytes}``; a category docker
-    did not print is zero."""
+    """``docker system df`` by category: ``{count, bytes}``, and for the build
+    cache ``reclaimable`` too -- the bytes of the records no image holds,
+    which is what its budget is of; a category docker did not print is
+    zero."""
     _, lines = out(
         ctx, ["docker", "system", "df", "--format", "{{json .}}"], passed_on=False
     )
     found: dict[str, Json] = {
         name: {"count": 0, "bytes": 0} for name in _CATEGORIES.values()
     }
+    found[CACHE] = {"count": 0, "bytes": 0, RECLAIMABLE: 0}
     for line in lines:
         if not line.strip():
             continue
@@ -161,7 +183,29 @@ def system_df(ctx: StepContext) -> dict[str, Json]:
                 "count": int(count),
                 "bytes": docker_size(str(row.get("Size"))),
             }
+            if name == CACHE:
+                found[name] = {
+                    "count": int(count),
+                    "bytes": docker_size(str(row.get("Size"))),
+                    RECLAIMABLE: reclaimable_size(str(row.get("Reclaimable"))),
+                }
     return found
+
+
+def reclaimable_size(text: str) -> int:
+    """``Reclaimable`` of a line of ``docker system df`` -> bytes: a size,
+    and for some categories its share in brackets after it (``20MB (7%)``)."""
+    return docker_size(text.split("(", 1)[0])
+
+
+def _own(cache: Json) -> int:
+    """The bytes of the build cache no image holds, of its measurement."""
+    return _number({CACHE: cache}, CACHE, RECLAIMABLE)
+
+
+def _whole(cache: Json) -> int:
+    """The bytes of the whole build cache, shared records and all."""
+    return _number({CACHE: cache}, CACHE, "bytes")
 
 
 def _number(df: Mapping[str, Json], category: str, key: str) -> int:
@@ -338,6 +382,7 @@ class Gc(Step):
         self.fetched = fetched
         self.root = root
         self.now = now
+        self._pruned_from: int | None = None
 
     def _old_sessions(self) -> list[Path]:
         """The logs of ``db connect`` older than ``CONNECT_KEEP_DAYS``: they hold
@@ -527,7 +572,7 @@ class Gc(Step):
                 {"stack": stack, "path": str(r.path), "bare": str(r.bare)} for r in gone
             ]
             kept[stack] = list[Json](stay)
-        cache = _number(df, "build_cache", "bytes")
+        cache = _number(df, CACHE, RECLAIMABLE)
         prune = cache > size_bytes(policy.builder_cache_budget)
         journal = self._journal_bytes()
         evict = journal > size_bytes(policy.journal_budget)
@@ -561,6 +606,45 @@ class Gc(Step):
             },
         )
         return CheckResult(True, would, data)
+
+    def _trim_cache(self, ctx: StepContext, check: CheckResult, budget: int) -> None:
+        """The build cache down to ``budget``: ``builder prune`` with the
+        limit, again while the cache no image holds is over the budget and
+        the last call made the whole cache smaller -- one call stops early
+        (see the module's text); a cache that did not shrink, or grew, ends
+        the calls. The cache is as ``check`` measured it, unless images
+        went since and the whole cache, shared records and all, is over the
+        budget: the layers of an image that went are the cache's alone now,
+        and only then can they take it over -- it is measured anew.
+        ``self._pruned_from`` -- the cache before the first prune, for
+        ``verify``."""
+        before = check.data.get("before")
+        if not isinstance(before, dict):
+            raise ValueError("gc act needs the measurement of its check")
+        seen = before.get(CACHE)
+        if check.data.get("images") and _number(before, CACHE, "bytes") > budget:
+            seen = system_df(ctx)[CACHE]
+        if _own(seen) <= budget:
+            return
+        self._pruned_from = _own(seen)
+        while True:
+            out(
+                ctx,
+                [
+                    "docker",
+                    "builder",
+                    "prune",
+                    "--force",
+                    "--all",
+                    "--max-used-space",
+                    str(budget),
+                ],
+                timeout=PRUNE_TIMEOUT_S,
+            )
+            now = system_df(ctx)[CACHE]
+            if _own(now) <= budget or _whole(now) >= _whole(seen):
+                return
+            seen = now
 
     def _choose(
         self,
@@ -659,20 +743,7 @@ class Gc(Step):
             run_git(ctx, self.root, ["-C", bare, "worktree", "prune"])
         for copy in _strings(check.data.get("data")):
             shutil.rmtree(copy)
-        if check.data.get("prune"):
-            out(
-                ctx,
-                [
-                    "docker",
-                    "builder",
-                    "prune",
-                    "--force",
-                    "--all",
-                    "--keep-storage",
-                    str(size_bytes(policy.builder_cache_budget)),
-                ],
-                timeout=PRUNE_TIMEOUT_S,
-            )
+        self._trim_cache(ctx, check, size_bytes(policy.builder_cache_budget))
         if check.data.get("evict"):
             self.box.evict_journals(size_bytes(policy.journal_budget), self.run_id)
         for path in _strings(check.data.get("connect")):
@@ -740,11 +811,8 @@ class Gc(Step):
         still: list[str] = [_short(str(i["id"])) for i in images if i["id"] in listed]
         still += [str(r["path"]) for r in releases if Path(str(r["path"])).exists()]
         still += [p for p in _strings(data.get("data")) if Path(p).exists()]
-        cache = (
-            _number(before, "build_cache", "bytes"),
-            _number(after, "build_cache", "bytes"),
-        )
-        if data.get("prune") and cache[1] >= cache[0]:
+        cache = _number(after, CACHE, RECLAIMABLE)
+        if self._pruned_from is not None and cache >= self._pruned_from:
             still.append("build-cache")
         current = f"{self.run_id}.jsonl"
         if (
@@ -756,7 +824,7 @@ class Gc(Step):
         if still:
             raise StepFailed("not-removed", {"objects": list[Json](still)}, fact)
         over: list[str] = []
-        if cache[1] > cache_budget:
+        if cache > cache_budget:
             over.append("build-cache")
         if journal > journal_budget:
             over.append("journal")
@@ -775,7 +843,7 @@ class Gc(Step):
                 "over-budget",
                 {
                     "over": list[Json](over),
-                    "builder_cache_bytes": cache[1],
+                    "builder_cache_bytes": cache,
                     "builder_cache_budget": cache_budget,
                     "journal_bytes": journal,
                     "journal_budget": journal_budget,

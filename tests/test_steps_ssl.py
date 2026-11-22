@@ -41,11 +41,26 @@ from pridem.steps.ssl import Ssl, SslRenew, TlsFiles, cert_path, key_path
 NAMES = list(DOMAINS.values())
 
 
-def ladder(root: Path, fetched: Fetched, secrets: Secrets | None = None) -> list[Step]:
+def ladder(
+    root: Path,
+    fetched: Fetched,
+    secrets: Secrets | None = None,
+    *,
+    clock: datetime | None = NOW,
+) -> list[Step]:
+    """``clock`` -- the steps' ``now``: ``NOW`` of the tests, or ``None`` for
+    the real clock -- for a test whose certificate is made by ``openssl
+    -days`` to end a number of days from today."""
     made = product()
     return [
-        TlsFiles(made, fetched=fetched, root=root, now=NOW),
-        Ssl(made, fetched=fetched, secrets=secrets or Secrets(()), root=root, now=NOW),
+        TlsFiles(made, fetched=fetched, root=root, now=clock),
+        Ssl(
+            made,
+            fetched=fetched,
+            secrets=secrets or Secrets(()),
+            root=root,
+            now=clock,
+        ),
     ]
 
 
@@ -192,20 +207,27 @@ def test_a_key_that_is_not_0600_is_refused_not_remoded(tmp_path: Path) -> None:
 def test_a_fresh_self_signed_pair_is_kept_an_expiring_one_is_made_again(
     tmp_path: Path,
 ) -> None:
+    """Changed by the FIX of DM-126 (by the dispatcher's word): the steps
+    judge by the real clock here. The pair that is due is made by ``openssl
+    -days 10`` -- ten days from today -- and was judged by the fixed ``NOW``
+    of the tests (2026-11-01): from 21.11.2026 on it ended more than
+    ``RENEW_BEFORE`` after ``NOW``, the machine rightly kept it, and the test
+    was red for good. A certificate made by the real clock is judged by the
+    real clock."""
     root, fetched = passport(tmp_path)
     with Mixed() as runner:
-        run(ladder(root, fetched), runner)
+        run(ladder(root, fetched, clock=None), runner)
     first = cert_path(root).read_text()
     runner = Mixed()
     with runner:
-        run(ladder(root, fetched), runner)
+        run(ladder(root, fetched, clock=None), runner)
     assert cert_path(root).read_text() == first
     assert not [a for a in runner.argvs if "req" in a]
     cert, key = self_signed_pair(tmp_path, NAMES, days=10)
     cert_path(root).write_text(cert)
     key_path(root).write_text(key)
     with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+        outcome, _ = run(ladder(root, fetched, clock=None), runner)
     assert outcome.code is ExitCode.OK
     assert cert_path(root).read_text() not in (first, cert)
 

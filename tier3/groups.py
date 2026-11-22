@@ -72,6 +72,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_probe_DM_58_skin_version_switch_needs_no_rebuild", "b"),
     ("test_tier3_both_slots_from_one_brand_package_by_subpath", "b"),
     ("test_tier3_reinstall_keeps_the_persistent_volume", "b"),
+    # the last of b: a budget of the build cache the box is over (FIX DM-126)
+    ("test_tier3_gc_trims_the_build_cache_to_the_budget", "b"),
     # c -- an install of its own: services, languages, a job, a stop for
     # migrate, a dump and its restore, a reset, the project's verbs, logs and
     # a session, then destroy and destroy --all

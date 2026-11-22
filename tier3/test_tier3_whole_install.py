@@ -85,6 +85,7 @@ from pridem.runner import CommandNotStarted, CommandTimedOut, Stream, Subprocess
 from pridem.steps.compose import PROXY_URL as PROXY
 from pridem.steps.edge import CERTBOT_IMAGE
 from pridem.steps.egress import SQUID_IMAGE
+from pridem.steps.gc import reclaimable_size
 
 PYTHON = "/opt/pridem/current/venv/bin/python"
 PRIDEM = "/usr/local/bin/pridem"
@@ -241,6 +242,7 @@ def _passport(
     options: list[str] | None = None,
     params: dict[str, dict[str, str]] | None = None,
     asked: dict[str, dict[str, str]] | None = None,
+    cache_budget: str = "3G",
 ) -> Path:
     """A passport of the box; the blank declares ``languages: [en, ru]`` since
     ``BLANK_COMMIT`` 2e7580f, and an instance names its own (DM-46)."""
@@ -261,7 +263,7 @@ def _passport(
             "ssl": "self-signed",
             "gc": {
                 "keep_releases": 2,
-                "builder_cache_budget": "3G",
+                "builder_cache_budget": cache_budget,
                 "journal_budget": "200M",
             },
             "backup": {"enabled": False},
@@ -1460,8 +1462,10 @@ def test_tier3_both_slots_from_one_brand_package_by_subpath(
 
 
 def test_tier3_reinstall_keeps_the_persistent_volume(tmp_path: Path) -> None:
-    """DM-86, pass 3, last of group b: a mark on the volume of the persistent
-    entry ``primer-blank-files``; ``reinstall`` -- green, its ``destroy``
+    """DM-86, pass 3, in group b after every test but the cache's budget (FIX
+    of DM-126, which runs on the box it leaves): a mark on the volume of the
+    persistent entry ``primer-blank-files``; ``reinstall`` -- green, its
+    ``destroy``
     names the volume kept, and the stack comes up again on it: the mark is
     there. The database of the blank's own entry is new (not persistent):
     its test rows are gone, the seed of ``install`` is back."""
@@ -1487,6 +1491,56 @@ def test_tier3_reinstall_keeps_the_persistent_volume(tmp_path: Path) -> None:
     assert _psql("SELECT key FROM app_settings WHERE key = 'installed_at'") == [
         "installed_at"
     ]
+
+
+def _cache_line() -> dict[str, str]:
+    """The line ``Build Cache`` of ``docker system df``, as docker prints it."""
+    rows = [
+        json.loads(line)
+        for line in _stdout(["docker", "system", "df", "--format", "{{json .}}"])
+        if line.strip()
+    ]
+    [row] = [row for row in rows if row.get("Type") == "Build Cache"]
+    return {str(key): str(value) for key, value in row.items()}
+
+
+def test_tier3_gc_trims_the_build_cache_to_the_budget(tmp_path: Path) -> None:
+    """FIX of DM-126 (owner's decision of 22.11), the last of group ``b``, on
+    the box ``reinstall`` left: a passport whose ``builder_cache_budget`` is
+    ``1M``. The budget is of the cache no image holds (``Reclaimable`` of the
+    line ``Build Cache``); the box has more of it than that -- else this test
+    proves nothing and is red on its first assertion. ``update``: green, its
+    ``gc`` measured the cache over the budget before and not over it after,
+    and docker says the same after the run. Before the FIX the prune removed
+    less than it had to in one call, and ``verify`` read ``Size``, which the
+    images' own layers keep over any small budget.
+
+    Measured into the run's output first (par0 14.3): docker's line before
+    and after, the cache in the fact of ``gc``."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    budget = 1024**2
+    before = _cache_line()
+    print("FIX DM-126 measure: the cache before", before)
+    assert reclaimable_size(before["Reclaimable"]) > budget, (
+        f"the box holds no cache of its own over the budget: {before}"
+    )
+    passport = _passport(tmp_path, version=16, cache_budget="1M")
+    verdict, printed = _install(passport, "update")
+    after = _cache_line()
+    [gc] = [s for s in verdict.steps if (s.phase, s.name) == ("finally", "gc")]
+    fact = gc.verify or {}
+    measured = {
+        when: (fact.get(when) or {}).get("build_cache")  # type: ignore[union-attr]
+        for when in ("before", "after")
+    }
+    print("FIX DM-126 measure: the cache after", after, "the fact of gc", measured)
+    assert verdict.result == "green", printed
+    assert gc.status == "ok", gc
+    was, now = measured["before"], measured["after"]
+    assert isinstance(was, dict) and isinstance(now, dict), measured
+    assert isinstance(was["reclaimable"], int) and was["reclaimable"] > budget, was
+    assert isinstance(now["reclaimable"], int) and now["reclaimable"] <= budget, now
+    assert reclaimable_size(after["Reclaimable"]) <= budget, after
 
 
 def _check(directory: Path) -> tuple[int, dict[str, object]]:

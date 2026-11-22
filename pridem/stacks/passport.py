@@ -274,7 +274,8 @@ _UNITS = {"K": 1024, "M": 1024**2, "G": 1024**3}
 
 
 def size_bytes(size: str) -> int:
-    """``200M`` -> bytes; binary units, as docker reads ``--keep-storage``."""
+    """``200M`` -> bytes; binary units. ``gc`` gives docker the number of
+    bytes itself (``--max-used-space``)."""
     return int(size[:-1]) * _UNITS[size[-1]]
 
 

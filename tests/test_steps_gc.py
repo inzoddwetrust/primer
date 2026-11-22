@@ -111,7 +111,12 @@ def df(
     containers: tuple[int, str] = (3, "10MB"),
     volumes: tuple[int, str] = (2, "100MB"),
     cache: tuple[int, str] | None = (5, "1GB"),
+    own: str | None = None,
 ) -> FakeCall:
+    """``docker system df``. ``own`` -- ``Reclaimable`` of the build cache,
+    the records no image holds, which its budget is of (FIX of DM-126, owner's
+    decision of 22.11); by default all of the cache -- it printed ``0B (0%)``
+    for every line, when the machine read ``Size`` alone."""
     rows = [
         ("Images", images),
         ("Containers", containers),
@@ -123,7 +128,7 @@ def df(
         json.dumps(
             {
                 "Active": "1",
-                "Reclaimable": "0B (0%)",
+                "Reclaimable": (own or size) if kind == "Build Cache" else "0B (0%)",
                 "Size": size,
                 "TotalCount": str(number),
                 "Type": kind,
@@ -307,6 +312,11 @@ def kept_world(tmp: Path) -> tuple[World, Path, Path]:
 
 
 def test_probe_DM_20_planted_noop_prune_makes_verify_red(tmp_path: Path) -> None:
+    """Changed by the FIX of DM-126 (owner's decision of 22.11; by the
+    dispatcher's word, before the change): the prune of the build cache is
+    ``--max-used-space`` and the machine reads the cache after it -- the
+    scenario holds one more ``docker system df``. What the probe asserts is
+    as it was: a prune that removed nothing is ``not-removed``."""
     world, _, _ = kept_world(tmp_path)
     old = image(3, world.commits[0])
     script = [
@@ -344,6 +354,7 @@ def test_probe_DM_20_planted_noop_prune_makes_verify_red(tmp_path: Path) -> None
         *listed([], kind="container"),
         *listed([], kind="image"),
         FakeCall(prune_argv(3 * GIB)),
+        df(cache=(9, "5GB")),  # act reads the cache: as it was -- no more calls
         df(cache=(9, "5GB")),
     ) as runner:
         outcome, _ = run_gc(world, runner)
@@ -413,6 +424,11 @@ def test_probe_DM_20_unlabelled_and_base_images_are_kept(tmp_path: Path) -> None
 
 
 def test_probe_DM_20_volumes_never_touched(tmp_path: Path) -> None:
+    """Changed by the FIX of DM-126 (owner's decision of 22.11; by the
+    dispatcher's word, before the change): the machine reads the build cache
+    after the images went and after the prune -- the scenario holds two more
+    ``docker system df``. What the probe asserts of the volumes is as it
+    was."""
     world, _, _ = kept_world(tmp_path)
     old = image(3, world.commits[0])
     runner = GitReal(
@@ -420,7 +436,9 @@ def test_probe_DM_20_volumes_never_touched(tmp_path: Path) -> None:
         *listed([], kind="container"),
         *listed([old], kind="image"),
         FakeCall(("docker", "image", "rm", str(old["Id"]))),
+        df(volumes=(3, "800MB"), cache=(9, "4GB")),  # the cache, images gone
         FakeCall(prune_argv(3 * GIB)),
+        df(volumes=(3, "800MB"), cache=(2, "1GB")),  # under the budget: enough
         df(volumes=(3, "800MB"), cache=(2, "1GB")),
         FakeCall(IMAGES),
     )
@@ -489,13 +507,21 @@ def test_probe_DM_20_runs_in_finally_after_red_plan(tmp_path: Path) -> None:
 
 
 def test_probe_DM_20_over_budget_gives_exit_2_with_numbers(tmp_path: Path) -> None:
+    """Changed by the FIX of DM-126 (owner's decision of 22.11; by the
+    dispatcher's word, before the change): the machine repeats the prune
+    while the cache shrinks -- the scenario holds two prunes, the second
+    changing nothing, and the reads of the cache between them. The numbers
+    and the exit code are as they were."""
     world, _, _ = kept_world(tmp_path)
     with GitReal(
         df(cache=(9, "5GB")),
         *listed([], kind="container"),
         *listed([], kind="image"),
         FakeCall(prune_argv(3 * GIB)),
-        df(cache=(7, "4GB")),  # shrank, yet over: the rest is in use
+        df(cache=(7, "4GB")),  # shrank, yet over: once more
+        FakeCall(prune_argv(3 * GIB)),
+        df(cache=(7, "4GB")),  # as it was: the rest is in use
+        df(cache=(7, "4GB")),
     ) as runner:
         outcome, _ = run_gc(world, runner)
     assert outcome.code is ExitCode.INCOMPLETE
@@ -526,7 +552,7 @@ def prune_argv(budget: int) -> tuple[str, ...]:
         "prune",
         "--force",
         "--all",
-        "--keep-storage",
+        "--max-used-space",
         str(budget),
     )
 
@@ -717,6 +743,8 @@ def test_journals_go_to_the_budget_and_the_current_one_stays(tmp_path: Path) -> 
 
 
 def test_an_empty_box_measures_and_is_green(tmp_path: Path) -> None:
+    """Changed by the FIX of DM-126: the measurement of the build cache has
+    ``reclaimable`` -- the bytes no image holds -- zero too with no line."""
     data = passport_data()
     root, fetched = passport_box(tmp_path, data)
     box = Box(root / "opt" / "pridem")
@@ -743,7 +771,7 @@ def test_an_empty_box_measures_and_is_green(tmp_path: Path) -> None:
     assert outcome.code is ExitCode.OK, outcome.steps
     after = fact(outcome)["after"]
     assert isinstance(after, dict)
-    assert after["build_cache"] == {"count": 0, "bytes": 0}
+    assert after["build_cache"] == {"count": 0, "bytes": 0, "reclaimable": 0}
 
 
 def test_without_any_passport_gc_removes_nothing_and_says_so(tmp_path: Path) -> None:
