@@ -251,11 +251,7 @@ class Build(Step):
         one code."""
         compose = self.compose
         document = config(ctx, compose)
-        passport = self._passport()
-        slots = None if passport is None else set(passport.packages)  # DM-127
-        places_found = package_places(
-            compose.stack, self._documents(ctx, document), slots
-        )
+        places_found = package_places(compose.stack, self._documents(ctx, document))
         refused = refusal(compose, document, raw, [*places_found, *also])
         if refused is not None:
             raise StepFailed(*refused)
