@@ -88,7 +88,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -574,14 +574,23 @@ def reserved(
 
 
 def package_places(
-    stack: Product | Service, documents: Mapping[str, Mapping[str, Json]]
+    stack: Product | Service,
+    documents: Mapping[str, Mapping[str, Json]],
+    slots: Collection[str] | None = None,
 ) -> list[str]:
     """Where the product's packages go, against the compose ``documents`` of
     all its stack entries: a ``mount`` or ``build`` place whose service is in
-    none of them, or a ``build`` place on a service with no ``build``, one
+    none of them, a ``build`` place on a service with no ``build``, or one
+    whose directory is not in the service's build context -- the path is the
+    context's (contract 3 rule 10), and a place under a directory the context
+    has not is a package no build reads (DM-127: velo's ``public/skin`` with
+    the repository's root as context, a green build with no skin). One
     ``<service>: packages.<slot>.<form> (...)`` each, sorted. A service of
     another entry is no finding: a package belongs to the stack its service is
-    in. One function for ``build`` and ``pridem check``."""
+    in. ``slots`` -- the slots whose ``build`` directory is checked: the
+    passport's packages on a box (an optional slot with none builds as the
+    repository has it, DM-101), every one in ``pridem check``. One function
+    for ``build`` and ``pridem check``."""
     if not isinstance(stack, Product):
         return []
     bodies: dict[str, dict[str, Json]] = {}
@@ -603,6 +612,15 @@ def package_places(
                 )
             elif "build" not in body:
                 found.append(f"{place.service}: packages.{slot}.build (no build)")
+            elif slots is None or slot in slots:
+                build = body["build"]
+                context = build.get("context") if isinstance(build, dict) else build
+                parent = Path(place.path).parent
+                if isinstance(context, str) and not (Path(context) / parent).is_dir():
+                    found.append(
+                        f"{place.service}: packages.{slot}.build "
+                        f"({parent}: no such directory in its context)"
+                    )
     return sorted(set(found))
 
 

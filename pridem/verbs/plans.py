@@ -307,7 +307,28 @@ def deploy_plan(
             if isinstance(step, FetchRoot) and _guards_stand(wanted, role):
                 own.append(Stand(step, box, root))  # right after it: DM-24
         key = DeployKey(passport.product.repo, root, fresh=known.fresh)  # file:// none
-        return [StackSteps(machine.SOURCES, [key, *own])]
+        # a package of the passport from its own repository: its key, as a
+        # product's or a service's, in a stack of its slot -- one key a stack
+        # (DM-127, contract 1 section 9); file:// has none
+        addresses = [
+            passport.product.repo,
+            *(p.repo for p in passport.packages.values()),
+        ]
+        keys = [
+            StackSteps(
+                f"{machine.MACHINE_PREFIX}package-{slot}",
+                [
+                    DeployKey(
+                        package.repo,
+                        root,
+                        others=[a for a in addresses if a != package.repo],
+                        fresh=known.fresh,
+                    )
+                ],
+            )
+            for slot, package in sorted(passport.packages.items())
+        ]
+        return [*keys, StackSteps(machine.SOURCES, [key, *own])]
 
     def dependencies() -> Sequence[StackSteps] | None:
         """The keys of the dependencies the edition uses, the lock, the services."""

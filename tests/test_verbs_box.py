@@ -157,7 +157,11 @@ def test_a_box_of_an_ops_repository_names_its_address_and_server(
 
 
 def _sources(tmp: Path, role: str, wanted: Wanted) -> tuple[FetchRoot, dict[str, str]]:
-    """The ``fetch_root`` the plan makes once the passport is read."""
+    """The ``fetch_root`` the plan makes once the passport is read.
+
+    Changed by DM-127: the keys of the passport's packages are stacks of their own
+    before pridem-sources -- the sources stack is found by its name, not as the
+    first part made."""
     box = Box(tmp / "opt" / "pridem")
     file = _passport(tmp / "p", role=role)
     planned = deploy_plan(Session(box, "r1", Fetched(), NO_SECRETS), tmp, wanted, None)
@@ -170,7 +174,8 @@ def _sources(tmp: Path, role: str, wanted: Wanted) -> tuple[FetchRoot, dict[str,
     ]
     made = sources.build()
     assert made is not None
-    [fetch] = [step for step in made[0].steps if isinstance(step, FetchRoot)]
+    [own] = [part for part in made if part.name == "pridem-sources"]
+    [fetch] = [step for step in own.steps if isinstance(step, FetchRoot)]
     return fetch, fetch.resolved.tries
 
 

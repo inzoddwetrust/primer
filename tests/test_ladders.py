@@ -47,7 +47,11 @@ def _made(
     fs_root: Path, verb: str, role: str, rollback: bool
 ) -> tuple[Plan, list[StackSteps]]:
     """The plan of ``verb`` on a box of ``role``, every deferred stack made;
-    the stacks made, in the ladder's order."""
+    the stacks made, in the ladder's order.
+
+    Changed by DM-127: the keys of the passport's packages are stacks of their own
+    before pridem-sources -- the sources stack is found by its name, not as the
+    first part built."""
     data = passport_example()
     section(data, "server")["role"] = role
     if role != "test":  # passport rule 4: a release tag there
@@ -80,7 +84,8 @@ def _made(
             ladder([StackSteps(part.name, list(part.steps), root=True)])
         stacks += built
         if stack.name == "pridem-sources":  # what fetch_root reads: the target
-            [fetch] = [s for s in built[0].steps if isinstance(s, FetchRoot)]
+            [sources] = [part for part in built if part.name == "pridem-sources"]
+            [fetch] = [s for s in sources.steps if isinstance(s, FetchRoot)]
             fetch.target = Target("main", role == "test", COMMIT)
             fetch.resolved.product = blank()
             fetch.resolved.releases[fetch.stack] = fs_root / "release"

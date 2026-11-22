@@ -809,9 +809,14 @@ STORAGE: dict[str, Json] = {
 
 def test_a_package_belongs_to_the_stack_its_service_is_in(tmp_path: Path) -> None:
     """Two stacks, the skin in ``velo``: green for both; the service in none:
-    a finding for both (the pair)."""
+    a finding for both (the pair).
+
+    Changed by DM-127: a build place's directory must be in its service's build
+    context (package_places) -- the velo-like repository has frontend/public, as
+    velo's has; what is held is the same."""
     stack = made(velo_data())
-    velo = VELO
+    velo = in_release(VELO, tmp_path)
+    (tmp_path / "frontend" / "public").mkdir(parents=True)
     assert package_places(stack, {"velo": velo, "velo-storage": STORAGE}) == []
     nowhere = made(velo_data(skin_service="web"))
     assert package_places(nowhere, {"velo": velo, "velo-storage": STORAGE}) == [
@@ -961,10 +966,15 @@ def test_an_entry_s_own_aliases_are_not_reserved_for_it(tmp_path: Path) -> None:
 
 def test_check_reads_every_compose_before_it_refuses(tmp_path: Path) -> None:
     """``pridem check`` of a velo-like repository: two stacks, the skin in
-    one -- green; the other way round, the service in none -- both red."""
+    one -- green; the other way round, the service in none -- both red.
+
+    Changed by DM-127: a build place's directory must be in its service's build
+    context (package_places) -- the velo-like repository has frontend/public, as
+    velo's has; what is held is the same."""
 
     def repository(data: Mapping[str, object], where: Path) -> Path:
         (where / "deploy").mkdir(parents=True)
+        (where / "frontend" / "public").mkdir(parents=True)
         (where / "primer.yaml").write_text(yaml.safe_dump(dict(data)))
         (where / "docker-compose.yml").write_text("services: {}\n")
         (where / "deploy" / "storage-compose.yml").write_text("services: {}\n")

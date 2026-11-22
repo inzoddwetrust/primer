@@ -101,6 +101,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
         "test_tier3_optional_build_slot_without_a_package_serves_the_repository_s_front",
         "e",
     ),
+    ("test_tier3_a_skin_built_into_a_frontend_built_from_the_root", "e"),
     ("test_tier3_types_are_made_by_the_products_commands", "e"),  # DM-63
     ("test_tier3_alembic_runs_with_the_apps_environment", "e"),  # DM-124
     # f -- an install of its own: options, derive, points (out of c, DM-85:

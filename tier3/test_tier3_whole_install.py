@@ -3985,3 +3985,60 @@ def test_tier3_doctor_is_empty_with_the_apt_timers_on(tmp_path: Path) -> None:
         _run(["systemctl", "stop", *APT_TIMERS], expect=(0, 5))
         _run(["systemctl", "mask", *APT_TIMERS], expect=(0, 1))
         print("DM-105 measure, after:", _timers_state())
+
+
+ROOT_FRONTEND = """    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+"""
+"""The copy of DM-127: the blank's frontend built from the repository's root,
+as velo's is."""
+
+ROOT_DOCKERFILE = (
+    (
+        "COPY package.json package-lock.json ./\n",
+        "COPY frontend/package.json frontend/package-lock.json ./\n",
+    ),
+    ("COPY . .\n", "COPY frontend/ .\nRUN test -f public/skin/skin.css\n"),
+    (
+        "COPY nginx/package.js nginx/validate.js ",
+        "COPY frontend/nginx/package.js frontend/nginx/validate.js ",
+    ),
+    ("COPY src/texts/ ", "COPY frontend/src/texts/ "),
+    ("COPY nginx/default.conf.template ", "COPY frontend/nginx/default.conf.template "),
+)
+"""The frontend's Dockerfile read from the root: every COPY of the context
+under ``frontend/``; the skin checked by the build, as in DM-61."""
+
+
+def test_tier3_a_skin_built_into_a_frontend_built_from_the_root(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-127 (review 0004, finding 5): a copy of the blank whose frontend is
+    built from the repository's root, as velo's is, the skin built into it at
+    ``frontend/public/skin`` -- the path of the context, where its build reads
+    it: the update is green and the frontend serves the skin. What DM-61
+    holds of a build with a package is its, not this probe's."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    skin = _skin_repository(tmp_path)
+    copy = _copy_of_blank(tmp_path, mirror, "root-context")
+    primer = copy / "primer.yaml"
+    rooted = BUILD_SKIN.replace("path: public/skin", "path: frontend/public/skin")
+    assert rooted.count("frontend/public/skin") == 1
+    _replace_once(primer, RUNTIME_SKIN, rooted)
+    _replace_once(
+        copy / "docker-compose.yml",
+        "    build:\n      context: ./frontend\n",
+        ROOT_FRONTEND,
+    )
+    for old, new in ROOT_DOCKERFILE:
+        _replace_once(copy / "frontend" / "Dockerfile", old, new)
+    _push(copy, mirror, "DM-127: the frontend built from the root, the skin into it")
+    package = {"skin": {"repo": f"file://{skin}", "version": "1.0.0"}}
+    verdict, printed = _install(
+        _passport(tmp_path, version=80, packages=package), "update"
+    )
+    assert verdict.result == "green", printed
+    facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
+    print("DM-127 measure:", facts.get((STACK, "build")))
+    assert _body("/skin/skin.css", FRONTEND) == "one"

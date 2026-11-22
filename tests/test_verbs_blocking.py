@@ -269,12 +269,16 @@ def test_stand_is_in_update_and_deploy_on_test(
     tmp_path: Path, verb: str, role: str, guarded: bool
 ) -> None:
     """``stand`` stands right after ``fetch_root`` in the plan of ``update``
-    and ``deploy`` on a test box, and nowhere else."""
+    and ``deploy`` on a test box, and nowhere else.
+
+    Changed by DM-127: the keys of the passport's packages are stacks of their own
+    before pridem-sources -- the sources stack is found by its name, not as the
+    first part built."""
     sources = deploy_verbs_box(tmp_path, verb, role)
     assert isinstance(sources, Deferred)
     built = sources.build()
     assert built is not None
-    [stack] = built
+    [stack] = [part for part in built if part.name == "pridem-sources"]
     ladder = sorted(stack.steps, key=lambda step: step.order)  # as the plan runs
     names = [step.name for step in ladder]
     expected = ["deploy_key", "fetch_root", *(["stand"] if guarded else [])]
