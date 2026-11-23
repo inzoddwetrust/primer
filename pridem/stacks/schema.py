@@ -137,6 +137,11 @@ RULES = {
     ),
     "R11.edition-enum": (11, "enum: editions needs editions declared"),
     "R17.seed-form": (17, "a seed profile is {run, when}, when is install or command"),
+    "R17.seed-reset": (
+        17,
+        "reset and reset_only are commands of a profile of when: command -- only "
+        "the verb seed resets",
+    ),
     "R20.test-form": (
         20,
         "tests are {run, target, services?}: run in the image built from target, "
@@ -399,9 +404,18 @@ Roles = Annotated[list[Literal["test", "prod", "preview"]], Field(min_length=1)]
 # the roles of the box it may run on, as a verb's (DM-22); the refusal of a seed
 # outside them comes with the machine's running of seeds (DM-86).
 class Seed(Strict):
+    """A seed profile. Seeding and taking seeds back are the product's: the
+    machine runs its commands and touches no data itself (owner's decision of
+    23.11, DM-133). ``run`` -- seed; ``reset`` -- take the profile's data back
+    and seed it again (``seed --reset``); ``reset_only`` -- take it back alone
+    (``seed --reset-only``). A profile without the command is refused the
+    verb, never a wipe of the database."""
+
     run: Command
     when: Literal["install", "command"]
     roles: Roles | None = None
+    reset: Command | None = None
+    reset_only: Command | None = None
 
 
 class Job(Strict):
@@ -482,6 +496,9 @@ class Stack(Strict):
     """Services of this entry's compose stopped before its ``migrate`` acts --
     workers, consumers, the API too (protocol 6.3, contract 3 rule 35); ``up``
     brings them up after it (DM-22)."""
+    seeds_reset_all: Command | None = None
+    """The product's command that takes back the data of every seed profile of
+    this entry (``seed --reset-all``, DM-133); none -- the verb is refused."""
 
 
 class _Var(Strict):
@@ -1342,6 +1359,22 @@ def _s_accepts_services(stack: Product | Service) -> list[Problem]:
     ]
 
 
+def _r17_seed_reset(stack: Product | Service) -> list[Problem]:
+    """``reset`` and ``reset_only`` on a profile of ``when: install`` are
+    refused: the verb ``seed`` runs no such profile, so nothing would ever run
+    them (DM-133)."""
+    return [
+        problem_at(
+            ("stacks", entry, "seeds", name, field), "R17.seed-reset", "when: install"
+        )
+        for entry, stage in sorted(stack.stacks.items())
+        for name, seed in sorted(stage.seeds.items())
+        if seed.when == "install"
+        for field, command in (("reset", seed.reset), ("reset_only", seed.reset_only))
+        if command is not None
+    ]
+
+
 def _s_types_one(stack: Product | Service) -> list[Problem]:
     """``types`` on one entry at most (DM-63 FIX): the step makes the types of
     one entry; a second would be left without a word."""
@@ -1373,6 +1406,7 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _s_stop,
     _s_verbs,
     _s_types_one,
+    _r17_seed_reset,
     _s_reserved,
     _s_accepts_services,
 )

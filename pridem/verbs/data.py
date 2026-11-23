@@ -24,7 +24,7 @@ import json
 import re
 import shlex
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -40,7 +40,7 @@ from pridem.runner import Interactive, RunnerError, Stream
 from pridem.stacks import names as machine
 from pridem.stacks.env import MINTED_FILE, read_minted
 from pridem.stacks.loader import ContractError
-from pridem.stacks.schema import Ident, Product, Service, load_primer_yaml
+from pridem.stacks.schema import Ident, Product, Seed, Service, load_primer_yaml
 from pridem.state import Box
 from pridem.steps.base import Step, StepFailed
 from pridem.steps.compose import ComposeStack, verb_entry, verb_service
@@ -54,6 +54,7 @@ from pridem.steps.data import (
     DbRestore,
     ProjectVerb,
     SeedPlan,
+    SeedReset,
     SeedRun,
     StartRestored,
     StopForRestore,
@@ -376,6 +377,8 @@ class SeedArgs(Strict):
     list_: bool = False
     dry_run: bool = False
     reset: bool = False
+    reset_only: bool = False
+    reset_all: bool = False
     confirm: str | None = None
 
 
@@ -394,14 +397,52 @@ def _seed_list(ctx: Context) -> dict[str, Json]:
     return found
 
 
+NO_RESET = (
+    "seed {flag}: {owner} declares no {field} -- to wipe the whole database: "
+    "pridem db reset {entry}; to reset seeds: declare {field} in primer.yaml"
+)
+"""The refusal of a reset the product did not declare (DM-133): the machine
+never wipes a database in its place."""
+
+ALL_ROLES: frozenset[str] = frozenset({"test", "prod", "preview"})
+
+
+def _reset_all_roles(seeds: Mapping[str, Seed]) -> frozenset[str]:
+    """The roles ``--reset-all`` may run on: those of every profile of the
+    entry -- it takes back the data of each, so it is as strict as the
+    strictest; a profile without ``roles`` -- every role; no profile --
+    every role (DM-133)."""
+    allowed = ALL_ROLES
+    for seed in seeds.values():
+        if seed.roles is not None:
+            allowed = allowed & frozenset(seed.roles)
+    return allowed
+
+
 def _seed(args: Strict, ctx: Context) -> int:
     """``seed --list``; ``seed <stack> --profile <n> [--dry-run | --reset
-    --confirm <server.name>]`` -- a profile of ``when: command`` (rule 17), in
-    its roles; refused before the run otherwise (DM-86)."""
+    --confirm <server.name> | --reset-only --confirm <server.name>]``; ``seed
+    <stack> --reset-all --confirm <server.name>`` -- every one a command of
+    the product (owner's decision of 23.11, DM-133): ``run`` of a profile of
+    ``when: command`` (rule 17), its ``reset`` (its data back and seeded
+    again), its ``reset_only`` (its data back alone), ``seeds_reset_all`` of
+    the entry (the data of every profile back). The machine touches no data
+    itself: none of these wipes the database, which is ``db reset`` alone. A
+    command the product did not declare is refused before the run; the role
+    and the server's name are checked under the lock."""
     if not isinstance(args, SeedArgs):
         raise TypeError("seed takes SeedArgs")
+    resets = [
+        flag
+        for flag, given in (
+            ("--reset", args.reset),
+            ("--reset-only", args.reset_only),
+            ("--reset-all", args.reset_all),
+        )
+        if given
+    ]
     if args.list_:
-        if args.stack or args.profile or args.dry_run or args.reset or args.confirm:
+        if args.stack or args.profile or args.dry_run or resets or args.confirm:
             raise Refused("seed --list: takes nothing else")
         listed = _seed_list(ctx)
 
@@ -412,6 +453,18 @@ def _seed(args: Strict, ctx: Context) -> int:
         return run_plan_verb(
             ctx, verb="seed", mode="command", make=lists, args={"list": True}
         )
+    if len(resets) > 1:
+        raise Refused(f"seed: {' and '.join(resets)} -- one reset at a time")
+    if args.dry_run and (resets or args.confirm):
+        raise Refused("seed --dry-run: runs nothing, so resets nothing")
+    if resets and args.confirm is None:
+        raise Refused(f"seed {resets[0]}: --confirm <server.name> to go on")
+    if not resets and args.confirm is not None:
+        raise Refused("seed: --confirm goes with --reset, --reset-only or --reset-all")
+    if args.reset_all:
+        if args.stack is None or args.profile is not None:
+            raise Refused("seed --reset-all: names the entry, and no --profile")
+        return _seed_reset_all(ctx, args.stack, args.confirm)
     if args.stack is None or args.profile is None:
         raise Refused("seed: names the entry and --profile, or --list")
     compose = _target(ctx, args.stack)
@@ -420,18 +473,34 @@ def _seed(args: Strict, ctx: Context) -> int:
         raise Refused(f"seed: {compose.entry} has no profile {args.profile}")
     if seed.when != "command":
         raise Refused(f"seed: {args.profile} runs at install only (when: install)")
-    if args.dry_run and (args.reset or args.confirm):
-        raise Refused("seed --dry-run: runs nothing, so resets nothing")
     given: dict[str, Json] = {"stack": compose.entry, "profile": args.profile}
-    reset, confirm, profile, roles = args.reset, args.confirm, args.profile, seed.roles
+    confirm, profile, roles = args.confirm, args.profile, seed.roles
+    step: Step
+    if args.reset or args.reset_only:
+        mode: Literal["reset", "reset-only"] = "reset" if args.reset else "reset-only"
+        field = "reset" if args.reset else "reset_only"
+        command = seed.reset if args.reset else seed.reset_only
+        if command is None:
+            raise Refused(
+                NO_RESET.format(
+                    flag=resets[0],
+                    owner=f"the profile {profile} of {compose.entry}",
+                    field=field,
+                    entry=compose.entry,
+                )
+            )
+        step = SeedReset(compose, mode, command, profile)
+        given = {**given, field: True, "confirm": confirm or ""}
+    else:
+        step = SeedRun(compose, profile, seed.run)
 
     def seedable(box: Box) -> None:
         """The role and the confirmation under the lock (DM-24)."""
         role = _role(ctx, "seed")
         if roles is not None and role not in roles:
             raise Refused(f"seed: {profile} is not for the role {role}")
-        if reset:
-            _resettable(ctx, "seed --reset", compose, confirm)
+        if resets:
+            _confirmed(ctx, f"seed {resets[0]}", confirm)
 
     if args.dry_run:
         app = compose.app_service or ""
@@ -444,8 +513,8 @@ def _seed(args: Strict, ctx: Context) -> int:
         }
 
         def dry(session: Session) -> Planned:
-            step = SeedPlan("seed_dry_run", fact)
-            return Planned([StackSteps(compose.entry, [step], root=True)])
+            planned = SeedPlan("seed_dry_run", fact)
+            return Planned([StackSteps(compose.entry, [planned], root=True)])
 
         return run_plan_verb(
             ctx,
@@ -455,24 +524,52 @@ def _seed(args: Strict, ctx: Context) -> int:
             args={**given, "dry_run": True},
             before=seedable,
         )
-    if not args.reset and args.confirm is not None:
-        raise Refused("seed: --confirm goes with --reset")
-    run = SeedRun(compose, args.profile, seed.run)
 
     def make(session: Session) -> Planned:
-        stopped = Stopped()
-        steps: list[Step] = (
-            [*_reset_steps(compose, stopped), run] if args.reset else [run]
-        )
-        finals = (
-            [StackSteps(machine.STOPPED, [StartStopped(stopped)])] if args.reset else []
-        )
-        return Planned([StackSteps(compose.entry, steps, root=True)], finally_=finals)
+        return Planned([StackSteps(compose.entry, [step], root=True)])
 
-    if args.reset:
-        given = {**given, "reset": True, "confirm": args.confirm or ""}
     return run_plan_verb(
         ctx, verb="seed", mode="command", make=make, args=given, before=seedable
+    )
+
+
+def _seed_reset_all(ctx: Context, entry: str, confirm: str | None) -> int:
+    """``seed <stack> --reset-all --confirm <server.name>``: the entry's
+    ``seeds_reset_all``, on the roles of every profile (DM-133)."""
+    compose = _target(ctx, entry)
+    stage = compose.stack.stacks[compose.entry]
+    if stage.seeds_reset_all is None:
+        raise Refused(
+            NO_RESET.format(
+                flag="--reset-all",
+                owner=compose.entry,
+                field="seeds_reset_all",
+                entry=compose.entry,
+            )
+        )
+    roles = _reset_all_roles(stage.seeds)
+    step = SeedReset(compose, "reset-all", stage.seeds_reset_all)
+
+    def resettable(box: Box) -> None:
+        """The role and the confirmation under the lock (DM-24)."""
+        role = _role(ctx, "seed")
+        if role not in roles:
+            raise Refused(
+                f"seed --reset-all: a seed of {compose.entry} is not for "
+                f"the role {role}"
+            )
+        _confirmed(ctx, "seed --reset-all", confirm)
+
+    def make(session: Session) -> Planned:
+        return Planned([StackSteps(compose.entry, [step], root=True)])
+
+    given: dict[str, Json] = {
+        "stack": compose.entry,
+        "reset_all": True,
+        "confirm": confirm or "",
+    }
+    return run_plan_verb(
+        ctx, verb="seed", mode="command", make=make, args=given, before=resettable
     )
 
 
@@ -486,6 +583,8 @@ SEED = Verb(
         "--list": ("list_", "flag"),
         "--dry-run": ("dry_run", "flag"),
         "--reset": ("reset", "flag"),
+        "--reset-only": ("reset_only", "flag"),
+        "--reset-all": ("reset_all", "flag"),
         "--confirm": ("confirm", "value"),
     },
 )

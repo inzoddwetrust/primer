@@ -688,29 +688,46 @@ def test_the_verb_seed_refuses_before_the_run(
     assert said in err
 
 
-def test_seed_reset_resets_then_seeds_on_test_with_the_name(tmp_path: Path) -> None:
-    """``--reset``: ``db reset`` of the entry, then the seed -- two forms in a
-    row; on ``preview`` -- refused (``db reset`` is for ``test``)."""
-    cs = _with_seeds(tmp_path, "test", ROLED)
-    calls = [*reset_calls(cs), *_run_seed_calls(cs, "demo")]
+def test_seed_reset_runs_the_products_reset_on_the_roles_of_its_profile(
+    tmp_path: Path,
+) -> None:
+    """``--reset``: the profile's own ``reset``, one step ``seed_reset`` --
+    on ``preview`` as on ``test``, the roles of the profile; on ``prod``,
+    outside them -- refused, nothing ran.
+
+    Replaces ``test_seed_reset_resets_then_seeds_on_test_with_the_name``
+    (owner's decision of 23.11, DM-133): ``--reset`` was ``db reset`` of the
+    whole database and then the seed, on ``test`` alone. Seeds are the
+    product's: the machine runs its command and wipes nothing."""
+    demo = ROLED["demo"]
+    assert isinstance(demo, dict)
+    resettable: dict[str, Json] = {
+        **ROLED,
+        "demo": {**demo, "reset": "python -m app.seed demo --reset"},
+    }
     argv = ["seed", STACK, "--profile", "demo", "--reset", "--confirm", "box-1"]
-    with FakeRunner(*calls) as runner:
-        code, out, _ = _cli(tmp_path, argv, runner)
-    verdict = _verdict(out)
-    assert code == 0, verdict.steps
-    assert [s.name for s in verdict.steps] == [
-        "stop_for_restore",
-        "db_reset",
-        "start_restored",
-        "seed",
-        "start_stopped",
-    ]
-    other = tmp_path / "preview"
-    other.mkdir()
-    _with_seeds(other, "preview", ROLED)
+    for role in ("test", "preview"):
+        home = tmp_path / role
+        home.mkdir()
+        cs = _with_seeds(home, role, resettable)
+        calls = [config_call(cs), *image_calls(cs), _command_call(cs, "--reset")]
+        with FakeRunner(*calls) as runner:
+            code, out, _ = _cli(home, argv, runner)
+        verdict = _verdict(out)
+        assert code == 0, verdict.steps
+        assert [s.name for s in verdict.steps] == ["seed_reset"]
+    home = tmp_path / "prod"
+    home.mkdir()
+    _with_seeds(home, "prod", resettable)
     with FakeRunner() as runner:
-        code, out, err = _cli(other, argv, runner)
-    assert (code, out) == (1, "") and "role test only" in err
+        code, out, err = _cli(home, argv, runner)
+    assert (code, out) == (1, "") and "not for the role prod" in err
+
+
+def _command_call(cs: ComposeStack, *tail: str) -> FakeCall:
+    """``python -m app.seed demo <tail>`` in a one-off container of the app."""
+    operands = ("app", "python", "-m", "app.seed", "demo", *tail)
+    return FakeCall(tuple(cs.argv("run", "--rm", operands=operands)))
 
 
 def test_seed_list_names_every_entry_s_profiles(tmp_path: Path) -> None:

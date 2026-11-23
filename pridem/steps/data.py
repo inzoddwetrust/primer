@@ -54,7 +54,7 @@ import re
 import shlex
 from collections.abc import Sequence
 from pathlib import Path
-from typing import ClassVar, Protocol
+from typing import ClassVar, Literal, Protocol
 
 from pridem.events import Json
 from pridem.runner import RunnerError, Stream
@@ -944,6 +944,63 @@ class SeedRun(Step):
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         return Verified({"stack": self.compose.entry, "profile": self.profile})
+
+
+class SeedReset(Step):
+    """Seeds taken back by the product's own command (owner's decision of
+    23.11, DM-133): ``reset`` of a profile -- its data back and seeded again;
+    ``reset-only`` -- its data back alone; ``reset-all`` -- the data of every
+    profile of the entry. The command runs as ``seed`` runs one -- a one-off
+    container of the app of the current release. The machine touches no data
+    itself: no service stopped, no database made again (that is ``db reset``
+    alone). The step stands instead of ``seed``; it is the point of no return
+    -- what the product took back is gone, and a red step after it needs a
+    restore."""
+
+    name = "seed_reset"
+    title = "Reset the seeds"
+    order = 4
+    modes = COMMAND
+    point_of_no_return = True
+    codes: ClassVar[dict[str, str]] = {
+        **IMAGE_CODES,
+        "no-app": "{stack} has no app to reset seeds in",
+        "reset": "take back the seed {profile} of {entry} and seed it again",
+        "reset-only": "take back the seed {profile} of {entry}",
+        "reset-all": "take back every seed of {entry}",
+    }
+
+    def __init__(
+        self,
+        compose: ComposeStack,
+        mode: Literal["reset", "reset-only", "reset-all"],
+        command: str,
+        profile: str | None = None,
+    ) -> None:
+        if (profile is None) != (mode == "reset-all"):
+            raise ValueError("a profile goes with reset and reset-only alone")
+        self.compose = compose
+        self.mode = mode
+        self.command = command
+        self.profile = profile
+
+    def _named(self) -> dict[str, Json]:
+        return {} if self.profile is None else {"profile": self.profile}
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        image_is_current(ctx, self.compose, config(ctx, self.compose))
+        params: dict[str, Json] = {"entry": self.compose.entry, **self._named()}
+        return CheckResult(True, local_code(self.mode, params), {})
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        out(ctx, _seed_argv(self.compose, self.command), timeout=SEED_TIMEOUT_S)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        # the command's code 0, read by the runner: the product's command is
+        # the whole of the act (as ``seed`` and ``project_verb``)
+        return Verified(
+            {"stack": self.compose.entry, "mode": self.mode, **self._named()}
+        )
 
 
 class SeedPlan(Step):

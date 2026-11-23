@@ -863,7 +863,18 @@
     },
     "Seed": {
       "additionalProperties": false,
+      "description": "A seed profile. Seeding and taking seeds back are the product's: the\nmachine runs its commands and touches no data itself (owner's decision of\n23.11, DM-133). ``run`` -- seed; ``reset`` -- take the profile's data back\nand seed it again (``seed --reset``); ``reset_only`` -- take it back alone\n(``seed --reset-only``). A profile without the command is refused the\nverb, never a wipe of the database.",
       "properties": {
+        "reset": {
+          "minLength": 1,
+          "title": "Reset",
+          "type": "string"
+        },
+        "reset_only": {
+          "minLength": 1,
+          "title": "Reset Only",
+          "type": "string"
+        },
         "roles": {
           "items": {
             "enum": [
@@ -1118,6 +1129,11 @@
           },
           "title": "Seeds",
           "type": "object"
+        },
+        "seeds_reset_all": {
+          "minLength": 1,
+          "title": "Seeds Reset All",
+          "type": "string"
         },
         "stop_for_migrate": {
           "default": [],

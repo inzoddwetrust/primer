@@ -3364,6 +3364,154 @@ def test_tier3_a_failed_job_runs_on_the_repeat(tmp_path: Path, mirror: Path) -> 
     assert (diff, failed_checks) == ([], []), doctor.model_dump_json()
 
 
+SAMPLE_SEEDS = """\
+async def sample(engine: AsyncEngine) -> None:
+    \"\"\"Two rows of the profile sample, each with a fresh value.\"\"\"
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO app_settings (key, value) SELECT k, md5(random()::text) "
+                "FROM (VALUES ('sample-a'), ('sample-b')) AS v(k) "
+                "ON CONFLICT (key) DO NOTHING"
+            )
+        )
+
+
+async def sample_reset_only(engine: AsyncEngine) -> None:
+    \"\"\"The rows of the profile sample taken back, nothing else.\"\"\"
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM app_settings WHERE key LIKE 'sample-%'"))
+
+
+async def sample_reset(engine: AsyncEngine) -> None:
+    \"\"\"The rows of the profile sample taken back and seeded again.\"\"\"
+    await sample_reset_only(engine)
+    await sample(engine)
+
+
+async def reset_all(engine: AsyncEngine) -> None:
+    \"\"\"The rows of every profile run by command taken back.\"\"\"
+    await sample_reset_only(engine)
+
+
+PROFILES: dict[str, Callable[[AsyncEngine], Coroutine[None, None, None]]] = {
+    "bootstrap": bootstrap,
+    "sample": sample,
+    "sample-reset": sample_reset,
+    "sample-reset-only": sample_reset_only,
+    "reset-all": reset_all,
+}
+"""
+"""The blank's ``app/seed.py`` in the copy of DM-133: a profile run by command,
+``sample``, and the three commands that take seeds back -- the product's own.
+``demo`` is not taken: the blank's tests use it as a name it does not know."""
+
+
+def _blank_with_seed_resets(tmp: Path, mirror: Path) -> None:
+    """The blank, consistent as a whole (par0 14.3): ``primer.yaml`` declares
+    the profile ``sample`` with ``reset`` and ``reset_only`` and the entry's
+    ``seeds_reset_all``; ``app/seed.py`` -- where the product reads them --
+    knows each command."""
+    copy = _copy_of_blank(tmp, mirror, "seed-resets")
+    _replace_once(
+        copy / "primer.yaml",
+        "      bootstrap: { run: python -m app.seed bootstrap, when: install }\n",
+        "      bootstrap: { run: python -m app.seed bootstrap, when: install }\n"
+        "      sample:\n"
+        "        run: python -m app.seed sample\n"
+        "        reset: python -m app.seed sample-reset\n"
+        "        reset_only: python -m app.seed sample-reset-only\n"
+        "        when: command\n"
+        "    seeds_reset_all: python -m app.seed reset-all\n",
+    )
+    _replace_once(
+        copy / "backend" / "app" / "seed.py",
+        "PROFILES: dict[str, Callable[[AsyncEngine], "
+        "Coroutine[None, None, None]]] = {\n"
+        '    "bootstrap": bootstrap,\n'
+        "}\n",
+        SAMPLE_SEEDS,
+    )
+    _push(copy, mirror, "DM-133: a seed profile with the product's resets")
+
+
+def _settings() -> dict[str, str]:
+    """Every row of the blank's ``app_settings``, by key."""
+    rows = _psql("SELECT key || '=' || value FROM app_settings ORDER BY key")
+    return dict(row.split("=", 1) for row in rows)
+
+
+def _blank_oid() -> str:
+    [oid] = _psql("SELECT oid FROM pg_database WHERE datname = 'blank'")
+    return oid
+
+
+def _seed_verdict(*flags: str) -> tuple[Verdict, str]:
+    return _verdict_of("seed", STACK, *flags)
+
+
+def test_tier3_seed_resets_run_the_products_commands(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-133 (owner's decision of 23.11), on the box the earlier tests left:
+    a copy of the blank whose profile ``sample`` declares ``reset`` and
+    ``reset_only`` and whose entry declares ``seeds_reset_all``. ``update``,
+    then ``seed --profile sample``: its rows are there. Then, each with
+    ``--confirm <server.name>``: ``--reset`` -- the rows made again (other
+    values); ``--reset-only`` -- gone; seeded again, ``--reset-all`` -- gone.
+    Every time: one step ``seed_reset`` of its mode, every other row of the
+    database as it was, the same database (OID), the same container of
+    ``app`` -- the machine wiped nothing and stopped nothing. Measured into
+    the run's output first (par0 14.3): the rows, the OID, the container."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    _blank_with_seed_resets(tmp_path, mirror)
+    deployed, printed = _install(_passport(tmp_path, version=49), "update")
+    assert deployed.result == "green", printed
+    seeded, printed = _seed_verdict("--profile", "sample")
+    assert seeded.result == "green", printed
+    _psql("INSERT INTO app_settings (key, value) VALUES ('dm133-other', 'kept')")
+    oid, app = _blank_oid(), _container(STACK, "app")
+    before = _settings()
+    others = {
+        key: value for key, value in before.items() if not key.startswith("sample-")
+    }
+    print("DM-133 measure: before", {"rows": before, "oid": oid, "app": app})
+    assert {"sample-a", "sample-b"} <= set(before), before
+    try:
+        for flags, mode, sampled in (
+            (("--profile", "sample", "--reset"), "reset", True),
+            (("--profile", "sample", "--reset-only"), "reset-only", False),
+            (("--reset-all",), "reset-all", False),
+        ):
+            if mode == "reset-all":
+                again, printed = _seed_verdict("--profile", "sample")
+                assert again.result == "green", printed
+            verdict, printed = _seed_verdict(*flags, "--confirm", "tier3-env")
+            after = _settings()
+            print(f"DM-133 measure: {mode}", {
+                "rows": after, "oid": _blank_oid(), "app": _container(STACK, "app"),
+                "steps": [(s.name, s.status, s.verify) for s in verdict.steps],
+            })  # fmt: skip
+            assert verdict.result == "green", printed
+            assert [(s.name, (s.verify or {}).get("mode")) for s in verdict.steps] == [
+                ("seed_reset", mode)
+            ], verdict.steps
+            mine = {
+                key: value for key, value in after.items() if key.startswith("sample-")
+            }
+            if sampled:
+                assert set(mine) == {"sample-a", "sample-b"}, after
+                assert all(mine[key] != before[key] for key in mine), (before, after)
+            else:
+                assert mine == {}, after
+            rest = {k: v for k, v in after.items() if not k.startswith("sample-")}
+            assert rest == others, (others, after)
+            assert _blank_oid() == oid
+            assert _container(STACK, "app") == app
+    finally:
+        _psql("DELETE FROM app_settings WHERE key = 'dm133-other'")
+
+
 def _service_giving_its_asked(tmp: Path) -> str:
     """A copy of the service at ``v1.0.0`` whose ``SERVICE_BOT_TOKEN`` --
     source ``asked`` -- is in ``provides``, consistent as a whole (par0
