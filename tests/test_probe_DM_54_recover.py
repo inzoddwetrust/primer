@@ -26,8 +26,10 @@ from pridem.report.catalog import ENGLISH, Catalog
 from pridem.report.schema import Verdict
 from pridem.runner import CommandNotStarted, FakeCall, FakeRunner, OnLine, Result
 from pridem.state import Box, JournalHeader, JournalSink, Recovery
+from pridem.steps.identity import Answer, PanelUnreachable
 from pridem.steps.passport import PASSPORT_COPY
 from pridem.verbs import VERBS
+from pridem.verbs.register import TOKEN_ENV, make_register
 
 NO_SECRETS = Secrets(())
 PASSPORT = "<passport>"
@@ -53,6 +55,7 @@ ARGV = {
     "start": ["start"],
     "stop": ["stop"],
     "restart": ["restart"],
+    "register": ["register"],
 }
 """The command line of each verb with a verdict."""
 ON_A_BOX = {"db", "backup", "seed", "verb", "start", "stop", "restart"}
@@ -66,6 +69,19 @@ release (a refusal, not a command); the probe gives it a prod box with one
 (``history_support.release_box``), and its plan's commands are refused here.
 The box's two green verdicts are the setup's, not the verb's: they are left
 out of what the probe reads."""
+IDENTITY = {"register"}
+"""DM-139: ``register`` refuses before the lock without its token and the
+passport's copy; the probe gives it both and a Panel that does not answer
+(``Unreachable``) -- the probe is about what comes before."""
+
+
+class Unreachable:
+    """A way to the Panel that never reaches it: no network, no socket."""
+
+    def post(self, url: str, body: bytes, headers: Mapping[str, str]) -> Answer:
+        raise PanelUnreachable("refused")
+
+
 PLANS = {"install", "update", "deploy", "doctor", "reinstall", "destroy"}
 """DM-45: the verbs of the box's plan; their steps run commands, which a
 runner refuses here (``Refusing``): the probe is about what comes before."""
@@ -106,8 +122,13 @@ def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
     dispatcher's word: ``rollback`` is a verb with a verdict on a box.
 
     Changed by DM-136: ``state`` reads the box with no lock, no journal and
-    no verdict -- a verb without a box, beside ``check``."""
-    assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS, *ON_A_BOX, *ROLLBACK])
+    no verdict -- a verb without a box, beside ``check``.
+
+    Changed by DM-139, on the dispatcher's word 24.11: ``register`` is a verb
+    with a verdict on a box."""
+    assert WITH_VERDICT == sorted(
+        ["gc", "ssl", "status", *PLANS, *ON_A_BOX, *ROLLBACK, *IDENTITY]
+    )
     assert "version" in VERBS and not VERBS["version"].verdict
     assert {name for name, verb in VERBS.items() if not verb.box} == {
         "check",
@@ -173,6 +194,12 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
         copy = tmp_path / PASSPORT_COPY
         copy.parent.mkdir(parents=True, exist_ok=True)
         copy.write_text(file.read_text())
+    elif name in IDENTITY:  # DM-139: a token, the passport's copy, no Panel
+        monkeypatch.setenv(TOKEN_ENV, "a-one-time-token-of-the-panel")
+        copy = tmp_path / PASSPORT_COPY
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text(file.read_text())
+        monkeypatch.setitem(VERBS, "register", make_register(transport=Unreachable))
     seeded: set[str] = set()
     if name in ROLLBACK:  # a previous release to go back to (DM-24)
         release_box(tmp_path, "prod", NEW, released(1, OLD), released(2, NEW))

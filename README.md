@@ -32,7 +32,9 @@ contracts, the parts the machine is built from and its verbs:
   `doctor`, `reinstall` and `destroy` run the plan the machine makes itself
   (`pridem/verbs/plans.py`, `pridem/verbs/deploy.py`, the ladder of
   `destroy` in `pridem/steps/destroy.py`); `report` renders a run's report
-  from `history/` and its journal;
+  from `history/` and its journal; `register` mints the box's ed25519 key and
+  registers the box in the Panel by a one-time token (`pridem/identity.py`,
+  `pridem/steps/identity.py`);
 - `pridem/cli.py` -- the command line turned into a verb's arguments
   (`pridem [--json] [--timer] <verb> [arguments] [--option ...]`; `--json` may
   follow the verb too); an unknown verb, option or argument and

@@ -38,6 +38,8 @@ STOPPED = "pridem-stopped"
 BOX = "pridem-box"
 BACKUP = "pridem-backup"
 SEED = "pridem-seed"
+IDENTITY = "pridem-identity"
+"""The box's key and its registration in the Panel (``register``, DM-139)."""
 VERDICT = "pridem-verdict"
 """The stack of a journal line about the verdict itself (its build)."""
 
@@ -45,7 +47,7 @@ MACHINE_STACKS: frozenset[str] = frozenset(
     {
         HOST, PASSPORT, HOST_POLICY, NETWORK, TIMERS, SOURCES, DEPENDENCIES,
         ROLLBACK, POINTS, SERVICES, PRODUCT, SEAMS, EDGE, FRONTEND, FINALIZE,
-        DESTROY, STOPPED, BOX, BACKUP, SEED, VERDICT,
+        DESTROY, STOPPED, BOX, BACKUP, SEED, IDENTITY, VERDICT,
     }
 )  # fmt: skip
 

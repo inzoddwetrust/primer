@@ -65,15 +65,19 @@ runs after ``test_tier3_host.py`` (pytest takes a directory's files by
 name): docker is on the runner only after the host steps.
 """
 
+import base64
 import json
 import os
 import re
 import shutil
+import threading
 import time
 import warnings
 from collections.abc import Iterator
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
@@ -81,12 +85,20 @@ from conftest import SERVICE_MIRROR, SERVICE_PINS
 from groups import NEEDS_BOX
 
 from pridem.conformance.stack import check_health, check_logs
+from pridem.protocol import PROTOCOL_HEADER, Refusal, RegisterRequest, RegisterResponse
 from pridem.report.schema import Verdict
-from pridem.runner import CommandNotStarted, CommandTimedOut, Stream, SubprocessRunner
+from pridem.runner import (
+    CommandNotStarted,
+    CommandTimedOut,
+    Stream,
+    SubprocessRunner,
+    clean_env,
+)
 from pridem.steps.compose import PROXY_URL as PROXY
 from pridem.steps.edge import CERTBOT_IMAGE, live_config
 from pridem.steps.egress import SQUID_IMAGE
 from pridem.steps.gc import reclaimable_size
+from pridem.verbs.register import TOKEN_ENV
 
 PYTHON = "/opt/pridem/current/venv/bin/python"
 PRIDEM = "/usr/local/bin/pridem"
@@ -3493,6 +3505,129 @@ def test_tier3_a_reset_of_the_blank_makes_its_database_new() -> None:
     assert verdict.result == "green", printed
     [migrate] = [s for s in verdict.steps if s.name == "db_migrate"]
     assert migrate.verify == {"stack": STACK, "alembic_head": reset["alembic_head"]}
+
+
+class _RegisterPanel(BaseHTTPRequestHandler):
+    """The Panel's side of a registration on the runner's loopback (DM-139):
+    contract 4 read strictly, the public half 32 raw bytes, one token
+    (``_TOKEN``), used once."""
+
+    used: ClassVar[set[str]] = set()
+    received: ClassVar[list[dict[str, object]]] = []
+
+    def do_POST(self) -> None:
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        self.received.append(
+            {"path": self.path, "protocol": self.headers[PROTOCOL_HEADER]}
+        )
+        asked = RegisterRequest.model_validate_json(raw)
+        assert len(base64.b64decode(asked.box_key_public, validate=True)) == 32
+        if asked.token != _TOKEN:
+            self._answer(404, Refusal(code="token-unknown").model_dump_json())
+        elif asked.token in self.used:
+            self._answer(410, Refusal(code="token-used").model_dump_json())
+        else:
+            self.used.add(asked.token)
+            answer = RegisterResponse(
+                box_id="tier3-box",
+                agent_url="https://api.primer.team/agent/v1/",
+                heartbeat_s=30,
+                full_state_s=300,
+                poll_s=60,
+            )
+            self._answer(201, answer.model_dump_json())
+
+    def _answer(self, status: int, body: str) -> None:
+        data = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+
+_TOKEN = "tier3-one-time-token-of-the-panel-dm139"  # noqa: S105 -- a test value
+_FOREIGN = "tier3-a-token-the-panel-never-issued"  # noqa: S105 -- a test value
+
+
+def _register(origin: str, token: str) -> tuple[Verdict, str, float]:
+    """``pridem --json register --panel <origin>`` with ``token`` in the
+    environment: the verdict, the console, the seconds it took."""
+    out: list[str] = []
+    err: list[str] = []
+
+    def keep(stream: Stream, line: str, cut: bool) -> None:
+        (out if stream is Stream.STDOUT else err).append(line)
+
+    began = time.monotonic()
+    result = SubprocessRunner().run(
+        [PRIDEM, "--json", "register", "--panel", origin],
+        expect=(0, 1),
+        timeout=120,
+        env={**clean_env(), TOKEN_ENV: token},
+        on_line=keep,
+    )
+    spent = round(time.monotonic() - began, 2)
+    verdict = Verdict.model_validate_json("\n".join(out))
+    assert int(verdict.exit_code) == result.code, err
+    return verdict, "\n".join(err), spent
+
+
+def _step_code(verdict: Verdict, name: str) -> object:
+    [step] = [s for s in verdict.steps if s.name == name]
+    return step.reason.model_dump().get("code") if step.reason is not None else None
+
+
+def test_probe_DM_139_register_on_the_runner() -> None:
+    """DM-139, the last of group ``c``, on the box its install left: the box
+    registers in a Panel of contract 4 on the loopback (``_RegisterPanel``).
+    A token the Panel never issued -- ``register:token-unknown``, no
+    registration, the key minted 0600; the Panel's token -- green, the same
+    key (not minted again), ``box_id`` written 0600; the token again --
+    ``register:already``, no request. The token is in no verdict and no
+    journal. Measured into the run's journal (par0 14.3): what the Panel got
+    and the time of each registration."""
+    agent = Path("/opt/pridem/agent")
+    assert Path("/opt/pridem/passport.yaml").is_file(), "the install runs first"
+    assert not agent.exists(), "no registration before this probe"
+    received: list[dict[str, object]] = []
+    handler = type("Panel", (_RegisterPanel,), {"used": set(), "received": received})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        foreign, printed, spent_foreign = _register(origin, _FOREIGN)
+        assert _step_code(foreign, "register") == "register:token-unknown", printed
+        key = agent / "box.key"
+        minted = key.read_bytes()
+        assert not (agent / "registration.json").exists()
+
+        taken, printed, spent_taken = _register(origin, _TOKEN)
+        assert taken.result == "green", printed
+        found = os.lstat(key)
+        assert (found.st_mode & 0o777, found.st_uid, found.st_size) == (0o600, 0, 32)
+        assert key.read_bytes() == minted
+        kept = json.loads((agent / "registration.json").read_text(encoding="utf-8"))
+        assert kept["box_id"] == "tier3-box", kept
+        assert (agent / "registration.json").stat().st_mode & 0o777 == 0o600
+        assert agent.stat().st_mode & 0o777 == 0o700
+
+        again, printed, spent_again = _register(origin, _TOKEN)
+        assert _step_code(again, "register") == "register:already", printed
+    finally:
+        server.shutdown()
+        server.server_close()
+    print("DM-139 measure:", {"received": received, "seconds": [
+        spent_foreign, spent_taken, spent_again]})  # fmt: skip
+    assert received == [{"path": "/agent/v1/register", "protocol": "1"}] * 2
+    for verdict in (foreign, taken, again):
+        assert verdict.log_ref is not None
+        journal = (Path("/opt/pridem") / verdict.log_ref).read_text(encoding="utf-8")
+        assert _TOKEN not in journal and _FOREIGN not in journal
+        assert _TOKEN not in verdict.model_dump_json()
 
 
 def test_tier3_a_project_verb_runs_in_its_service(tmp_path: Path, mirror: Path) -> None:
