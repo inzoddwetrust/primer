@@ -5,6 +5,7 @@ the model's rules hold for every fixture; a passport is written as the box's
 local copy and loaded from it, as ``fetch_passport`` leaves it.
 """
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,10 +14,11 @@ from pathlib import Path
 from typing import Protocol
 
 import yaml
+from compose_support import EnvAsRead
 from passport_support import passport_example
 from plan_support import ListSink
 
-from pridem.events import Event, PlanOutcome, Secrets
+from pridem.events import Event, Json, PlanOutcome, Secrets
 from pridem.plan import Plan, StackSteps
 from pridem.runner import FakeCall, Runner, Stream
 from pridem.stacks.env import env_file, own_entry
@@ -210,6 +212,49 @@ def derive(
         staged=True,
     )
     return DeriveEnv(render, Built(compose, image, built))
+
+
+CHECKED_DOCUMENT: dict[str, Json] = {"name": "comms", "services": {}}
+"""What ``config`` prints of the comms fixture: nothing for the check to name."""
+
+
+def checked_calls(
+    root: Path,
+    stack: str = "comms",
+    checked: Mapping[str, Json] | None = None,
+    *,
+    entry: str | None = None,
+    compose: str = "deploy/docker-compose.yml",
+) -> list[FakeCall]:
+    """``derive_env.verify``'s check of the executable representation of the
+    stack's one entry (DM-182): ``config --environment`` first, which reads
+    ``next.env`` as the run has written it, then ``config`` of every profile
+    without and with interpolation. Literal argv (par0 14.2)."""
+    env_file = root / "opt" / stack / "env" / "next.env"
+    head = (
+        "docker",
+        "compose",
+        "-p",
+        entry or stack,
+        "--env-file",
+        str(env_file),
+        "-f",
+        str(root / "release" / compose),
+    )
+    document = ((Stream.STDOUT, json.dumps(checked or CHECKED_DOCUMENT)),)
+    return [
+        FakeCall(
+            (*head, "config", "--environment"),
+            lines=EnvAsRead(env_file),  # type: ignore[arg-type]
+        ),
+        FakeCall(
+            (*head, "--profile", "*", "config", "--format", "json", "--no-interpolate"),
+            lines=document,
+        ),
+        FakeCall(
+            (*head, "--profile", "*", "config", "--format", "json"), lines=document
+        ),
+    ]
 
 
 def running_calls(step: DeriveEnv, image: str | None) -> list[FakeCall]:

@@ -14,7 +14,7 @@ decide by one function, ``build_slots``.
 from pathlib import Path
 
 import pytest
-from compose_support import ENTRY, REF, SHA, placed
+from compose_support import ENTRY, REF, SHA, executable_calls, placed
 from test_steps_build_mode import (
     APP_IMAGE,
     FRONT_IMAGE,
@@ -82,7 +82,10 @@ def test_probe_DM_101_optional_build_slot_without_a_package(tmp_path: Path) -> N
     a context with no copy of a package -- the repository's own
     ``public/skin`` -- with the key ``skin: absent`` and the edition; ``up``
     finds the image by that key; the fact of ``packages`` is ``skin: absent``.
-    The pair: the same passport without ``optional`` -- ``package-missing``."""
+    The pair: the same passport without ``optional`` -- ``package-missing``.
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario."""
     stack = optional()
     root, fetched = skin_box(tmp_path, version=None)
     cs = compose(root, stack)
@@ -117,7 +120,9 @@ def test_probe_DM_101_optional_build_slot_without_a_package(tmp_path: Path) -> N
     assert fact.fact == {"packages": {"skin": "absent"}}
     # the pair: no optional, no package
     strict = made(product_data())
-    with FakeRunner(config_call(cs, raw=True), config_call(cs)) as runner:
+    # DM-182: the check of the executable representation reads before refusing
+    script = [config_call(cs, raw=True), config_call(cs), *executable_calls(cs)]
+    with FakeRunner(*script) as runner:
         refused = run([build(root, strict, fetched)], runner)
     assert refused.steps[0].reason == Code("build:package-missing", {"slot": "skin"})
 
@@ -125,7 +130,10 @@ def test_probe_DM_101_optional_build_slot_without_a_package(tmp_path: Path) -> N
 def test_a_package_and_no_package_are_two_images_of_one_commit(tmp_path: Path) -> None:
     """``was a package -> no package`` on the same commit: another key, another
     release image -- the build and ``up`` act; and back. ``absent`` is never a
-    package's value (``<repo>@<version>`` always has an ``@``)."""
+    package's value (``<repo>@<version>`` always has an ``@``).
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     stack = optional()
     root, with_skin = skin_box(tmp_path / "with")
     _, without = skin_box(tmp_path / "without", version=None)
@@ -143,11 +151,14 @@ def test_a_package_and_no_package_are_two_images_of_one_commit(tmp_path: Path) -
     script = [
         config_call(cs, raw=True),
         config_call(cs),  # the override differs (another key): build
+        *executable_calls(cs),  # DM-182
         config_call(cs, raw=True),
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         build_call(cs),
         config_call(cs, raw=True),
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         image_call(cs, "app", {}, APP_IMAGE),
         image_call(cs, "frontend", absent, FRONT_IMAGE),
     ]
@@ -227,7 +238,10 @@ def test_build_places_and_the_key_decide_alike(
 
 def test_doctor_after_a_green_deploy_without_a_package_is_empty(tmp_path: Path) -> None:
     """``par0`` 14.4: the box built without the skin; ``doctor`` finds the
-    image of the key ``absent`` and the override in place -- nothing to do."""
+    image of the key ``absent`` and the override in place -- nothing to do.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     stack = optional()
     root, fetched = skin_box(tmp_path, version=None)
     cs = compose(root, stack)
@@ -237,6 +251,7 @@ def test_doctor_after_a_green_deploy_without_a_package_is_empty(tmp_path: Path) 
     same = [
         config_call(cs, raw=True),
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         image_call(cs, "app", {}, APP_IMAGE),
         image_call(cs, "frontend", ABSENT_KEY, FRONT_IMAGE),
     ]

@@ -90,6 +90,23 @@ jobs:
           echo "$sops_sha256  $RUNNER_TEMP/sops" | sha256sum -c --strict
           sudo install -m 0755 "$RUNNER_TEMP/sops" /usr/local/bin/sops
           command -v age-keygen sops
+      # The probes of DM-182 read what compose would execute with compose
+      # itself: the one of the boxes, docker-compose-v2 of noble-updates, not
+      # the runner's own copy -- another version reads a file otherwise.
+      - name: docker compose of the boxes (DM-182)
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends docker-compose-v2
+          for dir in "$HOME/.docker/cli-plugins" /usr/local/lib/docker/cli-plugins \
+            /usr/local/libexec/docker/cli-plugins /usr/lib/docker/cli-plugins; do
+            sudo rm -f "$dir/docker-compose"
+          done
+          want=$(dpkg-query -W -f '${Version}' docker-compose-v2)
+          have=$(docker compose version --short)
+          echo "docker-compose-v2 $want, docker compose $have"
+          if [ "$want" != "$have" ]; then
+            echo "docker compose is not the one of docker-compose-v2"
+            exit 1
+          fi
       - name: pytest
         env:
           # Empty on push and on dispatch without `planted`; "1" only on a planted dispatch.

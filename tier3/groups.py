@@ -97,6 +97,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_a_failed_job_runs_on_the_repeat", "h"),  # DM-126
     ("test_tier3_seed_resets_run_the_products_commands", "h"),  # DM-133
     ("test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked", "h"),
+    # before the pair of destroy: a privileged service behind a profile (DM-182)
+    ("test_tier3_a_privileged_service_behind_a_profile_never_comes_up", "h"),
     ("test_tier3_destroy_takes_the_blank_off_the_box", "h"),
     ("test_tier3_destroy_all_wipes_the_persistent_volume", "h"),
     # d -- a clean box: a first install red at the product's tests and its

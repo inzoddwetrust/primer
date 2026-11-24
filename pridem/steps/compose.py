@@ -97,7 +97,8 @@ import yaml
 from pridem.events import Json, as_list
 from pridem.files import PathOutside, atomic_write, resolve_inside
 from pridem.runner import Stream, clean_env
-from pridem.stacks.env import env_file, own_entry
+from pridem.stacks.env import env_file, own_entry, parse_env
+from pridem.stacks.names import MACHINE_PREFIX
 from pridem.stacks.routes import alias, routed_services
 from pridem.stacks.schema import PROXY_VARIABLES, Product, Service
 from pridem.stacks.seams import Pair
@@ -339,7 +340,10 @@ def unfolded(compose: ComposeStack) -> list[str]:
     top-level ``include``, a service's ``extends`` -- both gone from its
     document, read with or without interpolation -- and ``env_file``, which
     compose reads off the host on ``config``. Read from the file itself, with
-    no symlink on its way out of the release."""
+    no symlink on its way out of the release. A file of more than one YAML
+    document (compose merges them) is ``compose: documents``; a file YAML
+    cannot read, or with a tag of compose, ``compose: unreadable`` -- never
+    "nothing found" (DM-182)."""
     try:
         path = resolve_inside(
             compose.release, compose.stack.stacks[compose.entry].compose
@@ -349,9 +353,17 @@ def unfolded(compose: ComposeStack) -> list[str]:
     if not path.is_file():
         return []  # no compose: the callers' own refusal (no-compose)
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        documents = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
     except (yaml.YAMLError, UnicodeDecodeError):
-        return []  # config says what is wrong with it, as before
+        # closed by default (DM-182): a file the machine cannot read -- a tag
+        # of compose (!reset, !override), a broken YAML -- is never "nothing
+        # found"; compose would read it its own way
+        return ["compose: unreadable"]
+    if len([d for d in documents if d is not None]) > 1:
+        # compose merges the documents of one file; the machine would see the
+        # first alone (DM-182, S4)
+        return ["compose: documents"]
+    document = next((d for d in documents if d is not None), None)
     if not isinstance(document, dict):
         return []
     found = ["compose: include"] if "include" in document else []
@@ -368,6 +380,7 @@ def config(
     *,
     interpolate: bool = True,
     values: Mapping[str, str] | None = None,
+    every_profile: bool = False,
 ) -> dict[str, Json]:
     """``docker compose config --format json`` of the product's file; without
     ``interpolate`` -- ``--no-interpolate``, where ``env_file`` and the
@@ -375,15 +388,21 @@ def config(
     (``pridem check``): no env file is read or written, the values are the
     environment of compose alone -- the runner's ``clean_env()``, the same
     docker as every command of the check sees, and them -- and compose's own
-    ``.env`` of the directory is off (``COMPOSE_DISABLE_ENV_FILE``)."""
+    ``.env`` of the directory is off (``COMPOSE_DISABLE_ENV_FILE``).
+    ``every_profile`` -- ``--profile "*"``: the check reads every service
+    (DM-182); a deploy reads the services compose starts."""
     found = unfolded(compose)
     if found:  # before compose reads a file of the host for them (DM-78)
         raise StepFailed(
             "compose-forbidden", {"stack": compose.entry, "found": list[Json](found)}
         )
-    args = ["config", "--format", "json"] + (
-        [] if interpolate else ["--no-interpolate"]
-    )
+    args = [
+        *(EVERY_PROFILE if every_profile else ()),
+        "config",
+        "--format",
+        "json",
+        *([] if interpolate else ["--no-interpolate"]),
+    ]
     if values is None:
         _, lines = out(ctx, compose.product_argv(*args), passed_on=False)
     else:
@@ -393,6 +412,131 @@ def config(
     if not isinstance(document, dict):
         raise ValueError("docker compose config did not print an object")
     return document
+
+
+@dataclass(frozen=True)
+class Executable:
+    """What compose would execute of an entry (DM-182): ``document`` --
+    ``config --profile "*"``, every service whatever its profile, with the
+    stack's env file; ``raw`` -- the same with ``--no-interpolate``;
+    ``environment`` -- the env file as compose read it (``config
+    --environment``), beside ``written`` -- as the machine wrote it."""
+
+    document: dict[str, Json]
+    raw: dict[str, Json]
+    environment: dict[str, str]
+    written: dict[str, str]
+
+
+EVERY_PROFILE = ("--profile", "*")
+"""Every service of a compose file, whatever its ``profiles:``: ``config``
+without it hides them, and ``compose run`` or ``COMPOSE_PROFILES`` would start
+them all the same (DM-182, S2)."""
+
+
+def executable(
+    ctx: StepContext,
+    compose: ComposeStack,
+    *,
+    values: Mapping[str, str] | None = None,
+) -> Executable:
+    """The executable representation of the entry: what compose reads, not
+    what the machine meant to write. One check reads it in ``build``, ``pridem
+    check`` and after ``derive_env`` (``checked``). ``values`` -- the check of
+    a repository, as ``config``."""
+    found = unfolded(compose)
+    if found:  # before compose reads a file of the host for them (DM-78)
+        raise StepFailed(
+            "compose-forbidden", {"stack": compose.entry, "found": list[Json](found)}
+        )
+    # the env file first: read otherwise, it changes what the file says --
+    # COMPOSE_PROFILES, a value in another key -- and config may not even run
+    environment, written = read_environment(ctx, compose, values=values)
+    misread = environment_problems(Executable({}, {}, environment, written))
+    if misread:
+        raise StepFailed(
+            "compose-forbidden", {"stack": compose.entry, "found": list[Json](misread)}
+        )
+    raw = config(ctx, compose, interpolate=False, values=values, every_profile=True)
+    document = config(ctx, compose, values=values, every_profile=True)
+    return Executable(document, raw, environment, written)
+
+
+def read_environment(
+    ctx: StepContext,
+    compose: ComposeStack,
+    *,
+    values: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """The env file as compose reads it (``config --environment``) and as the
+    machine wrote it (``parse_env``); ``values`` -- the check of a repository:
+    no file, compose reads them from its environment."""
+    if values is None:
+        path = compose.env_file
+        if not path.is_file():  # compose would refuse it as well: said by name
+            raise StepFailed("env-unread", {"stack": compose.entry, "path": str(path)})
+        written = parse_env(path.read_text(encoding="utf-8"))
+        _, lines = out(
+            ctx, compose.product_argv("config", "--environment"), passed_on=False
+        )
+    else:
+        written = dict(values)
+        env = {**clean_env(), "COMPOSE_DISABLE_ENV_FILE": "true", **values}
+        _, lines = out(
+            ctx,
+            compose.checked_argv("config", "--environment"),
+            passed_on=False,
+            env=env,
+        )
+    environment: dict[str, str] = {}
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep:
+            environment[key] = value
+    return environment, written
+
+
+_SET_BY_COMPOSE = frozenset({"COMPOSE_PROJECT_NAME"})
+_SET_BY_DOCKER = ("DOCKER_CLI_PLUGIN_",)
+"""What ``config --environment`` shows that compose and the docker CLI set
+themselves (measured, compose 2.40.3): the project of ``-p`` and the CLI's
+plugin variables -- never a setting the env file gave."""
+_COMPOSE_OWN = ("COMPOSE_", "DOCKER_")
+"""The variables compose and docker take as their own settings: an env file
+that hands one to compose (``COMPOSE_PROFILES``) changes what runs."""
+
+
+def environment_problems(found: Executable) -> list[str]:
+    """The env file as compose read it against the machine's writing: every
+    key of it read otherwise (a value ending in a backslash escapes its
+    quote, DM-182 S1), and a setting of compose or docker the process did not
+    give it -- one finding each, sorted."""
+    problems = [
+        f"env: {key} read otherwise"
+        for key, value in found.written.items()
+        if found.environment.get(key) != value
+    ]
+    process = clean_env()
+    problems += [
+        f"env: {key}"
+        for key, value in found.environment.items()
+        if key.startswith(_COMPOSE_OWN)
+        and key not in found.written
+        and process.get(key) != value
+        and key not in _SET_BY_COMPOSE
+        and not key.startswith(_SET_BY_DOCKER)
+    ]
+    problems += [f"env: {key}" for key in found.written if key.startswith(_COMPOSE_OWN)]
+    return sorted(set(problems))
+
+
+def checked(
+    compose: ComposeStack, found: Executable, also: Sequence[str] = ()
+) -> tuple[str, dict[str, Json]] | None:
+    """``refusal`` of the executable representation: its document and its
+    raw file (DM-182). The env file as compose read it was checked by
+    ``executable`` itself, before ``config`` ran on it."""
+    return refusal(compose, found.document, found.raw, also)
 
 
 def _mapping(value: Json | None) -> dict[str, Json]:
@@ -538,6 +682,14 @@ def _service_problems(
             path = os.path.join(context, dockerfile)  # an absolute one stays
             if not _within(path, release):
                 found.append(f"build.dockerfile={dockerfile}")
+    for network, options in _mapping(body.get("networks")).items():
+        # aliases alone: an address, a MAC, a priority or a driver's option
+        # takes what the machine gives its networks (DM-182, S16)
+        found += [
+            f"networks.{network}.{key}"
+            for key in sorted(_mapping(options))
+            if key != "aliases"
+        ]
     for port in as_list(body.get("ports")):
         entry = _mapping(port)
         proto = str(entry.get("protocol", "tcp"))
@@ -754,6 +906,19 @@ def forbidden(compose: ComposeStack, document: Mapping[str, Json]) -> list[str]:
         found += _top_network_problems(name, _mapping(body), project)
     exact, prefixes = reserved(stack, compose.entry)
     found += [
+        f"{name}: alias {given} reserved"
+        for name, body in services.items()
+        for network in _mapping(_mapping(body).get("networks")).values()
+        for given in as_list(_mapping(network).get("aliases"))
+        # an alias is a DNS name on the network as a name is (DM-182, S16)
+        if isinstance(given, str)
+        and (
+            given in exact
+            or given.startswith(prefixes)
+            or given.startswith(MACHINE_PREFIX)
+        )
+    ]
+    found += [
         f"{name}: name reserved"
         for name in services
         # the name itself is a DNS name on pridem too (compose gives every
@@ -873,6 +1038,7 @@ def refusal(
 REFUSAL_CODES = {
     "instance-args": "the compose of {stack} gives build arguments to {services}",
     "compose-forbidden": "the compose of {stack} asks the host for {found}",
+    "env-unread": "the env file of {stack} is not there to check: {path}",
 }
 """The texts of ``refusal``'s codes, for every step that gives them."""
 

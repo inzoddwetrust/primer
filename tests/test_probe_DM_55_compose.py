@@ -28,6 +28,7 @@ from compose_support import (
     build_call,
     compose,
     config_call,
+    executable_calls,
     image_call,
     in_release,
     raw_config_call,
@@ -114,12 +115,19 @@ def test_probe_DM_55_privileged_compose_is_red_before_build(tmp_path: Path) -> N
     """A privileged service is red in ``check`` of ``build``: the strict
     scenario holds ``config`` alone -- nothing is built, no override written.
     The pair: the blank's compose, as ``config`` prints it, is clean and
-    builds."""
+    builds.
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario."""
     cs = released(tmp_path)
     document = in_release(BLANK, cs.release)
     planted = json.loads(json.dumps(document))
     planted["services"]["app"]["privileged"] = True
-    with FakeRunner(raw_config_call(cs, planted), config_call(cs, planted)) as runner:
+    with FakeRunner(
+        raw_config_call(cs, planted),
+        config_call(cs, planted),
+        *executable_calls(cs, planted, planted),  # DM-182
+    ) as runner:
         outcome, _ = run([build(tmp_path)], runner)
     assert outcome.code is ExitCode.FAILED
     assert outcome.steps[0].reason == Code(
@@ -130,11 +138,14 @@ def test_probe_DM_55_privileged_compose_is_red_before_build(tmp_path: Path) -> N
     green = [
         raw_config_call(cs, BLANK),  # check: env_file
         config_call(cs, BLANK),  # check
+        *executable_calls(cs, BLANK, BLANK),  # DM-182
         raw_config_call(cs, BLANK),  # act: build.args (DM-57 FIX)
         config_call(cs, BLANK),  # act
+        *executable_calls(cs, BLANK, BLANK),  # DM-182
         build_call(cs),
         raw_config_call(cs, BLANK),  # verify: build.args (DM-57 FIX)
         config_call(cs, BLANK),  # verify
+        *executable_calls(cs, BLANK, BLANK),  # DM-182
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),
     ]
@@ -144,9 +155,15 @@ def test_probe_DM_55_privileged_compose_is_red_before_build(tmp_path: Path) -> N
 
 
 def test_doctor_names_a_forbidden_compose_too(tmp_path: Path) -> None:
+    """Changed by DM-182: the compose check reads the executable form -- its
+    calls are in the scenario."""
     cs = released(tmp_path)
     document = app(cap_add=["NET_ADMIN"])
-    calls = [raw_config_call(cs, document), config_call(cs, document)]
+    calls = [
+        raw_config_call(cs, document),
+        config_call(cs, document),
+        *executable_calls(cs, document),  # DM-182: the check reads it so
+    ]
     with FakeRunner(*calls) as runner:
         outcome, _ = run([build(tmp_path)], runner, mode="doctor")
     [step] = outcome.steps
@@ -616,10 +633,16 @@ def test_a_service_has_no_env_file_in_any_form(tmp_path: Path) -> None:
 def test_build_names_an_env_file_before_anything(
     tmp_path: Path,
 ) -> None:
+    """Changed by DM-182: the compose check reads the executable form -- its
+    calls are in the scenario."""
     cs = released(tmp_path)
     raw = json.loads(json.dumps(BLANK))
     raw["services"]["app"]["env_file"] = [{"path": "/root/.env", "required": True}]
-    with FakeRunner(raw_config_call(cs, raw), config_call(cs, BLANK)) as runner:
+    with FakeRunner(
+        raw_config_call(cs, raw),
+        config_call(cs, BLANK),
+        *executable_calls(cs, BLANK, raw),  # DM-182
+    ) as runner:
         outcome, _ = run([build(tmp_path)], runner)
     assert outcome.steps[0].reason == Code(
         "build:compose-forbidden",

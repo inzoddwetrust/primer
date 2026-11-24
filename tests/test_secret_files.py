@@ -21,6 +21,7 @@ from compose_support import (
     blank,
     build_call,
     config_call,
+    executable_calls,
     image_call,
     raw_config_call,
     run,
@@ -74,16 +75,21 @@ def _user(cs: ComposeStack, user: str = ME) -> FakeCall:
 
 
 def _green(cs: ComposeStack) -> list[FakeCall]:
+    """Changed by DM-182: the compose check reads the executable form -- its
+    calls are in the scenario."""
     return [
         raw_config_call(cs),
         config_call(cs),  # check: no override yet
+        *executable_calls(cs, CONFIG, CONFIG),  # DM-182
         raw_config_call(cs),
         config_call(cs),  # act
+        *executable_calls(cs, CONFIG, CONFIG),  # DM-182
         build_call(cs),
         image_call(cs, "app", APP_IMAGE),  # act: the user app runs as
         _user(cs),
         raw_config_call(cs),
         config_call(cs),  # verify
+        *executable_calls(cs, CONFIG, CONFIG),  # DM-182
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),
         image_call(cs, "app", APP_IMAGE),  # verify: the file read back
@@ -102,7 +108,10 @@ def test_probe_DM_145_a_secret_file_is_nowhere_but_its_file(tmp_path: Path) -> N
     """The planted value -- whole and line by line -- is in its file and
     nowhere else: not in the env file's values, the override, the file's
     name, any argv, the journal or the verdict. The file is 0600, its
-    owner the user the service runs as, bound read-only at its path."""
+    owner the user the service runs as, bound read-only at its path.
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario, through ``_green``."""
     build, cs, fetched = _setup(tmp_path)
     assert fetched.passport is not None
     resolved = resolve(cs.stack, cs.stack, fetched.passport, {}, SeamMemory())  # type: ignore[arg-type]
@@ -153,6 +162,8 @@ def test_probe_DM_145_a_secret_file_is_nowhere_but_its_file(tmp_path: Path) -> N
 def test_probe_DM_145_a_multiline_value_arrives_byte_for_byte(
     tmp_path: Path, value: str
 ) -> None:
+    """Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario, through ``_green``."""
     build, cs, _ = _setup(tmp_path, value)
     with FakeRunner(*_green(cs)) as runner:
         outcome, _ = run([build], runner)
@@ -318,7 +329,10 @@ def test_a_name_the_image_does_not_know_is_refused() -> None:
 
 def test_a_file_not_as_written_makes_build_act_again(tmp_path: Path) -> None:
     """A green build, then the file's mode changed by hand: ``check`` sees it
-    and asks to act. The pair: as written -- nothing to do."""
+    and asks to act. The pair: as written -- nothing to do.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     build, cs, _ = _setup(tmp_path)
     with FakeRunner(*_green(cs)) as runner:
         run([build], runner)
@@ -326,6 +340,7 @@ def test_a_file_not_as_written_makes_build_act_again(tmp_path: Path) -> None:
     again = [
         raw_config_call(cs),
         config_call(cs),
+        *executable_calls(cs, CONFIG, CONFIG),  # DM-182
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),
         image_call(cs, "app", APP_IMAGE),

@@ -175,6 +175,63 @@ def raw_config_call(
     )
 
 
+class EnvAsRead:
+    """What ``config --environment`` prints of the stack's env file when the
+    call is made -- its ``KEY='value'`` lines as ``KEY=value`` -- read then,
+    not when the script is written: ``render_env`` and ``derive_env`` write
+    the file during the run."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def __iter__(self) -> Iterator[tuple[Stream, str]]:
+        text = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+        for line in text.splitlines():
+            key, _, quoted = line.partition("=")
+            yield Stream.STDOUT, f"{key}={quoted[1:-1]}"
+
+
+def executable_calls(
+    cs: ComposeStack,
+    document: Mapping[str, Json] = CONFIG,
+    raw: Mapping[str, Json] | None = None,
+) -> list[FakeCall]:
+    """The check of the executable representation (DM-182): the env file as
+    compose reads it first, then ``config`` of every profile without and with
+    interpolation. Literal argv, as compose gets it -- never built by the
+    machine's own functions (par0 14.2). On a box ``render_env`` wrote the env
+    file before any of them: a fixture without one gets it empty here."""
+    head = (
+        "docker",
+        "compose",
+        "-p",
+        cs.project,
+        "--env-file",
+        str(cs.env_file),
+        "-f",
+        str(cs.compose_file),
+    )
+    raw = document if raw is None else raw
+    if not cs.env_file.exists():  # the fixture's box: render_env wrote it
+        cs.env_file.parent.mkdir(parents=True, exist_ok=True)
+        cs.env_file.write_text("", encoding="utf-8")
+        cs.env_file.chmod(0o600)
+    return [
+        FakeCall(
+            (*head, "config", "--environment"),
+            lines=EnvAsRead(cs.env_file),  # type: ignore[arg-type]
+        ),
+        FakeCall(
+            (*head, "--profile", "*", "config", "--format", "json", "--no-interpolate"),
+            lines=stdout(json.dumps(in_release(raw, cs.release))),
+        ),
+        FakeCall(
+            (*head, "--profile", "*", "config", "--format", "json"),
+            lines=stdout(json.dumps(in_release(document, cs.release))),
+        ),
+    ]
+
+
 def image_call(cs: ComposeStack, service: str, *ids: str) -> FakeCall:
     return FakeCall(
         (

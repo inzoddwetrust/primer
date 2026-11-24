@@ -266,11 +266,22 @@ def _read(checked: Checked, stack: Stack, entry: str) -> Read:
         return read
     stand_ins = dict.fromkeys(stack.env, STAND_IN)
     try:
-        read.raw = config(checked.ctx, compose, interpolate=False, values=stand_ins)
+        # every service, whatever its profile -- the representation compose
+        # would execute (DM-182); a repository has no env file: its values
+        # are the machine's stand-ins, read as they are given
+        read.raw = config(
+            checked.ctx,
+            compose,
+            interpolate=False,
+            values=stand_ins,
+            every_profile=True,
+        )
         wrong = variables(read.raw, stack.env, file_keys(stack))
         read.found = [*env_files(read.raw), *wrong]
         if not wrong:  # config stops at the first one, and names it as text
-            read.document = config(checked.ctx, compose, values=stand_ins)
+            read.document = config(
+                checked.ctx, compose, values=stand_ins, every_profile=True
+            )
     except CommandFailed as failed:
         read.failed = StepFailed(
             "config-failed", {"stack": entry, "exit_code": failed.code}

@@ -8,11 +8,13 @@ two other flags. Both by the strict scenario: the command exactly, in order.
 
 from pathlib import Path
 
+from compose_support import executable_calls
 from env_support import (
     COMMS_REPO,
     IMAGE,
     STDOUT,
     box,
+    checked_calls,
     derive,
     passport_data,
     product,
@@ -22,6 +24,7 @@ from env_support import (
     service,
 )
 
+from pridem.events import Json
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
 
@@ -57,7 +60,11 @@ def _product_derive(env_file: Path, *command: str, value: str) -> FakeCall:
 def test_probe_DM_79_product_derive_has_no_network(tmp_path: Path) -> None:
     """Each ``derived`` key of a product -- two here, each its own container
     -- is derived with ``--network none``; the pair: comms' ``derive`` has no
-    ``--network`` at all, and both drop every capability and never pull."""
+    ``--network`` at all, and both drop every capability and never pull.
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check
+    reads the executable form -- its calls are in the scenario, after the
+    derives of each stack (``executable_calls``, ``checked_calls``)."""
     made = product(
         tmp_path,
         {
@@ -69,11 +76,14 @@ def test_probe_DM_79_product_derive_has_no_network(tmp_path: Path) -> None:
     root, fetched = box(tmp_path, passport_data())
     env_file = root / "opt" / "aivis" / "env" / "derive.env"
     first = render(made, root, fetched)
+    step = derive(first, root)
+    blank: dict[str, Json] = {"name": "aivis", "services": {}}
     with FakeRunner(
         _product_derive(env_file, "app", "derive", "one", value=ONE),
         _product_derive(env_file, "app", "derive", "two", value=TWO),
+        *executable_calls(step.build.compose, blank),  # DM-182: verify's check
     ) as runner:
-        outcome, _ = run([first, derive(first, root)], runner)
+        outcome, _ = run([first, step], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     held = read_env(root, "aivis")
     assert (held["FIRST_DERIVED"], held["SECOND_DERIVED"]) == (ONE, TWO)
@@ -111,7 +121,9 @@ def test_probe_DM_79_product_derive_has_no_network(tmp_path: Path) -> None:
     )
     assert "--network" not in argv
     first = render(comms, root, fetched, product=owner)
-    with FakeRunner(FakeCall(argv, lines=((STDOUT, BOT_URL),))) as runner:
+    with FakeRunner(
+        FakeCall(argv, lines=((STDOUT, BOT_URL),)), *checked_calls(root)
+    ) as runner:
         outcome, _ = run([first, derive(first, root)], runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == BOT_URL

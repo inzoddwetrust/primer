@@ -21,6 +21,7 @@ from compose_support import (
     OLD_SHA,
     compose,
     config_call,
+    executable_calls,
     image_call,
     raw_config_call,
 )
@@ -50,7 +51,10 @@ def _images(path: Path) -> dict[str, object]:
 def _deploy(root: Path, *, red: bool) -> tuple[ExitCode, ComposeStack]:
     """The release at ``OLD_SHA`` runs, its override in place; a deploy of
     ``SHA`` builds, then ``red``: the step after (``tests``, before the point
-    of no return) is red. The running release's compose comes back."""
+    of no return) is red. The running release's compose comes back.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     deploy = compose(root)
     running = replace(compose(root, commit=OLD_SHA), staged=False)
     write_override(
@@ -88,6 +92,7 @@ def _deploy(root: Path, *, red: bool) -> tuple[ExitCode, ComposeStack]:
         script += [
             raw_config_call(deploy),
             config_call(deploy),
+            *executable_calls(deploy),  # DM-182
             image_call(deploy, "app", APP_IMAGE),
             image_call(deploy, "frontend", FRONT_IMAGE),
         ]
@@ -103,6 +108,8 @@ def _deploy(root: Path, *, red: bool) -> tuple[ExitCode, ComposeStack]:
 def test_probe_DM_90_red_after_build_leaves_the_running_release_its_image(
     tmp_path: Path,
 ) -> None:
+    """Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario, through ``_deploy``."""
     code, running = _deploy(tmp_path / "red", red=True)
     assert code is ExitCode.FAILED
     argv = running.argv("up", "-d")

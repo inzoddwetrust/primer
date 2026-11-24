@@ -54,6 +54,7 @@ passport's model and goes to the local copy; the version does not change.
 
 import shlex
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar, Protocol
 
@@ -110,7 +111,13 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.compose import ComposeStack, running_image
+from pridem.steps.compose import (
+    REFUSAL_CODES,
+    ComposeStack,
+    checked,
+    executable,
+    running_image,
+)
 from pridem.steps.passport import (
     NO_PASSPORT,
     Ask,
@@ -647,6 +654,7 @@ class DeriveEnv(Step):
         "derive-failed": "deriving {key} failed — exit code {exit_code}",
         "derive-empty": "deriving {key} printed {lines} lines, not one value",
         "derive-short": "the derived {key} is shorter than 16 characters",
+        **REFUSAL_CODES,
         **OPTION_CODES,
     }
 
@@ -767,6 +775,7 @@ class DeriveEnv(Step):
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         verified = self.render.read_back(waiting=())
+        self._executable(ctx)  # before the seams go anywhere
         self.render.provide()  # the file is whole: the seams are ready
         fact: dict[str, Json] = {
             **verified.fact,
@@ -775,6 +784,19 @@ class DeriveEnv(Step):
         if self._image is not None:
             fact["image"] = self._image
         return Verified(fact)
+
+    def _executable(self, ctx: StepContext) -> None:
+        """The compose of every entry of the stack, checked on what compose
+        would execute with the values just derived (DM-182, S3): ``build``
+        checked it with ``<derived>`` in their place, and a value stands in
+        a volume, a port or a flag of compose as well as anywhere. Every
+        entry: the stack's env file is theirs too."""
+        built = self.build.compose
+        for entry in sorted(built.stack.stacks):
+            compose = replace(built, entry=entry)
+            refused = checked(compose, executable(ctx, compose))
+            if refused is not None:
+                raise StepFailed(*refused)
 
 
 def usable(value: str) -> bool:

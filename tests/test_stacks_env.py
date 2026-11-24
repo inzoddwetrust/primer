@@ -24,6 +24,7 @@ from env_support import (
     STDERR,
     STDOUT,
     box,
+    checked_calls,
     context,
     derive,
     env_of,
@@ -106,7 +107,11 @@ def derive_call(
 
 
 class Reading(FakeRunner):
-    """Reads ``--env-file`` at the moment ``docker run`` is called."""
+    """Reads ``--env-file`` at the moment ``docker run`` is called.
+
+    Changed by DM-182: ``docker run`` alone -- compose's reading of the
+    stack's ``next.env`` by the check (``checked_calls``) names an env file
+    too, and it is not the file ``derive`` gets."""
 
     def __init__(self, *calls: FakeCall) -> None:
         super().__init__(*calls)
@@ -124,7 +129,7 @@ class Reading(FakeRunner):
         on_line: OnLine,
     ) -> Result:
         self.argvs.append(tuple(argv))
-        if "--env-file" in argv:
+        if tuple(argv[:2]) == ("docker", "run") and "--env-file" in argv:
             file = Path(argv[list(argv).index("--env-file") + 1])
             self.files.append(file.read_text(encoding="utf-8"))
             self.files.append(oct(file.stat().st_mode & 0o777))
@@ -242,11 +247,16 @@ def test_probe_DM_14_derived_runs_in_container_and_fails_on_nonzero(
 
     Changed by DM-79 (``DERIVE_ARGV``; by the dispatcher's word, before the change):
     throwaway containers drop every capability; an image of this run is never
-    pulled."""
+    pulled.
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario."""
     made, comms, root, fetched = comms_box(tmp_path, derived=True)
     env_file = root / "opt" / "comms" / "env" / "derive.env"
 
-    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+    with Reading(
+        derive_call(env_file, lines=[(STDOUT, DERIVED)]), *checked_calls(root)
+    ) as runner:
         outcome, _ = run(passes(comms, root, fetched, made), runner)
 
     assert outcome.code is ExitCode.OK, outcome.steps
@@ -331,10 +341,15 @@ def test_probe_DM_14_verify_reads_env_back(tmp_path: Path) -> None:
 def test_probe_DM_14_secret_never_in_argv(tmp_path: Path) -> None:
     """Changed by DM-79 (``DERIVE_ARGV``; by the dispatcher's word, before the change):
     throwaway containers drop every capability; an image of this run is never
-    pulled."""
+    pulled.
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario."""
     made, comms, root, fetched = comms_box(tmp_path, derived=True)
     env_file = root / "opt" / "comms" / "env" / "derive.env"
-    runner = Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)]))
+    runner = Reading(
+        derive_call(env_file, lines=[(STDOUT, DERIVED)]), *checked_calls(root)
+    )
 
     with runner:
         outcome, _ = run(passes(comms, root, fetched, made), runner)
@@ -354,6 +369,8 @@ def test_probe_DM_14_secret_never_in_argv(tmp_path: Path) -> None:
 
 
 def test_derived_value_is_cleaned_from_journal_and_verdict(tmp_path: Path) -> None:
+    """Changed by DM-182: the compose check reads the executable form -- its
+    calls are in the scenario."""
     made, comms, root, fetched = comms_box(tmp_path, derived=True)
     env_file = root / "opt" / "comms" / "env" / "derive.env"
     secrets = Secrets(())
@@ -362,7 +379,7 @@ def test_derived_value_is_cleaned_from_journal_and_verdict(tmp_path: Path) -> No
     sink = JournalSink(journal, secrets)
     call = derive_call(env_file, lines=[(STDOUT, DERIVED), (STDERR, f"made {DERIVED}")])
     steps = passes(comms, root, fetched, made, secrets=secrets)
-    with Reading(call) as runner:
+    with Reading(call, *checked_calls(root)) as runner:
         outcome, seen = run(steps, runner, sink=sink)
     sink.close()
     assert outcome.code is ExitCode.OK, outcome.steps
@@ -587,10 +604,15 @@ def test_write_private_is_0600_whatever_the_umask(tmp_path: Path) -> None:
 
 
 def _green(tmp: Path) -> tuple[Path, Fetched, Product, Service, Path]:
-    """A box where ``render_env`` and ``derive_env`` of comms went green."""
+    """A box where ``render_env`` and ``derive_env`` of comms went green.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     made, comms, root, fetched = comms_box(tmp, derived=True)
     env_file = root / "opt" / "comms" / "env" / "derive.env"
-    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+    with Reading(
+        derive_call(env_file, lines=[(STDOUT, DERIVED)]), *checked_calls(root)
+    ) as runner:
         outcome, _ = run(passes(comms, root, fetched, made), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     return root, fetched, made, comms, env_file
@@ -603,7 +625,10 @@ def test_a_derived_value_the_file_lacks_or_holds_short_is_derived_again(
     """DM-55 FIX, DM-67: a derived value in ``.env`` is taken only when it
     could be one -- a file without the key, with a value shorter than
     ``SECRET_MIN_LENGTH`` or with ``<derived>`` needs ``act`` (``doctor``
-    names it and asks docker nothing), and ``derive_env`` derives it again."""
+    names it and asks docker nothing), and ``derive_env`` derives it again.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     root, fetched, made, comms, env_file = _green(tmp_path)
     env = env_of(root, "comms")
     values = parse_env(env.read_text())
@@ -619,7 +644,9 @@ def test_a_derived_value_the_file_lacks_or_holds_short_is_derived_again(
     if held != "placeholder":  # render_env writes the placeholder in its place
         expected.insert(0, "render_env:render")
     assert codes == expected and runner.argvs == []
-    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+    with Reading(
+        derive_call(env_file, lines=[(STDOUT, DERIVED)]), *checked_calls(root)
+    ) as runner:
         outcome, _ = run(passes(comms, root, fetched, made), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED
@@ -630,11 +657,14 @@ def test_check_takes_derived_values_from_the_file_and_runs_no_container(
 ) -> None:
     """Twin REPEAT: the same env and ``app`` on this run's image -- ``derive``
     does not run, in a run and in doctor; docker is only asked which image
-    ``app`` runs on. The pair: a key gone -- ``act`` derives again."""
+    ``app`` runs on. The pair: a key gone -- ``act`` derives again.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     root, fetched, made, comms, env_file = _green(tmp_path)
     secrets = Secrets(())
     steps = passes(comms, root, fetched, made, secrets=secrets)
-    with Reading(*running_calls(steps[1], IMAGE)) as runner:
+    with Reading(*running_calls(steps[1], IMAGE), *checked_calls(root)) as runner:
         outcome, _ = run(steps, runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert all(step.reason is None for step in outcome.steps)
@@ -648,10 +678,13 @@ def test_check_takes_derived_values_from_the_file_and_runs_no_container(
     env = env_of(root, "comms")
     lines = env.read_text().splitlines(keepends=True)
     write_private(env, "".join(lines[1:]))  # a key gone: the file is not current
-    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+    with Reading(
+        derive_call(env_file, lines=[(STDOUT, DERIVED)]), *checked_calls(root)
+    ) as runner:
         outcome, _ = run(passes(comms, root, fetched, made), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
-    assert [a[:2] for a in runner.argvs] == [("docker", "run")]
+    # one derive; the rest is compose read by the check (DM-182)
+    assert [a[:2] for a in runner.argvs if a[1] != "compose"] == [("docker", "run")]
     assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED
 
 
@@ -661,12 +694,16 @@ def test_app_on_another_image_derives_again(
 ) -> None:
     """Р4, the image: the same env, but ``app`` runs on another image than
     ``build`` gives (a new commit) or does not run -- ``derive`` again, on the
-    run's image."""
+    run's image.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     root, fetched, made, comms, env_file = _green(tmp_path)
     steps = passes(comms, root, fetched, made)
     calls = [
         *running_calls(steps[1], running),
         derive_call(env_file, lines=[(STDOUT, DERIVED_NEW)]),
+        *checked_calls(root),
     ]
     with Reading(*calls) as runner:
         outcome, _ = run(steps, runner)
@@ -678,7 +715,10 @@ def test_app_on_another_image_derives_again(
 def test_another_input_of_derive_derives_again(tmp_path: Path) -> None:
     """Р4, the inputs: the passport gives another token on the same image --
     ``render_env`` rewrites the others and keeps the old derived value until
-    ``derive_env`` derives it from the new token."""
+    ``derive_env`` derives it from the new token.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     root, _, made, comms, env_file = _green(tmp_path)
     other = "invented-telegram-token-0002"
     _, fetched = box(
@@ -692,10 +732,14 @@ def test_another_input_of_derive_derives_again(tmp_path: Path) -> None:
             seen.append(read_env(root, "comms")["TELEGRAM_BOT_URL"])
             return super().run(argv, **kwargs)
 
-    with Watching(derive_call(env_file, lines=[(STDOUT, DERIVED_NEW)])) as runner:
+    with Watching(
+        derive_call(env_file, lines=[(STDOUT, DERIVED_NEW)]),
+        *checked_calls(root),
+    ) as runner:
         outcome, _ = run(steps, runner)
     assert outcome.code is ExitCode.OK, outcome.steps
-    assert seen == [DERIVED]  # before derive: the old value, not the placeholder
+    # before derive: the old value, not the placeholder; then the check (DM-182)
+    assert seen[0] == DERIVED and set(seen[1:]) == {DERIVED_NEW}
     assert f"TELEGRAM_BOT_TOKEN={other}\n" in runner.files[0]
     assert read_env(root, "comms")["TELEGRAM_BOT_URL"] == DERIVED_NEW
 
@@ -738,12 +782,19 @@ def test_two_derived_keys_one_red_leaves_the_env_as_render_env_wrote_it(
 
 def test_the_final_check_reads_both_passes_green(tmp_path: Path) -> None:
     """``final_check`` verifies ``render_env`` again after ``derive_env``: the
-    real value is there, and the provides are the derived ones."""
+    real value is there, and the provides are the derived ones.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     made, comms, root, fetched = comms_box(tmp_path, derived=True)
     env_file = root / "opt" / "comms" / "env" / "derive.env"
     steps = passes(comms, root, fetched, made)
     ticks = count()
-    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+    with Reading(
+        derive_call(env_file, lines=[(STDOUT, DERIVED)]),
+        *checked_calls(root),
+        *checked_calls(root),  # final_check verifies derive_env again (DM-182)
+    ) as runner:
         outcome = Plan(
             [StackSteps("comms", steps), StackSteps("end", [FinalCheck()], root=True)],
             mode="install",
@@ -761,12 +812,17 @@ def test_the_final_check_reads_both_passes_green(tmp_path: Path) -> None:
 def test_derive_env_gives_the_provides_their_derived_value(tmp_path: Path) -> None:
     """D7: ``render_env``'s read back holds ``<derived>``; ``derive_env``'s
     holds the value -- what ``derive_env`` hands the plan's memory (DM-126;
-    it was ``up``, after health)."""
+    it was ``up``, after health).
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     made, _, root, fetched = comms_box(tmp_path)
     comms = service(tmp_path, comms_env(derived=True), provides=["TELEGRAM_BOT_URL"])
     env_file = root / "opt" / "comms" / "env" / "derive.env"
     first, second = passes(comms, root, fetched, made)
-    with Reading(derive_call(env_file, lines=[(STDOUT, DERIVED)])) as runner:
+    with Reading(
+        derive_call(env_file, lines=[(STDOUT, DERIVED)]), *checked_calls(root)
+    ) as runner:
         outcome, _ = run([first], runner)
         assert first.provided() == {"TELEGRAM_BOT_URL": DERIVED_PLACEHOLDER}
         outcome, _ = run([second], runner)

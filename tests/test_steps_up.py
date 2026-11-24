@@ -20,6 +20,7 @@ from compose_support import (
     build_call,
     compose,
     config_call,
+    executable_calls,
     hash_calls,
     heads_call,
     health,
@@ -156,7 +157,10 @@ def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
     the assertions are as they were. Changed by DM-132, on the dispatcher's
     word 24.11: with no app to say a head, ``act`` reads ``alembic current`` before
     the migration (an empty database: nothing to restore); the assertions are
-    as they were."""
+    as they were.
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario."""
     cs = compose(tmp_path, app.port)
     parts = {
         "release": cs.release,
@@ -172,11 +176,14 @@ def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
     script = [
         raw_config_call(cs),
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         raw_config_call(cs),  # build's act reads the build arguments (DM-57 FIX)
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         build_call(cs),
         raw_config_call(cs),  # and its verify
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         image_call(cs, "app", APP_IMAGE),
         image_call(cs, "frontend", FRONT_IMAGE),
         image_call(cs, "app", APP_IMAGE),

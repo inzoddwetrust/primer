@@ -79,7 +79,11 @@ def config_call(
     keys: tuple[str, ...] = ENV_KEYS,
     code: int = 0,
 ) -> FakeCall:
+    """Changed by DM-182, on the dispatcher's word 24.11: the compose check
+    reads the executable form -- ``config`` of every profile,
+    ``--profile "*"`` before the command."""
     argv = ["docker", "compose", "-p", "blank", "-f", str(root / "docker-compose.yml")]
+    argv += ["--profile", "*"]
     argv += ["config", "--format", "json", *(["--no-interpolate"] if raw else [])]
     return FakeCall(
         tuple(argv),
@@ -146,7 +150,10 @@ def test_probe_DM_57_check_names_every_violation_of_a_product_repo(
     """Every kind of violation, planted one at a time into the blank, is red
     with its name; the pair: the blank itself is green, exit 0. DM-57 FIX: the
     build arguments are planted in both outputs of ``config``, as it prints a
-    mapping -- ``refusal`` reads them in ``--no-interpolate`` since."""
+    mapping -- ``refusal`` reads them in ``--no-interpolate`` since.
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario, through ``config_call``."""
     root = repo(tmp_path / "pair")
     code, verdict, _ = check(root, green_calls(root))
     assert (code, verdict["result"]) == (0, "green")

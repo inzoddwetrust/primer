@@ -26,6 +26,7 @@ from compose_support import (
     SHA,
     LiveApp,
     app_config_call,
+    executable_calls,
     hash_calls,
     in_release,
     live,
@@ -196,21 +197,27 @@ def key_of(version: str = "1.4.2", edition: str | None = "full") -> dict[str, st
 
 
 def verify_calls(cs: ComposeStack, key: Mapping[str, str]) -> list[FakeCall]:
+    """Changed by DM-182: every reading of the build checks the executable
+    representation (``executable_calls``)."""
     return [
         config_call(cs, raw=True),  # DM-57 FIX: verify reads build.args too
         config_call(cs),
+        *executable_calls(cs),
         image_call(cs, "app", {}, APP_IMAGE),
         image_call(cs, "frontend", key, FRONT_IMAGE),
     ]
 
 
 def first_build(cs: ComposeStack, key: Mapping[str, str]) -> list[FakeCall]:
-    """No override yet: check reads, act builds, verify finds by the key."""
+    """No override yet: check reads, act builds, verify finds by the key.
+    Changed by DM-182: each reading checks the executable representation."""
     return [
         config_call(cs, raw=True),
         config_call(cs),
+        *executable_calls(cs),
         config_call(cs, raw=True),  # act reads build.args too (DM-57 FIX)
         config_call(cs),
+        *executable_calls(cs),
         build_call(cs),
         *verify_calls(cs, key),
     ]
@@ -265,7 +272,10 @@ def test_probe_DM_61_build_mode_rebuilds_on_package_version_only(
 ) -> None:
     """A new version of the package, or another edition, is a build of the
     service on the same commit; the same version and edition are none (the
-    pair: no build command in the scenario)."""
+    pair: no build command in the scenario).
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check reads the
+    executable form -- its calls are in the scenario."""
     stack = made(product_data())
     root, fetched = skin_box(tmp_path)
     cs = compose(root, stack)
@@ -277,6 +287,7 @@ def test_probe_DM_61_build_mode_rebuilds_on_package_version_only(
     same = [
         config_call(cs, raw=True),
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         image_call(cs, "app", {}, APP_IMAGE),
         image_call(cs, "frontend", key_of(), FRONT_IMAGE),
         *verify_calls(cs, key_of()),
@@ -294,8 +305,10 @@ def test_probe_DM_61_build_mode_rebuilds_on_package_version_only(
     script = [
         config_call(cs2, raw=True),
         config_call(cs2),  # the override differs: build
+        *executable_calls(cs2),  # DM-182
         config_call(cs2, raw=True),  # act reads build.args too (DM-57 FIX)
         config_call(cs2),
+        *executable_calls(cs2),  # DM-182
         build_call(cs2),
         *verify_calls(cs2, key_of("1.4.3")),
     ]
@@ -318,8 +331,10 @@ def test_probe_DM_61_build_mode_rebuilds_on_package_version_only(
     script = [
         config_call(cs3, raw=True),
         config_call(cs3),
+        *executable_calls(cs3),  # DM-182
         config_call(cs3, raw=True),  # act reads build.args too (DM-57 FIX)
         config_call(cs3),
+        *executable_calls(cs3),  # DM-182
         build_call(cs3),
         *verify_calls(cs3, key_of(edition="core")),
     ]
@@ -332,7 +347,10 @@ def test_probe_DM_61_build_mode_rebuilds_on_package_version_only(
 
 
 def test_same_override_but_no_image_of_the_key_builds(tmp_path: Path) -> None:
-    """The override is not enough: no image of the key -- a build."""
+    """The override is not enough: no image of the key -- a build.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     stack = made(product_data())
     root, fetched = skin_box(tmp_path)
     cs = compose(root, stack)
@@ -342,10 +360,12 @@ def test_same_override_but_no_image_of_the_key_builds(tmp_path: Path) -> None:
     script = [
         config_call(cs, raw=True),
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         image_call(cs, "app", {}, APP_IMAGE),
         image_call(cs, "frontend", key_of()),  # none of this key
         config_call(cs, raw=True),  # act reads build.args too (DM-57 FIX)
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         build_call(cs),
         *verify_calls(cs, key_of()),
     ]
@@ -498,16 +518,22 @@ def test_without_editions_no_edition_goes_to_the_build(tmp_path: Path) -> None:
 def test_the_build_needs_the_package_and_an_edition_of_editions(
     tmp_path: Path, version: str | None, edition: str | None, code: Code
 ) -> None:
+    """Changed by DM-182: the compose check reads the executable form -- its
+    calls are in the scenario."""
     stack = made(product_data())
     root, fetched = skin_box(tmp_path, version=version, edition=edition)
     cs = compose(root, stack)
-    with FakeRunner(config_call(cs, raw=True), config_call(cs)) as runner:
+    # DM-182: the check of the executable representation reads before refusing
+    script = [config_call(cs, raw=True), config_call(cs), *executable_calls(cs)]
+    with FakeRunner(*script) as runner:
         outcome = run([build(root, stack, fetched)], runner)
     assert outcome.steps[0].reason == code
     assert not cs.override.exists()
 
 
 def test_a_package_not_on_the_box_is_red_before_the_build(tmp_path: Path) -> None:
+    """Changed by DM-182: the compose check reads the executable form -- its
+    calls are in the scenario."""
     stack = made(product_data())
     root, fetched = skin_box(tmp_path)
     package = root / "opt" / ENTRY / "releases" / "velo-look@1.4.2"
@@ -515,7 +541,9 @@ def test_a_package_not_on_the_box_is_red_before_the_build(tmp_path: Path) -> Non
         path.unlink()
     package.rmdir()
     cs = compose(root, stack)
-    with FakeRunner(config_call(cs, raw=True), config_call(cs)) as runner:
+    # DM-182: the check of the executable representation reads before refusing
+    script = [config_call(cs, raw=True), config_call(cs), *executable_calls(cs)]
+    with FakeRunner(*script) as runner:
         outcome = run([build(root, stack, fetched)], runner)
     assert outcome.steps[0].reason == Code(
         "build:missing-release", {"slot": "skin", "path": str(package)}
@@ -524,15 +552,20 @@ def test_a_package_not_on_the_box_is_red_before_the_build(tmp_path: Path) -> Non
 
 def test_a_failed_build_leaves_the_running_image(tmp_path: Path) -> None:
     """The product's build is the package's check: red, and nothing switched
-    -- no ``up`` in the scenario, the step is red."""
+    -- no ``up`` in the scenario, the step is red.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     stack = made(product_data())
     root, fetched = skin_box(tmp_path)
     cs = compose(root, stack)
     script = [
         config_call(cs, raw=True),
         config_call(cs),
+        *executable_calls(cs),  # DM-182
         config_call(cs, raw=True),  # act reads build.args too (DM-57 FIX)
         config_call(cs),
+        *executable_calls(cs),  # DM-182
     ]
     with FakeRunner(*script, build_call(cs, code=1)) as runner:
         outcome = run([build(root, stack, fetched)], runner)
@@ -828,7 +861,10 @@ def test_build_of_the_other_stack_reads_every_compose_and_is_green(
     tmp_path: Path,
 ) -> None:
     """``build`` of ``velo-storage``: the skin's service is in ``velo`` -- no
-    finding, no context, no bind; ``velo``'s compose read beside its own."""
+    finding, no context, no bind; ``velo``'s compose read beside its own.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     stack = made(velo_data())
     root, fetched = skin_box(tmp_path)
     storage = compose(root, stack, "velo-storage")
@@ -838,13 +874,16 @@ def test_build_of_the_other_stack_reads_every_compose_and_is_green(
         config_call(storage, STORAGE, raw=True),
         config_call(storage, STORAGE),
         other,
+        *executable_calls(storage, STORAGE),  # DM-182: after every entry's config
         config_call(storage, STORAGE, raw=True),  # act: build.args (DM-57 FIX)
         config_call(storage, STORAGE),
         other,
+        *executable_calls(storage, STORAGE),  # DM-182: after every entry's config
         build_call(storage),
         config_call(storage, STORAGE, raw=True),  # verify: build.args
         config_call(storage, STORAGE),
         other,
+        *executable_calls(storage, STORAGE),  # DM-182: after every entry's config
     ]
     with FakeRunner(*script) as runner:
         outcome = run([build(root, stack, fetched, "velo-storage")], runner)
@@ -886,6 +925,8 @@ def velo_runtime() -> dict[str, object]:
 
 
 def test_build_names_a_service_in_no_stack(tmp_path: Path) -> None:
+    """Changed by DM-182: the compose check reads the executable form -- its
+    calls are in the scenario."""
     stack = made(velo_data(skin_service="web"))
     root, fetched = skin_box(tmp_path)
     storage = compose(root, stack, "velo-storage")
@@ -894,6 +935,7 @@ def test_build_names_a_service_in_no_stack(tmp_path: Path) -> None:
         config_call(storage, STORAGE, raw=True),
         config_call(storage, STORAGE),
         config_call(velo, VELO),
+        *executable_calls(storage, STORAGE),  # DM-182: after every entry's config
     ]
     with FakeRunner(*script) as runner:
         outcome = run([build(root, stack, fetched, "velo-storage")], runner)
@@ -961,7 +1003,10 @@ def test_an_entry_s_own_aliases_are_not_reserved_for_it(tmp_path: Path) -> None:
 
 def test_check_reads_every_compose_before_it_refuses(tmp_path: Path) -> None:
     """``pridem check`` of a velo-like repository: two stacks, the skin in
-    one -- green; the other way round, the service in none -- both red."""
+    one -- green; the other way round, the service in none -- both red.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
 
     def repository(data: Mapping[str, object], where: Path) -> Path:
         (where / "deploy").mkdir(parents=True)
@@ -971,6 +1016,8 @@ def test_check_reads_every_compose_before_it_refuses(tmp_path: Path) -> None:
         return where
 
     def calls(root: Path) -> list[FakeCall]:
+        """Changed by DM-182: the compose check reads the executable form -- its
+        calls are in the scenario."""
         out: list[FakeCall] = [version_call()]
         for entry, file, document in (
             ("velo", "docker-compose.yml", VELO),
@@ -978,7 +1025,8 @@ def test_check_reads_every_compose_before_it_refuses(tmp_path: Path) -> None:
         ):
             for raw in (True, False):
                 argv = ["docker", "compose", "-p", entry, "-f", str(root / file)]
-                argv += ["config", "--format", "json"]
+                # DM-182: check reads every profile
+                argv += ["--profile", "*", "config", "--format", "json"]
                 argv += ["--no-interpolate"] if raw else []
                 out.append(
                     FakeCall(

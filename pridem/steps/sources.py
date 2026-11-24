@@ -619,7 +619,9 @@ class FetchServices(_SourceStep):
 
     A service's directory is named by its key in ``dependencies``, its env by
     the ``name`` of its ``primer.yaml``: the two are one name, or the service
-    is refused (``name-mismatch``) before its worktree is made. A ``remote``
+    is refused (``name-mismatch``) before its worktree is made; so is a
+    service with an entry another stack of the box has (``entry-taken``,
+    DM-182). A ``remote``
     dependency is never fetched (rule 13), nor one the edition leaves out."""
 
     name = "fetch_services"
@@ -637,6 +639,8 @@ class FetchServices(_SourceStep):
         "not-a-service": "{service}: primer.yaml of {tag} is not a service",
         "invalid-config": "{service}: {file} of {tag} breaks its contract: {codes}",
         "name-mismatch": "the dependency {service} names itself {name} in primer.yaml",
+        "entry-taken": "the dependency {service} has an entry {entry} another stack "
+        "has: one compose project for two",
     }
 
     def _targets(self, ctx: StepContext) -> list[tuple[Checkout, Target]]:
@@ -685,9 +689,28 @@ class FetchServices(_SourceStep):
             raise StepFailed(
                 "name-mismatch", {"service": checkout.stack, "name": config.name}
             )
+        taken = self._entries_taken(checkout.stack)
+        for entry in sorted(config.stacks):
+            if entry in taken:  # one compose project, -p <entry>, for two
+                raise StepFailed(
+                    "entry-taken", {"service": checkout.stack, "entry": entry}
+                )
         self.resolved.services[checkout.stack] = config
         self.resolved.commits[checkout.stack] = target.commit
         self.resolved.releases[checkout.stack] = checkout.release_dir(target)
+
+    def _entries_taken(self, service: str) -> set[str]:
+        """The entries of the product and of every other service read so far:
+        an entry names its compose project (``-p <entry>``) and its alias on
+        the shared network, so a service's entry of the same name would take
+        another stack's containers (DM-182, B27)."""
+        taken: set[str] = set()
+        if self.resolved.product is not None:
+            taken |= set(self.resolved.product.stacks)
+        for other, config in self.resolved.services.items():
+            if other != service:
+                taken |= set(config.stacks)
+        return taken
 
     def check(self, ctx: StepContext) -> CheckResult:
         stale = []

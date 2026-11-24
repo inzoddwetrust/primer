@@ -16,6 +16,7 @@ from compose_support import (
     CONTAINER,
     LiveApp,
     config_call,
+    executable_calls,
     hash_calls,
     health,
     image_call,
@@ -91,7 +92,10 @@ def comms(port: int) -> dict[str, object]:
 
 
 def script(cs: ComposeStack, env_dir: Path) -> list[FakeCall]:
-    """Every command of comms' ladder on ``install``, in its order."""
+    """Every command of comms' ladder on ``install``, in its order.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     derive = FakeCall(
         (
             "docker",
@@ -125,8 +129,10 @@ def script(cs: ComposeStack, env_dir: Path) -> list[FakeCall]:
         # build: check (no override yet), act, verify
         raw_config_call(cs, CONFIG),
         config_call(cs, CONFIG),
+        *executable_calls(cs, CONFIG),  # DM-182: the check reads what runs
         raw_config_call(cs, CONFIG),
         config_call(cs, CONFIG),
+        *executable_calls(cs, CONFIG),  # DM-182
         FakeCall(
             tuple(
                 cs.argv(
@@ -141,9 +147,12 @@ def script(cs: ComposeStack, env_dir: Path) -> list[FakeCall]:
         ),
         raw_config_call(cs, CONFIG),
         config_call(cs, CONFIG),
+        *executable_calls(cs, CONFIG),  # DM-182
         image_call(cs, "comms-app", IMAGE),
         # derive_env: the placeholder on disk -- derive on the build's image
         derive,
+        # derive_env: verify checks compose on the values derived (DM-182)
+        *executable_calls(cs, CONFIG),
         # up: check -- nothing runs yet
         image_call(cs, "comms-app", IMAGE),
         FakeCall(tuple(cs.argv("ps", "-q", operands=("comms-app",)))),
@@ -201,7 +210,11 @@ def test_probe_DM_67_service_derived_seam_reaches_the_product(tmp_path: Path) ->
     ``data_copy``, and ``up`` after the product's first half -- and the
     product takes the seam once comms' environment is read back whole, before
     comms' health. The commands and their order are as they were; so is what
-    the probe asserts."""
+    the probe asserts.
+
+    Changed by DM-182, on the dispatcher's word 24.11: the compose check
+    reads the executable form -- its calls are in the scenario: after each
+    reading of ``build`` and after ``derive`` (``executable_calls``)."""
     app = LiveApp()
     try:
         made, root = planned(

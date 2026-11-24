@@ -160,8 +160,11 @@ def minted_text(values: Mapping[str, str]) -> str:
 
 
 def safe(key: str, value: str) -> None:
-    """A value an env file holds as it is; refused by its key, never quoted."""
-    if any(mark in value for mark in _UNSAFE):
+    """A value an env file holds as it is; refused by its key, never quoted.
+    A backslash is compose's escape of the closing quote: one inside a value
+    compose reads as itself, one at its end escapes the quote and compose
+    reads the lines after it otherwise than the machine (DM-182, S1)."""
+    if any(mark in value for mark in _UNSAFE) or value.endswith("\\"):
         raise StepFailed("env-unsafe", {"key": key})
 
 

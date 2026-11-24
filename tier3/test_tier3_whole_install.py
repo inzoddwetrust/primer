@@ -4170,6 +4170,46 @@ def test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked(
     assert left == [], left
 
 
+PROFILED = """\
+  dm182-hidden:
+    image: postgres:16-alpine
+    privileged: true
+    healthcheck: { test: ["CMD", "true"] }
+    profiles: [never]
+"""
+"""A privileged service behind a profile (DM-182, S2): ``config`` without
+``--profile`` hides it; ``compose run`` or ``COMPOSE_PROFILES`` would start
+it."""
+
+
+def test_tier3_a_privileged_service_behind_a_profile_never_comes_up(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-182, in group ``h`` before the pair of ``destroy``, on the box the
+    earlier tests left: a copy of the blank whose compose holds a privileged
+    service behind a profile. ``update`` is red at ``build`` --
+    ``compose-forbidden`` naming the service -- before anything is built; no
+    container of it exists, and the containers that ran are the ones that
+    run. Measured into the run's output first (par0 14.3): the verdict's
+    steps and the containers."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    copy = _copy_of_blank(tmp_path, mirror, "dm182-profiled")
+    _replace_once(copy / "docker-compose.yml", "services:\n", "services:\n" + PROFILED)
+    _push(copy, mirror, "DM-182: a privileged service behind a profile")
+    running = _services_of(STACK)
+    red, printed = _install(_passport(tmp_path, version=50), "update")
+    steps = [(s.stack, s.name, s.status) for s in red.steps if s.phase == "main"]
+    print("DM-182 measure:", steps, "containers", _services_of(STACK))
+    assert red.result == "red", printed
+    [failed] = [s for s in red.steps if s.status == "failed"]
+    assert (failed.stack, failed.name) == (STACK, "build"), red.steps
+    assert failed.reason is not None
+    assert failed.reason.code == "build:compose-forbidden", failed.reason
+    assert "dm182-hidden: privileged" in failed.reason.model_dump()["found"]
+    assert "dm182-hidden" not in _services_of(STACK)
+    assert _services_of(STACK) == running
+
+
 def test_tier3_destroy_takes_the_blank_off_the_box() -> None:
     """The last of the cycle (DM-45): ``pridem destroy`` -- every container,
     network, volume and image labelled ``pridem.stack`` gone but the volume of

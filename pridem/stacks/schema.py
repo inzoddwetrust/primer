@@ -544,6 +544,23 @@ class Minted(_Var):
     length: Annotated[int, AfterValidator(_minted_length)] | None = None
 
 
+_SEGMENT = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9._-]*")
+"""A segment of a path in a container: letters, digits and ``._-``, no dash
+first -- no ``$`` or ``{`` for compose to interpolate."""
+
+
+def container_path(path: str) -> bool:
+    """A path in a container the machine writes into its override (DM-182,
+    S17): absolute, every segment of ``_SEGMENT`` and none empty (``//``),
+    ``.`` or ``..``."""
+    if not path.startswith("/") or path == "/":
+        return False
+    return all(
+        part not in (".", "..") and _SEGMENT.fullmatch(part) is not None
+        for part in path[1:].split("/")
+    )
+
+
 class SecretFile(Strict):
     """``asked`` that reaches its container as a file, not a variable (DM-145):
     a multi-line value -- an age key, an ssh key -- byte for byte. ``path`` --
@@ -558,12 +575,7 @@ class SecretFile(Strict):
     @model_validator(mode="after")
     def _form(self) -> Self:
         path = PurePosixPath(self.path)
-        if (
-            not path.is_absolute()
-            or ".." in path.parts
-            or str(path) != self.path
-            or self.path == "/"
-        ):
+        if not container_path(self.path):
             raise _rule_error(
                 "S.secret-file", f"not an absolute normalized path: {self.path!r}"
             )
@@ -1131,8 +1143,7 @@ def _mount_problems(path: tuple[int | str, ...], mount: Mount) -> list[Problem]:
         if mount.path is None:
             out.append(problem_at(path, "R10.mount", "a service mount needs path"))
         else:
-            p = PurePosixPath(mount.path)
-            if not p.is_absolute() or ".." in p.parts or str(p) != mount.path:
+            if not container_path(mount.path):
                 out.append(
                     problem_at(
                         (*path, "path"),

@@ -83,13 +83,14 @@ from pridem.steps.compose import (
     REFUSAL_CODES,
     ComposeStack,
     built_services,
+    checked,
     config,
     env_files,
+    executable,
     image_of,
     out,
     override_text,
     package_places,
-    refusal,
     variables,
     write_override,
 )
@@ -271,7 +272,11 @@ class Build(Step):
         files_found = secret_files.unknown_services(
             files, set(named) if isinstance(named, dict) else set()
         )
-        refused = refusal(compose, document, raw, [*places_found, *files_found, *also])
+        # the check reads what compose would execute: every profile, the env
+        # file as compose reads it (DM-182); the build's own document stays
+        # the one compose starts
+        found = executable(ctx, compose)
+        refused = checked(compose, found, [*places_found, *files_found, *also])
         if refused is not None:
             raise StepFailed(*refused)
         bodies = document.get("services")

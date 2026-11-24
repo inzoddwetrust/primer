@@ -16,6 +16,7 @@ from compose_support import (
     CONTAINER,
     LiveApp,
     config_call,
+    executable_calls,
     hash_calls,
     health,
     image_call,
@@ -87,7 +88,10 @@ def _plan(
 
 def _doctor_calls(cs: ComposeStack) -> list[FakeCall]:
     """Every command of ``doctor`` on comms' ladder, nothing to do: the
-    checks of ``build``, ``derive_env`` and ``up`` read docker and the app."""
+    checks of ``build``, ``derive_env`` and ``up`` read docker and the app.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     ps_app = FakeCall(
         tuple(cs.argv("ps", "-q", operands=(APP,))), lines=stdout(CONTAINER)
     )
@@ -99,6 +103,7 @@ def _doctor_calls(cs: ComposeStack) -> list[FakeCall]:
     return [
         raw_config_call(cs, CONFIG),
         config_call(cs, CONFIG),
+        *executable_calls(cs, CONFIG),  # DM-182: build's check reads what runs
         image_call(cs, APP, IMAGE),
         ps_app,
         inspect,
@@ -131,7 +136,10 @@ def test_doctor_of_a_product_with_a_seam_from_a_healthy_service_is_empty(
     Changed by DM-126 (owner's decision of 19.11): a seam is ready with the
     provider's environment, not its health. A service that is ``degraded``
     no longer holds the product's ``render_env`` back -- ``up`` still names
-    it -- so the pair is the environment that is not ready."""
+    it -- so the pair is the environment that is not ready.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     app = LiveApp()
     try:
         made, _ = planned(
@@ -170,7 +178,9 @@ def test_doctor_of_a_product_with_a_seam_from_a_healthy_service_is_empty(
         values["TELEGRAM_BOT_URL"] = DERIVED_PLACEHOLDER
         write_private(env, env_text(values))
         calls = _doctor_calls(cs)
-        del calls[3:5]  # derive_env asks docker nothing: the value is to derive
+        # derive_env asks docker nothing: the value is to derive (the three
+        # calls of the check before them: DM-182)
+        del calls[6:8]
         doctor, _ = _plan(tmp_path, app.port, "doctor", calls, again=True)
     finally:
         app.close()

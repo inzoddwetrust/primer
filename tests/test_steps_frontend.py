@@ -13,6 +13,7 @@ from compose_support import (
     HASHES,
     REF,
     SHA,
+    executable_calls,
     hash_calls,
     in_release,
     stdout,
@@ -290,7 +291,10 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
 ) -> None:
     """DM-55: a package mounted into a service the compose does not have would
     drop out of the override unseen; ``build`` refuses it in ``check``, before
-    anything is built. The pair: with the service, the package is no finding."""
+    anything is built. The pair: with the service, the package is no finding.
+
+    Changed by DM-182: the compose check reads the executable form -- its calls are
+    in the scenario."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, _ = skin_box(tmp_path)
     cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged=True)
@@ -309,7 +313,11 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
         root=root,
         fetched=fetched,
     )
-    script = [compose_raw_config(cs, lacking), compose_config(cs, lacking)]
+    script = [
+        compose_raw_config(cs, lacking),
+        compose_config(cs, lacking),
+        *executable_calls(cs, lacking),  # DM-182: read before it refuses
+    ]
     with FakeRunner(*script) as runner:  # nothing is built
         outcome = run([step], runner)
     assert outcome.steps[0].reason == Code(
