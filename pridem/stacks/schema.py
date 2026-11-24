@@ -100,6 +100,11 @@ RULES = {
     "R3.lock-tag": (3, "a dependency is a release tag vX.Y.Z equal to its version"),
     "R3.lock-commit": (3, "the locked commit is a lowercase hex sha of 7-40 chars"),
     "R4.route-domain": (4, "a route is declared only for a name in host.domains"),
+    "R4.route-path-closed": (
+        4,
+        "a path of a route opens nothing the machine closes: not the health or "
+        "ready of the route's app nor under them, nothing under /__pridem/",
+    ),
     "R5.file-seam": (5, "product data reaches a service through its API, not files"),
     "R9.branch": (9, "a service is installed from release tags only, no branch"),
     "R10.apply": (
@@ -148,6 +153,11 @@ RULES = {
         "with the services named -- neither the app nor the frontend -- up first",
     ),
     "S.seam-from": (0, "a seam names a stack this stack can be wired to"),
+    "S.route-path": (
+        0,
+        "a path of a route is absolute, normalized, of [A-Za-z0-9._~/-], not / "
+        "itself (the route's own knobs are the domain's), with a knob",
+    ),
     "S.mount-dependency": (0, "a package mount names a declared dependency"),
     "S.entry-dependency": (
         0,
@@ -707,10 +717,63 @@ class Package(Strict):
     build: list[BuildPlace] = []
 
 
+Timeout = Annotated[str, Field(pattern=r"^\d+(ms|s|m|h)?$")]
+"""An nginx time: a number with ``ms``, ``s``, ``m`` or ``h`` (seconds without)."""
+
+MACHINE_PATHS = "/__pridem"
+"""The machine's own paths on every route (the preview link): no path of a
+route is under it."""
+
+_ROUTE_PATH = re.compile(r"/[A-Za-z0-9._~/-]*")
+
+
+def _route_path(value: str) -> str:
+    """A path of a route (DM-147): written into the nginx config of the box as
+    it is, so it is plain and normalized -- no empty, ``.`` or ``..`` segment;
+    one ``/`` at the end makes it a prefix (``location /p/``), none an exact
+    address (``location = /p``). ``/`` itself is the whole domain, whose knobs
+    are the route's own (it would be ``location /`` twice)."""
+    if not _ROUTE_PATH.fullmatch(value):
+        raise _rule_error("S.route-path", f"not ^/[A-Za-z0-9._~/-]*$: {value!r}")
+    if value == "/":
+        raise _rule_error("S.route-path", "/ is the whole domain: the route's knobs")
+    segments = value[1:].split("/")
+    if value.endswith("/"):
+        segments.pop()
+    if any(segment in ("", ".", "..") for segment in segments):
+        raise _rule_error("S.route-path", f"not normalized: {value!r}")
+    return value
+
+
+RoutePathName = Annotated[
+    str,
+    AfterValidator(_route_path),
+    WithJsonSchema({"type": "string", "pattern": f"^{_ROUTE_PATH.pattern}$"}),
+]
+
+
+class RoutePath(Strict):
+    """The knobs of one path of a route (DM-147): a long read for long-poll
+    and server-sent events, the response passed on as it comes. No ``to``:
+    the routing of paths is the frontend's (contract 3 rule 4). Without a
+    knob a path says nothing (``S.route-path``); ``buffering: true`` is what
+    every path has, so only ``false`` is a knob."""
+
+    read_timeout: Timeout | None = None
+    buffering: Literal[False] | None = None
+
+    @model_validator(mode="after")
+    def _has_a_knob(self) -> Self:
+        if self.read_timeout is None and self.buffering is None:
+            raise _rule_error("S.route-path", "no knob: leave the path out")
+        return self
+
+
 class Route(Strict):
     to: Annotated[str, Field(pattern=r"^[^\s:]+:\d+$")]
     max_body: Annotated[str, Field(pattern=r"^\d+[kKmMgG]?$")] | None = None
-    read_timeout: Annotated[str, Field(pattern=r"^\d+(ms|s|m|h)?$")] | None = None
+    read_timeout: Timeout | None = None
+    paths: dict[RoutePathName, RoutePath] = {}
 
 
 class Headers(Strict):
@@ -1018,6 +1081,46 @@ def _r4_route_domains(stack: Product | Service) -> list[Problem]:
         for name in stack.host.routes
         if name not in stack.host.domains
     ]
+
+
+def route_closed(stack: Product | Service, route: Route) -> tuple[str, ...]:
+    """The paths nginx answers 404 itself on ``route``: ``health`` and
+    ``ready`` of every entry whose ``app`` is its ``to`` (protocol 9.3). One
+    such entry is ``routes.targets``' own answer; none or two -- the machine
+    refuses the route before ``act`` (``route-target-unknown``,
+    ``route-ambiguous``), the loader closes all it can see."""
+    service, _, port = route.to.rpartition(":")
+    found: list[str] = []
+    for stage in stack.stacks.values():
+        app = stage.app
+        if app is not None and (app.service, app.port) == (service, int(port)):
+            found += [app.health, app.ready]
+    return tuple(dict.fromkeys(found))
+
+
+def _under(path: str, top: str) -> bool:
+    """``path`` is ``top`` or lies under it, a ``/`` at the end of either
+    aside."""
+    base, root = path.rstrip("/"), top.rstrip("/")
+    return base == root or base.startswith(f"{root}/")
+
+
+def _r4_route_paths(stack: Product | Service) -> list[Problem]:
+    """No path of a route opens what the machine closes (DM-147): an exact
+    ``location =`` wins over a path in nginx anyway, so this keeps the
+    declaration honest and ``location =`` from being written twice."""
+    if stack.host is None:
+        return []
+    out: list[Problem] = []
+    for name, route in stack.host.routes.items():
+        closed = (*route_closed(stack, route), MACHINE_PATHS)
+        for path in route.paths:
+            hit = [top for top in closed if _under(path, top)]
+            if hit:
+                where = ("host", "routes", name, "paths", path)
+                detail = f"{path!r} is {hit[0]!r} or under it"
+                out.append(problem_at(where, "R4.route-path-closed", detail))
+    return out
 
 
 def _mount_problems(path: tuple[int | str, ...], mount: Mount) -> list[Problem]:
@@ -1463,6 +1566,7 @@ def _s_types_one(stack: Product | Service) -> list[Problem]:
 RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r3_single_point,
     _r4_route_domains,
+    _r4_route_paths,
     _r10_mounts,
     _r10_apply,
     _s_mount_dependency,

@@ -2,8 +2,20 @@
 
 ``host.routes`` is the whole dictionary of the host: a route is named by a
 domain of ``host.domains`` and has exactly ``to``, ``max_body``,
-``read_timeout``; ``headers`` has exactly ``csp``. The loader refuses any other
-key (``Strict`` models), so an unknown knob is red before a step runs.
+``read_timeout`` and ``paths``; a path of ``paths`` has exactly
+``read_timeout`` and ``buffering: false``; ``headers`` has exactly ``csp``.
+The loader refuses any other key (``Strict`` models), so an unknown knob is
+red before a step runs.
+
+A path (DM-147) is a ``location`` of its own on the route's domain, for long
+connections -- long-poll and server-sent events: one with ``/`` at the end is a
+prefix (``location /p/``), one without an exact address (``location = /p``).
+It is ``location /`` in all but its knobs: the same upstream, request
+headers, preview cookie and response headers -- ``_proxied`` writes both -- its
+own ``proxy_read_timeout`` (else the route's: a location inherits none from its
+sibling) and ``proxy_buffering off`` with ``buffering: false``. A path never
+routes elsewhere (no ``to``) and never opens what the machine closes
+(``R4.route-path-closed``).
 
 ``to: <service>:<port>`` names no stack: its target is the entry of ``stacks``
 that declares that pair as its ``app`` or its ``frontend``. None -- the route
@@ -45,13 +57,13 @@ from dataclasses import dataclass
 
 from pridem.events import Json
 from pridem.stacks.passport import Passport
-from pridem.stacks.schema import Product, Route
+from pridem.stacks.schema import MACHINE_PATHS, Product, Route
 from pridem.steps.base import StepFailed
 
 CERT = "/etc/pridem/certs/fullchain.pem"
 KEY = "/etc/pridem/certs/privkey.pem"
 ACME_ROOT = "/var/www/acme"
-PREVIEW_PATH = "/__pridem/preview"
+PREVIEW_PATH = f"{MACHINE_PATHS}/preview"
 PREVIEW_COOKIE = "pridem_preview"
 HSTS = "max-age=31536000; includeSubDomains"
 GZIP_TYPES = "text/css application/javascript application/json image/svg+xml text/plain"
@@ -130,6 +142,57 @@ def _closed(name: str, target: Target) -> list[str]:
     return lines
 
 
+def _proxied(
+    head: str,
+    target: Target,
+    read_timeout: str | None,
+    buffering: bool,
+    inner: list[str],
+    secret: str | None,
+) -> list[str]:
+    """One proxied ``location`` -- ``location /`` or a path's: what reaches the
+    app and what comes back is the same in each (DM-147)."""
+    lines = [f"  {head} {{"]
+    if secret is not None:
+        lines.append(
+            f'    if ($cookie_{PREVIEW_COOKIE} != "{secret}") {{ return 404; }}'
+        )
+    lines += [
+        f"    set $upstream http://{target.alias}:{target.port};",
+        "    proxy_pass $upstream;",
+        "    proxy_http_version 1.1;",
+        "    proxy_set_header Host $host;",
+        "    proxy_set_header X-Real-IP $remote_addr;",
+        "    proxy_set_header X-Forwarded-For $remote_addr;",
+        "    proxy_set_header X-Forwarded-Proto https;",
+        # what the client says of the edge is the edge's to say (DM-93, R2-S11):
+        # its own host and port; the prefix and Forwarded never reach the app
+        "    proxy_set_header X-Forwarded-Host $host;",
+        "    proxy_set_header X-Forwarded-Port 443;",
+        '    proxy_set_header X-Forwarded-Prefix "";',
+        '    proxy_set_header Forwarded "";',
+    ]
+    if read_timeout is not None:
+        lines.append(f"    proxy_read_timeout {read_timeout};")
+    if not buffering:
+        lines.append("    proxy_buffering off;")
+    return [*lines, *inner, "  }"]
+
+
+def _paths(name: str, route: Route) -> list[tuple[str, str | None, bool]]:
+    """``(head of the location, read timeout, buffering)`` of every path of
+    ``route``, in the file's order; a path is written into the config as it
+    is, so one that could read as more than a path is refused."""
+    out: list[tuple[str, str | None, bool]] = []
+    for path, knobs in route.paths.items():
+        if not _PATH.fullmatch(path):
+            raise StepFailed("path-unsafe", {"route": name, "path": path})
+        head = f"location {path}" if path.endswith("/") else f"location = {path}"
+        timeout = knobs.read_timeout or route.read_timeout
+        out.append((head, timeout, knobs.buffering is None))
+    return out
+
+
 def _quoted(name: str, value: str) -> str:
     if _UNSAFE.search(value):
         raise StepFailed("header-unsafe", {"header": name})
@@ -186,30 +249,10 @@ def _server(
     # what the machine reads of the app it reads on the network pridem, never
     # here (protocol 9.3); an exact location wins over the prefix / in nginx
     lines += _closed(name, target)
-    lines += ["  location / {"]
-    if secret is not None:
-        lines.append(
-            f'    if ($cookie_{PREVIEW_COOKIE} != "{secret}") {{ return 404; }}'
-        )
-    lines += [
-        f"    set $upstream http://{target.alias}:{target.port};",
-        "    proxy_pass $upstream;",
-        "    proxy_http_version 1.1;",
-        "    proxy_set_header Host $host;",
-        "    proxy_set_header X-Real-IP $remote_addr;",
-        "    proxy_set_header X-Forwarded-For $remote_addr;",
-        "    proxy_set_header X-Forwarded-Proto https;",
-        # what the client says of the edge is the edge's to say (DM-93, R2-S11):
-        # its own host and port; the prefix and Forwarded never reach the app
-        "    proxy_set_header X-Forwarded-Host $host;",
-        "    proxy_set_header X-Forwarded-Port 443;",
-        '    proxy_set_header X-Forwarded-Prefix "";',
-        '    proxy_set_header Forwarded "";',
-    ]
-    if route.read_timeout is not None:
-        lines.append(f"    proxy_read_timeout {route.read_timeout};")
-    lines += [*inner, "  }", "}"]
-    return lines
+    for head, timeout, buffering in _paths(name, route):
+        lines += _proxied(head, target, timeout, buffering, inner, secret)
+    lines += _proxied("location /", target, route.read_timeout, True, inner, secret)
+    return [*lines, "}"]
 
 
 def render(product: Product, passport: Passport, secret: str | None) -> str:

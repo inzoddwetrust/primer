@@ -111,6 +111,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
         "e",
     ),
     ("test_tier3_a_skin_built_into_a_frontend_built_from_the_root", "e"),
+    # the last of e: a stream through a path of a route (DM-147)
+    ("test_probe_DM_147_sse_arrives_in_parts_through_the_path", "e"),
     # i: types and alembic, each on a copy of its own
     ("test_tier3_types_are_made_by_the_products_commands", "i"),  # DM-63
     ("test_tier3_alembic_runs_with_the_apps_environment", "i"),  # DM-124

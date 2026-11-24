@@ -822,6 +822,16 @@
           "title": "Max Body",
           "type": "string"
         },
+        "paths": {
+          "default": {},
+          "patternProperties": {
+            "^/[A-Za-z0-9._~/-]*$": {
+              "$ref": "#/$defs/RoutePath"
+            }
+          },
+          "title": "Paths",
+          "type": "object"
+        },
         "read_timeout": {
           "pattern": "^\\d+(ms|s|m|h)?$",
           "title": "Read Timeout",
@@ -837,6 +847,24 @@
         "to"
       ],
       "title": "Route",
+      "type": "object"
+    },
+    "RoutePath": {
+      "additionalProperties": false,
+      "description": "The knobs of one path of a route (DM-147): a long read for long-poll\nand server-sent events, the response passed on as it comes. No ``to``:\nthe routing of paths is the frontend's (contract 3 rule 4). Without a\nknob a path says nothing (``S.route-path``); ``buffering: true`` is what\nevery path has, so only ``false`` is a knob.",
+      "properties": {
+        "buffering": {
+          "const": false,
+          "title": "Buffering",
+          "type": "boolean"
+        },
+        "read_timeout": {
+          "pattern": "^\\d+(ms|s|m|h)?$",
+          "title": "Read Timeout",
+          "type": "string"
+        }
+      },
+      "title": "RoutePath",
       "type": "object"
     },
     "Seam": {

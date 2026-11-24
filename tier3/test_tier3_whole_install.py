@@ -84,7 +84,7 @@ from pridem.conformance.stack import check_health, check_logs
 from pridem.report.schema import Verdict
 from pridem.runner import CommandNotStarted, CommandTimedOut, Stream, SubprocessRunner
 from pridem.steps.compose import PROXY_URL as PROXY
-from pridem.steps.edge import CERTBOT_IMAGE
+from pridem.steps.edge import CERTBOT_IMAGE, live_config
 from pridem.steps.egress import SQUID_IMAGE
 from pridem.steps.gc import reclaimable_size
 
@@ -4584,3 +4584,106 @@ def test_tier3_a_skin_built_into_a_frontend_built_from_the_root(
     facts = {(s.stack, s.name): s.verify or {} for s in verdict.steps}
     print("DM-127 measure:", facts.get((STACK, "build")))
     assert _body("/skin/skin.css", FRONTEND) == "one"
+
+
+SSE_EVENTS = 5
+"""DM-147: the copy's stream -- five server-sent events a second apart."""
+SSE_ROUTE = '    api:      { to: "app:8000", max_body: 1M }\n'
+SSE_PATHS = (
+    '    api:      { to: "app:8000", max_body: 1M,\n'
+    '                paths: { "/sse/": { read_timeout: 120s, buffering: false } } }\n'
+)
+SSE_APP = '''
+    from fastapi.responses import StreamingResponse
+
+    async def _ticks() -> AsyncIterator[bytes]:
+        for n in range(5):
+            yield f"data: {n}\\n\\n".encode()
+            await asyncio.sleep(1)
+
+    @app.get("/sse/events")
+    @app.get("/events")
+    async def events() -> StreamingResponse:
+        """DM-147 (tier 3): one stream under the path /sse/ and outside it."""
+        return StreamingResponse(_ticks(), media_type="text/event-stream")
+
+    return wrapped
+'''
+SSE_CLIENT = """
+import http.client, json, ssl, sys, time
+host, port, tls, name, path = sys.argv[1:6]
+if tls == "tls":
+    context = ssl._create_unverified_context()
+    conn = http.client.HTTPSConnection(host, int(port), context=context, timeout=60)
+else:
+    conn = http.client.HTTPConnection(host, int(port), timeout=60)
+start = time.monotonic()
+conn.request("GET", path, headers={"Host": name, "Accept-Encoding": "gzip"})
+resp = conn.getresponse()
+times = []
+while chunk := resp.read1(65536):
+    times += [round(time.monotonic() - start, 2)] * chunk.count(b"data:")
+print(json.dumps({"status": resp.status,
+                  "encoding": resp.getheader("Content-Encoding"),
+                  "times": times}))
+"""
+"""Reads a stream and says when each event came: the same code at the app, on
+the network ``pridem``'s side, and through nginx of the machine."""
+
+
+def _sse_times(argv: list[str]) -> dict[str, object]:
+    [line] = [x for x in _stdout(argv, timeout=120) if x.startswith("{")]
+    found = json.loads(line)
+    assert isinstance(found, dict), line
+    return found
+
+
+def _in_parts(leg: dict[str, object]) -> bool:
+    times = leg["times"]
+    assert isinstance(times, list) and len(times) == SSE_EVENTS, leg
+    return bool(times[0] < 1.5 and times[-1] - times[0] >= 3)
+
+
+def test_probe_DM_147_sse_arrives_in_parts_through_the_path(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-147: a copy of the blank with one stream of server-sent events -- at
+    ``/sse/events``, under the path ``/sse/`` of the route ``api`` with
+    ``buffering: false``, and at ``/events``, outside it. Measured first and
+    printed (par0 14.3): (a) at the app itself, inside its container -- the
+    harness: the app sends in parts; (b) through nginx of the machine under
+    the path -- in parts; (c) outside it -- at the end, all at once: the knob,
+    not the app or nginx alone, makes (b). Over https, as the box serves: a
+    measure of nginx 1.24 at DM-147's gate had (c) in parts over plain http
+    and at the end over TLS. The long ``read_timeout`` is held by its literal
+    in tier 1: a pause over 60 s is not spent here."""
+    assert (OPT / "current").is_symlink(), "the group's install runs first"
+    copy = _copy_of_blank(tmp_path, mirror, "sse")
+    _replace_once(copy / "primer.yaml", SSE_ROUTE, SSE_PATHS)
+    main = copy / "backend" / "app" / "main.py"
+    _replace_once(main, "import hmac\n", "import asyncio\nimport hmac\n")
+    _replace_once(main, "\n    return wrapped\n", SSE_APP)
+    _push(copy, mirror, "DM-147: a stream under the path /sse/ and outside it")
+    verdict, printed = _install(_passport(tmp_path, version=81), "update")
+    assert verdict.result == "green", printed
+    config = live_config(Path("/")).read_text(encoding="utf-8")
+    sse = config[config.index("location /sse/ {") :]
+    sse = sse[: sse.index("  }")]
+    assert "proxy_buffering off;" in sse and "proxy_read_timeout 120s;" in sse, sse
+
+    host = ["python3", "-c", SSE_CLIENT, "localhost", "443", "tls", API]
+    app = ["docker", "exec", _app(), "python", "-c", SSE_CLIENT]
+    legs = {
+        "app": _sse_times([*app, "127.0.0.1", "8000", "plain", API, "/events"]),
+        "path": _sse_times([*host, "/sse/events"]),
+        "outside": _sse_times([*host, "/events"]),
+    }
+    print("DM-147 measure:", json.dumps(legs))
+    assert {leg["status"] for leg in legs.values()} == {200}, legs
+    assert legs["path"]["encoding"] is None, legs  # gzip_types has no event-stream
+    assert _in_parts(legs["app"]), legs
+    assert _in_parts(legs["path"]), legs
+    # the pair: the same stream outside the path comes at the end, all at once
+    times = legs["outside"]["times"]
+    assert isinstance(times, list) and len(times) == SSE_EVENTS, legs
+    assert times[0] >= times[-1] - 0.5 and times[-1] >= 3, legs
