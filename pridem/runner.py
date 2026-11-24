@@ -11,9 +11,13 @@ process group, under ``setpriv --pdeathsig KILL``: when ``pridem`` dies the
 leader is killed with it. What the leader started may outlive it, so the
 runner hands the box lock's descriptor (``hold``) to every command: the lock is
 not released while a process of the command lives, and no second command takes
-the box meanwhile. A signal that the command's ``Interrupt`` says stops it
-(``pridem/interrupt.py``) stops the command's group as a timeout does and
-raises ``Interrupted``.
+the box meanwhile. When the leader ends, its group goes with it: a child left
+in the group is stopped, and the command is done once its own process ended
+and nothing more comes from its pipes, whoever still holds them (DM-190). A
+child that left the group (``setsid``) is no longer the command's: it keeps
+the lock while it lives (DM-24), and the box says who holds it. A signal
+that the command's ``Interrupt`` says stops it (``pridem/interrupt.py``)
+stops the command's group as a timeout does and raises ``Interrupted``.
 
 A command run with no ``env`` gets ``clean_env()``, never the environment of
 ``pridem``'s own process: a ``DOCKER_HOST``, a ``COMPOSE_*`` or a product's
@@ -355,8 +359,10 @@ class SubprocessRunner:
             raise CommandNotStarted(command, error.strerror or str(error)) from error
 
         finished = False
+        held = False
         try:
             ended = _pump(process, deadline, emit, self._interrupt)
+            held = ended == "exited"  # its own process ended, a child holds a pipe
             while ended == "running":
                 try:
                     process.wait(timeout=_LOOK_SECONDS)
@@ -373,7 +379,12 @@ class SubprocessRunner:
             code = process.wait()
             finished = True
         finally:
-            if not finished:
+            # a cut command's group goes; so does the group of one whose own
+            # process ended while a child it left in the group held its pipe
+            # (DM-190, B2). One that ended with its pipes closed keeps what it
+            # left -- a child on its way out of the group (setsid) among it, the
+            # box's lock with it (DM-24)
+            if not finished or held:
                 _stop_group(process)
             for pipe in (process.stdout, process.stderr):
                 if pipe is not None:
@@ -440,8 +451,11 @@ def _pump(
     interrupt: Interrupt,
 ) -> Ended:
     """Read both pipes to EOF, emitting lines: ``running`` -- both are closed
-    (the process may still run); ``timeout`` -- the deadline passed;
-    ``interrupted`` -- a signal stops the command.
+    (the process may still run); ``exited`` -- the command's own process
+    ended and a round of reading found nothing more: a child it left behind
+    holds a pipe, and the command is done all the same (DM-190, B2);
+    ``timeout`` -- the deadline passed; ``interrupted`` -- a signal stops the
+    command.
 
     When cut, the unterminated line of each stream is emitted before the
     return: output is cut, never lost.
@@ -474,7 +488,15 @@ def _pump(
                     for line, continued in [*splitter.feed(text), *splitter.finish()]:
                         emit(stream, line, continued)
                 return cut
-            for key, _ in selector.select(timeout=min(remaining, _LOOK_SECONDS)):
+            ready = selector.select(timeout=min(remaining, _LOOK_SECONDS))
+            if not ready and process.poll() is not None:
+                cut = "exited"  # what is left holds a pipe, not the command
+                for stream, splitter in splitters.items():
+                    text = decoders[stream].decode(b"", final=True)
+                    for line, continued in [*splitter.feed(text), *splitter.finish()]:
+                        emit(stream, line, continued)
+                return cut
+            for key, _ in ready:
                 stream = pipes[key.fd]
                 chunk = os.read(key.fd, _READ_SIZE)
                 text = decoders[stream].decode(chunk, final=not chunk)

@@ -213,7 +213,9 @@ class Waiting:
     deadline_s: float
     poll_s: float
     clock: Callable[[], float] = time.monotonic
-    sleep: Callable[[float], None] = time.sleep
+    sleep: Callable[[float], None] | None = None
+    """``None`` -- the command's interrupt sleeps: a signal ends the wait
+    within a slice (DM-190, E6); a test gives its own."""
 
 
 def wait_until(ctx: StepContext, ready: Callable[[], bool], waiting: Waiting) -> bool:
@@ -225,6 +227,6 @@ def wait_until(ctx: StepContext, ready: Callable[[], bool], waiting: Waiting) ->
         if waiting.clock() >= deadline:
             return False
         ctx.interrupt.check()
-        waiting.sleep(waiting.poll_s)
+        (waiting.sleep or ctx.interrupt.sleep)(waiting.poll_s)
         ctx.interrupt.check()
     return True

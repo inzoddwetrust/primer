@@ -329,7 +329,7 @@ class WaitHostQuiet(_HostStep):
         timeout_s: float = QUIET_TIMEOUT_S,
         poll_s: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         super().__init__(root)
         self.timeout_s = timeout_s
@@ -372,7 +372,7 @@ class WaitHostQuiet(_HostStep):
                     "host-busy", {"services": _j(busy), "timeout_s": self.timeout_s}
                 )
             ctx.interrupt.check()  # a signal ends the wait (DM-45)
-            self.sleep(self.poll_s)
+            (self.sleep or ctx.interrupt.sleep)(self.poll_s)
             ctx.interrupt.check()
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:

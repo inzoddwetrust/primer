@@ -474,14 +474,18 @@ def _verdict(
 
         try:
             verdict = assemble(outcome, planned.report.failures, planned.report.junit)
-        except ValueError as error:  # the model refused what the run gave (DM-92)
+        except Exception as error:  # the model refused what the run gave (DM-92)
+            # any error of the model's code, not its ValueError alone (DM-190, E7)
             name = type(error).__name__
             note = LogLine(
                 "finally", machine.VERDICT, "build", Stream.STDERR, f"{name}: {error}"
             )
             journal.emit(note)  # the stream's own next line (DM-137)
             journal.sync()
-            verdict = assemble(salvaged(outcome, name, assemble), (), None)
+            try:
+                verdict = assemble(salvaged(outcome, name, assemble), (), None)
+            except Exception:  # the last rung: the run, red, and why (E7)
+                verdict = assemble(unbuildable(outcome, name), (), None)
         box.write_verdict(verdict)
     except BaseException:
         close_journal(journal)  # no verdict, no end: a run that did not end
@@ -491,6 +495,21 @@ def _verdict(
 
 
 Assemble = Callable[[PlanOutcome, Sequence[Fact], Mapping[str, int] | None], Verdict]
+
+
+def unbuildable(outcome: PlanOutcome, error: str) -> PlanOutcome:
+    """The last rung of a verdict that could not be built (DM-190, E7): red,
+    nothing of the run but ``run/unbuildable {type}`` -- a verdict always."""
+    return replace(
+        outcome,
+        code=ExitCode.FAILED,
+        steps=(),
+        restore=(),
+        finally_=(),
+        incomplete=(Incomplete("run", Code("unbuildable", {"type": error})),),
+        doctor_diff=(),
+        needs_restore=False,
+    )
 
 
 def salvaged(outcome: PlanOutcome, error: str, assemble: Assemble) -> PlanOutcome:
@@ -512,7 +531,7 @@ def salvaged(outcome: PlanOutcome, error: str, assemble: Assemble) -> PlanOutcom
     def fits(part: PlanOutcome) -> bool:
         try:
             assemble(part, (), None)
-        except ValueError:
+        except Exception:  # whatever refuses it (DM-190, E7)
             return False
         return True
 

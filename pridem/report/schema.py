@@ -369,6 +369,14 @@ class JournalDamaged(Strict):
     line: Annotated[int, Field(ge=1)]
 
 
+class RunInterrupted(Strict):
+    """A signal stopped the run where no step could say it: ``main`` empty or
+    not yet made (DM-190). A red verdict always has its reason."""
+
+    what: Literal["run"]
+    code: Literal["interrupted"]
+
+
 class RunUnbuildable(Strict):
     """The verdict of the run could not be built (``type`` of the error); this
     one holds what could be, the journal the rest (DM-92)."""
@@ -439,6 +447,7 @@ def _incomplete_tag(value: object) -> str:
 IncompleteEntry = Annotated[
     Annotated[NoVerdict, Tag("run/no-verdict")]
     | Annotated[JournalDamaged, Tag("run/journal-damaged")]
+    | Annotated[RunInterrupted, Tag("run/interrupted")]
     | Annotated[RunUnbuildable, Tag("run/unbuildable")]
     | Annotated[JournalWriteFailed, Tag("journal/write-failed")]
     | Annotated[JournalQuarantined, Tag("journal/quarantined")]
@@ -452,6 +461,7 @@ IncompleteEntry = Annotated[
 INCOMPLETE_MODELS: dict[str, type[Strict]] = {
     "run/no-verdict": NoVerdict,
     "run/journal-damaged": JournalDamaged,
+    "run/interrupted": RunInterrupted,
     "run/unbuildable": RunUnbuildable,
     "journal/write-failed": JournalWriteFailed,
     "journal/quarantined": JournalQuarantined,

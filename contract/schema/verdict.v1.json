@@ -628,6 +628,9 @@
                 "$ref": "#/$defs/JournalDamaged"
               },
               {
+                "$ref": "#/$defs/RunInterrupted"
+              },
+              {
                 "$ref": "#/$defs/RunUnbuildable"
               },
               {
@@ -726,6 +729,28 @@
         "role"
       ],
       "title": "RoleSkip",
+      "type": "object"
+    },
+    "RunInterrupted": {
+      "additionalProperties": false,
+      "description": "A signal stopped the run where no step could say it: ``main`` empty or\nnot yet made (DM-190). A red verdict always has its reason.",
+      "properties": {
+        "code": {
+          "const": "interrupted",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "const": "run",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code"
+      ],
+      "title": "RunInterrupted",
       "type": "object"
     },
     "RunUnbuildable": {

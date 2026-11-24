@@ -472,15 +472,19 @@ def test_timeout_escalates_to_sigkill_after_grace(
         _kill(*map(int, lines.of(Stream.STDOUT)[:1]))
 
 
-def test_descendant_holding_the_pipe_is_a_timeout(
+def test_descendant_holding_the_pipe_ends_with_its_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Changed by DM-190 (B2, the gate's decision): a child left in the
+    command's group that holds its pipe no longer makes it a timeout -- the
+    command is done once its own process ended and nothing more comes; the
+    child is stopped with the group. Was ``..._is_a_timeout``."""
     monkeypatch.setattr(runner, "KILL_GRACE_SECONDS", 1.0)
     lines = Lines()
-    with pytest.raises(CommandTimedOut):
-        SubprocessRunner().run(
-            [SH, "-c", "sleep 300 & echo hi"], timeout=1.0, on_line=lines
-        )
+    result = SubprocessRunner().run(
+        [SH, "-c", "sleep 300 & echo hi"], timeout=30.0, on_line=lines
+    )
+    assert result.code == 0
     assert lines.of(Stream.STDOUT) == ["hi"]
 
 

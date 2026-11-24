@@ -204,12 +204,19 @@ def test_probe_DM_45_signal_sets_the_flag_and_finally_runs(
     """A real SIGINT under the command's handler: no exception -- the flag is
     set, the step that got it finishes, the rest of ``main`` is skipped
     ``after-interrupt``, ``finally`` runs, and the verdict is written (exit
-    1). The pair: with no signal the same plan runs every step."""
+    1). The pair: with no signal the same plan runs every step.
+
+    Changed by DM-190, on the dispatcher's word 24.11: the step the signal
+    kept from starting says so -- ``failed`` with ``interrupted``, never a
+    red verdict without its reason; a step after it (``finalize_after``) is
+    the one skipped ``after-interrupt``. ``finally`` and the flag as they
+    were."""
     journal = Journal()
     killer = _Kill("finalize_mark", 2, journal)
     tail = ScriptedStep("finalize_tail", 3, journal)
+    after = ScriptedStep("finalize_after", 4, journal)
     monkeypatch.setattr(
-        deploy_verbs, "deploy_plan", _fake_plan(journal, extra=[killer, tail])
+        deploy_verbs, "deploy_plan", _fake_plan(journal, extra=[killer, tail, after])
     )
     file = _passport(tmp_path)
     interrupt = Interrupt()
@@ -222,7 +229,10 @@ def test_probe_DM_45_signal_sets_the_flag_and_finally_runs(
     verdict = Verdict.model_validate_json(out)
     steps = {(s.phase, s.stack, s.name): s for s in verdict.steps}
     assert steps[("main", "pridem-finalize", "finalize_mark")].status == "ok"
-    skipped = steps[("main", "pridem-finalize", "finalize_tail")]
+    stopped = steps[("main", "pridem-finalize", "finalize_tail")]
+    assert stopped.status == "failed" and stopped.reason is not None
+    assert stopped.reason.code == "interrupted"
+    skipped = steps[("main", "pridem-finalize", "finalize_after")]
     assert skipped.status == "skipped" and skipped.reason is not None
     assert skipped.reason.code == "after-interrupt"
     assert steps[("finally", "pridem-box", "gc")].status == "ok"

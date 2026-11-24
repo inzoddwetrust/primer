@@ -581,7 +581,11 @@ def test_interrupt_inside_finally_stops_the_rest_of_finally() -> None:
 
 def test_the_first_signal_inside_finally_is_only_counted() -> None:
     """DM-24: the command's first signal lands in ``finally``: ``gc`` goes to
-    its end, a line of it says the clean-up goes on, the run is interrupted."""
+    its end, a line of it says the clean-up goes on, the run is interrupted.
+
+    Changed by DM-190 (B11, the gate's decision): the first signal in
+    ``finally`` is shielded and leaves the run what main made of it -- no
+    red without a reason."""
     journal = Journal()
     run, sink = plan(
         _root(ScriptedStep("up", 1, journal)),
@@ -596,7 +600,7 @@ def test_the_first_signal_inside_finally_is_only_counted() -> None:
         ],
     )
     outcome = run.run()
-    assert outcome.interrupted
+    assert not outcome.interrupted  # DM-190, B11: the shield holds
     assert [(r.name, r.status) for r in outcome.finally_] == [
         ("gc", "ok"),
         ("timers", "ok"),
@@ -650,7 +654,11 @@ def test_interrupt_while_a_log_line_is_written_stops_the_step() -> None:
 def test_interrupt_between_finally_steps_lets_the_clean_up_finish() -> None:
     """FIX DM-37: SIGTERM between two clean-up steps; both still run. DM-45:
     the signal arrives in a step of finally (a flag, never raised); the run
-    returns interrupted instead of raising."""
+    returns interrupted instead of raising.
+
+    Changed by DM-190 (B11, the gate's decision): the first signal in
+    ``finally`` is shielded and leaves the run what main made of it -- no
+    red without a reason."""
     journal = Journal()
     run, _ = plan(
         _root(ScriptedStep("up", 1, journal)),
@@ -666,7 +674,7 @@ def test_interrupt_between_finally_steps_lets_the_clean_up_finish() -> None:
         ],
     )
     outcome = run.run()
-    assert outcome.interrupted
+    assert not outcome.interrupted  # DM-190, B11: the shield holds
     assert [(r.name, r.status) for r in outcome.finally_] == [
         ("gc", "ok"),
         ("timers", "ok"),

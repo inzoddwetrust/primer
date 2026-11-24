@@ -239,7 +239,7 @@ def wait_for_access(
     access: Callable[[], bool],
     deadline: float,
     clock: Callable[[], float],
-    sleep: Callable[[float], None],
+    sleep: Callable[[float], None] | None,
 ) -> bool:
     """Until ``access`` answers ``STEADY`` times in a row, ``STEADY_PAUSE_S``
     apart -- ``True``; ``False`` at ``deadline``. A refusal starts the row
@@ -260,7 +260,8 @@ def wait_for_access(
         if clock() >= deadline:
             return False
         ctx.interrupt.check()
-        sleep(pause)
+        # None -- the interrupt's own sleep: a signal ends it in a slice (E6)
+        (sleep or ctx.interrupt.sleep)(pause)
         ctx.interrupt.check()
 
 
@@ -286,7 +287,7 @@ class FreshKeys:
         self,
         root: Path = Path("/"),
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.root = root
         self.clock = clock
@@ -383,7 +384,7 @@ class DeployKey(Step):
         others: Sequence[str] = (),
         wait_s: float = KEY_WAIT_S,
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
         fresh: FreshKeys | None = None,
     ) -> None:
         self.repo = repo(address)
@@ -625,7 +626,7 @@ class WriteKey(LeftUndone, DeployKey):
         others: Sequence[str] = (),
         wait_s: float = KEY_WAIT_S,
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         super().__init__(
             address,

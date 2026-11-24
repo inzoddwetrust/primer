@@ -517,7 +517,7 @@ class FetchPassport(Step):
         wait_s: float = RECIPIENT_WAIT_S,
         poll_s: float = 10.0,
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         if (ops is None) == (file is None):
             raise ValueError("a passport comes from the ops repository or a file")
@@ -812,7 +812,7 @@ class FetchPassport(Step):
                     {"server": self.server, "public_key": shown, "wait_s": self.wait_s},
                 )
             ctx.interrupt.check()  # a signal ends the wait (DM-45)
-            self.sleep(self.poll_s)
+            (self.sleep or ctx.interrupt.sleep)(self.poll_s)
             ctx.interrupt.check()
             commit = self._fetch(ctx)
 

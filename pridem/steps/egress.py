@@ -290,7 +290,7 @@ class Egress(Step):
         ready_s: float = READY_S,
         poll_s: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.product = product
         self.fetched = fetched
@@ -495,7 +495,7 @@ class Egress(Step):
                     "log-missing", {"host": SENTINEL}, self.diagnosis(ctx, container)
                 )
             ctx.interrupt.check()
-            self.sleep(self.poll_s)
+            (self.sleep or ctx.interrupt.sleep)(self.poll_s)
             ctx.interrupt.check()
 
     def _address(self, ctx: StepContext, container: str) -> str:
@@ -563,7 +563,7 @@ class Egress(Step):
             if self.clock() >= deadline:
                 return status
             ctx.interrupt.check()  # a signal ends the wait (DM-45)
-            self.sleep(self.poll_s)
+            (self.sleep or ctx.interrupt.sleep)(self.poll_s)
             ctx.interrupt.check()
         return status
 
@@ -607,6 +607,6 @@ class Egress(Step):
                     self.diagnosis(ctx, container),
                 )
             ctx.interrupt.check()  # a signal ends the wait (DM-45)
-            self.sleep(self.poll_s)
+            (self.sleep or ctx.interrupt.sleep)(self.poll_s)
             ctx.interrupt.check()
         return status

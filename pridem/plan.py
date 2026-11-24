@@ -481,8 +481,11 @@ class Plan:
             if built is None
             else built
         )
-        for part in made:
-            _validate_steps(part.name, part.steps)
+        try:
+            for part in made:
+                _validate_steps(part.name, part.steps)
+        except ValueError as error:  # a ladder of no form is a red step (B10)
+            made = [StackSteps(stack.name, [Unbuilt(error)])]
         pairs = [(part.name, step.name) for part in made for step in part.steps]
         twice = [pair for pair in pairs if pair in self._pairs or pairs.count(pair) > 1]
         if twice:
@@ -505,17 +508,23 @@ class Plan:
         if self._mode == "doctor":
             return self._doctor()
         state = self._run
-        begin = self._interrupt.count
         steps = self._main()
         main_failed = any(record.status == "failed" for record in steps)
         stopped = main_failed or state.interrupted
         restore: list[StepRecord] = []
         if stopped and not state.crossed:
             restore = self._ladder("restore", self._restore)
+        # the first signal during finally is shielded: the clean-up ran to its
+        # end, the run is what main made of it (DM-190, B11); a second stops
+        # a step of finally, which says so itself (interrupted)
         final = self._finally_ladder()
-        if self._interrupt.count > begin:  # a signal during finally too
-            state.interrupted = True
         records = (*steps, *restore, *final)
+        if state.interrupted and not any(
+            record.reason == INTERRUPTED for record in records
+        ):
+            # no step to say it -- main was empty or not yet made: never a red
+            # verdict without its reason (DM-190)
+            state.incomplete.append(Incomplete("run", INTERRUPTED))
         if state.sink_failed:
             state.incomplete.append(SINK_FAILED)
         incomplete = tuple(state.incomplete)
@@ -545,10 +554,16 @@ class Plan:
         reached and not made at all once the ladder has stopped."""
         records: list[StepRecord] = []
         stopped: Code | None = None
-        begin = self._interrupt.count
+        begin = 0  # a signal since the command began, the plan's start too (B3)
         for stack in self._stacks:
-            if stopped is None and self._interrupt.count > begin:
-                stopped = AFTER_INTERRUPT  # between stacks
+            if (
+                stopped is None
+                and self._interrupt.count > begin
+                and isinstance(stack, Deferred)
+            ):
+                # a stack not made yet is not made after a signal: no step of
+                # it to name -- the run says it (run/interrupted)
+                stopped = AFTER_INTERRUPT
             if stopped is not None and isinstance(stack, Deferred):
                 continue  # its steps are not known: nothing to skip by name
             part, stopped = self._steps("main", self._made(stack), stopped, begin)
@@ -579,7 +594,12 @@ class Plan:
         records: list[StepRecord] = []
         for stack, step in steps:
             if stopped is None and self._interrupt.count > begin:
-                stopped = AFTER_INTERRUPT  # between steps
+                # the step the signal kept from starting says so: interrupted,
+                # its check never asked; the rest after it (DM-190, B3)
+                record = StepRecord(stack, step.name, step.order, "failed", INTERRUPTED)
+                records.append(self._record(phase, record))
+                stopped = AFTER_INTERRUPT
+                continue
             if stopped is not None:
                 records.append(self._skipped(phase, stack, step, stopped))
                 continue

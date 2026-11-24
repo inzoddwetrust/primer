@@ -35,6 +35,7 @@ ENGLISH: Catalog = {
     "exception": "unexpected {type}; its text is in the journal",
     "run/no-verdict": "no verdict; the journal ends at {ended_at}",
     "run/journal-damaged": "no verdict; the journal is damaged at line {line}",
+    "run/interrupted": "a signal stopped the run before a step it could name",
     "run/unbuildable": "the verdict of this run could not be built ({type}); "
     "its journal holds the rest",
     "journal/write-failed": (

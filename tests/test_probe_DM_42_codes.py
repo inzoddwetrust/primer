@@ -16,6 +16,7 @@ import ast
 import errno
 import io
 import re
+import signal
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
@@ -42,7 +43,8 @@ from pridem.events import (
     StepStarted,
     role_skip,
 )
-from pridem.plan import Plan, StackSteps
+from pridem.interrupt import Interrupt
+from pridem.plan import Deferred, Plan, StackSteps
 from pridem.report.catalog import ENGLISH, Catalog, Value, text, with_steps
 from pridem.report.codes import (
     INCOMPLETE_CODES,
@@ -182,13 +184,27 @@ def _plan_verdicts() -> list[Verdict]:
     )
     out.append(cut.run())
 
+    # DM-190: the step a signal kept from starting is interrupted, the one
+    # after it is skipped after-interrupt
     between, _ = plan(
         _root(
             ScriptedStep("a", 1, journal, signal_in="verify", signal_stops=False),
             ScriptedStep("c", 2, journal),
+            ScriptedStep("e", 3, journal),
         )
     )
     out.append(between.run())
+
+    # DM-190: a signal before main whose stack is not made yet (a product's
+    # entries are made when the ladder reaches them) -- no step to say it:
+    # run/interrupted
+    early = Interrupt()
+    early.receive(signal.SIGTERM)
+    unmade = Deferred(
+        "blank", lambda: _root(ScriptedStep("a", 1, journal)), "a", root=True
+    )
+    empty, _ = plan([unmade], interrupt=early)
+    out.append(empty.run())
 
     # DM-45: an interrupt no longer cuts a write; a full disk still does
     ticks = count()
@@ -245,7 +261,13 @@ def test_probe_DM_42_verdict_carries_no_prose(tmp_path: Path) -> None:
     """Changed by DM-132, on the dispatcher's word 24.11: one plan more --
     ``migrate`` over an empty database, then a red ``build`` -- writes the new
     code ``restore/empty``; the assertions are as they were: every code of the
-    machine is written."""
+    machine is written.
+
+    Changed by DM-190, on the dispatcher's word 24.11: the scenario of
+    a signal between steps has a step after the interrupted one, so
+    ``after-interrupt`` is still made; a signal before an empty ``main``
+    makes ``run/interrupted`` -- a red verdict always has its reason. What
+    the test holds is as it was."""
     verdicts = [*_plan_verdicts(), *_recovered_verdicts(tmp_path)]
     seen: set[str] = set()
     for verdict in verdicts:
@@ -501,6 +523,11 @@ def test_build_refuses_a_code_without_text() -> None:
 
 
 def test_llm_counts_skips_by_code(tmp_path: Path) -> None:
+    """Changed by DM-190, on the dispatcher's word 24.11: the scenario of
+    a signal between steps has a step after the interrupted one, so
+    ``after-interrupt`` is still made; a signal before an empty ``main``
+    makes ``run/interrupted`` -- a red verdict always has its reason. What
+    the test holds is as it was."""
     verdicts = _plan_verdicts()
     for verdict in verdicts:
         skipped = [
