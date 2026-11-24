@@ -458,6 +458,9 @@ def test_db_connect_of_a_stopped_database_is_refused_before_the_session(
 def test_a_session_whose_log_is_not_taken_ends_with_1(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Changed by DM-190 (E15, the gate's decision): the copy fails, and the
+    log in the database's container is removed all the same -- the scenario
+    holds the ``rm -f`` after the failed ``cp``."""
     stamp = _freeze(monkeypatch)
     blank_box(tmp_path)
     cs = compose(tmp_path)
@@ -471,7 +474,8 @@ def test_a_session_whose_log_is_not_taken_ends_with_1(
                 lines=c.lines,
                 code=c.code,
             )
-            for c in calls[:4]
+            # DM-190 (E15): the log in the container is removed all the same
+            for c in calls[:5]
         ]
     ) as runner:
         code, out, err = _out(tmp_path, ["db", "connect", STACK], runner)

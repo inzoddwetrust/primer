@@ -274,6 +274,8 @@ class Egress(Step):
         "no-address": "the proxy has no address on {network}",
         "log-missing": "the proxy's log in its stdout has no line of {host}",
         "proxy-silent": "the proxy at {address} does not answer for {host}",
+        "host-silent": "{hosts} of egress answered nobody through the proxy: "
+        "the proxy lets them through, the hosts are silent",
         "proxy-open": "the proxy lets {host} through: {status}, not 403",
         "host-refused": "the proxy refuses {hosts} of egress",
         "proxy-left": "egress is empty and the proxy is left: {found}",
@@ -451,14 +453,15 @@ class Egress(Step):
             raise StepFailed("proxy-open", {"host": SENTINEL, "status": refused})
         allowed: dict[str, Json] = {}
         denied: list[str] = []
+        silent: list[str] = []
         for host in self.hosts:
             status = self._allowed_answer(ctx, address, host)
             if status is None:
-                raise StepFailed(
-                    "proxy-silent",
-                    {"address": address, "host": host},
-                    self.diagnosis(ctx, container),
-                )
+                # the proxy answered the sentinel: it runs and reads its config;
+                # a host it lets through and that answers nobody is the host's
+                # own state -- left undone, never a red deploy (DM-190, E14)
+                silent.append(host)
+                continue
             if status == REFUSED:
                 denied.append(host)
             allowed[host] = status
@@ -477,7 +480,12 @@ class Egress(Step):
                 "refused": {SENTINEL: REFUSED},
                 "allowed": allowed,
                 "log": self._logged(ctx, container),
-            }
+            },
+            incomplete=(
+                local_code("host-silent", {"hosts": list[Json](silent)})
+                if silent
+                else None
+            ),
         )
 
     def _logged(self, ctx: StepContext, container: str) -> str:

@@ -794,7 +794,6 @@ def test_a_proxy_still_there_after_removal_is_red(tmp_path: Path) -> None:
     [
         ("open", "egress:proxy-open"),
         ("refuses", "egress:host-refused"),
-        ("silent", "egress:proxy-silent"),
         ("never-answers", "egress:proxy-silent"),
         ("image", "egress:image-wrong"),
         ("config", "egress:config-not-seen"),
@@ -807,7 +806,11 @@ def test_verify_reads_the_proxy_and_its_behaviour(
 ) -> None:
     """Changed by DM-84: a host of the list refused until ``ready_s`` is red
     with what the proxy's container resolves it to (``resolved``) beside
-    docker's word."""
+    docker's word.
+
+    Changed by DM-190 (E14, the gate's decision): a host of the list that
+    answers nobody is no longer red -- the case ``silent`` left this table
+    for ``test_a_silent_host_is_left_undone_and_not_asked_again``."""
     hosts = list(ZOOM)
     proxy = Bounded(hosts)
     calls = verify_calls(hosts)[:-1]  # red before the log is read (DM-45)
@@ -1142,13 +1145,18 @@ def test_the_log_line_carries_the_address_and_no_path() -> None:
     assert "%ru" not in LOG_FORMAT and "%>rp" not in LOG_FORMAT
 
 
-def test_a_silent_host_is_not_asked_again(tmp_path: Path) -> None:
-    """Silence is ``proxy-silent`` at once: only a refusal is asked again."""
+def test_a_silent_host_is_left_undone_and_not_asked_again(tmp_path: Path) -> None:
+    """Changed by DM-190 (E14, the gate's decision; was
+    ``test_a_silent_host_is_not_asked_again``): a host of the list that
+    answers nobody -- the proxy answered the sentinel, it runs -- is the
+    host's own state: the step is green and leaves ``host-silent`` undone,
+    never a red deploy. Silence is still not asked again: only a refusal is."""
     proxy = Bounded(list(ZOOM))
     proxy.silent = {"api.zoom.us"}
-    calls = [*verify_calls(ZOOM)[:-1], *diagnosis()]
-    with FakeRunner(up(tmp_path), *calls) as runner:
+    with FakeRunner(up(tmp_path), *verify_calls(ZOOM)) as runner:
         outcome, _ = run([step(tmp_path, ZOOM, proxy, ready_s=3)], runner)
-    reason = outcome.steps[0].reason
-    assert reason is not None and reason.code == "egress:proxy-silent"
+    assert outcome.code is ExitCode.INCOMPLETE, outcome.steps
+    assert outcome.steps[0].status == "ok"
+    [left] = outcome.incomplete
+    assert left.reason == Code("egress:host-silent", {"hosts": ["api.zoom.us"]})
     assert proxy.asked.count("api.zoom.us") == 1

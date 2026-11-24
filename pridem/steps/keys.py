@@ -210,6 +210,19 @@ def write_ssh_config(root: Path, repos: Sequence[Repo]) -> None:
 SSH_OWN = "ssh: "
 """How ssh starts a line of its own failure (not the server's refusal)."""
 
+HOST_KEY = "Host key verification failed"
+"""What ssh says when the server's host key is not the one the machine keeps
+(``known_hosts.github``): no deploy key can answer it (DM-190, E5)."""
+
+KEY_CODES: dict[str, str] = {
+    "unreachable": "ssh does not reach {repo}: no key can answer before it does",
+    "host-key-mismatch": "the host key of {repo} is not the one the machine "
+    "keeps: no deploy key can answer it",
+}
+"""The codes of a command to a repository by its key, in every step that goes
+there through a key (DM-190, E4): the key's own step and every step of
+sources -- ``by_key`` waits for a fresh key in each."""
+
 
 def has_access(ctx: StepContext, root: Path, found: Repo) -> bool:
     """``git ls-remote`` answers: the key works (read access is enough);
@@ -223,6 +236,9 @@ def has_access(ctx: StepContext, root: Path, found: Repo) -> bool:
         expect=(0, 128),
         stderr=errors,
     )
+    if code != 0 and any(HOST_KEY in line for line in errors):
+        # not a key to wait for: refused at once, never 1800 s under the lock
+        raise StepFailed("host-key-mismatch", {"repo": found.address})
     if code != 0 and any(line.startswith(SSH_OWN) for line in errors):
         raise StepFailed("unreachable", {"repo": found.address})
     return code == 0
@@ -372,7 +388,7 @@ class DeployKey(Step):
         "ssh-config-differs": "{path} is not as drawn after the write",
         "no-access": "no read access to {repo} with key {public_key} after {wait_s} s "
         "-- check that the key is added to {repo}",
-        "unreachable": "ssh does not reach {repo}: no key can answer before it does",
+        **KEY_CODES,
     }
 
     def __init__(
@@ -586,6 +602,9 @@ def has_write_access(
         expect=(0, 1, 128),
         stderr=errors,
     )
+    if code != 0 and any(HOST_KEY in line for line in errors):
+        # not a key to wait for: refused at once, never 1800 s under the lock
+        raise StepFailed("host-key-mismatch", {"repo": found.address})
     if code != 0 and any(line.startswith(SSH_OWN) for line in errors):
         raise StepFailed("unreachable", {"repo": found.address})
     return code == 0

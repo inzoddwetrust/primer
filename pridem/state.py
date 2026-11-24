@@ -62,6 +62,7 @@ records the last run of a verb in an existing ``state.json`` and never creates
 it: a red first ``install`` must not leave a composition the box does not have.
 """
 
+import contextlib
 import fcntl
 import json
 import os
@@ -594,6 +595,7 @@ class JournalSink:
         self.cut: int | None = None
         """The limit the run's output reached (its later lines not written)."""
         self._seq = 2  # the header is 1 (Box.open_journal)
+        self._broken: OSError | None = None
         # the journal exists (open_journal created it, 0600); never create one here
         fd = os.open(path, os.O_WRONLY | os.O_APPEND)
         self._handle: TextIO = os.fdopen(fd, "a", encoding="utf-8")
@@ -612,7 +614,7 @@ class JournalSink:
                     if key[:3] == (event.phase, record.stack, record.name)
                 )
             self._write(event)
-        self._handle.flush()
+        self._flush()
         if isinstance(event, StepFinished):
             os.fsync(self._handle.fileno())
 
@@ -620,13 +622,13 @@ class JournalSink:
         """What the console shows a person -- a key to add -- into the stream
         too (DM-137): written whatever the limit, as a step's event."""
         self._write(notice)
-        self._handle.flush()
+        self._flush()
 
     def sync(self) -> None:
         """Every held piece written, the file on the disk: before the verdict,
         so a failure is ``{journal, write-failed}`` in it."""
         self._release(self._held)
-        self._handle.flush()
+        self._flush()
         os.fsync(self._handle.fileno())
 
     def finish(
@@ -643,15 +645,40 @@ class JournalSink:
         self.close()
 
     def close(self) -> None:
+        if self._broken is not None:
+            # the write that failed was raised once and is in the verdict
+            # (journal/write-failed); the file goes, whatever its buffer still
+            # tries -- never a line after it with a seq of its own (E3)
+            with contextlib.suppress(OSError):
+                self._handle.close()
+            raise self._broken
         self._release(self._held)
-        self._handle.flush()
+        self._flush()
         os.fsync(self._handle.fileno())
         self._handle.close()
 
     def _put(self, raw: Mapping[str, Json]) -> None:
-        """One line into the file, with the next ``seq``."""
-        self._handle.write(_numbered(raw, self._seq))
+        """One line into the file, with the next ``seq``. After a write that
+        failed nothing more is written (DM-190, E3): a line torn by a full
+        disk stays the last one -- the reader drops it -- and no ``seq`` is
+        written twice."""
+        if self._broken is not None:
+            raise self._broken
+        try:
+            self._handle.write(_numbered(raw, self._seq))
+        except OSError as error:
+            self._broken = error
+            raise
         self._seq += 1
+
+    def _flush(self) -> None:
+        if self._broken is not None:
+            raise self._broken
+        try:
+            self._handle.flush()
+        except OSError as error:
+            self._broken = error
+            raise
 
     def _write(self, event: JournalEvent) -> None:
         raw = _event_line(event, self._secrets)

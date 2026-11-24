@@ -185,13 +185,17 @@ def text(
     is said as it is, by the catalog's ``@unknown`` (DM-77; a new verdict with
     such a code is refused when it is built, contract 2 rule 6)."""
     key = catalog_key(code, what)
+    shown = ", ".join(f"{name}={value}" for name, value in params.items())
     if key not in catalog:
-        shown = ", ".join(f"{name}={value}" for name, value in params.items())
         return catalog["@unknown"].format(code=key, params=shown)
-    template = catalog[key]
-    return template.format(
-        **{name: _present(catalog, name, value) for name, value in params.items()}
-    )
+    try:
+        return catalog[key].format(
+            **{name: _present(catalog, name, value) for name, value in params.items()}
+        )
+    except (KeyError, IndexError):
+        # an old verdict: its code's words now name a value it does not have
+        # -- said as it is, never a KeyError of a report (DM-190, E8)
+        return catalog["@unknown"].format(code=key, params=shown)
 
 
 NOT_A_CAUSE: tuple[str, ...] = (

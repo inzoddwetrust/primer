@@ -17,7 +17,7 @@ from pridem.contract import Strict
 from pridem.events import LogLine, Secrets
 from pridem.report.catalog import ENGLISH, Catalog, with_steps
 from pridem.report.render import render_json, render_llm, render_report
-from pridem.state import Box, VerdictDamaged
+from pridem.state import Box, JournalDamaged, VerdictDamaged
 from pridem.steps.base import Step
 from pridem.verbs import plans  # noqa: F401 -- every step class of a plan, loaded
 from pridem.verbs.base import Context, Refused, Verb
@@ -57,7 +57,11 @@ def _run(args: Strict, ctx: Context) -> int:
     if ctx.json:
         ctx.out.write(render_json(verdict) + "\n")
         return 0
-    journal = box.read_journal(args.run_id)
+    try:
+        journal = box.read_journal(args.run_id)
+    except JournalDamaged:
+        # its header is damaged: the verdict is what is known (DM-190, E8)
+        journal = None
     lines = (
         None
         if journal is None

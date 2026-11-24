@@ -185,13 +185,21 @@ def refuse_busy(ctx: Context, busy: BoxBusy) -> Refused:
     return Refused(f"the box is busy: {busy}")
 
 
-def read_copy(ctx: Context) -> Fetched:
+def read_copy(ctx: Context, *, replaced: bool = False) -> Fetched:
     """The box's passport copy; none on a box without one. A copy its loader
-    rejects raises ``ContractError``: the command says so and stops."""
+    rejects raises ``ContractError``: the command says so and stops -- but a
+    run given a new passport to replace it (``replaced``: ``--passport`` or
+    ``--ops``) reads a rejected copy as none, or nothing could ever replace
+    it (DM-190, E10)."""
     copy = ctx.fs_root / PASSPORT_COPY
     if not copy.is_file():
         return Fetched()
-    return Fetched(passport=load_passport(copy))
+    try:
+        return Fetched(passport=load_passport(copy))
+    except ContractError:
+        if replaced:
+            return Fetched()
+        raise
 
 
 def close_journal(journal: JournalSink) -> tuple[Incomplete, ...]:

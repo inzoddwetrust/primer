@@ -109,6 +109,69 @@ def _held(seconds: float) -> threading.Timer:
     return timer
 
 
+DOCKER_CE = ("docker-ce", "docker-ce-cli", "containerd.io")
+"""Docker's own packages, as a host prepared by hand has them (DM-190, E12)."""
+DOCKER_REPO = Path("/etc/apt/sources.list.d/dm190-docker.list")
+DOCKER_KEY = Path("/etc/apt/keyrings/dm190-docker.asc")
+
+
+def _states() -> dict[str, str]:
+    """``dpkg-query`` of docker-ce and docker.io: what each says, as it says it."""
+    found: dict[str, str] = {}
+    for package in ("docker-ce", "docker.io"):
+        code, status = _run(["dpkg-query", "-W", "-f=${Status}", package], timeout=30)
+        found[package] = " ".join(status) if code == 0 else f"exit {code}"
+    return found
+
+
+def test_tier3_provision_host_on_a_host_with_docker_ce() -> None:
+    """DM-190, E12 -- a measure, not a probe: a host whose docker is Docker's
+    own (``docker-ce`` from download.docker.com, as one prepared by hand
+    has it), and ``provision_host`` on it, which installs ``docker.io``.
+    Printed: ``dpkg-query`` of both before and after, and the verdict's
+    reason if the step is red. Nothing asserted on what it says (par0 14.3).
+    Then the host is as the probes after it find it: Docker's packages and
+    its source gone, ``provision_host`` of the next probe installs as ever."""
+    DOCKER_KEY.parent.mkdir(parents=True, exist_ok=True)
+    code, _ = _run(
+        ["curl", "-fsSL", "-o", str(DOCKER_KEY),
+         "https://download.docker.com/linux/ubuntu/gpg"],
+        timeout=120,
+    )  # fmt: skip
+    assert code == 0, "Docker's key"
+    DOCKER_REPO.write_text(
+        f"deb [arch=amd64 signed-by={DOCKER_KEY}] "
+        "https://download.docker.com/linux/ubuntu noble stable\n"
+    )
+    apt = ["apt-get", "-o", "DPkg::Lock::Timeout=600"]
+    try:
+        assert _run([*apt, "update"])[0] == 0
+        code, lines = _run([*apt, "install", "-y", *DOCKER_CE])
+        assert code == 0, lines[-20:]
+        before = _states()
+        _hosts(_public_ip())
+        verdict, lines = _plan("", 600)
+        [provision] = [s for s in verdict.steps if s.name == "provision_host"]
+        after = _states()
+        print(
+            "DM-190 E12 measure:",
+            json.dumps(
+                {
+                    "before": before,
+                    "after": after,
+                    "provision_host": provision.status,
+                    "reason": provision.reason and provision.reason.model_dump(),
+                    "result": verdict.result,
+                }
+            ),
+        )
+    finally:
+        _run([*apt, "purge", "-y", *DOCKER_CE])
+        DOCKER_REPO.unlink(missing_ok=True)
+        DOCKER_KEY.unlink(missing_ok=True)
+        _run([*apt, "update"])
+
+
 def test_probe_DM_12_host_steps_on_a_clean_runner() -> None:
     _hosts(_public_ip())
     verdict, lines = _plan("", 600)

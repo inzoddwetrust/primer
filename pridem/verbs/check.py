@@ -238,7 +238,12 @@ def _manifest(slot: str, manifest: Path) -> str | None:
         cause = "too-big"
     if cause is not None:
         raise StepFailed("manifest-unreadable", {"slot": slot, "cause": cause})
-    return manifest.read_text(encoding="utf-8")
+    try:
+        return manifest.read_text(encoding="utf-8")
+    except UnicodeDecodeError:  # a code, never a traceback (DM-190, E9)
+        raise StepFailed(
+            "manifest-unreadable", {"slot": slot, "cause": "not-utf-8"}
+        ) from None
 
 
 def _drop(stream: Stream, line: str, cut: bool) -> None:

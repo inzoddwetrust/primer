@@ -178,7 +178,9 @@ def closing(verdict: Verdict, catalog: Catalog = ENGLISH) -> list[str]:
             changed.append(f"{key} {_short(after[key])}")
     if changed:
         lines.append(say(catalog, "@end.versions", versions=", ".join(changed)))
-    if verdict.result == "red":
+    if verdict.result == "red" and verdict.log_ref is not None:
+        # a verdict with no journal (``pridem check``) names no log and no
+        # report of it -- never /opt/pridem/None (DM-190, E9)
         lines.append(say(catalog, "@end.log", log_ref=verdict.log_ref))
         lines.append(say(catalog, "@end.next", run_id=verdict.run_id))
     return lines

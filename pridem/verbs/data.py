@@ -979,14 +979,23 @@ def _connect(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
         ),
     )  # fmt: skip
     code = runner.interactive(session)
+    remove = compose.argv("exec", "-T", operands=(found.service, "rm", "-f", inside))
     try:
         lines_of(compose.argv("cp", operands=(f"{found.service}:{inside}", str(kept))))
-        lines_of(
-            compose.argv("exec", "-T", operands=(found.service, "rm", "-f", inside))
-        )
         kept.chmod(0o600)
     except (RunnerError, OSError) as error:
         print(f"db connect: the session's log was not kept ({error})", file=ctx.err)
+        # the log -- what the person read of the database -- never stays in the
+        # container, kept or not (DM-190, E15)
+        try:
+            lines_of(remove)
+        except RunnerError as gone:
+            print(f"db connect: the log in the container stays ({gone})", file=ctx.err)
+        return 1
+    try:
+        lines_of(remove)
+    except RunnerError as error:
+        print(f"db connect: the log in the container stays ({error})", file=ctx.err)
         return 1
     print(f"db connect: psql ended with {code}; its log: {kept}", file=ctx.err)
     return 0 if code == 0 else 1

@@ -156,7 +156,10 @@ def _plan_verb(name: str, mode: PlanMode) -> Callable[[Strict, Context], int]:
         if not isinstance(args, SourceArgs):
             raise TypeError(f"{name} takes SourceArgs")
         tries = _tries(args.tries) if isinstance(args, UpdateArgs) else {}
-        copy = read_copy(ctx)
+        # a new passport given: a copy the loader rejects is no obstacle --
+        # this run is what replaces it (DM-190, E10)
+        replacing = args.passport is not None or args.ops is not None
+        copy = read_copy(ctx, replaced=replacing)
         file = Path(args.passport) if args.passport is not None else None
         preread = load_passport(file) if file is not None else copy.passport
         source = source_of(
@@ -170,7 +173,8 @@ def _plan_verb(name: str, mode: PlanMode) -> Callable[[Strict, Context], int]:
 
             def before(box: Box) -> None:
                 """The server's name under the lock (DM-24), any role (DM-110)."""
-                _named(name, confirm, read_copy(ctx).passport or preread)
+                copied = read_copy(ctx, replaced=replacing).passport
+                _named(name, confirm, copied or preread)
 
             new_secrets = args.new_secrets
         wanted = Wanted(

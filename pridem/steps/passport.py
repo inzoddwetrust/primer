@@ -86,7 +86,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.git import KEYS, git_env, repo, run_git
-from pridem.steps.keys import DeployKey, FreshKeys
+from pridem.steps.keys import KEY_CODES, DeployKey, FreshKeys
 from pridem.steps.sources import NOT_A_COMMIT, Checkout, remote_target
 
 AGE_KEY = KEYS / "age.key"
@@ -481,6 +481,7 @@ class FetchPassport(Step):
     modes = ALL_MODES
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
+        **KEY_CODES,
         "fetch": "fetch passports/{server}.yaml from {repo}",
         "copy": "copy the passport from {file}",
         "no-ref": "the ops repository {repo} has no branch {ref}",

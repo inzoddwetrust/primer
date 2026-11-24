@@ -728,7 +728,11 @@ def test_probe_DM_126_buildx_comes_with_docker(
     """A box with docker and no ``docker-buildx``: the step installs exactly
     it, and its fact holds what the plugin says of itself. The pair: the
     package is there and the plugin does not answer -- red by the command,
-    not a green host whose ``docker build`` is the classic builder."""
+    not a green host whose ``docker build`` is the classic builder.
+
+    Changed by DM-190, on the dispatcher's word 25.11: provision_host reads
+    ``dpkg --audit`` (E12) -- its call is in the scenario, with an empty
+    answer, in check and in verify; what the probe asserts is as it was."""
     from test_steps_host import apt_get_env
 
     from pridem.steps.host import APT_LOCK_TIMEOUT_S
@@ -756,14 +760,16 @@ def test_probe_DM_126_buildx_comes_with_docker(
         "docker", "version", "--format", "{{.Server.Version}}", lines=("29.1.3",)
     )
     tail = [active("docker", True), version]
-    outcome = run_host([ProvisionHost(root)], [*before, *apt, *after, *tail, BUILDX])
+    audit = FakeCall(("dpkg", "--audit"))
+    script = [*before, audit, *apt, *after, audit, *tail, BUILDX]
+    outcome = run_host([ProvisionHost(root)], script)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert outcome.steps[0].verify is not None
     assert outcome.steps[0].verify["buildx"] == BUILDX_SAYS
     assert "docker-buildx" in outcome.steps[0].verify["packages"]  # type: ignore[operator]
     # the pair: installed, and no plugin answers
     dead = call("docker", "buildx", "version", code=1)
-    red = run_host([ProvisionHost(root)], [*after, *after, *tail, dead])
+    red = run_host([ProvisionHost(root)], [*after, audit, *after, audit, *tail, dead])
     assert red.steps[0].reason == Code(
         "command-failed", {"argv": ["docker", "buildx", "version"], "exit_code": 1}
     )

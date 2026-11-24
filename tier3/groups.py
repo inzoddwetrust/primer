@@ -53,6 +53,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_probe_DM_16_box_files_are_private_on_the_runner", "a"),
     ("test_tier3_install_sh_shows_its_own_lines_alone", "a"),
     ("test_tier3_install_sh_refused_shows_why_the_tail_and_the_log", "a"),
+    # a measure before the host's probes: docker-ce and provision_host (DM-190)
+    ("test_tier3_provision_host_on_a_host_with_docker_ce", "a"),
     ("test_probe_DM_12_host_steps_on_a_clean_runner", "a"),
     ("test_probe_DM_12_planted_dpkg_lock_waits_then_passes", "a"),
     ("test_probe_DM_12_planted_dpkg_lock_over_timeout_is_red_without_checkmark", "a"),

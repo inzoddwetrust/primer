@@ -71,6 +71,10 @@ def apt_get_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     return {**os.environ, **APT_VARIABLES}
 
 
+AUDIT = FakeCall(("dpkg", "--audit"))
+"""``dpkg --audit`` of a sound host: nothing half done (DM-190, E12)."""
+
+
 def dpkg(package: str, installed: bool = True) -> FakeCall:
     if installed:
         return call("dpkg-query", "-W", "-f=${Status}", package, lines=(OK,))
@@ -154,7 +158,7 @@ def ready_calls() -> list[FakeCall]:
         for unit in ("apt-daily.service", "apt-daily-upgrade.service")
     ]
     packages = [dpkg(p) for p in HOST_PACKAGES]
-    provision = [*packages, *packages, active("docker", True)]
+    provision = [*packages, AUDIT, *packages, AUDIT, active("docker", True)]
     provision.append(
         call("docker", "version", "--format", "{{.Server.Version}}", lines=("27.5.1",))
     )
@@ -211,7 +215,11 @@ def test_probe_DM_12_second_run_calls_no_act(tmp_path: Path) -> None:
     Changed by DM-126 (owner's decision of 19.11): ``docker-buildx`` is one
     of the host's packages, and ``verify`` of ``provision_host`` asks the
     plugin its version (``docker buildx version``) after docker's -- the
-    scenario holds that command; what the probe asserts is as it was."""
+    scenario holds that command; what the probe asserts is as it was.
+
+    Changed by DM-190, on the dispatcher's word 25.11: provision_host reads
+    ``dpkg --audit`` (E12) -- its call is in the scenario, with an empty
+    answer, in check and in verify; what the probe asserts is as it was."""
     root = ready(tmp_path)
     main, final = host_steps(root, min_free_gib=0)
     outcome = run(main, ready_calls(), final)
@@ -328,7 +336,11 @@ def test_probe_DM_12_apt_always_passes_lock_timeout(
     Changed by DM-126 (owner's decision of 19.11): ``docker-buildx`` is one
     of the host's packages, and ``verify`` of ``provision_host`` asks the
     plugin its version (``docker buildx version``) after docker's -- the
-    scenario holds that command; what the probe asserts is as it was."""
+    scenario holds that command; what the probe asserts is as it was.
+
+    Changed by DM-190, on the dispatcher's word 25.11: provision_host reads
+    ``dpkg --audit`` (E12) -- its call is in the scenario, with an empty
+    answer, in check and in verify; what the probe asserts is as it was."""
     root = box(tmp_path)
     env = apt_get_env(monkeypatch)
     timeout = f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_S}"
@@ -352,7 +364,7 @@ def test_probe_DM_12_apt_always_passes_lock_timeout(
         call("docker", "version", "--format", "{{.Server.Version}}", lines=("27.5.1",)),
         BUILDX,
     ]
-    runner = FakeRunner(*before, *apt, *after, *tail)
+    runner = FakeRunner(*before, AUDIT, *apt, *after, AUDIT, *tail)
     with runner:
         outcome = Plan(
             [StackSteps("pridem-host", [ProvisionHost(root)], root=True)],
@@ -488,7 +500,11 @@ def test_probe_DM_12_package_verify_reads_dpkg_not_exit_code(
     Changed by DM-126 (owner's decision of 19.11): ``docker-buildx`` is one
     of the host's packages, and ``verify`` of ``provision_host`` asks the
     plugin its version (``docker buildx version``) after docker's -- the
-    scenario holds that command; what the probe asserts is as it was."""
+    scenario holds that command; what the probe asserts is as it was.
+
+    Changed by DM-190, on the dispatcher's word 25.11: provision_host reads
+    ``dpkg --audit`` (E12) -- its call is in the scenario, with an empty
+    answer, in check and in verify; what the probe asserts is as it was."""
     root = box(tmp_path)
     env = apt_get_env(monkeypatch)
     timeout = f"DPkg::Lock::Timeout={APT_LOCK_TIMEOUT_S}"
@@ -509,7 +525,7 @@ def test_probe_DM_12_package_verify_reads_dpkg_not_exit_code(
     after = [
         dpkg(p, p != "docker.io") for p in HOST_PACKAGES
     ]  # apt said 0, dpkg says no
-    outcome = run([ProvisionHost(root)], [*before, *apt, *after])
+    outcome = run([ProvisionHost(root)], [*before, AUDIT, *apt, *after])
     reason = outcome.steps[0].reason
     assert reason is not None
     assert reason.as_json() == {
@@ -523,7 +539,8 @@ def test_probe_DM_12_package_verify_reads_dpkg_not_exit_code(
         call("docker", "version", "--format", "{{.Server.Version}}", lines=("27.5.1",)),
         BUILDX,
     ]
-    assert run([ProvisionHost(root)], [*before, *apt, *good, *tail]).code is ExitCode.OK
+    script = [*before, AUDIT, *apt, *good, AUDIT, *tail]
+    assert run([ProvisionHost(root)], script).code is ExitCode.OK
 
 
 def test_daemon_json_keeps_other_keys(tmp_path: Path) -> None:

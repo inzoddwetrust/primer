@@ -142,6 +142,13 @@ def _installed(ctx: StepContext, package: str) -> bool:
     return code == 0 and lines == ["install ok installed"]
 
 
+def _audit(ctx: StepContext) -> list[str]:
+    """What ``dpkg --audit`` says is left half done -- nothing on a sound
+    host (DM-190, E12)."""
+    _, lines = _out(ctx, ["dpkg", "--audit"])
+    return [line for line in lines if line.strip()]
+
+
 BUSY_STATES = frozenset({"activating", "deactivating", "refreshing"})
 """States of a unit at work that ``systemctl is-active`` answers with 3, not 0:
 a oneshot such as ``apt-daily.service`` is ``activating`` all the while it
@@ -473,7 +480,9 @@ class ProvisionHost(_HostStep):
     order = 3
     codes: ClassVar[dict[str, str]] = {
         "install": "install {packages}",
+        "configure": "configure what dpkg left half done",
         "package-missing": "{packages} not installed after apt-get",
+        "dpkg-unconfigured": "dpkg still says packages are left half done",
         "docker-dead": "docker is installed and does not run",
     }
 
@@ -490,17 +499,26 @@ class ProvisionHost(_HostStep):
 
     def check(self, ctx: StepContext) -> CheckResult:
         missing = [package for package in self.packages if not _installed(ctx, package)]
-        if not missing:
+        audit = bool(_audit(ctx))
+        if not missing and not audit:
             return CheckResult(False)
-        return CheckResult(
-            True,
-            local_code("install", {"packages": _j(missing)}),
-            {"missing": _j(missing)},
+        code = (
+            local_code("install", {"packages": _j(missing)})
+            if missing
+            else local_code("configure")
         )
+        return CheckResult(True, code, {"missing": _j(missing), "audit": audit})
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         missing = strings(check.data.get("missing"))
         timeout = self.lock_timeout_s + 1800
+        if check.data.get("audit") is True:
+            # a dpkg run cut midway (a reboot, a killed apt) leaves packages
+            # half done: apt refuses everything until they are configured
+            # (DM-190, E12) -- only when dpkg itself says so
+            _out(ctx, ["dpkg", "--configure", "-a"], timeout=timeout, env=apt_env())
+        if not missing:
+            return
         update = apt_get("update", timeout_s=self.lock_timeout_s)
         _out(ctx, update, timeout=timeout, env=apt_env())
         install = apt_get(
@@ -516,6 +534,8 @@ class ProvisionHost(_HostStep):
         missing = [package for package in self.packages if not _installed(ctx, package)]
         if missing:
             raise StepFailed("package-missing", {"packages": _j(missing)})
+        if _audit(ctx):
+            raise StepFailed("dpkg-unconfigured")
         if not _active(ctx, "docker"):
             raise StepFailed("docker-dead")
         _, version = _out(ctx, ["docker", "version", "--format", "{{.Server.Version}}"])

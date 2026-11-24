@@ -61,7 +61,7 @@ from pridem.steps.base import (
     local_code,
 )
 from pridem.steps.git import Repo, repo, run_git
-from pridem.steps.keys import FreshKeys, by_key
+from pridem.steps.keys import KEY_CODES, FreshKeys, by_key
 
 ALL_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall"})
 
@@ -404,6 +404,7 @@ class FetchRoot(_SourceStep):
     order = 2
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
+        **KEY_CODES,
         "fetch": "fetch {entry} at {ref}",
         "missing-ref": "{ref} is not on {repo}",
         "no-primer-yaml": "{ref} has no primer.yaml",
@@ -527,6 +528,7 @@ class CheckLock(_SourceStep):
     order = 3
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
+        **KEY_CODES,
         "lock-missing": "primer.lock is missing and the product has dependencies",
         "lock-range": "primer.lock breaks primer.yaml: {codes}",
         "lock-commit": "{service}: tag {tag} is {found}, the lock says {commit}",
@@ -630,6 +632,7 @@ class FetchServices(_SourceStep):
     order = 4
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
+        **KEY_CODES,
         "fetch": "fetch {services}",
         "missing-tag": "{service}: tag {tag} is not on {repo}",
         "release-off-target": "{release} is not on the target commit after the reset",
@@ -780,6 +783,7 @@ class FetchPackages(_SourceStep):
     order = 5
     codes: ClassVar[dict[str, str]] = {
         **NOT_A_COMMIT,
+        **KEY_CODES,
         "fetch": "fetch {packages}",
         "undeclared": "the product declares no package slot {slots}",
         "missing-tag": "{slot}: tag {tag} is not on {repo}",
