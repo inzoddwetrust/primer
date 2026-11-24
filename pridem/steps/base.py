@@ -113,8 +113,8 @@ class StepContext:
     on_line: OnLine
     interrupt: Interrupt = field(default_factory=Interrupt)
     notice: Callable[[Notice], None] = field(default=lambda notice: None)
-    """What the step tells the console alone -- a key a person must add
-    (DM-107); the journal never sees it."""
+    """What the step tells a person -- a key to add (DM-107): the console's
+    block, and a ``notice`` line of the journal (DM-137)."""
 
 
 _T = TypeVar("_T")

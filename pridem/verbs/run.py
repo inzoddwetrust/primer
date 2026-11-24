@@ -31,6 +31,7 @@ object alone. A busy box is refused before anything runs.
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from typing import TextIO
 
 from pridem import __version__
 from pridem.events import (
@@ -149,12 +150,36 @@ def read_copy(ctx: Context) -> Fetched:
 
 
 def close_journal(journal: JournalSink) -> tuple[Incomplete, ...]:
-    """Close the journal; a failure to is ``{journal, write-failed}``."""
+    """Close the journal of a run that did not end -- no ``run_finished``
+    (DM-137); a failure to is ``{journal, write-failed}``."""
     try:
         journal.close()
     except Exception:  # disk full, I/O error: the verdict says so (contract 2)
         return (WRITE_FAILED,)
     return ()
+
+
+def sync_journal(journal: JournalSink) -> tuple[Incomplete, ...]:
+    """Everything of the run on the disk before its verdict; a failure to is
+    ``{journal, write-failed}`` in the verdict (contract 2)."""
+    try:
+        journal.sync()
+    except Exception:  # disk full, I/O error: the verdict says so
+        return (WRITE_FAILED,)
+    return ()
+
+
+def end_journal(journal: JournalSink, verdict: Verdict, err: TextIO) -> None:
+    """``run_finished`` once the verdict is in ``history/``, and the close
+    (DM-137). A failure here cannot reach the verdict, written already: one
+    line to stderr, and the exit code stays the verdict's -- the journal then
+    reads as a run that did not end, and ``history/`` has its verdict."""
+    try:
+        journal.finish(verdict.exit_code, verdict.result)
+    except Exception as error:  # disk full, I/O error
+        err.write(
+            f"journal: the end of the run is not written: {type(error).__name__}\n"
+        )
 
 
 def found_on_box(box: Box, recovery: Recovery) -> tuple[Incomplete, ...]:
@@ -183,7 +208,7 @@ def with_incomplete(outcome: PlanOutcome, extra: Sequence[Incomplete]) -> PlanOu
 class _Sinks:
     """The journal, and the console's ladder when the verb prints one."""
 
-    def __init__(self, journal: EventSink, console: EventSink | None) -> None:
+    def __init__(self, journal: JournalSink, console: EventSink | None) -> None:
         self.journal = journal
         self.console = console
 
@@ -201,9 +226,11 @@ class _Sinks:
             self.console.attach(catalog)
 
     def notice(self, notice: Notice) -> None:
-        """What a step tells the console alone, to the console."""
+        """What a step tells a person -- a key to add -- to the console and
+        to the journal, the run's stream (DM-137)."""
         if isinstance(self.console, Attachable):
             self.console.notice(notice)
+        self.journal.notice(notice)
 
 
 def _verdict(
@@ -282,53 +309,65 @@ def _verdict(
         restore = planned.restore_on
         if any(_failed_by(record, restore) for record in outcome.steps):
             outcome = replace(outcome, needs_restore=True)
-    finally:
-        finished = finished_at(started, journal)
-        lost = close_journal(journal)
-    cut = (
-        (Incomplete("journal", Code("cut", {"limit": journal.cut})),)
-        if journal.cut is not None
-        else ()
-    )
-    outcome = with_incomplete(outcome, (*found_on_box(box, recovery), *lost, *cut))
-    read_passport = planned.fetched.passport if planned.fetched else None
-    shown = read_passport if read_passport is not None else passport
-    after_state = box.read_state()
-
-    def assemble(
-        found: PlanOutcome, failures: Sequence[Fact], junit: Mapping[str, int] | None
-    ) -> Verdict:
-        return build_verdict(
-            found,
-            run_id=run_id,
-            verb=verb,
-            args=dict(args),
-            actor=actor,
-            started=started,
-            finished=finished,
-            passport_version=shown.version if shown is not None else None,
-            composition_before=composed,
-            composition_after=(
-                dict(after_state.composition)
-                if after_state
-                else {"pridem": __version__}
-            ),
-            secrets=secrets,
-            failures=failures,
-            junit=junit,
-            catalog=plan.catalog,
-        )
-
+    except BaseException:
+        # an error of the machine: the journal ends with no run_finished --
+        # a run that did not end, which recover closes (DM-137)
+        close_journal(journal)
+        raise
     try:
-        verdict = assemble(outcome, planned.report.failures, planned.report.junit)
-    except ValueError as error:  # the model refused what the run gave (DM-92)
-        name = type(error).__name__
-        note = LogLine(
-            "finally", machine.VERDICT, "build", Stream.STDERR, f"{name}: {error}"
+        finished = finished_at(started, journal)
+        lost = sync_journal(journal)
+        cut = (
+            (Incomplete("journal", Code("cut", {"limit": journal.cut})),)
+            if journal.cut is not None
+            else ()
         )
-        box.append_journal(run_id, note, secrets)
-        verdict = assemble(salvaged(outcome, name, assemble), (), None)
-    box.write_verdict(verdict)
+        outcome = with_incomplete(outcome, (*found_on_box(box, recovery), *lost, *cut))
+        read_passport = planned.fetched.passport if planned.fetched else None
+        shown = read_passport if read_passport is not None else passport
+        after_state = box.read_state()
+
+        def assemble(
+            found: PlanOutcome,
+            failures: Sequence[Fact],
+            junit: Mapping[str, int] | None,
+        ) -> Verdict:
+            return build_verdict(
+                found,
+                run_id=run_id,
+                verb=verb,
+                args=dict(args),
+                actor=actor,
+                started=started,
+                finished=finished,
+                passport_version=shown.version if shown is not None else None,
+                composition_before=composed,
+                composition_after=(
+                    dict(after_state.composition)
+                    if after_state
+                    else {"pridem": __version__}
+                ),
+                secrets=secrets,
+                failures=failures,
+                junit=junit,
+                catalog=plan.catalog,
+            )
+
+        try:
+            verdict = assemble(outcome, planned.report.failures, planned.report.junit)
+        except ValueError as error:  # the model refused what the run gave (DM-92)
+            name = type(error).__name__
+            note = LogLine(
+                "finally", machine.VERDICT, "build", Stream.STDERR, f"{name}: {error}"
+            )
+            journal.emit(note)  # the stream's own next line (DM-137)
+            journal.sync()
+            verdict = assemble(salvaged(outcome, name, assemble), (), None)
+        box.write_verdict(verdict)
+    except BaseException:
+        close_journal(journal)  # no verdict, no end: a run that did not end
+        raise
+    end_journal(journal, verdict, ctx.err)
     return verdict, plan.catalog
 
 

@@ -101,6 +101,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_red_tests_stop_before_any_migrate", "d"),
     ("test_tier3_destroy_after_an_interrupted_install", "d"),
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),
+    # every journal the group wrote is a stream with its end (DM-137)
+    ("test_tier3_every_journal_has_its_seq_and_its_end", "d"),
     # the last of d: the apt timers on (DM-105) -- apt may hold dpkg after it
     ("test_tier3_doctor_is_empty_with_the_apt_timers_on", "d"),
     # e, i -- an install of their own each: the build mode of packages (e cut in

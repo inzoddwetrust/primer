@@ -11,26 +11,35 @@ absent (contract 2 v1.9). A busy box is refused before anything runs.
 """
 
 from datetime import UTC, datetime
+from typing import TextIO
 
 from pridem import __version__
 from pridem.contract import Strict
-from pridem.events import PlanOutcome, Secrets, said
+from pridem.events import Incomplete, PlanOutcome, Secrets, said
 from pridem.report.catalog import ENGLISH
 from pridem.report.codes import ExitCode
 from pridem.report.render import closing, render_json
 from pridem.report.schema import Actor, Verdict, build_verdict
 from pridem.state import Box, BoxBusy, JournalHeader
 from pridem.verbs.base import Context, NoArgs, Refused, Verb
-from pridem.verbs.run import close_journal, finished_at, found_on_box
+from pridem.verbs.run import (
+    close_journal,
+    end_journal,
+    finished_at,
+    found_on_box,
+    sync_journal,
+)
 from pridem.verbs.state import console_lines, snapshot
 
 ACTOR = {"type": "engineer", "via": "local"}
 NO_SECRETS = Secrets(())  # no passport, no minted secrets on a fresh box
 
 
-def _verdict(box: Box) -> Verdict:
+def _verdict(box: Box, err: TextIO) -> Verdict:
     """Everything ``status`` does once it holds the lock: what it finds in
-    quarantine and a journal that does not close are its ``incomplete``."""
+    quarantine and a journal that does not reach the disk are its
+    ``incomplete``; after its verdict the journal ends with ``run_finished``
+    (DM-137) -- a failure to is one line to ``err``."""
     recovery = box.recover(NO_SECRETS, __version__, ENGLISH)
     state = box.read_state()
     composition = dict(state.composition) if state else {"pridem": __version__}
@@ -46,10 +55,27 @@ def _verdict(box: Box) -> Verdict:
         composition_before=composition,
     )
     journal = box.open_journal(header, NO_SECRETS)
-    finished = finished_at(started, journal)
-    lost = close_journal(journal)
-    incomplete = (*found_on_box(box, recovery), *lost)
-    verdict = build_verdict(
+    try:
+        finished = finished_at(started, journal)
+        lost = sync_journal(journal)
+        incomplete = (*found_on_box(box, recovery), *lost)
+        verdict = _status_verdict(run_id, started, finished, composition, incomplete)
+        box.write_verdict(verdict)
+    except BaseException:
+        close_journal(journal)  # no verdict: a run that did not end (DM-137)
+        raise
+    end_journal(journal, verdict, err)
+    return verdict
+
+
+def _status_verdict(
+    run_id: str,
+    started: datetime,
+    finished: datetime,
+    composition: dict[str, str],
+    incomplete: tuple[Incomplete, ...],
+) -> Verdict:
+    return build_verdict(
         PlanOutcome(
             "status",
             ExitCode.INCOMPLETE if incomplete else ExitCode.OK,
@@ -68,15 +94,13 @@ def _verdict(box: Box) -> Verdict:
         secrets=NO_SECRETS,
         catalog=ENGLISH,
     )
-    box.write_verdict(verdict)
-    return verdict
 
 
 def _run(args: Strict, ctx: Context) -> int:
     box = Box(ctx.root)
     try:
         with box.lock("status"):
-            verdict = _verdict(box)
+            verdict = _verdict(box, ctx.err)
     except BoxBusy as busy:  # raised only by taking the lock
         raise Refused(f"the box is busy: {busy}") from None
     if ctx.json:

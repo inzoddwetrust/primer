@@ -343,13 +343,16 @@ def test_a_quarantined_journal_is_in_the_verdict_of_the_command_that_found_it(
 def test_a_journal_that_does_not_close_is_write_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = JournalSink.close
+    """Changed by DM-137: what reaches the verdict is the journal's ``sync``
+    before it -- the close comes after the verdict, with ``run_finished``. A
+    journal whose ``sync`` fails is ``{journal, write-failed}``."""
+    real = JournalSink.sync
 
     def full(self: JournalSink) -> None:
         real(self)
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(JournalSink, "close", full)
+    monkeypatch.setattr(JournalSink, "sync", full)
     _named(tmp_path)  # DM-110: destroy confirms the server's name on any role
     code, out, _ = _cli(tmp_path, ["--json", *DESTROY], _clean())
     verdict = Verdict.model_validate_json(out)
@@ -370,7 +373,7 @@ def test_a_journal_that_does_not_close_is_write_failed(
         {"what": "journal", "code": "write-failed"}
     ]
     monkeypatch.setattr(JournalSink, "emit", real_emit)
-    monkeypatch.setattr(JournalSink, "close", real)  # the pair: it closes
+    monkeypatch.setattr(JournalSink, "sync", real)  # the pair: it reaches the disk
     code, out, _ = _cli(tmp_path, ["--json", *DESTROY], _clean())
     assert Verdict.model_validate_json(out).report.incomplete == []
 

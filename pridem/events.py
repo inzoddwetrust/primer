@@ -371,16 +371,17 @@ class EventSink(Protocol):
 @runtime_checkable
 class Attachable(Protocol):
     """A sink the plan itself connects (DM-107 FIX 2): it takes the plan's
-    catalog -- the steps' titles and ``said`` -- and what the steps tell the
-    console alone (``notice``). Any builder of a plan -- the CLI, a script of
-    tier 3 -- gets the same console by the same path."""
+    catalog -- the steps' titles and ``said`` -- and what the steps tell a
+    person (``notice``; the journal writes it too, DM-137). Any builder of a
+    plan -- the CLI, a script of tier 3 -- gets the same console by the same
+    path."""
 
     def attach(self, catalog: Callable[[], Catalog]) -> None:
         """The plan's catalog, unless the sink was given its own."""
         ...
 
     def notice(self, notice: "Notice") -> None:
-        """What a step tells the console alone."""
+        """What a step tells a person: a key to add."""
         ...
 
 
@@ -511,7 +512,8 @@ class RecipientNeeded:
 
 
 Notice = KeyNeeded | RecipientNeeded
-"""What a step tells the console alone -- never the journal (DM-107)."""
+"""What a step tells a person -- a key to add (DM-107): the console shows it,
+the journal writes it as a ``notice`` line (DM-137)."""
 
 
 def _spent(catalog: Catalog, seconds: float) -> str:

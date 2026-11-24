@@ -26,15 +26,23 @@
 - ``journal/<run_id>.jsonl`` -- the header first (``run_id, verb, mode, args,
   actor, started, passport_version, composition_before``), created with it by
   ``atomic_write`` with ``exclusive`` before the first step, so no journal
-  exists without one; then one JSON line per step event and log line, each
-  with its plan phase. Known secrets are cleaned on write. A line is flushed
-  when written; the file is fsynced on every finished step and when closed. A
-  reader drops a torn last line (the writer died in it) and stops at the first
-  damaged line after the header, naming it; a damaged header is
-  ``JournalDamaged``. Journals are evicted oldest ``run_id`` first down to the
-  passport's budget, quarantined ones (``<run_id>.jsonl.damaged``) with them;
-  the journal of the current run is never evicted, and a verdict outlives its
-  journal.
+  exists without one; then one JSON line per step event, log line and notice
+  of the console (a key to add), each with its plan phase where it has one;
+  last, after the verdict is in ``history/``, ``run_finished`` with the exit
+  code and the result. Every line carries ``seq`` -- its number in the file,
+  the header 1, no gap -- and ``at``, the moment it was written, UTC to the
+  millisecond: the journal is the run's stream of events (DM-137), read by the
+  agent and kept by the Panel by ``(run_id, seq)``. A journal without
+  ``run_finished`` is a run that did not end: killed, cut by the power, or
+  stopped by an error of the machine. Known secrets are cleaned on write. A
+  line is flushed when written; the file is fsynced on every finished step,
+  before the verdict, and when closed. A reader drops a torn last line (the
+  writer died in it) and stops at the first damaged line after the header --
+  a line of another form, a ``seq`` that is not its number, a line after
+  ``run_finished`` -- naming it; a damaged header is ``JournalDamaged``.
+  Journals are evicted oldest ``run_id`` first down to the passport's budget,
+  quarantined ones (``<run_id>.jsonl.damaged``) with them; the journal of the
+  current run is never evicted, and a verdict outlives its journal.
 
 A run that ended without a verdict (journal, no verdict) is recovered under
 the lock before a new journal opens: a red verdict whose steps are the
@@ -73,9 +81,12 @@ from pridem.events import (
     Event,
     Incomplete,
     Json,
+    KeyNeeded,
     LogLine,
+    Notice,
     Phase,
     PlanOutcome,
+    RecipientNeeded,
     RunMode,
     Secrets,
     StepFinished,
@@ -105,7 +116,17 @@ _QUARANTINE_SUFFIX = ".damaged"
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
 
-JournalEvent = StepStarted | StepFinished | LogLine
+
+@dataclass(frozen=True)
+class RunFinished:
+    """The last line of a journal: the run ended and its verdict is in
+    ``history/`` (DM-137)."""
+
+    exit_code: ExitCode
+    result: Literal["green", "incomplete", "red"]
+
+
+JournalEvent = StepStarted | StepFinished | LogLine | KeyNeeded | RecipientNeeded
 
 
 class BoxBusy(Exception):
@@ -214,8 +235,15 @@ class JournalHeader(Strict):
     composition_before: Composition
 
 
+Seq = Annotated[int, Field(ge=1)]
+At = Annotated[str, Field(pattern=r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")]
+"""The moment a line was written: UTC to the millisecond."""
+
+
 class _Started(Strict):
     event: Literal["step_started"]
+    seq: Seq
+    at: At
     phase: Phase
     stack: Text
     name: Text
@@ -225,6 +253,8 @@ class _Started(Strict):
 
 class _Finished(Strict):
     event: Literal["step_finished"]
+    seq: Seq
+    at: At
     phase: Phase
     stack: Text
     name: Text
@@ -238,6 +268,8 @@ class _Finished(Strict):
 
 class _Log(Strict):
     event: Literal["log"]
+    seq: Seq
+    at: At
     phase: Phase
     stack: Text
     name: Text
@@ -246,10 +278,44 @@ class _Log(Strict):
     continued: bool = False
 
 
+class _KeyNeeded(Strict):
+    kind: Literal["key_needed"]
+    repo: Text
+    key: Text
+    page: str | None = None  # absent: not a GitHub address
+    write: bool
+    why: str | None = None
+    wait_s: float
+    again: bool
+
+
+class _RecipientNeeded(Strict):
+    kind: Literal["recipient_needed"]
+    key: Text
+    path: str | None = None  # absent: not known yet
+    wait_s: float
+
+
+class _Notice(Strict):
+    """What the console showed a person (a key to add): ``notice`` holds it."""
+
+    event: Literal["notice"]
+    seq: Seq
+    at: At
+    notice: Annotated[_KeyNeeded | _RecipientNeeded, Field(discriminator="kind")]
+
+
+class _End(Strict):
+    event: Literal["run_finished"]
+    seq: Seq
+    at: At
+    exit_code: Literal[0, 1, 2]
+    result: Literal["green", "incomplete", "red"]
+
+
 _RUN_ID: TypeAdapter[str] = TypeAdapter(RunId)
-_LINE: TypeAdapter[_Started | _Finished | _Log] = TypeAdapter(
-    Annotated[_Started | _Finished | _Log, Field(discriminator="event")]
-)
+_Line = _Started | _Finished | _Log | _Notice | _End
+_LINE: TypeAdapter[_Line] = TypeAdapter(Annotated[_Line, Field(discriminator="event")])
 
 
 @dataclass(frozen=True)
@@ -263,6 +329,8 @@ class Journal:
     """When the journal was last written (its mtime)."""
     damaged_at: int | None = None
     """The first damaged line after the header; ``events`` end before it."""
+    finished: RunFinished | None = None
+    """The last line ``run_finished``; ``None`` -- the run did not end."""
 
 
 @dataclass(frozen=True)
@@ -278,7 +346,14 @@ def _stamp(moment: datetime) -> str:
     return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _event_line(event: JournalEvent, secrets: Secrets) -> str:
+def at_now() -> str:
+    """The ``at`` of a line written now: UTC to the millisecond."""
+    now = datetime.now(UTC)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def _event_line(event: JournalEvent, secrets: Secrets) -> dict[str, Json]:
+    """The fields of a journal line but its ``seq`` and ``at``."""
     raw: dict[str, Json]
     if isinstance(event, StepStarted):
         raw = {
@@ -306,6 +381,38 @@ def _event_line(event: JournalEvent, secrets: Secrets) -> str:
         if record.duration_s is not None:
             raw["duration_s"] = record.duration_s
         raw["verify"] = secrets.fact(record.verify)
+    elif isinstance(event, KeyNeeded):
+        raw = {
+            "event": "notice",
+            "notice": secrets.value(
+                _present(
+                    {
+                        "kind": "key_needed",
+                        "repo": event.repo,
+                        "key": event.key,
+                        "page": event.page,
+                        "write": event.write,
+                        "why": event.why,
+                        "wait_s": event.wait_s,
+                        "again": event.again,
+                    }
+                )
+            ),
+        }
+    elif isinstance(event, RecipientNeeded):
+        raw = {
+            "event": "notice",
+            "notice": secrets.value(
+                _present(
+                    {
+                        "kind": "recipient_needed",
+                        "key": event.key,
+                        "path": event.path,
+                        "wait_s": event.wait_s,
+                    }
+                )
+            ),
+        }
     else:
         raw = {
             "event": "log",
@@ -317,10 +424,35 @@ def _event_line(event: JournalEvent, secrets: Secrets) -> str:
         }
         if event.continued:
             raw["continued"] = True
-    return json.dumps(raw, ensure_ascii=False) + "\n"
+    return raw
 
 
-def _event(line: _Started | _Finished | _Log) -> JournalEvent:
+def _present(fields: Mapping[str, Json]) -> dict[str, Json]:
+    """``fields`` without the keys that say nothing: a line writes no null."""
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _numbered(raw: Mapping[str, Json], seq: int) -> str:
+    """One line of the journal: ``event`` first, then ``seq`` and ``at``."""
+    head: dict[str, Json] = {"event": raw["event"], "seq": seq, "at": at_now()}
+    body = {key: value for key, value in raw.items() if key != "event"}
+    return json.dumps({**head, **body}, ensure_ascii=False) + "\n"
+
+
+def _event(line: _Started | _Finished | _Log | _Notice) -> JournalEvent:
+    if isinstance(line, _Notice):
+        found = line.notice
+        if isinstance(found, _KeyNeeded):
+            return KeyNeeded(
+                found.repo,
+                found.key,
+                found.page,
+                found.write,
+                found.why,
+                found.wait_s,
+                found.again,
+            )
+        return RecipientNeeded(found.key, found.path, found.wait_s)
     if isinstance(line, _Started):
         return StepStarted(line.phase, line.stack, line.name, line.order, line.started)
     if isinstance(line, _Finished):
@@ -361,7 +493,13 @@ class JournalSink:
     found secret crosses there -- and cleans it joined to the next piece, so no
     written piece carries a secret whole or in parts. What is held is written
     with the last piece of the line, at ``StepFinished`` of its step (a line cut
-    by a timeout or an interrupt) and at ``close``: nothing is lost.
+    by a timeout or an interrupt) and at ``sync``: nothing is lost.
+
+    ``seq`` is given when a line goes into the file, never when its event
+    arrives: a held piece written later takes the next number, so the order
+    of the file is the order of ``seq``. ``sync`` before the verdict,
+    ``finish`` after it -- ``run_finished`` and the close; ``close`` alone --
+    a run that did not end (an error of the machine), no ``run_finished``.
     """
 
     def __init__(self, path: Path, secrets: Secrets, limit: int | None = None) -> None:
@@ -371,6 +509,7 @@ class JournalSink:
         self._logged = 0
         self.cut: int | None = None
         """The limit the run's output reached (its later lines not written)."""
+        self._seq = 2  # the header is 1 (Box.open_journal)
         # the journal exists (open_journal created it, 0600); never create one here
         fd = os.open(path, os.O_WRONLY | os.O_APPEND)
         self._handle: TextIO = os.fdopen(fd, "a", encoding="utf-8")
@@ -393,26 +532,57 @@ class JournalSink:
         if isinstance(event, StepFinished):
             os.fsync(self._handle.fileno())
 
+    def notice(self, notice: Notice) -> None:
+        """What the console shows a person -- a key to add -- into the stream
+        too (DM-137): written whatever the limit, as a step's event."""
+        self._write(notice)
+        self._handle.flush()
+
+    def sync(self) -> None:
+        """Every held piece written, the file on the disk: before the verdict,
+        so a failure is ``{journal, write-failed}`` in it."""
+        self._release(self._held)
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
+
+    def finish(
+        self, exit_code: ExitCode, result: Literal["green", "incomplete", "red"]
+    ) -> None:
+        """``run_finished`` -- once the verdict is in ``history/`` -- and the
+        close: whatever the limit, the last line."""
+        end: dict[str, Json] = {
+            "event": "run_finished",
+            "exit_code": int(exit_code),
+            "result": result,
+        }
+        self._put(end)
+        self.close()
+
     def close(self) -> None:
         self._release(self._held)
         self._handle.flush()
         os.fsync(self._handle.fileno())
         self._handle.close()
 
+    def _put(self, raw: Mapping[str, Json]) -> None:
+        """One line into the file, with the next ``seq``."""
+        self._handle.write(_numbered(raw, self._seq))
+        self._seq += 1
+
     def _write(self, event: JournalEvent) -> None:
-        line = _event_line(event, self._secrets)
+        raw = _event_line(event, self._secrets)
         if isinstance(event, LogLine) and self._limit is not None:
             if self.cut is not None:
                 return
-            size = len(line.encode("utf-8"))
+            size = len(json.dumps(raw, ensure_ascii=False).encode("utf-8")) + 1
             if self._logged + size > self._limit:
                 self.cut = self._limit
                 text = f"output-cut {self._limit} bytes: the journal is at its limit"
                 cut = LogLine(event.phase, event.stack, event.name, event.stream, text)
-                self._handle.write(_event_line(cut, self._secrets))
+                self._put(_event_line(cut, self._secrets))
                 return
             self._logged += size
-        self._handle.write(line)
+        self._put(raw)
 
     def _log(self, event: LogLine) -> None:
         key = (event.phase, event.stack, event.name, event.stream)
@@ -447,21 +617,32 @@ def read_journal(path: Path) -> Journal:
         first = json.loads(body[0].decode("utf-8"))
         if not isinstance(first, dict) or first.pop("event", None) != "header":
             raise ValueError("the first line is not a journal header")
+        seq, at = first.pop("seq", None), first.pop("at", None)
         header = JournalHeader.model_validate(first)
+        if seq != 1 or not isinstance(at, str):
+            raise ValueError("the header is not line 1 of the stream")
     except (IndexError, ValueError) as error:  # UnicodeDecodeError is a ValueError
         # the line is not quoted: a header carries the run's args
         raise JournalDamaged(f"{path}:1: {type(error).__name__}") from None
     events: list[JournalEvent] = []
     damaged_at: int | None = None
+    finished: RunFinished | None = None
     for number, raw in enumerate(body[1:], start=2):
         try:
-            events.append(_event(_LINE.validate_json(raw.decode("utf-8"))))
+            line = _LINE.validate_json(raw.decode("utf-8"))
+            if line.seq != number or finished is not None:
+                # a gap, a number out of place, or a line after the end
+                raise ValueError(f"line {number}: not seq {number} of a run")
         except ValueError:  # ValidationError and UnicodeDecodeError alike
             if not (torn and number == len(body)):
                 damaged_at = number
             break
+        if isinstance(line, _End):
+            finished = RunFinished(ExitCode(line.exit_code), line.result)
+        else:
+            events.append(_event(line))
     written = datetime.fromtimestamp(path.stat().st_mtime, UTC)
-    return Journal(header, tuple(events), torn, written, damaged_at)
+    return Journal(header, tuple(events), torn, written, damaged_at, finished)
 
 
 def _run_of(path: Path) -> str:
@@ -618,18 +799,6 @@ class Box:
                 return run_id
         raise RunIdTaken(f"{now:%Y-%m-%dT%H:%M:%SZ}")
 
-    def append_journal(
-        self, run_id: str, event: JournalEvent, secrets: Secrets
-    ) -> None:
-        """One line more in the closed journal of ``run_id``, cleaned of
-        ``secrets``: what came after its sink closed -- the error a verdict
-        could not be built by (DM-92)."""
-        path = self.journals / f"{run_id}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(_event_line(event, secrets))
-            handle.flush()
-            os.fsync(handle.fileno())
-
     def open_journal(
         self, header: JournalHeader, secrets: Secrets, limit: int | None = None
     ) -> JournalSink:
@@ -647,7 +816,7 @@ class Box:
         final = self.journals / f"{header.run_id}.jsonl"
         raw = header.model_dump(mode="json", exclude_none=True)
         raw["args"] = secrets.value(raw["args"])
-        line = json.dumps({"event": "header", **raw}, ensure_ascii=False) + "\n"
+        line = _numbered({"event": "header", **raw}, 1)
         atomic_write(final, line, _FILE_MODE, exclusive=True)
         return JournalSink(final, secrets, limit)
 

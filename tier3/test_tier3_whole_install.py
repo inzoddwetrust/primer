@@ -4508,6 +4508,75 @@ def _timers_state() -> list[str]:
     return said
 
 
+def test_tier3_every_journal_has_its_seq_and_its_end() -> None:
+    """DM-137, in group ``d`` before its last test (the apt timers on, which
+    must stay last), on the box its installs, ``destroy`` and ``status``
+    left: every journal of ``journal/`` is a stream
+    -- each line's ``seq`` its number, from 1, no gap, an ``at`` to the
+    millisecond. A run with its verdict in ``history/`` ends with
+    ``run_finished`` whose ``exit_code`` and ``result`` are the verdict's; a
+    journal without a verdict has no end. Measured into the run's output first
+    (par0 14.3): the journals, their last lines, the verdicts."""
+    home = Path("/opt/pridem")
+    journals = sorted((home / "journal").glob("*.jsonl"))
+    seen: dict[str, object] = {}
+    for path in journals:
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        verdict_file = home / "history" / f"{path.stem}.json"
+        verdict = (
+            json.loads(verdict_file.read_text()) if verdict_file.is_file() else None
+        )
+        seen[path.stem] = {
+            "lines": len(lines),
+            "last": lines[-1] if lines else None,
+            "verdict": verdict and (verdict["exit_code"], verdict["result"]),
+        }
+    print("DM-137 measure: journals", json.dumps(seen))
+    assert journals, "the group ran plans on this box"
+    for path in journals:
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [line["seq"] for line in lines] == list(range(1, len(lines) + 1)), path
+        assert all(
+            re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", line["at"])
+            for line in lines
+        ), path
+        verdict_file = home / "history" / f"{path.stem}.json"
+        ends = [line for line in lines if line["event"] == "run_finished"]
+        if verdict_file.is_file():
+            verdict = json.loads(verdict_file.read_text())
+            assert ends == [lines[-1]], path
+            assert (lines[-1]["exit_code"], lines[-1]["result"]) == (
+                verdict["exit_code"],
+                verdict["result"],
+            ), path
+        else:
+            assert ends == [], path
+
+
+ROOT_FRONTEND = """    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+"""
+"""The copy of DM-127: the blank's frontend built from the repository's root,
+as velo's is."""
+
+ROOT_DOCKERFILE = (
+    (
+        "COPY package.json package-lock.json ./\n",
+        "COPY frontend/package.json frontend/package-lock.json ./\n",
+    ),
+    ("COPY . .\n", "COPY frontend/ .\nRUN test -f public/skin/skin.css\n"),
+    (
+        "COPY nginx/package.js nginx/validate.js ",
+        "COPY frontend/nginx/package.js frontend/nginx/validate.js ",
+    ),
+    ("COPY src/texts/ ", "COPY frontend/src/texts/ "),
+    ("COPY nginx/default.conf.template ", "COPY frontend/nginx/default.conf.template "),
+)
+"""The frontend's Dockerfile read from the root: every COPY of the context
+under ``frontend/``; the skin checked by the build, as in DM-61."""
+
+
 def test_tier3_doctor_is_empty_with_the_apt_timers_on(tmp_path: Path) -> None:
     """DM-105 on the box group ``d`` left: the apt timers on, as on a live
     Ubuntu (velo-dev) -- after a green ``update``, ``doctor`` is code 0 with no

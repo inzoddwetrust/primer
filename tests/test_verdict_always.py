@@ -138,7 +138,11 @@ def test_a_verdict_the_model_refuses_is_a_fallback_verdict(
     """A run whose verdict is refused: red, ``run/unbuildable {type}``, every
     step the model takes on its own -- the step it refuses left out -- and the
     error in the run's journal. The pair: the same plan with a listed code is
-    the verdict itself."""
+    the verdict itself.
+
+    Changed by DM-137: the error is written by the run's own sink, not added
+    to a closed journal, and the journal ends with ``run_finished`` after the
+    verdict -- the error is the line before the end."""
 
     def make(session: Session, *_: object) -> Planned:
         steps = [ScriptedStep("first", 1, Journal()), Unlisted("broken", 2, Journal())]
@@ -163,9 +167,14 @@ def test_a_verdict_the_model_refuses_is_a_fallback_verdict(
     ]
     assert [s["name"] for s in verdict["steps"]] == ["first"]
     journal = (tmp_path / "opt" / "pridem" / verdict["log_ref"]).read_text()
-    last = json.loads(journal.splitlines()[-1])
-    assert (last["stack"], last["name"]) == ("pridem-verdict", "build")
-    assert "no text in the catalog" in last["line"]
+    *_, note, end = [json.loads(line) for line in journal.splitlines()]
+    assert (note["stack"], note["name"]) == ("pridem-verdict", "build")
+    assert "no text in the catalog" in note["line"]
+    assert (end["event"], end["exit_code"], end["seq"]) == (
+        "run_finished",
+        1,
+        note["seq"] + 1,
+    )
 
 
 class Fetching(ScriptedStep):
