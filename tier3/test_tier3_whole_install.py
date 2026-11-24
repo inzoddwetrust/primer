@@ -72,6 +72,7 @@ import shutil
 import time
 import warnings
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -2771,6 +2772,98 @@ def _blank_on_the_reader(tmp: Path, mirror: Path, commit: str) -> None:
         f'{{ version: "1.2.0", tag: {READER_TAG}, commit: {commit} }}',
     )
     _push(copy, mirror, "DM-100: the blank on the service's second reader")
+
+
+HOLD_THE_LOCK = [
+    "sh",
+    "-c",
+    "setsid flock -x /opt/pridem/lock sleep 120 </dev/null >/dev/null 2>&1 & echo $!",
+]
+"""A process that takes the box's lock and keeps it, as a run does: the pid of
+the leader of its own group (``setsid``) -- ``flock`` and its ``sleep``, which
+holds the lock's descriptor too."""
+
+
+def _home_files() -> dict[str, bytes]:
+    """The machine's home but its passport copy: ``history/``, ``journal/``,
+    the lock, ``state.json``."""
+    home = Path("/opt/pridem")
+    return {
+        str(path.relative_to(home)): path.read_bytes()
+        for name in ("history", "journal")
+        for path in sorted((home / name).iterdir())
+    } | {
+        name: (home / name).read_bytes()
+        for name in ("lock", "state.json")
+        if (home / name).is_file()
+    }
+
+
+def test_tier3_state_of_the_box_with_its_lock_held() -> None:
+    """DM-136, the last of group ``f``, on the box the blank's installs left:
+    another process holds the box's lock. ``pridem --json state`` answers,
+    exit 0, and the machine's home -- ``history/``, ``journal/``, the lock,
+    ``state.json`` -- is byte for byte what it was. The state names the
+    process, each stack with the machine's mark and each entry of the
+    ``primer.yaml`` of its ``current``, every resource measured, and the
+    self-signed certificate with its end as ``openssl`` reads it. ``ssl
+    status`` names each domain of the passport.
+
+    Measured into the run's output first (par0 14.3): the whole form, the
+    console of ``state`` and ``ssl status``, the time of each call."""
+    assert (OPT / "current").is_symlink(), "the blank's install runs first"
+    before = _home_files()
+    [pid] = _stdout(HOLD_THE_LOCK)
+    try:
+        started = time.monotonic()
+        code, out, err = _pridem("--json", "state")
+        spent = time.monotonic() - started
+        console = _pridem("state")
+        started = time.monotonic()
+        ssl = _pridem("ssl", "status")
+        ssl_spent = time.monotonic() - started
+    finally:
+        _stdout(["kill", "--", f"-{pid}"])  # flock and its sleep: the group
+    print("DM-136 measure: state", {"seconds": round(spent, 2), "form": out})
+    print("DM-136 measure: console", console[1], "ssl status", ssl[1])
+    print("DM-136 measure: ssl status seconds", round(ssl_spent, 2))
+    assert (code, err) == (0, []), err
+    assert _home_files() == before
+    state = json.loads("\n".join(out))
+    assert any(f"pid {pid} " in holder for holder in state["lock_open_by"]), state
+    marked = sorted(
+        home.name for home in Path("/opt").iterdir() if (home / ".pridem").is_file()
+    )
+    stacks = {stack["stack"]: stack for stack in state["stacks"]}
+    assert sorted(stacks) == marked, (marked, stacks)
+    for name in (STACK, SERVICE):
+        release = Path(f"/opt/{name}/current").resolve()
+        declared = yaml.safe_load((release / "primer.yaml").read_text())["stacks"]
+        assert stacks[name]["release"] == release.name
+        entries = {entry["entry"]: entry for entry in stacks[name]["entries"]}
+        assert sorted(entries) == sorted(declared), (declared, entries)
+        for entry in entries.values():
+            assert isinstance(entry["services"], list) and entry["services"], entry
+    blank = {entry["entry"]: entry for entry in stacks[STACK]["entries"]}
+    assert blank[FILES]["persistent"] is True
+    resources = state["resources"]
+    for part in (resources["memory"], resources["swap"], resources["images"]):
+        assert "unmeasured" not in part, resources
+    assert all("unmeasured" not in disk["space"] for disk in resources["disk"])
+    ends = _stdout(
+        ["openssl", "x509", "-in", "/opt/pridem/edge/certs/fullchain.pem",
+         "-noout", "-enddate"]
+    )  # fmt: skip
+    end = datetime.strptime(
+        " ".join(ends[0].split("=", 1)[1].split()), "%b %d %H:%M:%S %Y %Z"
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert state["ssl"]["mode"] == "self-signed", state["ssl"]
+    assert state["ssl"]["expires"] == end and state["ssl"]["self_signed"] is True
+    copy = yaml.safe_load(Path("/opt/pridem/passport.yaml").read_text())
+    domains = sorted(set(copy["domains"].values()))
+    assert [d["domain"] for d in state["ssl"]["domains"]] == domains
+    assert ssl[0] == 0, ssl
+    assert all(any(domain in line for line in ssl[1]) for domain in domains), ssl
 
 
 def test_tier3_every_listed_service_reads_the_data(

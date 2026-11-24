@@ -1,0 +1,545 @@
+{
+  "$defs": {
+    "Disk": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "space": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Space"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Space"
+        }
+      },
+      "required": [
+        "path",
+        "space"
+      ],
+      "title": "Disk",
+      "type": "object"
+    },
+    "DomainPart": {
+      "additionalProperties": false,
+      "description": "A domain of the passport, and whether the box's one certificate names\nit (a wildcard covers one label).",
+      "properties": {
+        "covered": {
+          "title": "Covered",
+          "type": "boolean"
+        },
+        "domain": {
+          "title": "Domain",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domain",
+        "covered"
+      ],
+      "title": "DomainPart",
+      "type": "object"
+    },
+    "EntryPart": {
+      "additionalProperties": false,
+      "description": "An entry of a stack (``stacks.<entry>`` of its ``primer.yaml``): every\nservice of the compose of its current release, by its container.",
+      "properties": {
+        "entry": {
+          "title": "Entry",
+          "type": "string"
+        },
+        "persistent": {
+          "title": "Persistent",
+          "type": "boolean"
+        },
+        "services": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ServiceState"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Services"
+        }
+      },
+      "required": [
+        "entry",
+        "persistent",
+        "services"
+      ],
+      "title": "EntryPart",
+      "type": "object"
+    },
+    "Images": {
+      "additionalProperties": false,
+      "description": "docker's line ``Images`` of ``system df``: every image of the box.",
+      "properties": {
+        "bytes": {
+          "minimum": 0,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "count": {
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "reclaimable_bytes": {
+          "minimum": 0,
+          "title": "Reclaimable Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count",
+        "bytes",
+        "reclaimable_bytes"
+      ],
+      "title": "Images",
+      "type": "object"
+    },
+    "Machine": {
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "Machine",
+      "type": "object"
+    },
+    "MachineStackPart": {
+      "additionalProperties": false,
+      "description": "A stack of the machine's own (``pridem-edge``, ``pridem-egress``) by\nthe containers that carry its label.",
+      "properties": {
+        "services": {
+          "items": {
+            "$ref": "#/$defs/ServiceState"
+          },
+          "title": "Services",
+          "type": "array"
+        },
+        "stack": {
+          "title": "Stack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stack",
+        "services"
+      ],
+      "title": "MachineStackPart",
+      "type": "object"
+    },
+    "Memory": {
+      "additionalProperties": false,
+      "properties": {
+        "available_bytes": {
+          "minimum": 0,
+          "title": "Available Bytes",
+          "type": "integer"
+        },
+        "total_bytes": {
+          "minimum": 0,
+          "title": "Total Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_bytes",
+        "available_bytes"
+      ],
+      "title": "Memory",
+      "type": "object"
+    },
+    "PassportPart": {
+      "additionalProperties": false,
+      "description": "The version of the box's passport copy; nothing else of it -- no\nvalue of ``asked`` -- is in the form.",
+      "properties": {
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "PassportPart",
+      "type": "object"
+    },
+    "Resources": {
+      "additionalProperties": false,
+      "properties": {
+        "disk": {
+          "items": {
+            "$ref": "#/$defs/Disk"
+          },
+          "title": "Disk",
+          "type": "array"
+        },
+        "images": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Images"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Images"
+        },
+        "memory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Memory"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Memory"
+        },
+        "swap": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Swap"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Swap"
+        }
+      },
+      "required": [
+        "disk",
+        "memory",
+        "swap",
+        "images"
+      ],
+      "title": "Resources",
+      "type": "object"
+    },
+    "ServiceState": {
+      "additionalProperties": false,
+      "properties": {
+        "health": {
+          "enum": [
+            "healthy",
+            "unhealthy",
+            "starting",
+            "none"
+          ],
+          "title": "Health",
+          "type": "string"
+        },
+        "service": {
+          "title": "Service",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "running",
+            "exited",
+            "restarting",
+            "paused",
+            "created",
+            "dead",
+            "removing",
+            "absent"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "state",
+        "health"
+      ],
+      "title": "ServiceState",
+      "type": "object"
+    },
+    "Space": {
+      "additionalProperties": false,
+      "properties": {
+        "free_bytes": {
+          "minimum": 0,
+          "title": "Free Bytes",
+          "type": "integer"
+        },
+        "total_bytes": {
+          "minimum": 0,
+          "title": "Total Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_bytes",
+        "free_bytes"
+      ],
+      "title": "Space",
+      "type": "object"
+    },
+    "SslPart": {
+      "additionalProperties": false,
+      "description": "The one certificate nginx serves for every domain: its end, whether it\nsigns itself, from when the machine renews it (``RENEW_BEFORE`` ahead of\nits end, the daily timer) -- in ``provided`` the passport brings a new\none, never the machine.",
+      "properties": {
+        "domains": {
+          "items": {
+            "$ref": "#/$defs/DomainPart"
+          },
+          "title": "Domains",
+          "type": "array"
+        },
+        "expires": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+          "title": "Expires",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "letsencrypt",
+            "self-signed",
+            "defer",
+            "provided"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "renews_from": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Renews From"
+        },
+        "self_signed": {
+          "title": "Self Signed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mode",
+        "expires",
+        "self_signed",
+        "renews_from",
+        "domains"
+      ],
+      "title": "SslPart",
+      "type": "object"
+    },
+    "StackPart": {
+      "additionalProperties": false,
+      "description": "A stack with the machine's mark on the box (``/opt/<stack>/.pridem``):\nthe release ``current`` points to, and each of its entries.",
+      "properties": {
+        "entries": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/EntryPart"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Entries"
+        },
+        "release": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Release"
+        },
+        "stack": {
+          "title": "Stack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stack",
+        "release",
+        "entries"
+      ],
+      "title": "StackPart",
+      "type": "object"
+    },
+    "Swap": {
+      "additionalProperties": false,
+      "description": "``total_bytes`` 0 -- the box has no swap.",
+      "properties": {
+        "free_bytes": {
+          "minimum": 0,
+          "title": "Free Bytes",
+          "type": "integer"
+        },
+        "total_bytes": {
+          "minimum": 0,
+          "title": "Total Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_bytes",
+        "free_bytes"
+      ],
+      "title": "Swap",
+      "type": "object"
+    },
+    "Unmeasured": {
+      "additionalProperties": false,
+      "description": "A part that was not measured, and why -- never a default value.",
+      "properties": {
+        "unmeasured": {
+          "enum": [
+            "no-passport",
+            "passport-unreadable",
+            "docker-unreachable",
+            "no-current",
+            "primer-yaml-unreadable",
+            "compose-unread",
+            "path-missing",
+            "meminfo-unreadable",
+            "no-certificate",
+            "certificate-unreadable",
+            "renewed-by-passport"
+          ],
+          "title": "Unmeasured",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unmeasured"
+      ],
+      "title": "Unmeasured",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The state of a box, measured at ``measured_at``.\n\n``lock_open_by`` -- the processes that hold the file of the box's lock\nopen, read from ``/proc``: an open file of the lock, not a test of\n``flock`` (taking the lock, even for a moment, is a write). A command\nrunning, or a process it left behind -- never more.\n\n``journals_without_verdict`` -- the journals in ``journal/`` that have no\nverdict in ``history/``. A run going on now and a run that died are not\ntold apart: the lock keeps the name of a verb, not a ``run_id``. The\nnext command under the lock (``recover``) gives a dead run its verdict.",
+  "properties": {
+    "journals_without_verdict": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Journals Without Verdict",
+      "type": "array"
+    },
+    "lock_open_by": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Lock Open By",
+      "type": "array"
+    },
+    "machine": {
+      "$ref": "#/$defs/Machine"
+    },
+    "machine_stacks": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/MachineStackPart"
+          },
+          "type": "array"
+        },
+        {
+          "$ref": "#/$defs/Unmeasured"
+        }
+      ],
+      "title": "Machine Stacks"
+    },
+    "measured_at": {
+      "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+      "title": "Measured At",
+      "type": "string"
+    },
+    "passport": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PassportPart"
+        },
+        {
+          "$ref": "#/$defs/Unmeasured"
+        }
+      ],
+      "title": "Passport"
+    },
+    "resources": {
+      "$ref": "#/$defs/Resources"
+    },
+    "schema": {
+      "const": 1,
+      "title": "Schema",
+      "type": "integer"
+    },
+    "ssl": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SslPart"
+        },
+        {
+          "$ref": "#/$defs/Unmeasured"
+        }
+      ],
+      "title": "Ssl"
+    },
+    "stacks": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/StackPart"
+          },
+          "type": "array"
+        },
+        {
+          "$ref": "#/$defs/Unmeasured"
+        }
+      ],
+      "title": "Stacks"
+    }
+  },
+  "required": [
+    "schema",
+    "measured_at",
+    "machine",
+    "passport",
+    "lock_open_by",
+    "journals_without_verdict",
+    "stacks",
+    "machine_stacks",
+    "resources",
+    "ssl"
+  ],
+  "title": "box state v1",
+  "type": "object"
+}

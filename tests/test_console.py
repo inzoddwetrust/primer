@@ -225,24 +225,50 @@ def test_the_closing_green_and_red() -> None:
 
 
 def test_status_says_each_stack_running_or_not() -> None:
-    """``status``: each stack of ``current``, its release short, and what
-    compose says of it -- read outside the plan, the verdict's JSON as it was."""
+    """``status``: after its verdict, the box's state -- each stack of the
+    machine with its release, each entry with its services, running or not
+    -- read outside the plan, the verdict's JSON as it was.
+
+    Changed by DM-136: the state of the box (``pridem state``) replaces the
+    lines of ``docker compose ls`` (DM-107), which named compose's projects,
+    not the entries; the stack is found by the machine's mark, its services
+    by ``config --services`` and their containers by docker's labels."""
     import tempfile
+
+    from pridem.stacks.schema import load_primer_yaml
+    from pridem.steps.compose import ComposeStack
 
     root = Path(tempfile.mkdtemp())
     blank_box(root)
-    listed = json.dumps([{"Name": "blank", "Status": "running(3)"}])
-    ls = FakeCall(
-        ("docker", "compose", "ls", "--all", "--format", "json"),
-        lines=((Stream.STDOUT, listed),),
-    )
-    with FakeRunner(ls) as runner:
+    (root / "opt" / "blank" / ".pridem").write_text("blank\n")
+    release = (root / "opt" / "blank" / "current").resolve()
+    made = load_primer_yaml(release / "primer.yaml")
+    services = ComposeStack(made, "blank", release, release.name, release.name, root)
+    ps = ("docker", "ps", "-a", "-q", "--no-trunc", "--filter", "label=pridem.stack")
+    df = ("docker", "system", "df", "--format", "json")
+    app = {
+        "Config": {
+            "Labels": {"pridem.stack": "blank", "com.docker.compose.service": "app"}
+        },
+        "State": {"Status": "running", "Health": {"Status": "healthy"}},
+    }
+    calls = [
+        FakeCall(ps, lines=((Stream.STDOUT, "c1"),)),
+        FakeCall(
+            ("docker", "inspect", "--", "c1"),
+            lines=((Stream.STDOUT, json.dumps([app])),),
+        ),
+        FakeCall(
+            tuple(services.argv("config", "--services")),
+            lines=((Stream.STDOUT, "app"), (Stream.STDOUT, "frontend")),
+        ),
+        FakeCall(df),
+    ]
+    with FakeRunner(*calls) as runner:
         code, out, _ = _out(root, ["status"], runner)
     assert code == 0
-    assert "blank · 0e82be5 · running(3)" in out
-    with FakeRunner(FakeCall(ls.argv, lines=((Stream.STDOUT, "[]"),))) as runner:
-        _, out, _ = _out(root, ["status"], runner)
-    assert "blank · 0e82be5 · not running" in out
+    assert f"blank · {release.name}" in out
+    assert "  blank — app running (healthy), frontend absent" in out
 
 
 def test_logs_merge_the_services_by_time_filter_and_tail_in_all(tmp_path: Path) -> None:

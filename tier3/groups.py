@@ -119,6 +119,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "f"),
     ("test_tier3_product_derive_reaches_nothing", "f"),
     ("test_tier3_only_the_declared_consumer_reaches_a_point", "f"),
+    # the last of f: the state of the box with its lock held (DM-136)
+    ("test_tier3_state_of_the_box_with_its_lock_held", "f"),
     # j: a secret file (DM-145, out of e: j has the time), the data of a
     # service, a point of the product, an entry named frontend
     ("test_tier3_a_secret_file_in_the_live_container", "j"),  # DM-145

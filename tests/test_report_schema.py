@@ -368,12 +368,14 @@ def test_strict_is_defined_once() -> None:
 
 
 def test_every_schema_file_is_titled_contract_v1() -> None:
-    """DM-10 added ``primer-package.yaml``, the file a data package declares."""
+    """DM-10 added ``primer-package.yaml``, the file a data package declares;
+    DM-136 the box's state, one form for the console and the Panel."""
     titles = {
         path.name: json.loads(path.read_text(encoding="utf-8"))["title"]
         for path in sorted(SCHEMA_DIR.glob("*.json"))
     }
     assert titles == {
+        "box-state.v1.json": "box state v1",
         "passport.v1.json": "passport v1",
         "primer-package.v1.json": "primer-package.yaml v1",
         "primer-lock.v1.json": "primer.lock v1",

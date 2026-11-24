@@ -2,29 +2,27 @@
 
 Under the lock: runs that ended without a verdict get theirs first
 (``recover``), then ``status`` opens its journal and writes its own verdict
-with no steps. Both compositions are what ``state.json`` holds, ``{pridem}``
+with no steps; for the console, the box's state follows it (``pridem state``,
+DM-136). Both compositions are what ``state.json`` holds, ``{pridem}``
 without it; a damaged ``state.json`` and a journal ``recover`` put in
 quarantine are named in ``incomplete`` (code 2), as is a journal that did not
 close. There is no passport yet, so ``passport_version`` is
 absent (contract 2 v1.9). A busy box is refused before anything runs.
 """
 
-import json
-import re
 from datetime import UTC, datetime
-from pathlib import Path
 
 from pridem import __version__
 from pridem.contract import Strict
 from pridem.events import PlanOutcome, Secrets, said
-from pridem.report.catalog import ENGLISH, say
+from pridem.report.catalog import ENGLISH
 from pridem.report.codes import ExitCode
 from pridem.report.render import closing, render_json
 from pridem.report.schema import Actor, Verdict, build_verdict
-from pridem.runner import RunnerError, Stream
 from pridem.state import Box, BoxBusy, JournalHeader
 from pridem.verbs.base import Context, NoArgs, Refused, Verb
 from pridem.verbs.run import close_journal, finished_at, found_on_box
+from pridem.verbs.state import console_lines, snapshot
 
 ACTOR = {"type": "engineer", "via": "local"}
 NO_SECRETS = Secrets(())  # no passport, no minted secrets on a fresh box
@@ -85,55 +83,11 @@ def _run(args: Strict, ctx: Context) -> int:
         ctx.out.write(render_json(verdict) + "\n")
         return int(verdict.exit_code)
     lines = closing(verdict, ENGLISH)
-    lines += _stacks(ctx, box)  # read after the verdict, outside it (DM-107)
+    # the box's state, measured after the lock is given back and outside the
+    # verdict: its JSON stays as it was (DM-107, DM-136)
+    lines += console_lines(snapshot(ctx))
     said(ctx.out, "\n".join(lines) + "\n")
     return int(verdict.exit_code)
-
-
-SHORT = re.compile(r"\b([0-9a-f]{7})[0-9a-f]{33}\b")
-
-
-def _stacks(ctx: Context, box: Box) -> list[str]:
-    """Each stack of ``current``: its release, and whether compose runs it --
-    ``docker compose ls --all --format json``, read for the console alone and
-    never a step of the verdict: the verdict's JSON stays as it was (DM-107)."""
-    state = box.read_state()
-    if state is None or not state.current:
-        return [say(ENGLISH, "@status.none")]
-    lines: list[str] = []
-    try:
-        found: list[str] = []
-        ctx.runner.run(
-            ["docker", "compose", "ls", "--all", "--format", "json"],
-            timeout=60,
-            on_line=lambda s, line, c: (
-                found.append(line) if s is Stream.STDOUT else None
-            ),
-        )
-        listed = json.loads("".join(found) or "[]")
-        states = {
-            str(item.get("Name")): str(item.get("Status"))
-            for item in listed
-            if isinstance(item, dict)
-        }
-        why = None
-    except (RunnerError, ValueError) as error:
-        states, why = {}, type(error).__name__
-    for stack, release in sorted(state.current.items()):
-        if why is not None:
-            shown = say(ENGLISH, "@status.unknown", why=why)
-        else:
-            shown = states.get(stack) or say(ENGLISH, "@status.down")
-        lines.append(
-            say(
-                ENGLISH,
-                "@status.stack",
-                stack=stack,
-                release=SHORT.sub(r"\1", Path(release).name),
-                state=shown,
-            )
-        )
-    return lines
 
 
 STATUS = Verb("status", NoArgs, _run)

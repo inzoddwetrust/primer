@@ -21,6 +21,7 @@ from pridem.verbs.deploy import (
 from pridem.verbs.gc import GC
 from pridem.verbs.report import REPORT
 from pridem.verbs.ssl import SSL
+from pridem.verbs.state import STATE
 from pridem.verbs.status import STATUS
 from pridem.verbs.version import VERSION
 
@@ -29,6 +30,7 @@ VERBS: dict[str, Verb] = {
     for verb in (
         VERSION,
         STATUS,
+        STATE,
         GC,
         SSL,
         CHECK,

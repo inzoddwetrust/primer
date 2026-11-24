@@ -107,15 +107,21 @@ def cert_facts(ctx: StepContext, root: Path) -> dict[str, Json]:
             "x509",
             "-in",
             str(cert_path(root)),
-            "-noout",
-            "-enddate",
-            "-issuer",
-            "-subject",
-            "-ext",
-            "subjectAltName",
+            *CERT_ARGS,
         ],
         passed_on=False,
     )
+    return read_cert(lines)
+
+
+CERT_ARGS = ("-noout", "-enddate", "-issuer", "-subject", "-ext", "subjectAltName")
+"""What ``openssl x509`` prints of a certificate for ``read_cert``."""
+
+
+def read_cert(lines: list[str]) -> dict[str, Json]:
+    """What ``openssl x509 <CERT_ARGS>`` printed: the end, whether the
+    certificate signs itself, its domains (``state`` reads it too, DM-136).
+    ``KeyError`` or ``ValueError`` -- not what ``openssl`` prints."""
     fields: dict[str, str] = {}
     names: list[Json] = []
     for line in lines:

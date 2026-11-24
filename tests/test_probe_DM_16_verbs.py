@@ -40,7 +40,14 @@ def _verdicts(root: Path) -> list[Verdict]:
 def test_probe_DM_16_status_writes_one_verdict(tmp_path: Path) -> None:
     """Changed by DM-107 (on the dispatcher's word): the console's closing --
     ``<verb>: done in ...`` -- replaces the summary line of contract 2 section 4;
-    status says green and no passport as before."""
+    status says green and no passport as before.
+
+    Changed by DM-136, on the dispatcher's word of 24.11: ``status`` prints
+    the box's state after its verdict, and the state names why its SSL is not
+    measured -- ``no-passport``. It became false that "passport" is nowhere in
+    the console; the rule the probe holds -- contract 2 section 1: without a
+    passport the closing line leaves ``passport v<N>`` out -- is asserted on
+    the closing line itself."""
     root = tmp_path / "opt" / "pridem"
     code, out, err = _run(["status"], root)
     assert (code, err) == (0, "")
@@ -54,7 +61,8 @@ def test_probe_DM_16_status_writes_one_verdict(tmp_path: Path) -> None:
     )
     assert "passport_version" not in verdict.model_dump_json()
     assert [p.name for p in (root / "journal").iterdir()] == [f"{verdict.run_id}.jsonl"]
-    assert "status: done in " in out and "passport" not in out
+    [closing] = [line for line in out.splitlines() if "status: done in " in line]
+    assert "passport" not in closing
 
     # the pair: a run that ended without a verdict gets its own red one first
     other = tmp_path / "other"

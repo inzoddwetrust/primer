@@ -24,7 +24,7 @@ from pridem.cli import run
 from pridem.events import Secrets
 from pridem.report.catalog import ENGLISH, Catalog
 from pridem.report.schema import Verdict
-from pridem.runner import CommandNotStarted, FakeRunner, OnLine, Result
+from pridem.runner import CommandNotStarted, FakeCall, FakeRunner, OnLine, Result
 from pridem.state import Box, JournalHeader, JournalSink, Recovery
 from pridem.steps.passport import PASSPORT_COPY
 from pridem.verbs import VERBS
@@ -103,16 +103,39 @@ def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
     ``verb`` and (pass 4) ``start``, ``stop``, ``restart`` are verbs with a
     verdict on a box; the list names them, and the probe runs them on a box
     with an entry; ``logs`` reads with no verdict. Changed by DM-24, on the
-    dispatcher's word: ``rollback`` is a verb with a verdict on a box."""
+    dispatcher's word: ``rollback`` is a verb with a verdict on a box.
+
+    Changed by DM-136: ``state`` reads the box with no lock, no journal and
+    no verdict -- a verb without a box, beside ``check``."""
     assert WITH_VERDICT == sorted(["gc", "ssl", "status", *PLANS, *ON_A_BOX, *ROLLBACK])
     assert "version" in VERBS and not VERBS["version"].verdict
-    assert {name for name, verb in VERBS.items() if not verb.box} == {"check"}
+    assert {name for name, verb in VERBS.items() if not verb.box} == {
+        "check",
+        "state",
+    }
+
+
+STATE_ON_AN_EMPTY_BOX = (
+    FakeCall(
+        ("docker", "ps", "-a", "-q", "--no-trunc", "--filter", "label=pridem.stack")
+    ),
+    FakeCall(("docker", "system", "df", "--format", "json")),
+)
+"""What the state of a box without stacks asks docker (DM-136): no container,
+and ``system df`` saying nothing -- the images are not measured."""
 
 
 @pytest.mark.parametrize("name", WITH_VERDICT)
 def test_probe_DM_54_recover_runs_before_every_plan_verb(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
+    """Changed by DM-136, on the dispatcher's word of 24.11: ``status``
+    prints the box's state after its verdict. It became false that
+    ``status`` on a box without stacks runs no command: the strict script of
+    ``status`` holds the commands of the state on an empty box, literally as
+    docker gets them -- the containers by the machine's label and ``system
+    df``. What the probe holds is as it was: ``recover`` runs before the
+    plan."""
     root = tmp_path / "opt" / "pridem"
     box = Box(root)
     with box.lock("dying"):  # a run that died: a journal and no verdict
@@ -157,7 +180,10 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
     if name in PLANS | ON_A_BOX | ROLLBACK:
         run(argv, root=root, out=out, err=err, runner=Refusing(), fs_root=tmp_path)
     else:
-        with FakeRunner() as runner:  # no passport: the verbs' steps run nothing
+        # no passport: the verbs' steps run nothing; status measures the
+        # box's state after its verdict (DM-136)
+        state = STATE_ON_AN_EMPTY_BOX if name == "status" else ()
+        with FakeRunner(*state) as runner:
             run(argv, root=root, out=out, err=err, runner=runner, fs_root=tmp_path)
     assert err.getvalue() == ""
     verdicts = {
