@@ -411,11 +411,16 @@ def trigger_problems(text: str) -> list[str]:
 
 
 def test_ci_and_tier3_run_on_pull_requests_without_secrets() -> None:
+    """Changed by DM-164, on the dispatcher's word 24.11: tier 3 holds three
+    secrets -- the deploy key of DM-10 and the Docker Hub login's user and
+    token, one step each kept from pull requests; it held one. What the test
+    holds is as it was."""
     for name in ("ci.yml", "tier3.yml"):
         assert trigger_problems(_text(name)) == [], name
     assert secret_problems(_text("release.yml")) == []
     tier3 = _text("tier3.yml")
-    assert len(SECRET.findall(tier3)) == 1  # the pair: the check has a secret to see
+    # the pair: the check has secrets to see -- the deploy key, Docker Hub's two
+    assert len(SECRET.findall(tier3)) == 3
     key = "PRIMER_BLANK_DEPLOY_KEY: ${{ secrets.PRIMER_BLANK_DEPLOY_KEY }}"
     on_push = "on:\n  push:\n"
     planted = {

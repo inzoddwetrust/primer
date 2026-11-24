@@ -19,6 +19,16 @@ name: tier3
 # deselected by name, printed in the log of every group (in the others the
 # name selects nothing).
 
+# Docker Hub (DM-164): a push and a run by hand pull as an account, not
+# anonymously -- the anonymous limit is the runner's address, shared with every
+# other job on it (429 Too Many Requests). The token is written as root's
+# docker config before the probes: docker comes with the machine's
+# provision_host inside them, and every docker of the run -- the machine's and
+# the probes', all as root -- reads that config. A pull request has no secrets
+# (DM-82): it pulls anonymously and says so in its log. Docker Hub's pull limit,
+# anonymous and signed in, is printed before the probes and after them -- a
+# measure, never a gate. A box of a product never logs in to Docker Hub.
+
 # Tier 3 is a matrix of groups (DM-73; tier3/groups.py): each group a job on a
 # clean runner of its own, with the whole preparation of the box; a group
 # that needs the blank installed gets it from a fixture. A red group does not
@@ -183,6 +193,65 @@ jobs:
           GITHUB_API_TOKEN: ${{ github.token }}
         run: |
           (umask 077 && printf 'Authorization: Bearer %s\n' "$GITHUB_API_TOKEN" > "$RUNNER_TEMP/github_api_header")
+      - name: docker hub, the login of root, from the CI secrets (DM-164)
+        if: github.event_name != 'pull_request'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          # Anonymous pulls share Docker Hub's limit with every job on the
+          # runner's address (429 Too Many Requests). Docker comes with the
+          # machine's provision_host inside the probes, so there is no docker
+          # to log in with here: the login is root's docker config, which every
+          # docker of the run reads -- the machine's and the probes', all as
+          # root (runner.clean_env: DOCKER_CONFIG=$HOME/.docker of root).
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not set: no login to Docker Hub, and an anonymous pull is what this step is for"
+            exit 1
+          fi
+          auth=$(printf '%s:%s' "$DOCKERHUB_USERNAME" "$DOCKERHUB_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          if sudo test -e /root/.docker; then
+            echo "/root/.docker is already on the runner: a config of its own would be overwritten"
+            exit 1
+          fi
+          sudo install -d -m 700 /root/.docker
+          printf '{"auths": {"https://index.docker.io/v1/": {"auth": "%s"}}}\n' "$auth" \
+            | sudo sh -c 'umask 077 && cat > /root/.docker/config.json'
+          sudo stat -c '%n %a %s bytes' /root/.docker /root/.docker/config.json
+      - name: docker hub, the pull limit, anonymous and signed in (DM-164)
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        run: |
+          # A measure, never a gate: Docker Hub's headers of the pull limit for
+          # the runner's address and for the account. A HEAD of a manifest
+          # does not spend the limit.
+          limit() {
+            local who="$1" token code
+            shift
+            local body
+            body=$(curl -sS --fail "$@" "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull") || {
+              echo "$who: auth.docker.io gave no token"
+              return 0
+            }
+            token=$(printf '%s' "$body" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+            echo "::add-mask::$token"
+            code=$(curl -sS -o /dev/null -D "$RUNNER_TEMP/limit-headers" -w '%{http_code}' -I \
+              -H "Authorization: Bearer $token" \
+              "https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest") || code="no answer"
+            echo "$who: HEAD of the manifest -- $code"
+            grep -i '^\(ratelimit-limit\|ratelimit-remaining\|docker-ratelimit-source\):' "$RUNNER_TEMP/limit-headers" \
+              || echo "$who: no header of the limit"
+          }
+          limit anonymous
+          # signed in as root's docker is: the login's file, no secret here
+          auth=$(sudo python3 -c 'import json; print(json.load(open("/root/.docker/config.json"))["auths"]["https://index.docker.io/v1/"]["auth"])')
+          echo "::add-mask::$auth"
+          limit "signed in" -H "Authorization: Basic $auth"
+      - name: docker hub, anonymous on a pull request (DM-164)
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "docker hub: anonymous on a pull request (no secrets, DM-82)"
       - name: tier 3 probes
         env:
           TIER3_GROUP: ${{ matrix.group }}
@@ -195,6 +264,35 @@ jobs:
             deselect=(-k "not test_probe_DM_10_blank_is_fetched_by_ref_over_ssh")
           fi
           sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE,PRIMER_GITHUB_API_HEADER_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --durations=0 --rootdir "$GITHUB_WORKSPACE" --tier3-group "$TIER3_GROUP" "${deselect[@]}" "$GITHUB_WORKSPACE/tier3"
+      - name: docker hub, the pull limit after the probes (DM-164)
+        if: always() && github.event_name != 'pull_request'
+        continue-on-error: true
+        run: |
+          # A measure, never a gate: Docker Hub's headers of the pull limit for
+          # the runner's address and for the account. A HEAD of a manifest
+          # does not spend the limit.
+          limit() {
+            local who="$1" token code
+            shift
+            local body
+            body=$(curl -sS --fail "$@" "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull") || {
+              echo "$who: auth.docker.io gave no token"
+              return 0
+            }
+            token=$(printf '%s' "$body" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+            echo "::add-mask::$token"
+            code=$(curl -sS -o /dev/null -D "$RUNNER_TEMP/limit-headers" -w '%{http_code}' -I \
+              -H "Authorization: Bearer $token" \
+              "https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest") || code="no answer"
+            echo "$who: HEAD of the manifest -- $code"
+            grep -i '^\(ratelimit-limit\|ratelimit-remaining\|docker-ratelimit-source\):' "$RUNNER_TEMP/limit-headers" \
+              || echo "$who: no header of the limit"
+          }
+          limit anonymous
+          # signed in as root's docker is: the login's file, no secret here
+          auth=$(sudo python3 -c 'import json; print(json.load(open("/root/.docker/config.json"))["auths"]["https://index.docker.io/v1/"]["auth"])')
+          echo "::add-mask::$auth"
+          limit "signed in" -H "Authorization: Basic $auth"
       - name: apt's downloads to the cache
         if: always()
         run: |
