@@ -1688,7 +1688,11 @@ def test_tier3_the_panel_s_host_through_the_machine_s_proxy(tmp_path: Path) -> N
     and ssh through it reaches GitHub, the way git of the Panel goes; not
     ``github.com``, not port 22. And a process on the box's host -- the agent
     -- goes out without the machine in the way. Measured into the run's log
-    first (par0 14.3)."""
+    first (par0 14.3).
+
+    FIX: the host's way out is any HTTP answer of ``api.github.com`` (a
+    status, not ``000``) and the banner of ``ssh.github.com:443`` -- not a
+    200, which GitHub's limit per address decides."""
     import socket
 
     from pridem.stacks.egress import listed
@@ -1757,7 +1761,11 @@ def test_tier3_the_panel_s_host_through_the_machine_s_proxy(tmp_path: Path) -> N
     assert " 403 " in f"{status['github.com:443'][0]} ", status
     assert " 403 " in f"{status['ssh.github.com:22'][0]} ", status
     assert any("Permission denied (publickey)" in line for line in ssh), ssh
-    assert host_https[-1:] == ["200"], host_https
+    # out is any HTTP answer -- a status, not 000 (no connection): GitHub's
+    # anonymous API says 403 to a runner's shared address over its hourly limit,
+    # and the code is the environment's, not the way out's (FIX)
+    [code] = host_https[-1:]
+    assert re.fullmatch(r"[1-5][0-9][0-9]", code), host_https
     assert banner.startswith(b"SSH-2.0-"), banner
     for lines in rules.values():
         assert not any("pridem" in line for line in lines), rules
