@@ -74,23 +74,27 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_reinstall_keeps_the_persistent_volume", "b"),
     # the last of b: a budget of the build cache the box is over (FIX DM-126)
     ("test_tier3_gc_trims_the_build_cache_to_the_budget", "b"),
-    # c -- an install of its own: services, languages, a job, a stop for
-    # migrate, a dump and its restore, a reset, the project's verbs, logs and
-    # a session, then destroy and destroy --all
+    # c, g, h -- an install of their own each (c cut in three, DM-162: the
+    # longest group is the time of tier 3; the order of the file kept in each).
+    # c: services, languages, a stop for migrate, a dump and its restore -- the
+    # restore half-way stands on the dump (together, in order) -- a reset
     ("test_tier3_a_service_of_the_edition_goes_up_before_the_product", "c"),
     ("test_tier3_two_instances_with_their_own_languages", "c"),
-    ("test_tier3_a_job_runs_before_its_dependent_on_every_deploy", "c"),
+    ("test_tier3_a_job_runs_before_its_dependent_on_every_deploy", "g"),
     ("test_tier3_services_stopped_for_migrate_come_back", "c"),
     ("test_tier3_a_dump_of_the_blank_restores_what_was_in_it", "c"),
     ("test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was", "c"),
     ("test_tier3_a_reset_of_the_blank_makes_its_database_new", "c"),
-    ("test_tier3_a_project_verb_runs_in_its_service", "c"),
-    ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "c"),
-    ("test_tier3_a_failed_job_runs_on_the_repeat", "c"),  # DM-126
-    ("test_tier3_seed_resets_run_the_products_commands", "c"),  # DM-133
-    ("test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked", "c"),
-    ("test_tier3_destroy_takes_the_blank_off_the_box", "c"),
-    ("test_tier3_destroy_all_wipes_the_persistent_volume", "c"),
+    # g: a job, the project's verbs, logs and a session
+    ("test_tier3_a_project_verb_runs_in_its_service", "g"),
+    ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "g"),
+    # h: a failed job, seeds, a verb on a job and a seam -- last before destroy,
+    # then destroy and destroy --all (together, last, in order)
+    ("test_tier3_a_failed_job_runs_on_the_repeat", "h"),  # DM-126
+    ("test_tier3_seed_resets_run_the_products_commands", "h"),  # DM-133
+    ("test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked", "h"),
+    ("test_tier3_destroy_takes_the_blank_off_the_box", "h"),
+    ("test_tier3_destroy_all_wipes_the_persistent_volume", "h"),
     # d -- a clean box: a first install red at the product's tests and its
     # destroy (DM-126), then the blank without its service, then with it
     ("test_tier3_red_tests_stop_before_any_migrate", "d"),
@@ -98,27 +102,31 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),
     # the last of d: the apt timers on (DM-105) -- apt may hold dpkg after it
     ("test_tier3_doctor_is_empty_with_the_apt_timers_on", "d"),
-    # e -- an install of its own: the build mode of packages
+    # e, i -- an install of their own each: the build mode of packages (e cut in
+    # two, DM-162)
     ("test_tier3_build_mode_of_the_blank", "e"),
     (
         "test_tier3_optional_build_slot_without_a_package_serves_the_repository_s_front",
         "e",
     ),
     ("test_tier3_a_skin_built_into_a_frontend_built_from_the_root", "e"),
-    ("test_tier3_types_are_made_by_the_products_commands", "e"),  # DM-63
-    ("test_tier3_alembic_runs_with_the_apps_environment", "e"),  # DM-124
-    ("test_tier3_a_secret_file_in_the_live_container", "e"),  # DM-145
-    # f -- an install of its own: options, derive, points (out of c, DM-85:
-    # the longest group is the time of tier 3; the order of the file kept)
+    # i: types and alembic, each on a copy of its own
+    ("test_tier3_types_are_made_by_the_products_commands", "i"),  # DM-63
+    ("test_tier3_alembic_runs_with_the_apps_environment", "i"),  # DM-124
+    # f, j -- an install of their own each: options, derive, points (f out of
+    # c, DM-85; f cut in two, DM-162; the order of the file kept)
     ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "f"),
     ("test_tier3_product_derive_reaches_nothing", "f"),
     ("test_tier3_only_the_declared_consumer_reaches_a_point", "f"),
-    ("test_tier3_every_listed_service_reads_the_data", "f"),  # DM-100
-    ("test_tier3_a_service_takes_a_point_of_the_product", "f"),  # DM-23
-    ("test_tier3_an_entry_named_frontend_is_the_product_s_own", "f"),  # DM-102
+    # j: a secret file (DM-145, out of e: j has the time), the data of a
+    # service, a point of the product, an entry named frontend
+    ("test_tier3_a_secret_file_in_the_live_container", "j"),  # DM-145
+    ("test_tier3_every_listed_service_reads_the_data", "j"),  # DM-100
+    ("test_tier3_a_service_takes_a_point_of_the_product", "j"),  # DM-23
+    ("test_tier3_an_entry_named_frontend_is_the_product_s_own", "j"),  # DM-102
 )
 
-NEEDS_BOX = frozenset({"c", "e", "f"})
+NEEDS_BOX = frozenset({"c", "e", "f", "g", "h", "i", "j"})
 """Groups whose tests need the blank installed by a fixture first."""
 
 
@@ -174,7 +182,7 @@ def test_functions(directory: Path = HERE) -> list[str]:
     return out
 
 
-ALL = ("a", "b", "c", "d", "e", "f")
+ALL = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
 """Every group: the jobs of a full run of tier 3."""
 
 PLANNED = "${{ fromJSON(needs.plan.outputs.groups) }}"

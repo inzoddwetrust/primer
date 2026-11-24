@@ -104,12 +104,16 @@ def test_the_table_is_whole_and_its_selftest_catches_each_defect() -> None:
     Changed by DM-85: group ``c`` is cut in two, ``f`` with an install of its
     own -- six groups; the groups the fixture installs the blank for are named
     by equality, not as a subset of the matrix: ``f`` left out of
-    ``NEEDS_BOX`` is red here, not first on tier 3."""
+    ``NEEDS_BOX`` is red here, not first on tier 3.
+
+    Changed by DM-162: c is cut in three (c, g, h), e in two (e, i), f in two (f,
+    j) -- ten groups, the cut ones each with its install; named by equality as
+    before."""
     assert groups.check() == 0
     assert groups.selftest() == 0
     assert (
         set(groups.matrix())
         == {g for _, g in groups.GROUPS}
-        == {"a", "b", "c", "d", "e", "f"}
+        == {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
     )
-    assert groups.NEEDS_BOX == {"c", "e", "f"}
+    assert groups.NEEDS_BOX == {"c", "e", "f", "g", "h", "i", "j"}

@@ -115,3 +115,58 @@ def test_the_matrix_of_box_is_the_plan_s(tmp_path: Path) -> None:
         "jobs:\n  box:\n    strategy:\n      matrix:\n        group: [a, b]\n"
     )
     assert groups.matrix(fixed) == []
+
+
+def test_a_full_run_of_the_new_groups_is_a_release() -> None:
+    """DM-162: tier 3 in ten groups, cut so that none takes more than 10 minutes
+    -- a run where every one of them ran green is a release; a run without one
+    of the new groups (g, h, i, j) is not."""
+    assert ALL == ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+    full = _run(1, 10)
+    assert groups.full_run([full], {1: _jobs(*ALL)})[0] is True
+    for missing in ("g", "h", "i", "j"):
+        some = [group for group in ALL if group != missing]
+        assert groups.full_run([full], {1: _jobs(*some)})[0] is False, missing
+
+
+def _order() -> list[str]:
+    return [test for test, _ in groups.GROUPS]
+
+
+def test_the_pairs_that_stand_on_each_other_stay_in_one_group_in_order() -> None:
+    """N4: what a test of tier 3 stands on stays in its group, before it -- the
+    restore half-way after the dump; the verb on a job, then destroy, then
+    destroy --all, last of their group; the last of a, b and d last."""
+    order = _order()
+    group = dict(groups.GROUPS)
+    for chain in (
+        (
+            "test_tier3_a_dump_of_the_blank_restores_what_was_in_it",
+            "test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was",
+        ),
+        (
+            "test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked",
+            "test_tier3_destroy_takes_the_blank_off_the_box",
+            "test_tier3_destroy_all_wipes_the_persistent_volume",
+        ),
+    ):
+        assert len({group[test] for test in chain}) == 1, chain
+        assert [order.index(test) for test in chain] == sorted(
+            order.index(test) for test in chain
+        )
+    for last in (
+        "test_tier3_destroy_all_wipes_the_persistent_volume",
+        "test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild",
+        "test_tier3_gc_trims_the_build_cache_to_the_budget",
+        "test_tier3_doctor_is_empty_with_the_apt_timers_on",
+    ):
+        mine = [test for test in order if group[test] == group[last]]
+        assert mine[-1] == last, (last, mine[-1])
+
+
+def test_every_part_of_an_installed_group_installs_its_box() -> None:
+    """N1: c, e and f were installed by a fixture; every part cut out of them
+    (g, h out of c; i out of e; j out of f) is too -- else its first test finds
+    no blank on the box."""
+    assert {"c", "e", "f", "g", "h", "i", "j"} <= groups.NEEDS_BOX
+    assert {"a", "b", "d"}.isdisjoint(groups.NEEDS_BOX)

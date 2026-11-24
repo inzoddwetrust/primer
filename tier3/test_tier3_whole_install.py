@@ -2028,7 +2028,7 @@ def _types_fact(verdict: Verdict) -> dict[str, object]:
 def test_tier3_types_are_made_by_the_products_commands(
     tmp_path: Path, mirror: Path
 ) -> None:
-    """DM-63, on the box of group e: a copy of the blank with ``types``. An
+    """DM-63, on the box of its group: a copy of the blank with ``types``. An
     update makes the types by the copy's commands in a throwaway container of
     its app and commits ``out`` alone on top of the deployed commit, into the
     mirror, with the deployed commit's ``Task`` and the machine's trailer --
@@ -2090,7 +2090,7 @@ if not os.environ.get("DATABASE_URL"):  # as comms' revisions do (DM-124)
 def test_tier3_alembic_runs_with_the_apps_environment(
     tmp_path: Path, mirror: Path
 ) -> None:
-    """DM-124, on the box of group e: a copy of the blank whose first alembic
+    """DM-124, on the box of its group: a copy of the blank whose first alembic
     revision refuses to load without ``DATABASE_URL`` -- empty or absent --
     as comms' do. An update -- green: ``stop_for_migrate`` and ``migrate`` read
     the head with the app's environment, and the migration ran. Measured into
@@ -2182,7 +2182,7 @@ READER_WITH_A_UID = """\
 def test_tier3_a_secret_file_in_the_live_container(
     tmp_path: Path, mirror: Path
 ) -> None:
-    """DM-145 on the box of group e: a copy of the blank whose ``AGE_KEY`` is a
+    """DM-145 on the box of its group: a copy of the blank whose ``AGE_KEY`` is a
     secret file for ``app`` (``USER blank`` of the image) and ``reader``
     (``user: "4242"`` in compose, no entry in the image). Measured into the
     run's log first (par0 14.3): the user each service runs as, the owner and
@@ -4215,7 +4215,7 @@ def test_tier3_optional_build_slot_without_a_package_serves_the_repository_s_fro
 def test_tier3_an_entry_named_frontend_is_the_product_s_own(
     tmp_path: Path, mirror: Path
 ) -> None:
-    """DM-102, last of group f: a copy of the blank with a second entry named
+    """DM-102, last of its group: a copy of the blank with a second entry named
     ``frontend`` -- a word of the machine's plans before DM-102, the
     product's own now. ``update`` green; the verdict holds the entry's
     ``(frontend, up)`` and the machine's ``(pridem-frontend, frontend)``, two
