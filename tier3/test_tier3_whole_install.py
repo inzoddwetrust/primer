@@ -66,6 +66,7 @@ name): docker is on the runner only after the host steps.
 """
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -2112,16 +2113,26 @@ def test_tier3_two_instances_with_their_own_languages(
     assert json.loads(_body("/config.json", FRONTEND))["languages"] == "en,ru"
 
 
+OPTION_FILE = "/run/primer/probe.key"
+"""The secret file of ``app`` under the option ``probe`` (DM-181)."""
+OPTION_FILE_VALUE = "pridem-planted-option-file-181\nits second line\n"
+
+
 def _blank_with_an_option(tmp: Path, mirror: Path) -> None:
     """The blank with an option of its own, consistent as a whole (par0 14.3):
     ``options: [probe]``, a variable ``PROBE_URL`` under ``when: probe`` in
-    ``env`` and in the compose of ``app``; no host of ``egress`` (DM-62)."""
+    ``env`` and in the compose of ``app``, and a secret file ``AGE_KEY`` of
+    ``app`` under it (DM-181: no line of the env file, compose names it
+    nowhere); no host of ``egress`` (DM-62)."""
     copy = _copy_of_blank(tmp, mirror, "options")
     primer = copy / "primer.yaml"
     _replace_once(
         primer,
         "  SERVICE_API_URL:",
-        "  PROBE_URL:         { source: param, when: probe }\n  SERVICE_API_URL:",
+        "  PROBE_URL:         { source: param, when: probe }\n"
+        "  AGE_KEY:           { source: asked, when: probe, file: { path: "
+        f"{OPTION_FILE} }} }}\n"
+        "  SERVICE_API_URL:",
     )
     text = primer.read_text(encoding="utf-8")
     primer.write_text(text + "options: [probe]\n", encoding="utf-8")
@@ -2432,6 +2443,11 @@ def test_tier3_an_option_off_is_the_literal_and_on_the_value(
     in ``.env`` and in the app's container; with it -- the value. ``doctor``
     is empty on each green box.
 
+    Changed by DM-181: the copy has a secret file ``AGE_KEY`` under the same
+    option. Off -- the install and ``doctor`` are green (``render_env`` looked
+    the file's key up in the env file: ``KeyError``) and ``app`` has no file at
+    its path; on -- the file is the passport's value, byte for byte.
+
     Changed by DM-62 (by the owner's word, 09.11): no host of ``egress`` --
     on some runners ``api.github.com`` inside a container is ``127.0.0.2``
     and the proxy refuses it, rightly (DM-84). The proxy on tier 3 is held by
@@ -2445,21 +2461,36 @@ def test_tier3_an_option_off_is_the_literal_and_on_the_value(
     assert _env()["PROBE_URL"] == "primer-switched-off", printed
     held = _stdout(["docker", "exec", _app(), "printenv", "PROBE_URL"])
     assert held == ["primer-switched-off"]
+    assert _option_file() == ["absent"], printed
     diff, failed, doctor = _doctor(off)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
 
     # the pair: the option on
     value = "https://probe.example.org/x"
     on = _passport(
-        tmp_path, version=51, options=["probe"], params={STACK: {"PROBE_URL": value}}
+        tmp_path,
+        version=51,
+        options=["probe"],
+        params={STACK: {"PROBE_URL": value}},
+        asked={STACK: {"AGE_KEY": OPTION_FILE_VALUE}},
     )
     verdict, printed = _install(on, "update")
     assert verdict.result == "green", printed
     assert _env()["PROBE_URL"] == value
     held = _stdout(["docker", "exec", _app(), "printenv", "PROBE_URL"])
     assert held == [value]
+    wanted = hashlib.sha256(OPTION_FILE_VALUE.encode()).hexdigest()
+    assert _option_file() == [f"{wanted}  {OPTION_FILE}"], printed
     diff, failed, doctor = _doctor(on)
     assert (diff, failed) == ([], []), doctor.model_dump_json()
+
+
+def _option_file() -> list[str]:
+    """``sha256sum`` of the secret file of the option in ``app``, or
+    ``absent``."""
+    path = OPTION_FILE
+    script = f"if test -e {path}; then sha256sum {path}; else echo absent; fi"
+    return _stdout(["docker", "exec", _app(), "sh", "-c", script])
 
 
 ISOLATION_RUN = (

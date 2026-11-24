@@ -384,8 +384,13 @@ class RenderEnv(Step):
 
     def _switched(self) -> list[str]:
         """The keys of an option that is off: the literal, nothing minted,
-        derived or asked for them (contract 3 rules 38-39)."""
-        return off_keys(self.stack, switched_on(_passport(self.fetched)))
+        derived or asked for them (contract 3 rules 38-39). Keys of the env
+        file only: a secret file under an option that is off has no file, no
+        bind and no value -- no literal either, and never a line of the env
+        file to hold one (DM-145; DM-181: ``read_back`` looked its value up)."""
+        written = set(env_keys(self.stack))
+        on = switched_on(_passport(self.fetched))
+        return [key for key in off_keys(self.stack, on) if key in written]
 
     def _minted_keys(self) -> list[str]:
         off = set(self._switched())
