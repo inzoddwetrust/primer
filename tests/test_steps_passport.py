@@ -31,6 +31,7 @@ from pridem.report.catalog import ENGLISH, with_steps
 from pridem.report.codes import ExitCode
 from pridem.report.schema import Verdict, build_verdict
 from pridem.runner import FakeRunner, OnLine, Result, Runner, Stream, SubprocessRunner
+from pridem.stacks.passport import Passport
 from pridem.stacks.schema import PRIMER_YAML, Product
 from pridem.stacks.seams import SeamMemory
 from pridem.state import Box, BoxState, JournalSink
@@ -53,7 +54,9 @@ from pridem.steps.passport import (
     Fetched,
     FetchPassport,
     OpsSource,
+    copy_data,
     passport_steps,
+    rewrite_copy,
     with_passport,
 )
 
@@ -1238,3 +1241,131 @@ def test_act_makes_the_copy_directory_0700(tmp_path: Path) -> None:
         step.act(ctx, CheckResult(True, local_code("copy", {"file": str(given)})))
     assert mode_of(home) == oct(0o700)
     assert mode_of(root / PASSPORT_COPY) == oct(0o600)
+
+
+# --- DM-131: a passport file of the same version keeps the answers ------------
+
+
+ANSWER = "invented-meet-secret-answered"
+OWNERS = "invented-meet-secret-owner-01"
+TELEGRAM = SECRET_VALUES["comms"]["TELEGRAM_BOT_TOKEN"]
+"""What render_env asked and wrote to the copy (16+ characters, no form of a
+real key)."""
+
+
+def _answered(root: Path, **more: object) -> None:
+    """The box answered: what render_env writes to the copy (``rewrite_copy``)."""
+    data = copy_data(root)
+    asked = data["asked"]
+    assert isinstance(asked, dict)
+    asked.setdefault("aivis", {})["MEET_JWT_SECRET"] = ANSWER
+    asked["comms"]["MAILGUN_API_KEY"] = "primer-switched-off"  # an option off
+    for path, value in more.items():
+        node: dict[str, object] = data
+        *parents, leaf = path.split("__")
+        for part in parents:
+            child = node.setdefault(part, {})
+            assert isinstance(child, dict)
+            node = child
+        node[leaf] = value
+    rewrite_copy(root, data)
+
+
+def _source(version: int) -> Data:
+    """The owner's file: no answer to what the box was asked."""
+    data = passport(version=version)
+    asked = data["asked"]
+    assert isinstance(asked, dict)
+    del asked["aivis"]["MEET_JWT_SECRET"]
+    del asked["comms"]["MAILGUN_API_KEY"]
+    return data
+
+
+def _render_env_asks(passport_: Passport, tmp: Path) -> list[str]:
+    """What render_env would ask: the stack's keys its passport has not."""
+    from env_support import product
+
+    from pridem.stacks.env import resolve
+    from pridem.stacks.seams import SeamMemory
+
+    tmp.mkdir(parents=True, exist_ok=True)
+    stack = product(tmp, {"MEET_JWT_SECRET": {"source": "asked"}})
+    return resolve(stack, stack, passport_, {}, SeamMemory()).missing
+
+
+def test_probe_DM_131_a_passport_file_of_the_same_version_keeps_the_answers(
+    tmp_path: Path,
+) -> None:
+    """DM-131 (found on goodo-test 22.11): the box asked a secret and wrote it to
+    its copy; ``install``/``update --passport`` with the same file of the same
+    version keeps it -- in the copy, in the run's passport, nothing for
+    render_env to ask, ``doctor`` has nothing to do; the literal of an option
+    that is off stays too. The pair: a new version asks again."""
+    root = tmp_path / "box"
+    given = write_file(tmp_path, _source(5))
+    outcome, _ = run(file_steps(root, given)[1], FakeRunner())
+    assert outcome.code is ExitCode.OK, outcome.steps
+    _answered(root)
+    fetched, steps = file_steps(root, given, ask=never_ask)
+    outcome, _ = run(steps, FakeRunner())
+    assert outcome.code is ExitCode.OK, outcome.steps
+    copy = yaml.safe_load((root / PASSPORT_COPY).read_text())
+    assert copy["asked"]["aivis"]["MEET_JWT_SECRET"] == ANSWER
+    assert copy["asked"]["comms"]["MAILGUN_API_KEY"] == "primer-switched-off"
+    assert fetched.passport is not None
+    assert _render_env_asks(fetched.passport, tmp_path / "p1") == []
+    doctor, _ = run(file_steps(root, given)[1], FakeRunner(), mode="doctor")
+    assert doctor.doctor_diff == (), doctor.doctor_diff
+    # the pair: a new version -- the answer is not carried, render_env asks
+    fetched, steps = file_steps(root, write_file(tmp_path, _source(6), "v6.yaml"))
+    outcome, _ = run(steps, FakeRunner())
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert fetched.passport is not None
+    assert _render_env_asks(fetched.passport, tmp_path / "p2") == [
+        "asked.aivis.MEET_JWT_SECRET"
+    ]
+
+
+def test_the_passport_s_word_wins_over_the_copy_s(tmp_path: Path) -> None:
+    """M3: the same key in the file and in the copy, other values -- the file's
+    (the copy is a cache); M4: by key -- a stack with some answers in the file
+    keeps the copy's others."""
+    root = tmp_path / "box"
+    source = _source(5)
+    asked = source["asked"]
+    assert isinstance(asked, dict)
+    asked["aivis"]["MEET_JWT_SECRET"] = OWNERS
+    given = write_file(tmp_path, source)
+    run(
+        file_steps(root, write_file(tmp_path, _source(5), "first.yaml"))[1],
+        FakeRunner(),
+    )
+    _answered(root)
+    outcome, _ = run(file_steps(root, given, ask=never_ask)[1], FakeRunner())
+    assert outcome.code is ExitCode.OK, outcome.steps
+    copy = yaml.safe_load((root / PASSPORT_COPY).read_text())
+    assert copy["asked"]["aivis"]["MEET_JWT_SECRET"] == OWNERS
+    assert copy["asked"]["comms"]["MAILGUN_API_KEY"] == "primer-switched-off"
+    assert copy["asked"]["comms"]["TELEGRAM_BOT_TOKEN"] == TELEGRAM
+
+
+def test_params_domains_and_edition_render_env_wrote_are_kept(tmp_path: Path) -> None:
+    """M5: what render_env asks besides ``asked`` -- a parameter, a domain, the
+    edition -- is kept from the copy of the same version too."""
+    root = tmp_path / "box"
+    source = _source(5)
+    del source["edition"]  # the box was asked it
+    given = write_file(tmp_path, source)
+    run(file_steps(root, given)[1], FakeRunner())
+    _answered(
+        root,
+        params__aivis__ASKED_PARAM="an answered parameter",
+        domains__extra="extra.example.org",
+        edition="full",
+    )
+    outcome, _ = run(file_steps(root, given, ask=never_ask)[1], FakeRunner())
+    assert outcome.code is ExitCode.OK, outcome.steps
+    copy = yaml.safe_load((root / PASSPORT_COPY).read_text())
+    assert copy["params"]["aivis"]["ASKED_PARAM"] == "an answered parameter"
+    assert copy["domains"]["extra"] == "extra.example.org"
+    assert copy["edition"] == "full"

@@ -27,7 +27,9 @@ of the schema with a fixed key; ``schema``, ``version`` and the open mappings
 (``domains``, ``asked``, ``params``, ``packages``: their keys come from the
 stacks' ``primer.yaml``) are never asked, and missing they are a red step.
 Answers already in the local copy of the same version are reused, so a box
-is asked once per version (contract 1 rule 3). Answers go to the local copy
+is asked once per version (contract 1 rule 3) -- those of the fixed schema and
+what ``render_env`` asked and wrote there (``asked``, ``params``, ``domains``,
+``edition``; DM-131), on keys the passport has not. Answers go to the local copy
 only; the ops repository is the owner's. The version never changes here.
 
 The server's name is a DNS label in lower case (``SERVER_NAME``, the rule of
@@ -345,6 +347,38 @@ def _missing(data: Data) -> list[tuple[str, ...]]:
     return []
 
 
+def _carry(copy: Data, data: Data) -> None:
+    """Into ``data``, from the copy of the same version, what ``render_env``
+    asks and writes to the copy -- ``asked`` and ``params`` by stack and key,
+    ``domains`` by name, ``edition``; the literal of an option that is off is
+    one of those values. Only what ``data`` has not: the passport's own word
+    wins (contract 1 section 3: the copy is a cache). A passport given again
+    as a file of the same version keeps the answers the box was asked once
+    (contract 1 rule 3, DM-131); a new version carries nothing."""
+    for kind in ("asked", "params"):
+        theirs = copy.get(kind)
+        if not isinstance(theirs, dict):
+            continue
+        mine = data.setdefault(kind, {})
+        if not isinstance(mine, dict):
+            continue
+        for stack, keys in theirs.items():
+            if not isinstance(keys, dict):
+                continue
+            target = mine.setdefault(stack, {})
+            if isinstance(target, dict):
+                for key, value in keys.items():
+                    target.setdefault(key, value)
+    domains = copy.get("domains")
+    if isinstance(domains, dict):
+        mine = data.setdefault("domains", {})
+        if isinstance(mine, dict):
+            for name, value in domains.items():
+                mine.setdefault(name, value)
+    if data.get("edition") is None and copy.get("edition") is not None:
+        data["edition"] = copy["edition"]
+
+
 def _get(data: object, path: tuple[str, ...]) -> tuple[bool, object]:
     node = data
     for segment in path:
@@ -627,6 +661,7 @@ class FetchPassport(Step):
         asked; whether something is still missing (``asking`` false only)."""
         copy = _copy_data(self._copy)
         if copy is not None and copy.get("version") == data.get("version"):
+            _carry(copy, data)  # what render_env asked and wrote there (DM-131)
             for path in _missing(data):
                 present, value = _get(copy, path)
                 if present:
