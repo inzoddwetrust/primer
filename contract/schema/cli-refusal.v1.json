@@ -1,0 +1,111 @@
+{
+  "$defs": {
+    "Actor": {
+      "additionalProperties": false,
+      "properties": {
+        "on_behalf_of": {
+          "minLength": 1,
+          "title": "On Behalf Of",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "owner",
+            "engineer",
+            "dispatcher",
+            "executor",
+            "machine"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "via": {
+          "enum": [
+            "local",
+            "panel",
+            "timer"
+          ],
+          "title": "Via",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "via"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "LockHolder": {
+      "additionalProperties": false,
+      "description": "What the lock's file says of the command that holds the box (DM-138):\nits run, its verb, who ran it, since when, and the Panel's command when\nit came from the queue. One line of JSON, written under the lock.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/Actor"
+        },
+        "command": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Command",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z-[0-9a-f]{4}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "since": {
+          "format": "date-time",
+          "title": "Since",
+          "type": "string"
+        },
+        "verb": {
+          "minLength": 1,
+          "title": "Verb",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "verb",
+        "actor",
+        "since"
+      ],
+      "title": "LockHolder",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A refusal before execution (contract 2): its code, and what it knows.",
+  "properties": {
+    "holder": {
+      "$ref": "#/$defs/LockHolder"
+    },
+    "holder_unread": {
+      "enum": [
+        "starting",
+        "unreadable"
+      ],
+      "title": "Holder Unread",
+      "type": "string"
+    },
+    "processes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Processes",
+      "type": "array"
+    },
+    "refused": {
+      "const": "box-busy",
+      "title": "Refused",
+      "type": "string"
+    }
+  },
+  "required": [
+    "refused",
+    "processes"
+  ],
+  "title": "cli refusal v1",
+  "type": "object"
+}

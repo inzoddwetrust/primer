@@ -56,7 +56,7 @@ from pydantic.json_schema import models_json_schema
 from pridem.contract import SCHEMA_DIR, ContractSchema, Strict, schema_text
 from pridem.events import Json
 from pridem.report.box_snapshot import BoxSnapshot, Moment
-from pridem.report.schema import RunId, Text, Verdict
+from pridem.report.schema import CommandId, RunId, Text, Verdict
 from pridem.state import JournalLine
 
 PROTOCOL_VERSION = 1
@@ -152,7 +152,7 @@ class Command(Strict):
     console would run it; ``confirmed_at`` -- when a person confirmed a
     destructive one. The agent checks it against the verb's own schema."""
 
-    id: Text
+    id: CommandId
     verb: Text
     args: dict[str, Json]
     confirmed_at: Moment | None = None

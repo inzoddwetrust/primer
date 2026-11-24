@@ -76,13 +76,16 @@ def test_a_process_a_command_left_holds_the_box_after_a_normal_end(
 ) -> None:
     """``pridem`` ended normally, the process its command left lives: the next
     command is ``BoxBusy`` -- the holder written by the first and the process
-    by its pid and name. The pair: once that process is gone, the box is free."""
+    by its pid and name. The pair: once that process is gone, the box is free.
+
+    Changed by DM-138: the lock's file as written is ``held``; ``holder`` is
+    the ``LockHolder`` a command writes as JSON."""
     box = Box(tmp_path)
     left = _leave(box)
     try:
         with deadline(5.0), pytest.raises(BoxBusy) as busy, box.lock("status"):
             pass
-        assert busy.value.holder == "update 2026-11-12T10:00:00Z-a3f9 pid 7"
+        assert busy.value.held == "update 2026-11-12T10:00:00Z-a3f9 pid 7"
         comm = Path(f"/proc/{left}/comm").read_text().strip()  # setsid, then sleep
         assert busy.value.processes == (f"pid {left} ({comm})",)
         assert f"held by pid {left} ({comm})" in str(busy.value)

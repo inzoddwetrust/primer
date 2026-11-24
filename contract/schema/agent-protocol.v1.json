@@ -205,7 +205,7 @@
           "type": "string"
         },
         "id": {
-          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
           "title": "Id",
           "type": "string"
         },
@@ -668,6 +668,11 @@
         "at": {
           "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$",
           "title": "At",
+          "type": "string"
+        },
+        "command": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Command",
           "type": "string"
         },
         "composition_before": {
@@ -2351,6 +2356,11 @@
           },
           "title": "Args",
           "type": "object"
+        },
+        "command": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Command",
+          "type": "string"
         },
         "composition_after": {
           "additionalProperties": {

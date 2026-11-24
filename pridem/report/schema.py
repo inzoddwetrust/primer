@@ -99,6 +99,9 @@ RUN_ID = re.compile(
 RunId = Annotated[str, Field(pattern=f"^{RUN_ID.pattern}$")]
 
 Text = Annotated[str, Field(min_length=1)]
+CommandId = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")]
+"""The id of a command of the Panel's queue (DM-138): what ``--command`` names,
+what the journal's header and the verdict carry back."""
 Count = Annotated[int, Field(ge=0)]
 
 
@@ -521,6 +524,9 @@ class Verdict(Strict):
     report: Report
     junit: Junit | None = Field(default=None, exclude_if=_is_none)
     log_ref: Text | None = Field(default=None, exclude_if=_is_none)
+    command: CommandId | None = Field(default=None, exclude_if=_is_none)
+    """The command of the Panel that ran the verb (``--command``, DM-138);
+    absent for the console and a timer."""
     """The run's journal; absent when the verb keeps none (``check`` writes
     nothing), as every key with nothing to say (contract 2 section 1)."""
 
@@ -592,6 +598,7 @@ def build_verdict(
     junit: Mapping[str, int] | None = None,
     catalog: Catalog = ENGLISH,
     journal: bool = True,
+    command: str | None = None,
 ) -> Verdict:
     """The verdict of a plan, cleaned of ``secrets`` before it is validated.
 
@@ -656,6 +663,7 @@ def build_verdict(
         ],
         "report": report,
         **({"log_ref": f"journal/{run_id}.jsonl"} if journal else {}),
+        **({} if command is None else {"command": command}),
     }
     if junit is not None:
         raw["junit"] = dict(junit)

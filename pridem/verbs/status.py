@@ -10,7 +10,7 @@ close. There is no passport yet, so ``passport_version`` is
 absent (contract 2 v1.9). A busy box is refused before anything runs.
 """
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TextIO
 
 from pridem import __version__
@@ -19,23 +19,24 @@ from pridem.events import Incomplete, PlanOutcome, Secrets, said
 from pridem.report.catalog import ENGLISH
 from pridem.report.codes import ExitCode
 from pridem.report.render import closing, render_json
-from pridem.report.schema import Actor, Verdict, build_verdict
-from pridem.state import Box, BoxBusy, JournalHeader
-from pridem.verbs.base import Context, NoArgs, Refused, Verb
+from pridem.report.schema import Verdict, build_verdict
+from pridem.state import Box, BoxBusy, JournalHeader, LockHolder
+from pridem.verbs.base import Context, NoArgs, Verb
 from pridem.verbs.run import (
     close_journal,
     end_journal,
     finished_at,
     found_on_box,
+    lock_holder,
+    refuse_busy,
     sync_journal,
 )
 from pridem.verbs.state import console_lines, snapshot
 
-ACTOR = {"type": "engineer", "via": "local"}
 NO_SECRETS = Secrets(())  # no passport, no minted secrets on a fresh box
 
 
-def _verdict(box: Box, err: TextIO) -> Verdict:
+def _verdict(box: Box, err: TextIO, held: LockHolder, started: datetime) -> Verdict:
     """Everything ``status`` does once it holds the lock: what it finds in
     quarantine and a journal that does not reach the disk are its
     ``incomplete``; after its verdict the journal ends with ``run_finished``
@@ -43,23 +44,26 @@ def _verdict(box: Box, err: TextIO) -> Verdict:
     recovery = box.recover(NO_SECRETS, __version__, ENGLISH)
     state = box.read_state()
     composition = dict(state.composition) if state else {"pridem": __version__}
-    started = datetime.now(UTC).replace(microsecond=0)
-    run_id = box.new_run_id(started)
-    header = JournalHeader(
-        run_id=run_id,
-        verb="status",
-        mode="status",
-        args={},
-        actor=Actor(type="engineer", via="local"),
-        started=started,
-        composition_before=composition,
+    run_id = held.run_id
+    header = JournalHeader.model_validate(
+        {
+            "run_id": run_id,
+            "verb": "status",
+            "mode": "status",
+            "args": {},
+            "actor": held.actor,
+            "started": started,
+            "composition_before": composition,
+            # absent for the console and a timer, never null (DM-138)
+            **({} if held.command is None else {"command": held.command}),
+        }
     )
     journal = box.open_journal(header, NO_SECRETS)
     try:
         finished = finished_at(started, journal)
         lost = sync_journal(journal)
         incomplete = (*found_on_box(box, recovery), *lost)
-        verdict = _status_verdict(run_id, started, finished, composition, incomplete)
+        verdict = _status_verdict(held, started, finished, composition, incomplete)
         box.write_verdict(verdict)
     except BaseException:
         close_journal(journal)  # no verdict: a run that did not end (DM-137)
@@ -69,7 +73,7 @@ def _verdict(box: Box, err: TextIO) -> Verdict:
 
 
 def _status_verdict(
-    run_id: str,
+    held: LockHolder,
     started: datetime,
     finished: datetime,
     composition: dict[str, str],
@@ -82,10 +86,10 @@ def _status_verdict(
             (),
             incomplete=incomplete,
         ),
-        run_id=run_id,
+        run_id=held.run_id,
         verb="status",
         args={},
-        actor=ACTOR,
+        actor=held.actor.model_dump(exclude_none=True),
         started=started,
         finished=finished,
         passport_version=None,
@@ -93,16 +97,18 @@ def _status_verdict(
         composition_after=composition,
         secrets=NO_SECRETS,
         catalog=ENGLISH,
+        command=held.command,
     )
 
 
 def _run(args: Strict, ctx: Context) -> int:
     box = Box(ctx.root)
+    held, started = lock_holder(ctx, box, "status")
     try:
-        with box.lock("status"):
-            verdict = _verdict(box, ctx.err)
+        with box.lock(held.model_dump_json()):
+            verdict = _verdict(box, ctx.err, held, started)
     except BoxBusy as busy:  # raised only by taking the lock
-        raise Refused(f"the box is busy: {busy}") from None
+        raise refuse_busy(ctx, busy) from None
     if ctx.json:
         ctx.out.write(render_json(verdict) + "\n")
         return int(verdict.exit_code)

@@ -54,6 +54,9 @@ class Context:
     interrupt: Interrupt = field(default_factory=Interrupt)
     ask: Callable[[str], str | None] = ask_terminal
     terminal: Callable[[], bool] = lambda: sys.stdin.isatty()  # noqa: E731
+    command: str | None = None
+    """The Panel's command the verb runs for (``--command``, DM-138): its id
+    goes to the journal's header, the lock and the verdict."""
     """Whether a person is at a terminal to be asked (DM-118); a test says."""
     """A question to the person at the terminal; ``None`` -- no terminal (a
     pipe, the Panel). ``destroy`` asks the server's name with it (DM-110)."""

@@ -55,12 +55,21 @@ from pridem.events import (
 from pridem.plan import Plan, Stack, StackSteps
 from pridem.report.catalog import ENGLISH, Catalog, say
 from pridem.report.codes import ExitCode, worst
+from pridem.report.refusal import busy as busy_refusal
+from pridem.report.refusal import rendered as rendered_refusal
 from pridem.report.render import closing, render_json, words
 from pridem.report.schema import Actor, Verdict, build_verdict
 from pridem.runner import Holding, Stream
 from pridem.stacks import names as machine
 from pridem.stacks.passport import load_passport, size_bytes
-from pridem.state import Box, BoxBusy, JournalHeader, JournalSink, Recovery
+from pridem.state import (
+    Box,
+    BoxBusy,
+    JournalHeader,
+    JournalSink,
+    LockHolder,
+    Recovery,
+)
 from pridem.steps.base import Role, Step
 from pridem.steps.passport import PASSPORT_COPY, Fetched, passport_secrets
 from pridem.steps.tests import TestReport
@@ -137,7 +146,35 @@ def finished_at(started: datetime, journal: JournalSink) -> datetime:
 def _actor(ctx: Context) -> dict[str, str]:
     if ctx.timer:
         return {"type": "machine", "via": "timer"}
+    if ctx.command is not None:  # who pressed is the Panel's record (DM-138)
+        return {"type": "engineer", "via": "panel"}
     return {"type": "engineer", "via": "local"}
+
+
+def lock_holder(ctx: Context, box: Box, verb: str) -> tuple[LockHolder, datetime]:
+    """The run's id, taken before the lock -- the lock's file names it -- and
+    what the lock says of the run (DM-138). The id is the run's once its
+    journal is made, exclusively, under the lock: a second command that took
+    the same id is refused by the lock before it."""
+    started = datetime.now(UTC).replace(microsecond=0)
+    run_id = box.new_run_id(started)
+    held: dict[str, object] = {
+        "run_id": run_id,
+        "verb": verb,
+        "actor": Actor.model_validate(_actor(ctx)),
+        "since": started,
+    }
+    if ctx.command is not None:
+        held["command"] = ctx.command
+    return LockHolder.model_validate(held), started
+
+
+def refuse_busy(ctx: Context, busy: BoxBusy) -> Refused:
+    """The refusal of a busy box: with ``--json`` its object on stdout for the
+    agent (DM-138); the line on stderr in every case."""
+    if ctx.json:
+        said(ctx.out, rendered_refusal(busy_refusal(busy)) + "\n")
+    return Refused(f"the box is busy: {busy}")
 
 
 def read_copy(ctx: Context) -> Fetched:
@@ -244,9 +281,12 @@ def _verdict(
     copy: Fetched,
     ladder: bool,
     before: Before | None = None,
+    held: LockHolder,
+    started: datetime,
 ) -> tuple[Verdict, Catalog]:
     """Everything the verb does once it holds the lock; the verdict and the
-    words of its codes."""
+    words of its codes. ``held`` -- the run the lock names: its id, actor and
+    command go to the journal's header and the verdict."""
     passport = copy.passport
     secrets = Secrets(passport_secrets(passport) if passport is not None else ())
     recovery = box.recover(secrets, __version__, ENGLISH)
@@ -254,18 +294,19 @@ def _verdict(
         before(box)
     state = box.read_state()
     composed = dict(state.composition) if state else {"pridem": __version__}
-    started = datetime.now(UTC).replace(microsecond=0)
-    run_id = box.new_run_id(started)
-    actor = _actor(ctx)
+    run_id = held.run_id
+    actor = held.actor.model_dump(exclude_none=True)
     fields: dict[str, object] = {
         "run_id": run_id,
         "verb": verb,
         "mode": mode,
         "args": dict(args),
-        "actor": Actor.model_validate(actor),
+        "actor": held.actor,
         "started": started,
         "composition_before": composed,
     }
+    if held.command is not None:  # absent for the console and a timer
+        fields["command"] = held.command
     if passport is not None:  # absent without a passport, never null
         fields["passport_version"] = passport.version
     header = JournalHeader.model_validate(fields)
@@ -351,6 +392,7 @@ def _verdict(
                 failures=failures,
                 junit=junit,
                 catalog=plan.catalog,
+                command=held.command,
             )
 
         try:
@@ -453,8 +495,9 @@ def run_plan_verb(
     """Run the verb's plan under the box lock; print; return the exit code."""
     found = copy if copy is not None else read_copy(ctx)
     box = Box(ctx.root)
+    held, started = lock_holder(ctx, box, verb)
     try:
-        with box.lock(verb):
+        with box.lock(held.model_dump_json()):
             verdict, catalog = _verdict(
                 box,
                 ctx,
@@ -465,9 +508,11 @@ def run_plan_verb(
                 copy=found,
                 ladder=ladder,
                 before=before,
+                held=held,
+                started=started,
             )
     except BoxBusy as busy:  # raised only by taking the lock
-        raise Refused(f"the box is busy: {busy}") from None
+        raise refuse_busy(ctx, busy) from None
     if ctx.json:
         said(ctx.out, render_json(verdict) + "\n")
     else:

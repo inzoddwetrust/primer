@@ -1,12 +1,17 @@
 """Command-line entry point: the command line turned into a verb's arguments.
 
-``pridem [--json] [--timer] <verb> [arguments] [--option [value] ...]``.
-Parsing is all this module does; a verb's schema and run live in
-``pridem.verbs``. ``--timer`` says a timer of the box started the verb (its
-actor is the machine), and only a verb a timer runs takes it. ``--json`` may
-also follow the verb. Anything refused before a run -- an unknown verb, option
-or argument, a busy box -- exits 1 with a message on stderr and no verdict; 2
-is never a parse error here, it means "not all done".
+``pridem [--json] [--timer | --command <id>] <verb> [arguments] [--option
+[value] ...]``. Parsing is all this module does; a verb's schema and run live
+in ``pridem.verbs``. ``--timer`` says a timer of the box started the verb (its
+actor is the machine), and only a verb a timer runs takes it. ``--command``
+names the command of the Panel's queue the agent runs the verb for (DM-138):
+its id goes to the journal's header, the lock and the verdict, the actor is
+the Panel; a verb without a verdict refuses it. ``--json`` may also follow the
+verb. Anything refused before a run -- an unknown verb, option or argument, a
+busy box -- exits 1 with a message on stderr and no verdict; a busy box with
+``--json`` prints the refusal's object on stdout too
+(``pridem/report/refusal.py``). 2 is never a parse error here, it means "not
+all done".
 
 A contract file a loader rejects (``ContractError``) is a message on stderr --
 the file and its problems by path and rule, never a traceback: the loaders
@@ -29,10 +34,11 @@ from pathlib import Path
 from typing import TextIO
 
 import click
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from pridem.events import ShortSecret, said
 from pridem.interrupt import Interrupt, Interrupted
+from pridem.report.schema import CommandId
 from pridem.runner import Runner, SubprocessRunner
 from pridem.stacks.loader import ContractError
 from pridem.stacks.stack import CompositionCollision
@@ -57,12 +63,20 @@ from pridem.verbs.base import BOX_ROOT, ask_terminal
 )
 @click.option("--json", "as_json", is_flag=True)
 @click.option("--timer", "by_timer", is_flag=True)
+@click.option("--command", "command", default=None)
 @click.argument("verb")
 @click.argument("rest", nargs=-1, type=click.UNPROCESSED)
 def _command(
-    as_json: bool, by_timer: bool, verb: str, rest: tuple[str, ...]
-) -> tuple[str, bool, bool, tuple[str, ...]]:
-    return verb, as_json, by_timer, rest
+    as_json: bool,
+    by_timer: bool,
+    command: str | None,
+    verb: str,
+    rest: tuple[str, ...],
+) -> tuple[str, bool, bool, str | None, tuple[str, ...]]:
+    return verb, as_json, by_timer, command, rest
+
+
+_COMMAND_ID: TypeAdapter[str] = TypeAdapter(CommandId)
 
 
 def _arguments(
@@ -124,7 +138,7 @@ def run(
     interrupt = interrupt if interrupt is not None else Interrupt()
     try:
         try:
-            name, as_json, by_timer, rest = _command.main(
+            name, as_json, by_timer, command, rest = _command.main(
                 list(argv), prog_name="pridem", standalone_mode=False
             )
         except click.ClickException as error:
@@ -138,6 +152,20 @@ def run(
             raise Refused(f"{name} writes no verdict: --json has nothing to print")
         if by_timer and not verb.timer:
             raise Refused(f"{name} is not run by a timer: --timer does not apply")
+        if command is not None:  # a command of the Panel's queue (DM-138)
+            if by_timer:
+                raise Refused("--command and --timer: a run comes from one of them")
+            if not verb.verdict:
+                raise Refused(
+                    f"{name} writes no verdict: --command has nothing to carry"
+                )
+            try:
+                _COMMAND_ID.validate_python(command)
+            except ValidationError:
+                raise Refused(
+                    "--command: an id of letters, digits and . _ : -, "
+                    "at most 128, a letter or a digit first"
+                ) from None
         try:
             args = verb.args.model_validate(given)
         except ValidationError as error:
@@ -152,6 +180,7 @@ def run(
             by_timer,
             interrupt,
             ask,
+            command=command,
         )
         return verb.run(args, context)
     except Refused as refused:

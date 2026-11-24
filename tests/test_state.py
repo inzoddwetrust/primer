@@ -38,19 +38,26 @@ from pridem.state import (
 
 def test_second_command_is_refused_with_the_holder(tmp_path: Path) -> None:
     """Refused, not waiting: a blocking lock is red by assertion within the deadline
-    (DM-39: without it the second ``flock`` of one thread hung forever)."""
+    (DM-39: without it the second ``flock`` of one thread hung forever).
+
+    Changed by DM-138: the lock's file as written is ``held``; ``holder`` is
+    the ``LockHolder`` a command writes as JSON -- this text is not one."""
     first, second = Box(tmp_path), Box(tmp_path)
     with first.lock("deploy 2026-10-15T10:42:01Z-a3f9 pid 41"):
         with deadline(5.0), pytest.raises(BoxBusy) as busy, second.lock("doctor"):
             pass
-        assert busy.value.holder == "deploy 2026-10-15T10:42:01Z-a3f9 pid 41"
+        assert busy.value.held == "deploy 2026-10-15T10:42:01Z-a3f9 pid 41"
+        assert (busy.value.holder, busy.value.unread) == (None, "unreadable")
     with second.lock("doctor"):
         second.write_state(state())
     assert second.read_state() == state()
 
 
 def test_two_commands_racing_for_the_box_one_wins(tmp_path: Path) -> None:
-    """Both try at the same moment; exactly one holds the box, the other is refused."""
+    """Both try at the same moment; exactly one holds the box, the other is refused.
+
+    Changed by DM-138: the lock's file as written is ``held`` (``holder`` is
+    the ``LockHolder`` a command writes as JSON)."""
     start = threading.Barrier(2)
     held = threading.Event()
     done = threading.Event()
@@ -65,7 +72,7 @@ def test_two_commands_racing_for_the_box_one_wins(tmp_path: Path) -> None:
                 done.wait(5)
         except BoxBusy as busy:
             held.wait(5)
-            results[name] = f"busy:{busy.holder}"
+            results[name] = f"busy:{busy.held}"
 
     threads = [threading.Thread(target=command, args=(n,)) for n in ("a", "b")]
     for thread in threads:

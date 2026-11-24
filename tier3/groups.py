@@ -102,6 +102,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_red_tests_stop_before_any_migrate", "d"),
     ("test_tier3_destroy_after_an_interrupted_install", "d"),
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),
+    # a command of the Panel's queue runs, a busy box names it (DM-138)
+    ("test_tier3_a_command_runs_and_a_busy_box_names_it", "d"),
     # every journal the group wrote is a stream with its end (DM-137)
     ("test_tier3_every_journal_has_its_seq_and_its_end", "d"),
     # the last of d: the apt timers on (DM-105) -- apt may hold dpkg after it

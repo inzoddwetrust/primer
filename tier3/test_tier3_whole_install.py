@@ -4514,6 +4514,91 @@ def _timers_state() -> list[str]:
     return said
 
 
+COMMAND_HOOK = """#!/bin/sh
+# DM-138: git fetch of fetch_root waits here, the run holding the box
+[ "$1" = committed ] || exit 0
+touch "{marker}"
+sleep 20
+"""
+
+COMMANDED = """
+"$1" --json --command c-138 update --passport "$2" >"$3/update.out" 2>"$3/update.err" &
+pid=$!
+for _ in $(seq 1800); do [ -e "$3/marker" ] && break; sleep 0.1; done
+if [ ! -e "$3/marker" ]; then
+  echo "hook: not called"; wait $pid; exit 0
+fi
+echo "hook: called"
+echo "journal: $(basename "$(ls -t /opt/pridem/journal/*.jsonl | head -n 1)" .jsonl)"
+"$1" --json --command c-139 status >"$3/busy.out" 2>"$3/busy.err"
+echo "busy exit: $?"
+wait $pid
+echo "update exit: $?"
+"""
+
+
+def test_tier3_a_command_runs_and_a_busy_box_names_it(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-138, in group ``d`` before the test of the journals, on the box
+    the probe of DM-59 left: ``pridem --json --command c-138 update`` -- the
+    call of the agent -- waits in ``fetch_root`` on a git hook. Meanwhile
+    ``pridem --json --command c-139 status`` is refused: exit 1, on stdout
+    the object ``box-busy`` naming the run of the update (its journal), verb
+    ``update``, command ``c-138``, the Panel as its actor; no verdict of the
+    refused status. The update then ends: its verdict and its journal's header
+    carry ``c-138``. Measured into the run's output first (par0 14.3): the
+    scene's lines, the refusal, the verdict."""
+    assert (OPT / "current").is_symlink(), "the probe of DM-59 installs first"
+    bare = OPT / "git"
+    work = tmp_path / "dm138"
+    hooks = work / "hooks"
+    hooks.mkdir(parents=True)
+    hook = hooks / "reference-transaction"
+    hook.write_text(COMMAND_HOOK.format(marker=work / "marker"), encoding="utf-8")
+    hook.chmod(0o755)
+    copy = _copy_of_blank(tmp_path, mirror, "dm138-unfetched")
+    _git("-C", str(copy), "commit", "-q", "--allow-empty", "-m", "DM-138: unfetched")
+    _git("-C", str(copy), "push", "-q", "--force", str(mirror), "HEAD:refs/heads/main")
+    history = Path("/opt/pridem/history")
+    before = {p.name for p in history.iterdir()}
+    _run(["git", "--git-dir", str(bare), "config", "core.hooksPath", str(hooks)])
+    try:
+        seen = _run(
+            [
+                "sh",
+                "-c",
+                COMMANDED,
+                "scene",
+                PRIDEM,
+                str(_passport(tmp_path, version=47)),
+                str(work),
+            ],
+            timeout=1200,
+        )
+    finally:
+        _run(["git", "--git-dir", str(bare), "config", "--unset", "core.hooksPath"])
+    refused = (work / "busy.out").read_text(encoding="utf-8")
+    printed = (work / "update.out").read_text(encoding="utf-8")
+    print("DM-138 measure:", seen, "refusal:", refused, "verdict:", printed[:2000])
+    assert seen[0] == "hook: called", seen
+    run_id = seen[1].removeprefix("journal: ")
+    assert "busy exit: 1" in seen and "update exit: 0" in seen, seen
+    refusal = json.loads(refused)
+    assert refusal["refused"] == "box-busy", refusal
+    assert refusal["holder"]["run_id"] == run_id, refusal
+    assert refusal["holder"]["verb"] == "update", refusal
+    assert refusal["holder"]["command"] == "c-138", refusal
+    assert refusal["holder"]["actor"] == {"type": "engineer", "via": "panel"}
+    verdict = Verdict.model_validate_json(printed)
+    assert (verdict.run_id, verdict.command) == (run_id, "c-138")
+    header = json.loads(
+        Path(f"/opt/pridem/journal/{run_id}.jsonl").read_text().splitlines()[0]
+    )
+    assert header["command"] == "c-138", header
+    assert {p.name for p in history.iterdir()} - before == {f"{run_id}.json"}
+
+
 def test_tier3_every_journal_has_its_seq_and_its_end() -> None:
     """DM-137, in group ``d`` before its last test (the apt timers on, which
     must stay last), on the box its installs, ``destroy`` and ``status``

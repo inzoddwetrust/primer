@@ -60,6 +60,7 @@ LAYERS: Layers = (
             "pridem.report",
             "pridem.report.box_snapshot",
             "pridem.report.catalog",
+            "pridem.report.refusal",
             "pridem.report.codes",
             "pridem.report.render",
             "pridem.report.schema",

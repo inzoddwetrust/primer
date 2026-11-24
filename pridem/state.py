@@ -98,6 +98,7 @@ from pridem.report.catalog import ENGLISH, Catalog
 from pridem.report.codes import ExitCode
 from pridem.report.schema import (
     Actor,
+    CommandId,
     Composition,
     Moment,
     Reason,
@@ -129,16 +130,48 @@ class RunFinished:
 JournalEvent = StepStarted | StepFinished | LogLine | KeyNeeded | RecipientNeeded
 
 
-class BoxBusy(Exception):
-    """Another command holds the box: ``holder`` -- the command that took it
-    (the lock file); ``processes`` -- ``pid N (comm)`` of each process that
-    holds its descriptor now, a process a command left behind among them."""
+class LockHolder(Strict):
+    """What the lock's file says of the command that holds the box (DM-138):
+    its run, its verb, who ran it, since when, and the Panel's command when
+    it came from the queue. One line of JSON, written under the lock."""
 
-    def __init__(self, holder: str, processes: tuple[str, ...] = ()) -> None:
-        self.holder = holder
+    run_id: RunId
+    verb: Text
+    actor: Actor
+    since: Moment
+    command: CommandId | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+class BoxBusy(Exception):
+    """Another command holds the box. ``holder`` -- the command that took it,
+    as the lock's file says; ``None`` with ``unread``: ``starting`` -- the
+    file is empty, a command took the lock and is writing it; ``unreadable``
+    -- the file says something else (a machine of an earlier version holds
+    it): no holder is made up. ``processes`` -- ``pid N (comm)`` of each
+    process that holds its descriptor now, a process a command left behind
+    among them."""
+
+    def __init__(self, held: str, processes: tuple[str, ...] = ()) -> None:
+        self.held = held
         self.processes = processes
-        held = f"; held by {', '.join(processes)}" if processes else ""
-        super().__init__(f"the box is busy: {holder or 'a command is starting'}{held}")
+        self.holder: LockHolder | None = None
+        self.unread: Literal["starting", "unreadable"] | None = None
+        if not held.strip():
+            self.unread = "starting"
+            said = "a command is starting"
+        else:
+            try:
+                self.holder = LockHolder.model_validate_json(held)
+            except ValueError:
+                self.unread = "unreadable"
+                said = held.strip()
+            else:
+                by = f", command {self.holder.command}" if self.holder.command else ""
+                said = f"{self.holder.verb} {self.holder.run_id}{by}"
+        held_by = f"; held by {', '.join(processes)}" if processes else ""
+        super().__init__(f"the box is busy: {said}{held_by}")
 
 
 def holders(path: Path) -> tuple[str, ...]:
@@ -233,6 +266,11 @@ class JournalHeader(Strict):
         default=None, exclude_if=lambda value: value is None
     )
     composition_before: Composition
+    command: CommandId | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """The command of the Panel that started the run (DM-138): ``recover``
+    gives it to the verdict of a run that did not end."""
 
 
 Seq = Annotated[int, Field(ge=1)]
@@ -696,7 +734,9 @@ class Box:
 
     @contextmanager
     def lock(self, holder: str) -> Iterator[None]:
-        """Hold the box for one command; ``BoxBusy`` if another holds it."""
+        """Hold the box for one command; ``BoxBusy`` if another holds it.
+        ``holder`` is what the lock's file says while it is held: a command
+        writes its ``LockHolder`` as JSON (DM-138)."""
         for directory in (self.root, self.history, self.journals):
             directory.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
         fd = os.open(self.root / LOCK, os.O_RDWR | os.O_CREAT, _FILE_MODE)
@@ -982,4 +1022,5 @@ class Box:
             composition_after=after,
             secrets=secrets,
             catalog=catalog,
+            command=header.command,  # the Panel's command ended here too (DM-138)
         )
