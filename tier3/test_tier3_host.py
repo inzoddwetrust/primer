@@ -205,7 +205,8 @@ outcome = Plan(
     [StackSteps("pridem-host-policy", [Swap(fetched=fetched), memory], root=True)],
     mode="install", role="test", runner=SubprocessRunner(), sink=Sink(),
 ).run()
-print("OUTCOME " + json.dumps({"code": int(outcome.code), "steps": [
+print("OUTCOME " + json.dumps({"code": int(outcome.code),
+    "incomplete": [i.reason.code for i in outcome.incomplete], "steps": [
     {"name": r.name, "status": r.status, "verify": r.verify,
      "reason": r.reason.as_json() if r.reason is not None else None}
     for r in outcome.steps
@@ -216,7 +217,7 @@ box (DM-132); ``argv[2]`` -- a floor of memory planted for the refusal, or 0."""
 SWAPFILE = "/opt/pridem/host/swapfile"
 
 
-def _policy_passport(tmp: Path, swap: str) -> Path:
+def _policy_passport(tmp: Path, swap: str | None) -> Path:
     data = {
         "schema": 1,
         "version": 1,
@@ -235,11 +236,12 @@ def _policy_passport(tmp: Path, swap: str) -> Path:
             },
             "backup": {"enabled": False},
             "timers": {"gc": "daily"},
-            "host": {"swap": swap},
+            **({"host": {"swap": swap}} if swap is not None else {}),
         },
         "packages": {},
         "cloud": {},
     }
+    tmp.mkdir(parents=True, exist_ok=True)
     file = tmp / "passport.yaml"
     file.write_text(json.dumps(data), encoding="utf-8")  # JSON is YAML
     return file
@@ -262,7 +264,8 @@ def _swaps() -> list[str]:
 
 def test_probe_DM_132_swap_on_the_box_and_memory_refused(tmp_path: Path) -> None:
     """DM-132 on the runner. Measured first and printed (par0 14.3): the swap
-    the runner has, its memory, sshd and root's keys. Then: a swap switched on
+    the runner has, its memory, sshd and root's keys. FIX: without
+    ``policies.host`` the stack is green and its swap a fact. Then: a swap switched on
     is kept -- no file of the machine; with none on (the test, not the
     machine, switches the runner's off), the machine makes its own of the
     passport's size, in ``/etc/fstab`` once, and the repeat makes nothing.
@@ -293,11 +296,23 @@ def test_probe_DM_132_swap_on_the_box_and_memory_refused(tmp_path: Path) -> None
         "root_keys": keys.is_file() and bool(keys.read_text().strip()),
     }
     print("DM-132 runner:", json.dumps(measure))
+    # FIX: no policies.host, as every passport of tier 3 -- green, the swap of
+    # the runner a fact (its hoster's agent puts it in no fstab)
+    bare = _policy(_policy_passport(tmp_path / "bare", None))
+    assert bare["code"] == 0, bare
+    steps = bare["steps"]
+    assert isinstance(steps, list)
+    [swap] = [step for step in steps if step["name"] == "swap"]
+    assert swap["status"] == "ok" and swap["verify"]["wanted"] == "none", bare
     passport = _policy_passport(tmp_path, "1G")
     before = _swaps()
     if before:  # a swap on is kept: no file of the machine
         kept = _policy(passport)
-        assert kept["code"] == 0, kept
+        # with the field a swap in no fstab is exit 2, named (DM-132 FIX)
+        words = Path("/etc/fstab").read_text().split()
+        lost = [line.split()[0] for line in before if line.split()[0] not in words]
+        wanted = (2, ["swap:foreign-not-in-fstab"]) if lost else (0, [])
+        assert (kept["code"], kept["incomplete"]) == wanted, kept
         assert not Path(SWAPFILE).exists()
         assert _swaps() == before
         _run(["swapoff", "-a"])  # the test's hand, never the machine's

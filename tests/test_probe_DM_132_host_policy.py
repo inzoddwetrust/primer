@@ -408,6 +408,30 @@ def test_a_hand_made_swap_not_in_fstab_is_incomplete_and_kept(tmp_path: Path) ->
     assert left.reason == Code("swap:foreign-not-in-fstab", {"paths": [HAND]})
 
 
+def test_without_any_field_the_stack_only_says_what_it_sees(tmp_path: Path) -> None:
+    """DM-132 FIX (tier 3: every install of the blank ended at exit 2 -- the
+    runner's swap, switched on by its hoster's agent, is in no ``fstab``): no
+    ``policies.host`` -- the swap not in ``fstab`` and an ``sshd -T`` that
+    refuses are facts, nothing is left undone. The pair: with the field the
+    same swap is incomplete (``test_a_hand_made_swap_not_in_fstab_is_…``)."""
+    root, fetched = fetched_with(tmp_path, None)
+    table = fstab(root)
+    (root / SSHD).parent.mkdir(parents=True, exist_ok=True)
+    (root / SSHD).write_text("", encoding="utf-8")
+    meminfo(root, 15.3, 3)
+    runner_swap = ("/mnt/swapfile", "file", 3 * GIB)
+    refused = FakeCall(("sshd", "-T", *AS_ROOT), code=255)
+    with FakeRunner(swapon(runner_swap), swapon(runner_swap), refused) as runner:
+        outcome = run(host_policy_steps(root, fetched=fetched), runner)
+    assert outcome.code is ExitCode.OK, (outcome.steps, outcome.incomplete)
+    assert outcome.incomplete == ()
+    facts = {step.name: step.verify for step in outcome.steps}
+    assert facts["swap"]["not_in_fstab"] == ["/mnt/swapfile"]
+    assert facts["swap"]["wanted"] == "none"
+    assert facts["password_login"] == {"password": "unread"}
+    assert table.read_text() == FSTAB_TEXT and not (root / SWAPFILE).exists()
+
+
 def test_the_machine_s_swap_on_without_its_line_gets_it(tmp_path: Path) -> None:
     """An ``act`` cut after ``swapon``: the line is written, no second file."""
     root, fetched = fetched_with(tmp_path, {"swap": "1M"})

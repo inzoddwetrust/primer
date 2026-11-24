@@ -11,8 +11,11 @@ none. Its steps, in order:
   the machine -- counts and is never touched: no ``swapoff`` on any branch, a
   live swap is not resized. One smaller than the passport's is named in the
   fact (``short_by_gib``). One that is not in ``/etc/fstab`` is gone after a
-  reboot: the step is incomplete (exit 2) and names it -- except the
-  machine's own file, whose line the step writes. The machine's own swap is
+  reboot: the fact names it (``not_in_fstab``); with the field the step is
+  incomplete (exit 2), the passport asked for a swap the box may lose; without
+  it, a fact only -- no step of this stack leaves anything undone without its
+  field (DM-132 FIX: the runner's swap, made by its hoster's agent, is in no
+  ``fstab``). The machine's own file gets its line. The machine's own swap is
   the file ``/opt/pridem/host/swapfile``; a file of it not switched on (an
   ``act`` cut short) is made again whole. Room: the disk keeps
   ``MIN_FREE_DISK_GIB`` beside the swap, checked before the file is made
@@ -23,7 +26,8 @@ none. Its steps, in order:
   the field. It only reads; ``doctor`` names nothing of it.
 - ``password_login`` -- with ``policies.host.password_login: closed``, the
   login by password is closed, only when root has a key: see
-  ``PasswordLogin``. Without the field nothing is touched.
+  ``PasswordLogin``. Without the field nothing is touched and the fact says
+  ``open``, ``closed`` or ``unread``, never more.
 """
 
 import os
@@ -226,6 +230,8 @@ class Swap(Step):
             fact["short_by_gib"] = _gib(size_bytes(wanted) - total)
         lost = sorted(path for path, _, _ in on if path not in in_fstab)
         if lost:
+            fact["not_in_fstab"] = list[Json](lost)
+        if lost and wanted is not None:  # without the field: a fact, no more
             params: dict[str, Json] = {"paths": list[Json](lost)}
             return Verified(fact, local_code("foreign-not-in-fstab", params))
         return Verified(fact)
