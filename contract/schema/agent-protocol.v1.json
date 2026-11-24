@@ -190,7 +190,7 @@
     },
     "Command": {
       "additionalProperties": false,
-      "description": "``GET commands/next``: a verb of the machine and its arguments, as the\nconsole would run it; ``confirmed_at`` -- when a person confirmed a\ndestructive one. The agent checks it against the verb's own schema.",
+      "description": "``GET commands/next``: a verb of the machine and its arguments, as the\nconsole would run it; ``expires_at`` -- after it the command is not taken\n(``PRIMER-PANEL-TZ-2`` 6: the Panel expires it); ``confirmed_at`` -- when a\nperson confirmed a destructive one, before ``expires_at``. The agent checks\nit against the verb's own schema. The confirmation is bound to the server\nby the verb itself: a destructive verb of the machine names the server in\nits ``--confirm``.",
       "properties": {
         "args": {
           "additionalProperties": {
@@ -202,6 +202,11 @@
         "confirmed_at": {
           "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
           "title": "Confirmed At",
+          "type": "string"
+        },
+        "expires_at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+          "title": "Expires At",
           "type": "string"
         },
         "id": {
@@ -218,7 +223,8 @@
       "required": [
         "id",
         "verb",
-        "args"
+        "args",
+        "expires_at"
       ],
       "title": "Command",
       "type": "object"
@@ -299,7 +305,8 @@
           "enum": [
             "verb-unknown",
             "args-refused",
-            "confirmation-missing"
+            "confirmation-missing",
+            "expired"
           ],
           "title": "Code",
           "type": "string"
@@ -1402,7 +1409,8 @@
             "protocol-too-new",
             "clock-skew",
             "signature-bad",
-            "box-unknown"
+            "box-unknown",
+            "run-foreign"
           ],
           "title": "Code",
           "type": "string"
@@ -1416,7 +1424,7 @@
     },
     "RegisterRequest": {
       "additionalProperties": false,
-      "description": "``POST register``: the one-time token and what the Panel checks it with\n-- the server's name, free in the whole Panel; the product's repository,\nthe project's; the public half of the box's key.",
+      "description": "``POST register``: the one-time token and what the Panel checks it with\n-- the server's name, free in the whole Panel; the product's repository,\nthe project's; the public half of the box's key. The token is a secret:\nhidden in ``repr`` and in the text of any error, given by its JSON form\nalone.",
       "properties": {
         "box_key_public": {
           "minLength": 1,
@@ -1448,9 +1456,11 @@
           "type": "string"
         },
         "token": {
-          "minLength": 1,
+          "format": "password",
+          "minLength": 16,
           "title": "Token",
-          "type": "string"
+          "type": "string",
+          "writeOnly": true
         }
       },
       "required": [
@@ -1469,7 +1479,7 @@
       "description": "The box's ``box_id``, where the agent goes from now on, and its\nintervals: a light heartbeat, the full state, the long-poll.",
       "properties": {
         "agent_url": {
-          "pattern": "^https://[^\\s]+/agent/v1/$",
+          "pattern": "^https://(?:[a-z0-9-]+\\.)*[a-z0-9-]+/agent/v1/$",
           "title": "Agent Url",
           "type": "string"
         },
@@ -1479,17 +1489,20 @@
           "type": "string"
         },
         "full_state_s": {
-          "minimum": 1,
+          "maximum": 3600,
+          "minimum": 60,
           "title": "Full State S",
           "type": "integer"
         },
         "heartbeat_s": {
-          "minimum": 1,
+          "maximum": 60,
+          "minimum": 5,
           "title": "Heartbeat S",
           "type": "integer"
         },
         "poll_s": {
-          "minimum": 1,
+          "maximum": 85,
+          "minimum": 5,
           "title": "Poll S",
           "type": "integer"
         }

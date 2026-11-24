@@ -19,7 +19,7 @@ import sys
 from collections.abc import Sequence
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import ConfigDict, Field, TypeAdapter
 
 from pridem.contract import SCHEMA_DIR, ContractSchema, Strict, schema_text
 
@@ -176,6 +176,8 @@ class BoxSnapshot(Strict):
     told apart: the lock keeps the name of a verb, not a ``run_id``. The
     next command under the lock (``recover``) gives a dead run its verdict.
     """
+
+    model_config = ConfigDict(serialize_by_alias=True, validate_by_alias=True)
 
     schema_: Literal[1] = Field(alias="schema")
     measured_at: Moment

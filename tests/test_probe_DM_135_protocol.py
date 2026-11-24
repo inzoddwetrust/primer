@@ -69,7 +69,11 @@ def run(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Body, list[B
 
 
 def _samples(verdict: Body, lines: list[Body]) -> dict[str, Body]:
-    """A whole body of every message."""
+    """A whole body of every message.
+
+    Changed by DM-189, on the dispatcher's word 24.11: the token is 16
+    characters or more (a ``SecretStr`` of that length), ``Command`` carries
+    ``expires_at``, required now."""
     envelope: Body = {
         "verdict": verdict,
         "signature": "c2lnbmF0dXJl",
@@ -79,7 +83,7 @@ def _samples(verdict: Body, lines: list[Body]) -> dict[str, Body]:
     return {
         "Refusal": {"code": "token-used"},
         "RegisterRequest": {
-            "token": "one-time-token",
+            "token": "one-time-token-of-the-panel",
             "server_name": "velo-dev",
             "role": "test",
             "product_repo": "git@github.com:a/velo.git",
@@ -105,6 +109,7 @@ def _samples(verdict: Body, lines: list[Body]) -> dict[str, Body]:
             "id": "cmd-1",
             "verb": "update",
             "args": {},
+            "expires_at": "2026-11-24T10:10:00Z",
             "confirmed_at": "2026-11-24T10:00:00Z",
         },
         "CommandRefusal": {"code": "args-refused"},

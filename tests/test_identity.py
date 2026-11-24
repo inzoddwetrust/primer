@@ -583,7 +583,10 @@ def test_the_public_half_is_32_raw_bytes_of_the_key(
 
 
 class _PanelHandler(BaseHTTPRequestHandler):
-    """A Panel on the loopback: the registration's path and header, 201."""
+    """A Panel on the loopback: the registration's path and header, 201.
+
+    Changed by DM-189: ``agent_url`` is on the loopback's host -- ``register``
+    holds the host of ``agent_url`` and of ``--panel`` the same."""
 
     seen: list[tuple[str, str, dict[str, object]]] = []
 
@@ -591,7 +594,7 @@ class _PanelHandler(BaseHTTPRequestHandler):
         length = int(self.headers["Content-Length"])
         body = json.loads(self.rfile.read(length))
         self.seen.append((self.path, self.headers[PROTOCOL_HEADER], body))
-        answer = _created().body
+        answer = _created(agent_url="https://127.0.0.1/agent/v1/").body
         self.send_response(201)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(answer)))

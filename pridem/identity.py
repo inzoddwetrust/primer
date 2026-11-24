@@ -49,6 +49,7 @@ from pridem.protocol import (
     PROTOCOL_VERSION,
     SIGNATURE_HEADER,
     TIME_HEADER,
+    AgentUrl,
     RegisterResponse,
     signing_string,
     verdict_bytes,
@@ -84,7 +85,7 @@ class Registration(Strict):
     Panel it came from and when."""
 
     box_id: Text
-    agent_url: Annotated[str, Field(pattern=r"^https://[^\s]+/agent/v1/$")]
+    agent_url: AgentUrl
     heartbeat_s: Annotated[int, Field(ge=1)]
     full_state_s: Annotated[int, Field(ge=1)]
     poll_s: Annotated[int, Field(ge=1)]

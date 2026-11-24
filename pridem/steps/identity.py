@@ -14,7 +14,9 @@ protocol's version in its header, and keeps the answer in
 The Panel's refusals are the step's codes one to one; a Panel that does not
 answer is ``unreachable {cause}``; any other answer -- a 201 that is not a
 ``RegisterResponse`` of contract 4 (an unknown field, a ``null``, an
-``agent_url`` not ``https``), the Panel's own 422 to a body it does not read,
+``agent_url`` not of its form, intervals out of their bounds) or whose
+``agent_url`` names another host than the Panel registered with (DM-189), the
+Panel's own 422 to a body it does not read,
 a 5xx, a refusal no registration gets -- is ``answer-unread {status}``. One
 request, no repeat: the agent's repeats are its own (``PRIMER-PANEL-TZ-2``
 10, DM-141).
@@ -59,7 +61,7 @@ from pathlib import Path
 from typing import ClassVar, Literal, Protocol
 from urllib.parse import urlsplit
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from pridem.identity import (
     KeyDamaged,
@@ -350,7 +352,7 @@ class Register(Step):
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         seed = load_seed(self.root, self.owner)  # box_key read it back before
         asked = RegisterRequest(
-            token=self.token,
+            token=SecretStr(self.token),
             server_name=self.applicant.server_name,
             role=self.applicant.role,
             product_repo=self.applicant.product_repo,
@@ -367,6 +369,8 @@ class Register(Step):
         except PanelUnreachable as unreachable:
             raise StepFailed("unreachable", {"cause": unreachable.cause}) from None
         registered = _answered(answer)
+        if urlsplit(registered.agent_url).hostname != urlsplit(self.panel).hostname:
+            raise StepFailed("answer-unread", {"status": answer.status})
         at = _moment(self.now())
         write_registration(self.root, registration_of(registered, self.panel, at))
 

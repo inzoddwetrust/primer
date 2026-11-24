@@ -7,8 +7,9 @@ header first, the body read strictly as contract 4 (the Panel's own 422
 otherwise), the public half decoded as 32 raw bytes of an ed25519 key
 (``cryptography``), then the token -- unknown, used, expired -- the server's
 name free in the whole Panel and the product's repository the project's. A
-registration that holds is 201 with a ``RegisterResponse``; a refusal is
-``Refusal {code}`` with its status. Every request is kept as it came.
+registration that holds is 201 with a ``RegisterResponse`` whose ``agent_url``
+is on the host the request went to (DM-189: ``register`` holds them the same);
+a refusal is ``Refusal {code}`` with its status. Every request is kept as it came.
 
 ``ScriptedPanel`` answers whatever the test gives it, ``Unreachable`` never
 answers. ``register`` runs the verb through the command line on a box at
@@ -25,6 +26,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 import yaml
@@ -126,23 +128,24 @@ class FakePanel:
         if len(raw) != 32:
             return _invalid()
         Ed25519PublicKey.from_public_bytes(raw)
-        if asked.token not in self.repo:
+        token = asked.token.get_secret_value()
+        if token not in self.repo:
             return refused("token-unknown")
-        if asked.token in self.used:
+        if token in self.used:
             return refused("token-used")
-        if asked.token in self.expired:
+        if token in self.expired:
             return refused("token-expired")
         if asked.server_name in self.names:
             return refused("name-taken")
-        if asked.product_repo != self.repo[asked.token]:
+        if asked.product_repo != self.repo[token]:
             return refused("product-mismatch")
         box_id = f"box-{len(self.keys) + 1}"
         self.keys[box_id] = raw
         self.names.add(asked.server_name)
-        self.used.add(asked.token)
+        self.used.add(token)
         answer = RegisterResponse(
             box_id=box_id,
-            agent_url=AGENT_URL,
+            agent_url=f"https://{urlsplit(url).hostname}/agent/v1/",
             heartbeat_s=30,
             full_state_s=300,
             poll_s=60,

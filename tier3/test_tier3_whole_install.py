@@ -3553,15 +3553,16 @@ class _RegisterPanel(BaseHTTPRequestHandler):
         )
         asked = RegisterRequest.model_validate_json(raw)
         assert len(base64.b64decode(asked.box_key_public, validate=True)) == 32
-        if asked.token != _TOKEN:
+        token = asked.token.get_secret_value()
+        if token != _TOKEN:
             self._answer(404, Refusal(code="token-unknown").model_dump_json())
-        elif asked.token in self.used:
+        elif token in self.used:
             self._answer(410, Refusal(code="token-used").model_dump_json())
         else:
-            self.used.add(asked.token)
+            self.used.add(token)
             answer = RegisterResponse(
                 box_id="tier3-box",
-                agent_url="https://api.primer.team/agent/v1/",
+                agent_url="https://127.0.0.1/agent/v1/",
                 heartbeat_s=30,
                 full_state_s=300,
                 poll_s=60,
@@ -3620,7 +3621,12 @@ def test_probe_DM_139_register_on_the_runner() -> None:
     key (not minted again), ``box_id`` written 0600; the token again --
     ``register:already``, no request. The token is in no verdict and no
     journal. Measured into the run's journal (par0 14.3): what the Panel got
-    and the time of each registration."""
+    and the time of each registration.
+
+    Changed by DM-189, on the dispatcher's word 24.11: the Panel on the
+    loopback answers ``agent_url`` on its own host, ``https://127.0.0.1/agent/
+    v1/`` -- ``register`` holds the host of ``agent_url`` and of ``--panel``
+    the same; it reads the token, a ``SecretStr`` now, by its value."""
     agent = Path("/opt/pridem/agent")
     assert Path("/opt/pridem/passport.yaml").is_file(), "the install runs first"
     assert not agent.exists(), "no registration before this probe"
