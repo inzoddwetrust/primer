@@ -206,16 +206,21 @@ def test_status_names_its_run_in_the_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``status`` takes the lock as every command with a verdict: the lock's
-    file is its ``LockHolder`` -- verb ``status``, the run of its verdict."""
+    file is its ``LockHolder`` -- verb ``status``, the run of its verdict.
+
+    Changed by DM-183: ``status._verdict`` takes the box's secrets, read
+    under the lock (``known``); the stand-in passes them on."""
     import pridem.verbs.status as status
 
     blank_box(tmp_path)
     seen: list[str] = []
     real = status._verdict
 
-    def looking(box: Box, err: object, held: LockHolder, started: datetime) -> Verdict:
+    def looking(
+        box: Box, err: object, held: LockHolder, started: datetime, known: object
+    ) -> Verdict:
         seen.append((tmp_path / "opt" / "pridem" / "lock").read_text())
-        return real(box, err, held, started)  # type: ignore[arg-type]
+        return real(box, err, held, started, known)  # type: ignore[arg-type]
 
     monkeypatch.setattr(status, "_verdict", looking)
     code, out, _ = _cli(tmp_path, ["--json", "--command", COMMAND, "status"])

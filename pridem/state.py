@@ -89,6 +89,7 @@ from pridem.events import (
     RecipientNeeded,
     RunMode,
     Secrets,
+    SecretsUnread,
     StepFinished,
     StepRecord,
     StepStarted,
@@ -127,7 +128,9 @@ class RunFinished:
     result: Literal["green", "incomplete", "red"]
 
 
-JournalEvent = StepStarted | StepFinished | LogLine | KeyNeeded | RecipientNeeded
+JournalEvent = (
+    StepStarted | StepFinished | LogLine | KeyNeeded | RecipientNeeded | SecretsUnread
+)
 
 
 class LockHolder(Strict):
@@ -334,6 +337,12 @@ class RecipientNeededNotice(Strict):
     wait_s: float
 
 
+class SecretsUnreadNotice(Strict):
+    kind: Literal["secrets_unread"]
+    stack: Text
+    why: Literal["minted", "env", "primer-yaml"]
+
+
 class NoticeLine(Strict):
     """What the console showed a person (a key to add): ``notice`` holds it."""
 
@@ -341,7 +350,8 @@ class NoticeLine(Strict):
     seq: Seq
     at: At
     notice: Annotated[
-        KeyNeededNotice | RecipientNeededNotice, Field(discriminator="kind")
+        KeyNeededNotice | RecipientNeededNotice | SecretsUnreadNotice,
+        Field(discriminator="kind"),
     ]
 
 
@@ -460,6 +470,15 @@ def _event_line(event: JournalEvent, secrets: Secrets) -> dict[str, Json]:
                 )
             ),
         }
+    elif isinstance(event, SecretsUnread):
+        raw = {
+            "event": "notice",
+            "notice": {
+                "kind": "secrets_unread",
+                "stack": event.stack,
+                "why": event.why,
+            },
+        }
     elif isinstance(event, RecipientNeeded):
         raw = {
             "event": "notice",
@@ -505,6 +524,8 @@ def _event(
 ) -> JournalEvent:
     if isinstance(line, NoticeLine):
         found = line.notice
+        if isinstance(found, SecretsUnreadNotice):
+            return SecretsUnread(found.stack, found.why)
         if isinstance(found, KeyNeededNotice):
             return KeyNeeded(
                 found.repo,

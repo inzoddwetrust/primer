@@ -3769,6 +3769,48 @@ BOT_TOKEN = "dm86-asked-" + "q" * 24
 """The service's ``asked`` value its seam gives the product (pass 4b)."""
 
 
+DM183_VERB = """\
+  dm183-env:                          # DM-183: prints the app's environment
+    run: env
+    service: app
+"""
+
+
+def test_tier3_a_command_plan_prints_no_secret_of_the_box(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-183, the last of group ``g``, on the box the earlier tests left: a
+    copy of the blank with a verb that prints the app's environment -- the
+    database's password, minted by the machine, in it. Its journal and its
+    verdict hold no minted value of the box; the pair: the environment's
+    plain part (``PATH=``) is there. Measured into the run's output first
+    (par0 14.3): the number of lines the verb printed, never a value."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    copy = _copy_of_blank(tmp_path, mirror, "dm183-env")
+    _replace_once(copy / "primer.yaml", "  set-setting:", DM183_VERB + "  set-setting:")
+    _push(copy, mirror, "DM-183: a verb that prints the app's environment")
+    verdict, printed = _install(_passport(tmp_path, version=46), "update")
+    assert verdict.result == "green", printed
+    verdict, printed = _verdict_of("verb", "dm183-env")
+    assert verdict.result == "green", printed
+    journal = (Path("/opt/pridem") / str(verdict.log_ref)).read_text(encoding="utf-8")
+    history = (Path("/opt/pridem") / "history" / f"{verdict.run_id}.json").read_text()
+    minted = [
+        str(value)
+        for value in yaml.safe_load(MINTED.read_text(encoding="utf-8")).values()
+    ]
+    said = [
+        json.loads(line).get("line")
+        for line in journal.splitlines()
+        if '"project_verb"' in line and '"log"' in line
+    ]
+    print("DM-183 measure:", {"lines the verb printed": len(said)})
+    assert minted, "the blank mints its database's password"
+    for value in minted:
+        assert value not in journal and value not in history  # never printed
+    assert any(str(line).startswith("PATH=") for line in said), len(said)
+
+
 JOB_ONCE = "files-init"
 JOB_ONCE_MARK = "/srv/files/dm126-init"
 

@@ -30,15 +30,13 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import SecretStr
 
-from pridem.contract import SECRET_MIN_LENGTH, Strict
+from pridem.contract import Strict
 from pridem.events import Json, Secrets
 from pridem.interrupt import Interrupted
 from pridem.plan import StackSteps
 from pridem.runner import Interactive, RunnerError, Stream
 from pridem.stacks import names as machine
-from pridem.stacks.env import MINTED_FILE, read_minted
 from pridem.stacks.loader import ContractError
 from pridem.stacks.schema import Ident, Product, Seed, Service, load_primer_yaml
 from pridem.state import Box
@@ -64,10 +62,15 @@ from pridem.steps.data import (
 from pridem.steps.finalize import current_link
 from pridem.steps.gc import CONNECT_DIR
 from pridem.steps.migrate import StartStopped, StopForMigrate, Stopped
-from pridem.steps.passport import passport_secrets
 from pridem.steps.tests import database
 from pridem.verbs.base import Context, NoArgs, Refused, Verb
-from pridem.verbs.run import Planned, Session, read_copy, run_plan_verb
+from pridem.verbs.run import (
+    Planned,
+    Session,
+    box_secrets,
+    read_copy,
+    run_plan_verb,
+)
 
 
 class DbArgs(Strict):
@@ -599,25 +602,6 @@ class VerbArgs(Strict):
     confirm: str | None = None
 
 
-def box_secrets(ctx: Context) -> list[str]:
-    """The known secrets of the box (contract 3 rule 7): ``asked`` and ``tls``
-    of the passport, ``minted`` of every stack the box runs."""
-    found: list[str] = []
-    passport = read_copy(ctx).passport
-    if passport is not None:
-        found += [secret.get_secret_value() for secret in passport_secrets(passport)]
-    state = Box(ctx.root).read_state()
-    for stack in sorted(state.current if state is not None else ()):
-        path = ctx.fs_root / "opt" / stack / "env" / MINTED_FILE
-        try:
-            found += list(read_minted(path).values())
-        except (StepFailed, OSError):
-            raise Refused(
-                f"verb: the minted secrets of {stack} cannot be read"
-            ) from None
-    return [secret for secret in found if secret.strip()]
-
-
 def _values(verb: str, declared: list[str], pairs: list[str]) -> dict[str, str]:
     """``<arg>=<value>`` of each declared argument, once, none other, none
     empty -- refused before the run otherwise."""
@@ -665,9 +649,12 @@ def _verb(args: Strict, ctx: Context) -> int:
             raise Refused(f"verb {name}: not for the role {role}")
         if declared.destructive:
             _confirmed(ctx, f"verb {name}", confirm)
-        secrets = set(box_secrets(ctx))
+        known = box_secrets(ctx, read_copy(ctx).passport)
+        if known.unread:
+            stack, why = known.unread[0]
+            raise Refused(f"verb: the secrets of {stack} cannot be read ({why})")
         for key, value in values.items():
-            if value in secrets or value.strip() in secrets:
+            if value in known.every or value.strip() in known.every:
                 raise Refused(f"verb {name}: {key} is a secret of the box")
 
     service = verb_service(made, args.name)
@@ -791,9 +778,11 @@ def _logs(args: Strict, ctx: Context) -> int:
         raise Refused("logs: --tail is a number of lines")
     tail = int(args.tail) if args.tail is not None else None
     compose = _entry(ctx, args.stack)
-    secrets = Secrets(
-        SecretStr(s) for s in box_secrets(ctx) if len(s) >= SECRET_MIN_LENGTH
-    )
+    known = box_secrets(ctx, read_copy(ctx).passport)
+    if known.unread:
+        stack, why = known.unread[0]
+        raise Refused(f"logs: the secrets of {stack} cannot be read ({why})")
+    secrets = Secrets(known.values)
     argv = ["logs", "--no-color", "--no-log-prefix", "--timestamps"]
     if args.follow:
         # KNOWN CEILING (DM-107): with -f, --tail N is N lines of each service.

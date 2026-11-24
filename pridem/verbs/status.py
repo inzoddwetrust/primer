@@ -15,7 +15,7 @@ from typing import TextIO
 
 from pridem import __version__
 from pridem.contract import Strict
-from pridem.events import Incomplete, PlanOutcome, Secrets, said
+from pridem.events import Incomplete, PlanOutcome, Secrets, SecretsUnread, said
 from pridem.report.catalog import ENGLISH
 from pridem.report.codes import ExitCode
 from pridem.report.render import closing, render_json
@@ -23,25 +23,31 @@ from pridem.report.schema import Verdict, build_verdict
 from pridem.state import Box, BoxBusy, JournalHeader, LockHolder
 from pridem.verbs.base import Context, NoArgs, Verb
 from pridem.verbs.run import (
+    BoxSecrets,
+    box_secrets,
     close_journal,
     end_journal,
     finished_at,
     found_on_box,
     lock_holder,
+    read_copy,
     refuse_busy,
     sync_journal,
 )
 from pridem.verbs.state import console_lines, snapshot
 
-NO_SECRETS = Secrets(())  # no passport, no minted secrets on a fresh box
+NO_SECRETS = Secrets(())  # the verdict of status prints no command's line
 
 
-def _verdict(box: Box, err: TextIO, held: LockHolder, started: datetime) -> Verdict:
+def _verdict(
+    box: Box, err: TextIO, held: LockHolder, started: datetime, known: BoxSecrets
+) -> Verdict:
     """Everything ``status`` does once it holds the lock: what it finds in
     quarantine and a journal that does not reach the disk are its
     ``incomplete``; after its verdict the journal ends with ``run_finished``
     (DM-137) -- a failure to is one line to ``err``."""
-    recovery = box.recover(NO_SECRETS, __version__, ENGLISH)
+    secrets = Secrets(known.values)  # every secret of the box (DM-183)
+    recovery = box.recover(secrets, __version__, ENGLISH)
     state = box.read_state()
     composition = dict(state.composition) if state else {"pridem": __version__}
     run_id = held.run_id
@@ -58,7 +64,9 @@ def _verdict(box: Box, err: TextIO, held: LockHolder, started: datetime) -> Verd
             **({} if held.command is None else {"command": held.command}),
         }
     )
-    journal = box.open_journal(header, NO_SECRETS)
+    journal = box.open_journal(header, secrets)
+    for stack, why in known.unread:  # status goes on: it mends nothing else
+        journal.notice(SecretsUnread(stack, why))
     try:
         finished = finished_at(started, journal)
         lost = sync_journal(journal)
@@ -106,7 +114,8 @@ def _run(args: Strict, ctx: Context) -> int:
     held, started = lock_holder(ctx, box, "status")
     try:
         with box.lock(held.model_dump_json()):
-            verdict = _verdict(box, ctx.err, held, started)
+            known = box_secrets(ctx, read_copy(ctx).passport)
+            verdict = _verdict(box, ctx.err, held, started, known)
     except BoxBusy as busy:  # raised only by taking the lock
         raise refuse_busy(ctx, busy) from None
     if ctx.json:

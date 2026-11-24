@@ -13,7 +13,7 @@ from compose_support import ENTRY, REF
 from env_support import context
 from plan_support import ListSink
 
-from pridem.events import Code, PlanOutcome
+from pridem.events import Code, PlanOutcome, Secrets
 from pridem.plan import Plan, StackSteps
 from pridem.report.codes import ExitCode
 from pridem.runner import (
@@ -81,9 +81,13 @@ def writes(host: Path, words: list[str]) -> int:
 
 class Container(FakeRunner):
     """git runs for real; ``docker compose ... run`` of the app is the planted
-    container: ``dump-openapi`` prints ``printed`` (exit ``code``), the other
-    command runs ``generate`` on the mounted directory. Every docker argv is
-    kept, literally."""
+    container of ``openapi``: ``dump-openapi`` prints ``printed`` (exit
+    ``code``); ``docker run`` of the app's image is the planted ``generate``
+    on the mounted directory. Every docker argv is kept, literally.
+
+    Changed by DM-183: ``generate`` is a throwaway ``docker run`` of the
+    release's app image -- no network, no env of the app -- its words after
+    the image."""
 
     def __init__(
         self,
@@ -117,7 +121,10 @@ class Container(FakeRunner):
                 argv, expect=expect, timeout=timeout, cwd=cwd, env=env, on_line=on_line
             )
         self.docker.append(list(argv))
-        words = list(argv[argv.index("app") + 1 :])
+        if tuple(argv[:2]) == ("docker", "run"):  # generate (DM-183)
+            words = list(argv[argv.index("--") + 2 :])
+        else:
+            words = list(argv[argv.index("app") + 1 :])
         if words == ["dump-openapi"]:
             for line in self.printed:
                 on_line(Stream.STDOUT, line, False)
@@ -201,6 +208,7 @@ def step_of(
         git_dir=bare,
         root=tmp,
         env=GIT_ENV,
+        secrets=Secrets(()),
     )
 
 
@@ -240,7 +248,10 @@ def test_probe_DM_63_types_are_made_by_the_products_command(tmp_path: Path) -> N
     in a throwaway container of the app on the deploy's files -- and one commit
     of ``out`` lands on top of the deployed commit, by the product's bot, with
     the deployed commit's ``Task`` and the machine's trailer. The pair: types
-    that did not change -- no commit."""
+    that did not change -- no commit.
+
+    Changed by DM-183, on the dispatcher's word 24.11: generate is a throwaway
+    ``docker run`` without the app's network and env."""
     root = tmp_path / "changed"
     step, remote, deployed = types(root, "test", message="Add the API\n\nTask: DM-5")
     with Container() as runner:
@@ -272,8 +283,10 @@ def test_probe_DM_63_types_are_made_by_the_products_command(tmp_path: Path) -> N
     assert runner.docker[:2] == [
         [*project, "run", "--rm", "--no-deps", "-T", "--", "app", "dump-openapi"],
         [
-            *project, "run", "--rm", "--no-deps", "-T", "-v", f"{host}:/primer/types",
-            "--", "app", "gen-types", "--in", "/primer/types/openapi.json",
+            "docker", "run", "--rm", "--network", "none", "--cap-drop", "ALL",
+            "--pull", "never", "--label", "pridem.stack=blank",
+            "-v", f"{host}:/primer/types", "--", f"blank-app:{deployed[:12]}",
+            "gen-types", "--in", "/primer/types/openapi.json",
             "--out=/primer/types/out",
         ],
     ]  # fmt: skip
@@ -295,7 +308,10 @@ def test_probe_DM_19_types_commit_only_on_test_and_only_types_out(
     document is the product's ``openapi`` command and the types its
     ``generate`` (the owner's decision of 05.11), not HTTP and a
     ``Generator``; on prod a stale file is ``incomplete`` -- the step runs
-    after ``finalize`` -- not red."""
+    after ``finalize`` -- not red.
+
+    Changed by DM-183, on the dispatcher's word 24.11: generate is a throwaway
+    ``docker run`` without the app's network and env."""
     step, remote, _ = types(tmp_path, "test")
     before = head(remote)
     with Container() as runner:
@@ -324,7 +340,11 @@ def test_every_task_of_the_deployed_commit_and_none_more_is_carried(
 ) -> None:
     """No ``Task`` on the deployed commit: none on the types commit -- the set
     ``stand`` reads is empty for both; two of them: both, one line each, in
-    the one paragraph of trailers."""
+    the one paragraph of trailers.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, remote, _ = types(tmp_path / "none", "test")
     with Container() as runner:
         run(step, runner)
@@ -342,7 +362,11 @@ def test_a_branch_moved_meanwhile_is_left_undone_never_forced(
 ) -> None:
     """The remote's branch moved after the deployed commit: the types commit,
     made on the deployed one, is no fast-forward -- ``behind``, left undone;
-    the remote keeps what it had."""
+    the remote keeps what it had.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, remote, deployed = types(tmp_path, "test")
     work = tmp_path / "origin"
     (work / "README").write_text("moved\n")
@@ -359,7 +383,11 @@ def test_the_types_commit_is_made_on_the_deployed_commit_not_the_branch(
     tmp_path: Path,
 ) -> None:
     """The box's bare repository already has a newer commit of the branch than
-    the deployed one: the types commit's parent is the deployed commit."""
+    the deployed one: the types commit's parent is the deployed commit.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     bare, release, remote, deployed = repos(tmp_path)
     work = tmp_path / "origin"
     (work / "README").write_text("newer\n")
@@ -385,6 +413,9 @@ def test_the_types_commit_is_made_on_the_deployed_commit_not_the_branch(
 def test_an_openapi_command_that_gives_no_document_is_left_undone(
     tmp_path: Path, printed: tuple[str, ...], code: int, refused: Code
 ) -> None:
+    """Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, remote, _ = types(tmp_path, "test")
     before = head(remote)
     with Container(printed=printed, code=code) as runner:
@@ -396,6 +427,9 @@ def test_an_openapi_command_that_gives_no_document_is_left_undone(
 def test_a_document_over_the_bound_is_not_read_whole(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     monkeypatch.setattr(types_module, "OPENAPI_LIMIT", len(OPENAPI) - 1)
     step, _, _ = types(tmp_path, "test")
     with Container() as runner:
@@ -428,6 +462,9 @@ def _link(host: Path, words: list[str]) -> int:
 def test_a_generate_command_that_gives_no_types_is_left_undone(
     tmp_path: Path, generate: Generate, refused: Code | None
 ) -> None:
+    """Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, remote, _ = types(tmp_path, "test")
     before = head(remote)
     with Container(generate=generate) as runner:
@@ -443,7 +480,11 @@ def test_types_out_through_a_symlink_of_the_product_is_refused(
 ) -> None:
     """DM-78: the deployed commit makes ``frontend/src`` a symlink out of the
     tree -- root's write of ``out`` would land there. ``types:path-outside``,
-    left undone, and the place outside is untouched. The pair: the probe."""
+    left undone, and the place outside is untouched. The pair: the probe.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     bare, release, remote, _ = repos(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -494,7 +535,11 @@ def test_a_refused_push_says_why(
 ) -> None:
     """The push goes through the write key's alias, ``--porcelain``, never
     ``--force`` (the argv is literal): a rejected ref is ``behind``, ssh's own
-    failure ``unreachable``, any other refusal ``write-refused``."""
+    failure ``unreachable``, any other refusal ``write-refused``.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step = step_of(
         tmp_path, tmp_path, tmp_path, "c" * 40, "git@github.com:acme/blank.git", "test"
     )

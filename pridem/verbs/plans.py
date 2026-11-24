@@ -737,6 +737,7 @@ def deploy_plan(
                 push_to=passport.product.repo,
                 git_dir=bare,
                 root=root,
+                secrets=session.secrets,  # none goes into the types (DM-183)
             )
         )
         return made

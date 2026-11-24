@@ -3,10 +3,17 @@
 
 ``types.openapi`` prints the OpenAPI document to stdout; ``types.generate``
 turns the file ``<openapi>`` into the file ``<out>`` -- paths the machine puts
-in. Both run in a throwaway container of the release's app image with the
-app's environment, as ``migrate`` does: ``compose run --rm --no-deps -T <app>``
-on the deploy's files. The schema is never read over HTTP. The document is
-kept to ``OPENAPI_LIMIT`` and must be a JSON object; ``generate`` gets a
+in. ``openapi`` runs in a throwaway container of the release's app image with
+the app's environment, as ``migrate`` does: ``compose run --rm --no-deps -T
+<app>`` on the deploy's files -- the app reads its settings to make the
+document. ``generate`` runs with none of it (DM-183, S7): ``docker run`` of the
+same image with no network, no capability, never a pull and no env file -- the
+text it writes is committed and pushed, and the app's environment is no
+business of it. A document, or a text of ``out``, with a known secret of the
+box in it is refused (``secret-in-openapi``, ``secret-in-out``) before anything
+is written or committed; the value is never named. The schema is never read
+over HTTP. The document is kept to ``OPENAPI_LIMIT`` and must be a JSON
+object; ``generate`` gets a
 directory of the host (``/opt/<stack>/types-run``) mounted at
 ``/primer/types`` with ``openapi.json`` in it, and writes ``out`` there; the
 machine takes that file without following a link, to ``OPENAPI_LIMIT``, and
@@ -51,11 +58,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import ClassVar
 
-from pridem.events import Json
+from pridem.events import Json, Secrets
 from pridem.files import PathOutside, atomic_write, resolve_inside
 from pridem.runner import Stream
 from pridem.stacks.schema import Product, Service
 from pridem.steps.base import (
+    NO_PULL,
+    THROWAWAY,
     CheckResult,
     LeftUndone,
     Mode,
@@ -66,7 +75,7 @@ from pridem.steps.base import (
     Verified,
     local_code,
 )
-from pridem.steps.compose import ComposeStack
+from pridem.steps.compose import ComposeStack, release_image
 from pridem.steps.git import Repo, git_env, repo, run_git
 from pridem.steps.keys import SSH_OWN
 
@@ -123,6 +132,8 @@ class Types(LeftUndone, Step):
         "openapi-not-json": "the app's openapi command printed no JSON object",
         "openapi-too-big": "the app's openapi command printed over {limit} bytes",
         "generate-failed": "the types' generate command ended with {exit}",
+        "secret-in-openapi": "the app's OpenAPI document holds a secret of the box",
+        "secret-in-out": "the generated types hold a secret of the box",
         "generate-missing": "the types' generate command wrote no {path}",
         "generate-unsafe": "the file the generate command wrote is not taken: {cause}",
         "stale": "{path} of the release is not what the app's API gives",
@@ -152,6 +163,7 @@ class Types(LeftUndone, Step):
         git_dir: Path,
         root: Path = Path("/"),
         env: Mapping[str, str] | None = None,
+        secrets: Secrets,
     ) -> None:
         self.compose = ComposeStack(
             stack, entry, release, ref, commit, root, staged=True
@@ -164,6 +176,8 @@ class Types(LeftUndone, Step):
         self.writer: Repo = repo(push_to, write=True)
         self.git_dir = git_dir
         self.env = dict(env) if env is not None else None
+        self.secrets = secrets
+        """Every secret the run knows: none goes into the types (DM-183)."""
         self.pushed: str | None = None
         self.moved_on: str | None = None
         self.current = False
@@ -218,6 +232,32 @@ class Types(LeftUndone, Step):
             raise StepFailed("openapi-too-big", {"limit": OPENAPI_LIMIT})
         return result.code, "\n".join(lines).encode()
 
+    def _generate(self, ctx: StepContext, words: list[str], host: Path) -> int:
+        """``generate`` in a throwaway container of the release's app image:
+        no network, no capability, never a pull, no env file -- only the
+        directory of the document and of ``out`` (DM-183, S7). Its lines go
+        to the run's sinks."""
+        argv = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            *THROWAWAY,
+            *NO_PULL,
+            "--label",
+            f"pridem.stack={self.compose.entry}",
+            "-v",
+            f"{host}:{MOUNT}",
+            "--",
+            release_image(self.compose, self._app, {}),
+            *words,
+        ]
+        result = ctx.runner.run(
+            argv, expect=tuple(range(256)), timeout=TIMEOUT_S, on_line=ctx.on_line
+        )
+        return result.code
+
     def _openapi(self, ctx: StepContext) -> bytes:
         if self.types is None:
             raise RuntimeError("no types: the step is not asked")
@@ -230,6 +270,8 @@ class Types(LeftUndone, Step):
             raise StepFailed("openapi-not-json") from None
         if not isinstance(document, dict):
             raise StepFailed("openapi-not-json")
+        if self.secrets.found_in(printed.decode("utf-8", "replace")):
+            raise StepFailed("secret-in-openapi")  # its value never named
         return printed
 
     def _generated(self, ctx: StepContext) -> bytes:
@@ -249,10 +291,13 @@ class Types(LeftUndone, Step):
                 for placeholder, path in paths.items():
                     word = word.replace(placeholder, path)
                 words.append(word)
-            code, _ = self._run(ctx, words, "-v", f"{host}:{MOUNT}", keep=False)
+            code = self._generate(ctx, words, host)
             if code != 0:
                 raise StepFailed("generate-failed", {"exit": code})
-            return _took(host / "out")
+            text = _took(host / "out")
+            if self.secrets.found_in(text.decode("utf-8", "replace")):
+                raise StepFailed("secret-in-out")  # its value never named
+            return text
         finally:
             shutil.rmtree(host, ignore_errors=True)
 

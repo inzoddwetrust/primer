@@ -92,6 +92,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     # g: a job, the project's verbs, logs and a session
     ("test_tier3_a_project_verb_runs_in_its_service", "g"),
     ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "g"),
+    # the last of g: a command plan prints no secret of the box (DM-183)
+    ("test_tier3_a_command_plan_prints_no_secret_of_the_box", "g"),
     # h: a failed job, seeds, a verb on a job and a seam -- last before destroy,
     # then destroy and destroy --all (together, last, in order)
     ("test_tier3_a_failed_job_runs_on_the_repeat", "h"),  # DM-126

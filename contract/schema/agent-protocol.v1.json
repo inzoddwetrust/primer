@@ -1308,7 +1308,8 @@
           "discriminator": {
             "mapping": {
               "key_needed": "#/$defs/KeyNeededNotice",
-              "recipient_needed": "#/$defs/RecipientNeededNotice"
+              "recipient_needed": "#/$defs/RecipientNeededNotice",
+              "secrets_unread": "#/$defs/SecretsUnreadNotice"
             },
             "propertyName": "kind"
           },
@@ -1318,6 +1319,9 @@
             },
             {
               "$ref": "#/$defs/RecipientNeededNotice"
+            },
+            {
+              "$ref": "#/$defs/SecretsUnreadNotice"
             }
           ],
           "title": "Notice"
@@ -1760,6 +1764,37 @@
         "type"
       ],
       "title": "RunUnbuildable",
+      "type": "object"
+    },
+    "SecretsUnreadNotice": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "secrets_unread",
+          "title": "Kind",
+          "type": "string"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        },
+        "why": {
+          "enum": [
+            "minted",
+            "env",
+            "primer-yaml"
+          ],
+          "title": "Why",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "stack",
+        "why"
+      ],
+      "title": "SecretsUnreadNotice",
       "type": "object"
     },
     "ServiceState": {

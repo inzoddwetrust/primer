@@ -83,7 +83,10 @@ def test_probe_DM_22_logs_filter_by_json_fields(tmp_path: Path) -> None:
 
     Changed by DM-107 (on the dispatcher's word): ``logs`` asks compose for
     ``--timestamps`` to put the lines of every service in time order; the stamp is
-    taken off before the filter -- the assertions are the same."""
+    taken off before the filter -- the assertions are the same.
+
+    Changed by DM-183, on the dispatcher's word 24.11: a stack is found by its
+    label, as on the box -- the fixture writes the stack's mark."""
     cs = _box(tmp_path)
     with FakeRunner(_logs(cs)) as runner:
         code, out, err = _out(
@@ -103,7 +106,10 @@ def test_logs_without_a_filter_print_every_line_and_take_the_service_and_follow(
     tmp_path: Path,
 ) -> None:
     """No filter: every line, JSON or not, the secret cleaned. A first word
-    without ``=`` is the service; ``-f`` and ``--tail`` go to compose."""
+    without ``=`` is the service; ``-f`` and ``--tail`` go to compose.
+
+    Changed by DM-183: a stack is found by its label, as on the box -- the fixture
+    writes the stack's mark."""
     cs = _box(tmp_path)
     with FakeRunner(_logs(cs, "-f", "--tail", "50", service="app")) as runner:
         code, out, err = _out(

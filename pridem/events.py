@@ -234,6 +234,11 @@ class Secrets:
                     return match.start()
         return cut
 
+    def found_in(self, value: str) -> bool:
+        """Whether ``value`` holds a known secret: what is refused rather than
+        cleaned -- a text the machine would commit (DM-183)."""
+        return any(secret in value for secret in self._values)
+
     def text(self, value: str) -> str:
         """``value`` with every known secret replaced by ``[redacted]``."""
         for secret in self._values:
@@ -514,9 +519,21 @@ class RecipientNeeded:
     """How long the step waits for it; 0 -- it does not wait."""
 
 
-Notice = KeyNeeded | RecipientNeeded
-"""What a step tells a person -- a key to add (DM-107): the console shows it,
-the journal writes it as a ``notice`` line (DM-137)."""
+@dataclass(frozen=True)
+class SecretsUnread:
+    """The known secrets of a stack could not be read (DM-183): a run that
+    goes on anyway -- ``destroy``, ``reinstall``, ``status`` -- says so. Its
+    lines are cleaned of what was read; ``why`` names the file, never a
+    value."""
+
+    stack: str
+    why: Literal["minted", "env", "primer-yaml"]
+
+
+Notice = KeyNeeded | RecipientNeeded | SecretsUnread
+"""What a step or a run tells a person -- a key to add (DM-107), secrets not
+read (DM-183): the console shows it, the journal writes it as a ``notice``
+line (DM-137)."""
 
 
 def _spent(catalog: Catalog, seconds: float) -> str:
@@ -629,6 +646,13 @@ class ConsoleSink:
         """A key to add: the block, then the live line waits for it."""
         if isinstance(notice, RecipientNeeded):
             self._recipient(notice)
+            return
+        if isinstance(notice, SecretsUnread):
+            self._clear()
+            self._write(
+                f"secrets of {notice.stack} not read: {notice.why}"
+                " -- its values may be in this run's lines\n"
+            )
             return
         catalog = self._words()
         self._clear()

@@ -31,9 +31,12 @@ object alone. A busy box is refused before anything runs.
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TextIO
+from typing import Literal, TextIO
+
+from pydantic import SecretStr
 
 from pridem import __version__
+from pridem.contract import SECRET_MIN_LENGTH
 from pridem.events import (
     INTERNAL_STACKS,
     Attachable,
@@ -49,6 +52,7 @@ from pridem.events import (
     PlanMode,
     PlanOutcome,
     Secrets,
+    SecretsUnread,
     StepRecord,
     said,
 )
@@ -61,7 +65,10 @@ from pridem.report.render import closing, render_json, words
 from pridem.report.schema import Actor, Verdict, build_verdict
 from pridem.runner import Holding, Stream
 from pridem.stacks import names as machine
-from pridem.stacks.passport import load_passport, size_bytes
+from pridem.stacks.env import MINTED_FILE, env_file, parse_env, read_minted
+from pridem.stacks.loader import ContractError
+from pridem.stacks.passport import Passport, load_passport, size_bytes
+from pridem.stacks.schema import load_primer_yaml
 from pridem.state import (
     Box,
     BoxBusy,
@@ -70,7 +77,8 @@ from pridem.state import (
     LockHolder,
     Recovery,
 )
-from pridem.steps.base import Role, Step
+from pridem.steps.base import Role, Step, StepFailed
+from pridem.steps.destroy import machine_stacks
 from pridem.steps.passport import PASSPORT_COPY, Fetched, passport_secrets
 from pridem.steps.tests import TestReport
 from pridem.verbs.base import Context, Refused
@@ -270,6 +278,66 @@ class _Sinks:
         self.journal.notice(notice)
 
 
+GOES_ON_UNREAD = frozenset({"destroy", "reinstall", "status"})
+"""The runs that go on when a stack's secrets cannot be read (DM-183): the
+ways a box with a broken file is mended or taken off. Every other run is
+refused -- it could print a value it does not know to clean."""
+
+
+@dataclass(frozen=True)
+class BoxSecrets:
+    """The known secrets of the box, and the stacks whose files said none."""
+
+    values: list[SecretStr]
+    unread: list[tuple[str, Literal["minted", "env", "primer-yaml"]]]
+    every: frozenset[str] = frozenset()
+    """Every value, short ones too: what ``verb`` refuses as an argument."""
+
+
+def box_secrets(ctx: Context, passport: Passport | None) -> BoxSecrets:
+    """Every known secret of the box (contract 2 rule 2, DM-183): ``asked``
+    and ``tls`` of the passport, and of each stack with the machine's mark
+    and a release ``current`` names -- its ``minted.yaml`` and the values of
+    its ``derived`` keys in its env file. A seam is its provider's value,
+    there already; an ``address`` is no secret. Read under the lock, before
+    the journal: the one place every run goes through. A value shorter than
+    ``SECRET_MIN_LENGTH`` is no known secret (contract 2 rule 2): the machine
+    mints and derives none such, the passport's rule keeps ``asked`` to it."""
+    found: list[str] = []
+    if passport is not None:
+        found += [secret.get_secret_value() for secret in passport_secrets(passport)]
+    unread: list[tuple[str, Literal["minted", "env", "primer-yaml"]]] = []
+    for home in machine_stacks(ctx.fs_root):
+        current = home / "current"
+        if not current.is_symlink():
+            continue  # no release: nothing of it runs
+        stack = home.name
+        try:
+            found += list(read_minted(home / "env" / MINTED_FILE).values())
+        except (StepFailed, OSError, ValueError):
+            unread.append((stack, "minted"))
+            continue
+        try:
+            made = load_primer_yaml(current.resolve() / "primer.yaml")
+        except (ContractError, OSError):
+            unread.append((stack, "primer-yaml"))
+            continue
+        derived = {key for key, value in made.env.items() if value.source == "derived"}
+        if not derived:
+            continue
+        try:
+            held = parse_env(
+                env_file(ctx.fs_root, stack, staged=False).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            unread.append((stack, "env"))
+            continue
+        found += [held[key] for key in sorted(derived) if key in held]
+    values = sorted({v for v in found if len(v) >= SECRET_MIN_LENGTH})
+    every = frozenset(v for v in found if v.strip())
+    return BoxSecrets([SecretStr(v) for v in values], unread, every)
+
+
 def _verdict(
     box: Box,
     ctx: Context,
@@ -288,7 +356,11 @@ def _verdict(
     words of its codes. ``held`` -- the run the lock names: its id, actor and
     command go to the journal's header and the verdict."""
     passport = copy.passport
-    secrets = Secrets(passport_secrets(passport) if passport is not None else ())
+    known = box_secrets(ctx, passport)
+    if known.unread and verb not in GOES_ON_UNREAD:
+        stack, why = known.unread[0]
+        raise Refused(f"{verb}: the secrets of {stack} cannot be read ({why})")
+    secrets = Secrets(known.values)  # every secret of the box (DM-183)
     recovery = box.recover(secrets, __version__, ENGLISH)
     if before is not None:
         before(box)
@@ -313,6 +385,9 @@ def _verdict(
     budget = passport.policies.gc.journal_budget if passport is not None else None
     limit = size_bytes(budget) if budget is not None else None  # DM-24
     journal = box.open_journal(header, secrets, limit)
+    unread = [SecretsUnread(stack, why) for stack, why in known.unread]
+    for notice in unread:  # a run that goes on says what it could not clean
+        journal.notice(notice)
     if box.lock_fd is not None and isinstance(ctx.runner, Holding):
         ctx.runner.hold(box.lock_fd)
     lost: tuple[Incomplete, ...] = ()
@@ -330,6 +405,8 @@ def _verdict(
         if ladder:
             stream = ctx.err if ctx.json else ctx.out
             console = ConsoleSink(stream, secrets)  # the plan attaches its catalog
+            for notice in unread:
+                console.notice(notice)
         plan = Plan(
             planned.stacks,
             mode=mode,

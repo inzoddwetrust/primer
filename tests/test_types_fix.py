@@ -144,7 +144,11 @@ def test_the_second_line_refuses_git_in_the_steps(tmp_path: Path) -> None:
 def test_types_out_through_git_past_the_schema_writes_nothing(tmp_path: Path) -> None:
     """The step's own line: ``types.out`` of ``.git`` that came past the schema
     (built with ``model_construct``) -- ``path-outside``, left undone; the
-    worktree's ``.git`` is never written, the remote untouched."""
+    worktree's ``.git`` is never written, the remote untouched.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, remote, _ = types(tmp_path, "test")
     step.types = Types.model_construct(
         openapi=COMMANDS["openapi"],
@@ -181,6 +185,9 @@ def test_data_through_git_is_unsafe(tmp_path: Path) -> None:
 
 
 def test_a_deployed_tag_is_no_branch_to_push_to(tmp_path: Path) -> None:
+    """Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     bare, release, remote, commit = repos(tmp_path)
     git("--git-dir", str(remote), "tag", "v1", commit)
     step = step_of(tmp_path, release, bare, commit, f"file://{remote}", "test")
@@ -238,6 +245,9 @@ class Breaking(Container):
 
 
 def test_a_command_that_times_out_is_left_undone(tmp_path: Path) -> None:
+    """Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, _, _ = types(tmp_path, "test")
     with Breaking(error=CommandTimedOut(("docker",), 600.0, ())) as runner:
         outcome = run(step, runner)
@@ -248,7 +258,11 @@ def test_a_git_that_fails_and_a_clean_up_that_fails_are_left_undone(
     tmp_path: Path,
 ) -> None:
     """``git add`` of an ignored ``out`` fails: ``failed``, not red. A
-    clean-up of the worktree that fails hides nothing: the push stands."""
+    clean-up of the worktree that fails hides nothing: the push stands.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     bare, release, remote, commit = repos(tmp_path / "ignored")
     work = tmp_path / "ignored" / "origin"
     (work / ".gitignore").write_text("frontend/src/api/\n")
@@ -269,6 +283,9 @@ def test_a_git_that_fails_and_a_clean_up_that_fails_are_left_undone(
 
 
 def test_a_read_back_that_fails_is_left_undone(tmp_path: Path) -> None:
+    """Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, remote, _ = types(tmp_path, "test")
     ctx = context(Container())
     check = step.check(ctx)
@@ -279,6 +296,9 @@ def test_a_read_back_that_fails_is_left_undone(tmp_path: Path) -> None:
 
 
 def test_an_interrupt_goes_through(tmp_path: Path) -> None:
+    """Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, _, _ = types(tmp_path, "test")
     with Breaking(error=Interrupted(15)) as runner:
         outcome = run(step, runner)
@@ -346,7 +366,11 @@ def test_a_write_key_in_place_without_access_is_not_waited_for(
 
 def test_what_git_normalizes_is_no_commit(tmp_path: Path) -> None:
     """``* text=auto`` and a generator that writes CRLF: the bytes differ, git
-    sees nothing to commit -- ``same-in-git``, not ``more-than-types []``."""
+    sees nothing to commit -- ``same-in-git``, not ``more-than-types []``.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     bare, release, remote, _ = repos(tmp_path, old=generated(OPENAPI))
     work = tmp_path / "origin"
     (work / ".gitattributes").write_text("* text=auto\n")
@@ -369,7 +393,11 @@ def test_what_git_normalizes_is_no_commit(tmp_path: Path) -> None:
 def test_a_branch_moved_after_the_push_still_holds_it(tmp_path: Path) -> None:
     """Someone pushed on top of the types commit before ``verify``: it is in
     the branch -- ``committed`` with ``moved_on``. The pair: the branch reset
-    without it -- ``not-pushed``."""
+    without it -- ``not-pushed``.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, remote, deployed = types(tmp_path / "on-top", "test")
     ctx = context(Container())
     check = step.check(ctx)
@@ -417,7 +445,11 @@ def test_check_runs_no_command_of_the_product_and_writes_nothing(
     """The mark of the deployed commit: nothing to do, no docker at all. No
     mark: ``generate`` -- still no docker, no ``types-run``. ``act`` -- one
     ``openapi`` and one ``generate``; green -- the mark, the deployed commit
-    in it."""
+    in it.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, _, deployed = types(tmp_path, "test")
     runner = Container()
     check = step.check(context(runner))
@@ -433,6 +465,9 @@ def test_check_runs_no_command_of_the_product_and_writes_nothing(
 
 
 def test_a_step_left_undone_writes_no_mark(tmp_path: Path) -> None:
+    """Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, _, _ = types(tmp_path, "prod")
     with Container() as runner:
         outcome = run(step, runner, "prod")
@@ -466,6 +501,9 @@ class Loud(Container):
 def test_the_stdout_of_generate_goes_to_the_journal_unbounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     from pridem.steps import types as module
 
     monkeypatch.setattr(module, "OPENAPI_LIMIT", 150)  # over the types, under 200
@@ -535,7 +573,11 @@ def test_a_plan_deploying_a_tag_gives_types_no_branch(tmp_path: Path) -> None:
 
 def test_a_file_the_box_would_not_write_is_left_undone(tmp_path: Path) -> None:
     """``OSError``: the stack's directory is a file -- ``types-run`` cannot be
-    made. ``failed``, the class named; not red."""
+    made. ``failed``, the class named; not red.
+
+    Changed by DM-183: generate is a throwaway ``docker run`` without the app's
+    network and env -- the planted container (``Container``) and the step's
+    ``secrets`` follow; what the test holds is as it was."""
     step, _, _ = types(tmp_path, "test")
     (tmp_path / "opt").mkdir()
     (tmp_path / "opt" / "blank").write_text("not a directory\n")

@@ -40,8 +40,12 @@ def _box(
     fs_root: Path, role: str = "test", verbs: dict[str, Json] = VERBS
 ) -> ComposeStack:
     """The blank's box with ``verbs``, a minted secret and a passport with
-    ``asked`` and ``tls``."""
+    ``asked`` and ``tls``.
+
+    Changed by DM-183: the stack carries the machine's mark, as on the box --
+    the box's secrets are found by the mark and ``current``."""
     blank_box(fs_root, role=role, name="box-1")
+    (fs_root / "opt" / STACK / ".pridem").write_text(f"{STACK}\n")
     release = (fs_root / "opt" / STACK / "current").resolve()
     primer = yaml.safe_load((release / "primer.yaml").read_text())
     primer["verbs"] = verbs
@@ -149,7 +153,10 @@ def test_probe_DM_22_project_verb_secret_arg_refused_before_run(
     """Contract 3 rule 7: an argument equal to a known secret of the box --
     ``asked``, ``tls``, ``minted`` -- refused before the run; the refusal names
     the argument, not its value; no command, no verdict, no journal. The
-    pair: an ordinary value runs."""
+    pair: an ordinary value runs.
+
+    Changed by DM-183, on the dispatcher's word 24.11: a stack is found by its
+    label, as on the box -- the fixture writes the stack's mark."""
     cs = _box(tmp_path)
     argv = ["verb", "set-setting", "key=k", f"value={secret}", "--confirm", "box-1"]
     with FakeRunner() as runner:
@@ -264,11 +271,15 @@ def test_the_verb_verb_refuses_before_the_run(
 
 def test_the_minted_secrets_of_every_stack_of_the_box_count(tmp_path: Path) -> None:
     """``minted`` of a service on the box is as much a secret as the
-    product's (gate: V10d)."""
+    product's (gate: V10d).
+
+    Changed by DM-183: a stack is found by its label, as on the box -- the
+    service's mark is written."""
     from test_verbs_data import _service
 
     _box(tmp_path)
     _service(tmp_path, "comms", with_database=True)
+    (tmp_path / "opt" / "comms" / ".pridem").write_text("comms\n")  # DM-183
     other = "s" * 43
     minted = tmp_path / "opt" / "comms" / "env" / "minted.yaml"
     minted.parent.mkdir(parents=True)
@@ -408,7 +419,10 @@ def test_a_minted_file_that_cannot_be_read_refuses_the_verb_before_it_runs(
     not 0600 or is damaged: the verb is refused before the run -- an empty
     script, no verdict -- rather than run with a secret unchecked (the
     dispatcher's mutation of pass 3: "an unreadable one is skipped"). The
-    pair: the probes above, with a readable file."""
+    pair: the probes above, with a readable file.
+
+    Changed by DM-183: the refusal is the one helper's -- ``the secrets of
+    <stack> cannot be read (minted)``, the form taken at the gate."""
     _box(tmp_path)
     minted = tmp_path / "opt" / STACK / "env" / "minted.yaml"
     minted.write_text(text)
@@ -417,4 +431,4 @@ def test_a_minted_file_that_cannot_be_read_refuses_the_verb_before_it_runs(
     with FakeRunner() as runner:
         code, out, err = _cli(tmp_path, argv, runner)
     assert (code, out) == (1, "")
-    assert f"the minted secrets of {STACK} cannot be read" in err
+    assert f"the secrets of {STACK} cannot be read (minted)" in err
