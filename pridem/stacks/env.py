@@ -214,6 +214,27 @@ class Resolved:
     switched_off: list[str] = field(default_factory=list)
     """Fields of the passport (``asked.<stack>.<key>``, ``params.…``) of an
     option that is off and absent: ``install`` writes the literal there."""
+    files: dict[str, str] = field(default_factory=dict)
+    """The values of ``asked`` with ``file`` (DM-145): by key, never in
+    ``values`` -- never in the env file."""
+    missing_files: list[str] = field(default_factory=list)
+    """``asked.<stack>.<key>`` of a secret file the passport lacks: never asked
+    in the console, a file is put in the passport (``asked-file-missing``)."""
+
+
+def file_keys(stack: Stack) -> list[str]:
+    """The keys of ``asked`` that are files (DM-145), in schema order."""
+    return [
+        key
+        for key, var in stack.env.items()
+        if isinstance(var, Asked) and var.file is not None
+    ]
+
+
+def env_keys(stack: Stack) -> list[str]:
+    """The keys of the env file: the schema's, but the secret files'."""
+    files = set(file_keys(stack))
+    return [key for key in stack.env if key not in files]
 
 
 def address(stack: Stack) -> str:
@@ -304,6 +325,8 @@ def resolve(
                 raise StepFailed("option-literal", {"key": f"{kind}.{name}.{key}"})
     seams: dict[str, list[str]] = {}
     for key, var in stack.env.items():
+        if key in switched and isinstance(var, Asked) and var.file is not None:
+            continue  # an option off: no file, no bind, no value (DM-145)
         if key in switched:
             out.values[key] = LITERAL
             if isinstance(var, Asked):
@@ -315,6 +338,13 @@ def resolve(
         elif isinstance(var, Minted):
             out.values[key] = minted[key]
             out.secrets.append(minted[key])
+        elif isinstance(var, Asked) and var.file is not None:
+            if key in asked:  # a file, never a variable (DM-145)
+                value = asked[key].get_secret_value()
+                out.files[key] = value
+                out.secrets.append(value)
+            else:
+                out.missing_files.append(f"asked.{name}.{key}")
         elif isinstance(var, Asked):
             if key in asked:
                 value = asked[key].get_secret_value()

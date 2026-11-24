@@ -190,6 +190,12 @@ RULES = {
         "own files",
     ),
     "S.types-one": (0, "types are declared on one entry of the product at most"),
+    "S.secret-file": (
+        0,
+        "a secret file of asked is an absolute normalized path, not under /primer/ "
+        "nor through .git, once in the stack, for services named once; never a "
+        "seam the stack provides",
+    ),
     "S.accepts-services": (
         0,
         "accepts.<kind>.services names services of the service's first entry, "
@@ -528,8 +534,49 @@ class Minted(_Var):
     length: Annotated[int, AfterValidator(_minted_length)] | None = None
 
 
+class SecretFile(Strict):
+    """``asked`` that reaches its container as a file, not a variable (DM-145):
+    a multi-line value -- an age key, an ssh key -- byte for byte. ``path`` --
+    where the file is in the container; ``services`` -- the compose services
+    of the stack's own entry that get it, ``app`` without the field. The value
+    is still the stack's ``asked`` in the passport; it is never in the env
+    file, the container's environment, the verdict or the journal."""
+
+    path: str
+    services: list[Ident] | None = None
+
+    @model_validator(mode="after")
+    def _form(self) -> Self:
+        path = PurePosixPath(self.path)
+        if (
+            not path.is_absolute()
+            or ".." in path.parts
+            or str(path) != self.path
+            or self.path == "/"
+        ):
+            raise _rule_error(
+                "S.secret-file", f"not an absolute normalized path: {self.path!r}"
+            )
+        if through_git(self.path):
+            raise _rule_error("S.secret-file", f"through .git: {self.path!r}")
+        if path == PurePosixPath("/primer") or path.is_relative_to("/primer"):
+            raise _rule_error(
+                "S.secret-file", f"under /primer/, the machine's: {self.path!r}"
+            )
+        if self.services is not None:
+            if not self.services:
+                raise _rule_error(
+                    "S.secret-file", "services empty: leave the field out"
+                )
+            twice = sorted({s for s in self.services if self.services.count(s) > 1})
+            if twice:
+                raise _rule_error("S.secret-file", f"services twice: {twice}")
+        return self
+
+
 class Asked(_Var):
     source: Literal["asked"]
+    file: SecretFile | None = None
 
 
 class Derived(_Var):
@@ -1342,6 +1389,32 @@ def _s_entries(stack: Product | Service) -> list[Problem]:
     return out
 
 
+def _s_secret_files(stack: Product | Service) -> list[Problem]:
+    """A path of a secret file once in the stack -- among the secret files and
+    the packages' ``mount.path`` -- and never a key the stack provides: a file
+    is not a variable, a seam carries a variable (DM-145)."""
+    out: list[Problem] = []
+    seen: dict[str, str] = {}
+    if isinstance(stack, Product):
+        for slot, package in stack.packages.items():
+            for mount in package.mount:
+                if mount.path is not None:
+                    seen.setdefault(mount.path, f"packages.{slot}")
+    provided = set(stack.provides)
+    for key, var in stack.env.items():
+        if not isinstance(var, Asked) or var.file is None:
+            continue
+        where = ("env", key, "file", "path")
+        other = seen.setdefault(var.file.path, key)
+        if other != key:
+            out.append(problem_at(where, "S.secret-file", f"the path of {other} too"))
+        if key in provided:
+            out.append(
+                problem_at(("env", key, "file"), "S.secret-file", "a seam it provides")
+            )
+    return out
+
+
 def _s_accepts_services(stack: Product | Service) -> list[Problem]:
     """``accepts.<kind>.services`` of jobs alone (DM-100): a job runs again
     only when ``up`` of its entry acts, and ``up`` acts by a service that is
@@ -1409,6 +1482,7 @@ RULE_CHECKS: tuple[Callable[[Product | Service], list[Problem]], ...] = (
     _r17_seed_reset,
     _s_reserved,
     _s_accepts_services,
+    _s_secret_files,
 )
 
 

@@ -68,6 +68,7 @@ from pridem.stacks.env import (
     Resolved,
     env_dir,
     env_file,
+    env_keys,
     env_text,
     mint,
     minted_text,
@@ -134,6 +135,8 @@ READ_BACK_CODES: dict[str, str] = {
     "env-unsafe": "the value of {key} has a quote or a line break",
     "env-unreadable": "line {line} of the env file is not KEY='value'",
     "env-keys": "the env file lacks {missing} and has {extra} beyond the schema",
+    "asked-file-missing": "the passport lacks {key}, a secret file: put its value "
+    "in the passport as a block (|), the console asks no file",
     "placeholder": "the env file holds placeholders for {keys}",
 }
 DERIVE_TIMEOUT_S = 300
@@ -464,6 +467,8 @@ class RenderEnv(Step):
         if self._env.exists():
             private_mode(self._env, "env-mode")
         minted, resolved = self._known()
+        if resolved.missing_files:  # never asked: a file goes in the passport
+            raise StepFailed("asked-file-missing", {"key": resolved.missing_files[0]})
         if resolved.missing:
             if self.ask is None:
                 raise StepFailed("missing", {"fields": list[Json](resolved.missing)})
@@ -534,14 +539,15 @@ class RenderEnv(Step):
         ``rendered``."""
         if not self._env.exists():
             raise StepFailed(
-                "env-keys", {"missing": list[Json](self.stack.env), "extra": []}
+                "env-keys", {"missing": list[Json](env_keys(self.stack)), "extra": []}
             )
         private_mode(self._env, "env-mode")
         if self._minted.exists():
             private_mode(self._minted, "minted-mode")
         values = parse_env(self._env.read_text(encoding="utf-8"))
-        missing = [key for key in self.stack.env if key not in values]
-        extra = [key for key in values if key not in self.stack.env]
+        keys = env_keys(self.stack)  # a secret file is never there (DM-145)
+        missing = [key for key in keys if key not in values]
+        extra = [key for key in values if key not in keys]
         if missing or extra:
             raise StepFailed(
                 "env-keys", {"missing": list[Json](missing), "extra": list[Json](extra)}

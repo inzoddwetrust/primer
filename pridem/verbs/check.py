@@ -66,6 +66,7 @@ from pridem.report.render import closing, render_json
 from pridem.report.schema import build_verdict
 from pridem.runner import CommandFailed, CommandNotStarted, CommandTimedOut, Stream
 from pridem.stacks.egress import UNLISTED, unlisted
+from pridem.stacks.env import file_keys
 from pridem.stacks.loader import ContractError
 from pridem.stacks.lock import check_lock, load_primer_lock
 from pridem.stacks.package import PACKAGE_FILE
@@ -266,7 +267,7 @@ def _read(checked: Checked, stack: Stack, entry: str) -> Read:
     stand_ins = dict.fromkeys(stack.env, STAND_IN)
     try:
         read.raw = config(checked.ctx, compose, interpolate=False, values=stand_ins)
-        wrong = variables(read.raw, stack.env)
+        wrong = variables(read.raw, stack.env, file_keys(stack))
         read.found = [*env_files(read.raw), *wrong]
         if not wrong:  # config stops at the first one, and names it as text
             read.document = config(checked.ctx, compose, values=stand_ins)

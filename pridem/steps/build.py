@@ -57,16 +57,18 @@ place only after the service's ``validate`` of it (``data_copy``).
 
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar
 
 from pridem.events import Json
 from pridem.stacks.egress import UNLISTED, unlisted
+from pridem.stacks.env import file_keys
 from pridem.stacks.options import open_hosts, switched_on
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Product, Service
 from pridem.stacks.seams import Pair
+from pridem.steps import secret_files
 from pridem.steps.base import (
     CheckResult,
     Mode,
@@ -128,6 +130,11 @@ class Rendered:
     contexts: dict[str, tuple[Path, Path, list[PackagePlace]]]
     """service -> (the context in the release, the context with the packages,
     the places)."""
+    files: dict[secret_files.Wanted, Path | None] = field(default_factory=dict)
+    """The secret files of the entry and where each is -- ``None``: no file
+    with its value yet (DM-145)."""
+    document: Mapping[str, Json] = field(default_factory=dict)
+    """``config`` of the entry, for the users of its services."""
 
 
 def copied_dockerfile(context: Path, dockerfile: str) -> str:
@@ -157,6 +164,8 @@ class Build(Step):
         "egress-unlisted": UNLISTED,
         "missing-release": "{slot}: {path} is not on the box",
         "no-image": "no image of {service} at {commit} after the build",
+        "file-owner": "the user {service} runs as is not one its image knows",
+        "secret-file": "the secret file {key} of {service} is not as written",
         "two-images": "{count} images of {service} at {commit}",
     }
 
@@ -242,7 +251,12 @@ class Build(Step):
         return found
 
     def _rendered(
-        self, ctx: StepContext, raw: Mapping[str, Json], also: Sequence[str] = ()
+        self,
+        ctx: StepContext,
+        raw: Mapping[str, Json],
+        also: Sequence[str] = (),
+        *,
+        fresh: bool = False,
     ) -> Rendered:
         """The built services, the override and the contexts; ``raw`` -- the
         product's ``config --no-interpolate``, every caller reads it (the build
@@ -252,7 +266,12 @@ class Build(Step):
         compose = self.compose
         document = config(ctx, compose)
         places_found = package_places(compose.stack, self._documents(ctx, document))
-        refused = refusal(compose, document, raw, [*places_found, *also])
+        files = secret_files.wanted(compose, self._passport())
+        named = document.get("services")
+        files_found = secret_files.unknown_services(
+            files, set(named) if isinstance(named, dict) else set()
+        )
+        refused = refusal(compose, document, raw, [*places_found, *files_found, *also])
         if refused is not None:
             raise StepFailed(*refused)
         bodies = document.get("services")
@@ -301,6 +320,17 @@ class Build(Step):
         data_mounts, data_env = data_binds(self.data, compose.app_service)
         for service, more in data_mounts.items():
             binds[service] = [*binds.get(service, []), *more]
+        # secret files (DM-145): the file on disk with the value, or -- act --
+        # a new name; check with a file missing has to act anyway
+        chosen: dict[secret_files.Wanted, Path | None] = {}
+        for item in files:
+            on_disk = secret_files.matching(compose, item)
+            if on_disk is None and fresh:
+                on_disk = secret_files.new_path(compose, item)
+            chosen[item] = on_disk
+        placed = {item: path for item, path in chosen.items() if path is not None}
+        for service, more in secret_files.binds(placed).items():
+            binds[service] = [*binds.get(service, []), *more]
         text = override_text(
             compose,
             document,
@@ -311,7 +341,7 @@ class Build(Step):
             points=self.points,
             references=raw,  # ${VAR} lives in --no-interpolate only (DM-62 FIX 2)
         )
-        return Rendered(built_services(document), text, contexts)
+        return Rendered(built_services(document), text, contexts, chosen, document)
 
     def _key(self, service: str) -> dict[str, str]:
         return image_key(self.compose.stack, service, self._passport())
@@ -324,7 +354,11 @@ class Build(Step):
             )
         uninterpolated = config(ctx, self.compose, interpolate=False)
         keys = self.compose.stack.env
-        found = [*env_files(uninterpolated), *variables(uninterpolated, keys)]
+        files = file_keys(self.compose.stack)
+        found = [
+            *env_files(uninterpolated),
+            *variables(uninterpolated, keys, files),
+        ]
         rendered = self._rendered(ctx, uninterpolated, found)
         app = self.compose.app_service
         self.app_image = None
@@ -347,10 +381,49 @@ class Build(Step):
                 app_ids = ids
         if len(app_ids) == 1:
             self.app_image = app_ids[0]
+        if any(file is None for file in rendered.files.values()):
+            return needed
+        for item, file in rendered.files.items():
+            if file is not None and not self._owned(ctx, rendered, item, file):
+                return needed
         return CheckResult(False)
 
+    def _image(self, ctx: StepContext, rendered: Rendered, service: str) -> str:
+        """The image ``service`` runs: built by its labels, else ``image``."""
+        if service in rendered.built:
+            found = image_of(ctx, self.compose, service, self._key(service))
+            if len(found) == 1:
+                return found[0]
+            raise StepFailed(
+                "no-image", {"service": service, "commit": self.compose.commit}
+            )
+        services = rendered.document.get("services")
+        body = services.get(service) if isinstance(services, dict) else None
+        image = body.get("image") if isinstance(body, dict) else None
+        if not isinstance(image, str):
+            raise StepFailed("file-owner", {"service": service})
+        return image
+
+    def _owner(
+        self, ctx: StepContext, rendered: Rendered, item: secret_files.Wanted
+    ) -> tuple[int, int]:
+        image = self._image(ctx, rendered, item.service)
+        return secret_files.owner(ctx, item.service, image, rendered.document)
+
+    def _owned(
+        self,
+        ctx: StepContext,
+        rendered: Rendered,
+        item: secret_files.Wanted,
+        path: Path,
+    ) -> bool:
+        uid, gid = self._owner(ctx, rendered, item)
+        return secret_files.as_owned(path) == (uid, gid, secret_files.MODE)
+
     def act(self, ctx: StepContext, check: CheckResult) -> None:
-        rendered = self._rendered(ctx, config(ctx, self.compose, interpolate=False))
+        rendered = self._rendered(
+            ctx, config(ctx, self.compose, interpolate=False), fresh=True
+        )
         for source, target, places in rendered.contexts.values():
             write_context(source, target, places)
         write_override(self.compose, rendered.text)
@@ -359,6 +432,12 @@ class Build(Step):
             self.compose.argv("build", *build_args(self.compose)),
             timeout=BUILD_TIMEOUT_S,
         )
+        # the images are there: each file under the user its service runs as
+        for item, path in rendered.files.items():
+            if path is None:
+                raise RuntimeError("act names every secret file (fresh)")
+            uid, gid = self._owner(ctx, rendered, item)
+            secret_files.write(self.compose, path, item.value, uid, gid)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         # the same fact as check: the build arguments read where they show
@@ -394,4 +473,26 @@ class Build(Step):
         if app is not None and app in images:
             self.app_image = str(images[app])
             fact["app_image"] = images[app]
+        # each secret file read back: its value, its owner, 0600 -- the fact
+        # names no value and no hash of one (DM-145)
+        read: list[Json] = []
+        for item, path in sorted(rendered.files.items(), key=lambda p: str(p[0])):
+            if path is None or not self._owned(ctx, rendered, item, path):
+                raise StepFailed(
+                    "secret-file", {"key": item.key, "service": item.service}
+                )
+            uid, gid, mode = secret_files.as_owned(path)
+            read.append(
+                {
+                    "key": item.key,
+                    "service": item.service,
+                    "path": item.path,
+                    "uid": uid,
+                    "gid": gid,
+                    "mode": f"{mode:04o}",
+                    "matches": True,
+                }
+            )
+        if read:
+            fact["secret_files"] = read
         return Verified(fact)

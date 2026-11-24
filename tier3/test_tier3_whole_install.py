@@ -2150,6 +2150,110 @@ def test_tier3_alembic_runs_with_the_apps_environment(
     assert not (OPT / "env" / "alembic.env").exists()
 
 
+SECRET_FILE_PATH = "/run/primer/age.key"  # noqa: S105 -- a path, not a secret
+PLANTED_FILE_VALUE = "\n".join(
+    [
+        "pridem-tier3-planted-file-secret-145",
+        "the second line of the planted secret file",
+        "  an indented third line, then a short tail",
+        "tail",
+        "",
+    ]
+)
+"""A planted multi-line value of no real key's form (DM-145)."""
+READER_WITH_A_UID = """\
+  reader:
+    build:
+      context: ./backend
+      target: runtime
+    user: "4242"
+    command: ["python", "-m", "http.server", "7003"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "open('/run/primer/age.key').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+"""
+"""A second service of the copy, under a uid its image has no entry for."""
+
+
+def test_tier3_a_secret_file_in_the_live_container(
+    tmp_path: Path, mirror: Path
+) -> None:
+    """DM-145 on the box of group e: a copy of the blank whose ``AGE_KEY`` is a
+    secret file for ``app`` (``USER blank`` of the image) and ``reader``
+    (``user: "4242"`` in compose, no entry in the image). Measured into the
+    run's log first (par0 14.3): the user each service runs as, the owner and
+    the mode of the file each sees, its sha256 read by each process against
+    the value, a read by another uid, the containers' environment. Then: each
+    file is the value byte for byte, 0600, owned by its process; the value is
+    in no container's environment and not in the verdict."""
+    import hashlib
+
+    assert (OPT / "current").is_symlink(), "the group's box is installed"
+    copy = _copy_of_blank(tmp_path, mirror, "secret-file")
+    _replace_once(
+        copy / "docker-compose.yml",
+        "  postgres:\n",
+        READER_WITH_A_UID + "  postgres:\n",
+    )
+    _replace_once(
+        copy / "primer.yaml",
+        "env:\n",
+        "env:\n  AGE_KEY: { source: asked, file: { path: "
+        f"{SECRET_FILE_PATH}, services: [app, reader] }} }}\n",
+    )
+    _push(copy, mirror, "DM-145: a secret file for two services")
+    passport = _passport(
+        tmp_path, version=64, asked={"primer-blank": {"AGE_KEY": PLANTED_FILE_VALUE}}
+    )
+    verdict, printed = _install(passport, "update")
+    wanted = hashlib.sha256(PLANTED_FILE_VALUE.encode()).hexdigest()
+    seen: dict[str, object] = {}
+    for service in ("app", "reader"):
+        running = _container(STACK, service)
+        inside = ["docker", "exec", running]
+        seen[service] = {
+            "id": _run([*inside, "id"], expect=tuple(range(256))),
+            "stat": _run(
+                [*inside, "stat", "-c", "%u %g %a", SECRET_FILE_PATH],
+                expect=tuple(range(256)),
+            ),  # fmt: skip
+            "sha256": _run(
+                [*inside, "sha256sum", SECRET_FILE_PATH], expect=tuple(range(256))
+            ),  # fmt: skip
+            "other uid": _run(
+                ["docker", "exec", "--user", "65534", running, "cat", SECRET_FILE_PATH],
+                expect=tuple(range(256)),
+            )[-1:],
+            "env": _stdout(
+                ["docker", "inspect", "-f", "{{json .Config.Env}}", running]
+            ),
+        }
+    print("DM-145 measure:", seen)
+    assert verdict.result == "green", printed
+    for service in ("app", "reader"):
+        found = seen[service]
+        assert isinstance(found, dict)
+        assert found["sha256"][0].split()[0] == wanted, (service, found)
+        owner, group, mode = found["stat"][0].split()
+        assert mode == "600", (service, found)
+        assert f"uid={owner}(" in found["id"][0] or f"uid={owner} " in found["id"][0], (
+            found
+        )
+        assert "Permission denied" in " ".join(found["other uid"]), found
+        env = " ".join(found["env"])
+        lines = [line for line in PLANTED_FILE_VALUE.splitlines() if len(line) >= 16]
+        assert all(line not in env for line in lines), found
+    reader = seen["reader"]
+    assert isinstance(reader, dict) and reader["stat"][0].split()[:2] == ["4242", "0"]
+    dumped = verdict.model_dump_json()
+    assert all(line not in dumped for line in PLANTED_FILE_VALUE.splitlines()
+               if len(line) >= 16)  # fmt: skip
+
+
 def test_tier3_an_option_off_is_the_literal_and_on_the_value(
     tmp_path: Path, mirror: Path
 ) -> None:

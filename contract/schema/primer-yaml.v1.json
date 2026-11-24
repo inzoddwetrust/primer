@@ -96,6 +96,9 @@
     "Asked": {
       "additionalProperties": false,
       "properties": {
+        "file": {
+          "$ref": "#/$defs/SecretFile"
+        },
         "source": {
           "const": "asked",
           "title": "Source",
@@ -859,6 +862,29 @@
         "from"
       ],
       "title": "Seam",
+      "type": "object"
+    },
+    "SecretFile": {
+      "additionalProperties": false,
+      "description": "``asked`` that reaches its container as a file, not a variable (DM-145):\na multi-line value -- an age key, an ssh key -- byte for byte. ``path`` --\nwhere the file is in the container; ``services`` -- the compose services\nof the stack's own entry that get it, ``app`` without the field. The value\nis still the stack's ``asked`` in the passport; it is never in the env\nfile, the container's environment, the verdict or the journal.",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "services": {
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "type": "string"
+          },
+          "title": "Services",
+          "type": "array"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "SecretFile",
       "type": "object"
     },
     "Seed": {

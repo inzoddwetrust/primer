@@ -796,13 +796,16 @@ def _strings(value: Json, where: str) -> list[tuple[str, str]]:
     return []
 
 
-def variables(uninterpolated: Mapping[str, Json], env: Iterable[str]) -> list[str]:
+def variables(
+    uninterpolated: Mapping[str, Json], env: Iterable[str], files: Iterable[str] = ()
+) -> list[str]:
     """The variables of ``config --no-interpolate`` (written as in the file)
     that are not ``${NAME:?}`` or ``${NAME:?message}`` and those whose name is
     not a key of the stack's ``env`` (protocol 3.4, contract 3 rule 18), one
     ``<where>: ...`` each, sorted; ``$$`` is a dollar, not a variable.
     ``<where>`` is the service, or the top-level section and its entry."""
     keys = set(env)
+    secret_files = set(files)
     places: list[tuple[str, str]] = []
     for section, body in uninterpolated.items():
         if section.startswith("x-") or section == "name":
@@ -821,7 +824,9 @@ def variables(uninterpolated: Mapping[str, Json], env: Iterable[str]) -> list[st
             name = head.group(0) if head else inner
             if braced is None or not _REQUIRED.fullmatch(braced):
                 found.add(f"{where}: {match.group(0)} is not ${{{name}:?}}")
-            if name not in keys:
+            if name in secret_files:  # never in the env file (DM-145)
+                found.add(f"{where}: {name} is a secret file, not a variable")
+            elif name not in keys:
                 found.add(f"{where}: {name} is not a key of env")
     return sorted(found)
 

@@ -35,6 +35,7 @@ from pridem.events import Json
 from pridem.files import atomic_write, fsync_dir
 from pridem.stacks.env import env_file, write_private
 from pridem.state import Box, BoxState
+from pridem.steps import secret_files
 from pridem.steps.base import (
     CheckResult,
     Mode,
@@ -93,6 +94,7 @@ class Finalize(Step):
         "from {ops_commit}",
         "env": "env/.env of {stack} is not the environment of its release",
         "override": "the override of {stack} {entry} is not the one of its release",
+        "secret-files": "{count} secret files of {stack} no override names are left",
     }
 
     def __init__(
@@ -107,6 +109,8 @@ class Finalize(Step):
     ) -> None:
         self.releases = dict(releases)
         self.entries = {stack: list(entries[stack]) for stack in releases}
+        self.removed = 0
+        """Secret files no override names, taken by ``act`` (DM-145)."""
         """The entries of each stack's ``primer.yaml``: their overrides go
         with ``current``."""
         self.composition = dict(composition)
@@ -169,7 +173,8 @@ class Finalize(Step):
 
     def check(self, ctx: StepContext) -> CheckResult:
         overrides = {stack for stack, _ in self._overrides_behind()}
-        behind = sorted({*self._behind(), *self._env_behind(), *overrides})
+        stale = {s for s in self.releases if secret_files.unnamed(self.root, s)}
+        behind = sorted({*self._behind(), *self._env_behind(), *overrides, *stale})
         state = self.box.read_state()
         passport = self.fetched.passport
         same = (
@@ -227,6 +232,11 @@ class Finalize(Step):
                 staged = override_file(self.root, stack, entry, staged=True)
                 running = override_file(self.root, stack, entry, staged=False)
                 atomic_write(running, staged.read_bytes(), 0o644)
+            # the secret files no override names: after the switch, when no
+            # container of the old release can hold one any more (DM-145)
+            for file in secret_files.unnamed(self.root, stack):
+                file.unlink()
+                self.removed += 1
         self.box.write_state(self._state())
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
@@ -245,6 +255,10 @@ class Finalize(Step):
         if overrides:
             stack, entry = overrides[0]
             raise StepFailed("override", {"stack": stack, "entry": entry})
+        for stack in sorted(self.releases):
+            left = secret_files.unnamed(self.root, stack)
+            if left:
+                raise StepFailed("secret-files", {"stack": stack, "count": len(left)})
         state = self.box.read_state()
         wanted = self._wanted()
         for stack, name in wanted.items():
@@ -274,5 +288,6 @@ class Finalize(Step):
                     for stack in sorted(self.releases)
                     for entry in self.entries[stack]
                 ],
+                "secret_files_removed": self.removed,
             }
         )

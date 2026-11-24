@@ -103,6 +103,7 @@ LAYERS: Layers = (
             "pridem.steps.packages",
             "pridem.steps.passport",
             "pridem.steps.points",
+            "pridem.steps.secret_files",
             "pridem.steps.services",
             "pridem.steps.sources",
             "pridem.steps.ssl",
