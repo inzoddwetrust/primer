@@ -240,7 +240,7 @@ At = Annotated[str, Field(pattern=r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")]
 """The moment a line was written: UTC to the millisecond."""
 
 
-class _Started(Strict):
+class StepStartedLine(Strict):
     event: Literal["step_started"]
     seq: Seq
     at: At
@@ -251,7 +251,7 @@ class _Started(Strict):
     started: Moment
 
 
-class _Finished(Strict):
+class StepFinishedLine(Strict):
     event: Literal["step_finished"]
     seq: Seq
     at: At
@@ -266,7 +266,7 @@ class _Finished(Strict):
     verify: dict[str, Json] = {}
 
 
-class _Log(Strict):
+class LogLineLine(Strict):
     event: Literal["log"]
     seq: Seq
     at: At
@@ -278,7 +278,7 @@ class _Log(Strict):
     continued: bool = False
 
 
-class _KeyNeeded(Strict):
+class KeyNeededNotice(Strict):
     kind: Literal["key_needed"]
     repo: Text
     key: Text
@@ -289,23 +289,25 @@ class _KeyNeeded(Strict):
     again: bool
 
 
-class _RecipientNeeded(Strict):
+class RecipientNeededNotice(Strict):
     kind: Literal["recipient_needed"]
     key: Text
     path: str | None = None  # absent: not known yet
     wait_s: float
 
 
-class _Notice(Strict):
+class NoticeLine(Strict):
     """What the console showed a person (a key to add): ``notice`` holds it."""
 
     event: Literal["notice"]
     seq: Seq
     at: At
-    notice: Annotated[_KeyNeeded | _RecipientNeeded, Field(discriminator="kind")]
+    notice: Annotated[
+        KeyNeededNotice | RecipientNeededNotice, Field(discriminator="kind")
+    ]
 
 
-class _End(Strict):
+class RunFinishedLine(Strict):
     event: Literal["run_finished"]
     seq: Seq
     at: At
@@ -314,8 +316,29 @@ class _End(Strict):
 
 
 _RUN_ID: TypeAdapter[str] = TypeAdapter(RunId)
-_Line = _Started | _Finished | _Log | _Notice | _End
+
+
+class HeaderLine(JournalHeader):
+    """The first line of a journal: its header, ``seq`` 1."""
+
+    event: Literal["header"]
+    seq: Annotated[int, Field(ge=1, le=1)]
+    at: At
+
+
+_Line = StepStartedLine | StepFinishedLine | LogLineLine | NoticeLine | RunFinishedLine
 _LINE: TypeAdapter[_Line] = TypeAdapter(Annotated[_Line, Field(discriminator="event")])
+JournalLine = Annotated[
+    HeaderLine
+    | StepStartedLine
+    | StepFinishedLine
+    | LogLineLine
+    | NoticeLine
+    | RunFinishedLine,
+    Field(discriminator="event"),
+]
+"""Any line of a journal, as the agent sends it (contract 4, DM-135): the
+header first, then events, ``run_finished`` last (DM-137)."""
 
 
 @dataclass(frozen=True)
@@ -439,10 +462,12 @@ def _numbered(raw: Mapping[str, Json], seq: int) -> str:
     return json.dumps({**head, **body}, ensure_ascii=False) + "\n"
 
 
-def _event(line: _Started | _Finished | _Log | _Notice) -> JournalEvent:
-    if isinstance(line, _Notice):
+def _event(
+    line: StepStartedLine | StepFinishedLine | LogLineLine | NoticeLine,
+) -> JournalEvent:
+    if isinstance(line, NoticeLine):
         found = line.notice
-        if isinstance(found, _KeyNeeded):
+        if isinstance(found, KeyNeededNotice):
             return KeyNeeded(
                 found.repo,
                 found.key,
@@ -453,9 +478,9 @@ def _event(line: _Started | _Finished | _Log | _Notice) -> JournalEvent:
                 found.again,
             )
         return RecipientNeeded(found.key, found.path, found.wait_s)
-    if isinstance(line, _Started):
+    if isinstance(line, StepStartedLine):
         return StepStarted(line.phase, line.stack, line.name, line.order, line.started)
-    if isinstance(line, _Finished):
+    if isinstance(line, StepFinishedLine):
         reason = None
         if line.reason is not None:
             params = line.reason.model_dump()
@@ -614,13 +639,10 @@ def read_journal(path: Path) -> Journal:
     torn = lines[-1] != b""
     body = lines if torn else lines[:-1]
     try:
-        first = json.loads(body[0].decode("utf-8"))
-        if not isinstance(first, dict) or first.pop("event", None) != "header":
-            raise ValueError("the first line is not a journal header")
-        seq, at = first.pop("seq", None), first.pop("at", None)
-        header = JournalHeader.model_validate(first)
-        if seq != 1 or not isinstance(at, str):
-            raise ValueError("the header is not line 1 of the stream")
+        first = HeaderLine.model_validate_json(body[0].decode("utf-8"))
+        header = JournalHeader.model_validate(
+            first.model_dump(exclude={"event", "seq", "at"})
+        )
     except (IndexError, ValueError) as error:  # UnicodeDecodeError is a ValueError
         # the line is not quoted: a header carries the run's args
         raise JournalDamaged(f"{path}:1: {type(error).__name__}") from None
@@ -637,7 +659,7 @@ def read_journal(path: Path) -> Journal:
             if not (torn and number == len(body)):
                 damaged_at = number
             break
-        if isinstance(line, _End):
+        if isinstance(line, RunFinishedLine):
             finished = RunFinished(ExitCode(line.exit_code), line.result)
         else:
             events.append(_event(line))

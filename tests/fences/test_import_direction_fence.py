@@ -53,6 +53,7 @@ LAYERS: Layers = (
             "pridem",
             "pridem.contract",
             "pridem.events",
+            "pridem.protocol",
             "pridem.files",
             "pridem.interrupt",
             "pridem.report",

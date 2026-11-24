@@ -1,0 +1,2457 @@
+{
+  "$defs": {
+    "Actor": {
+      "additionalProperties": false,
+      "properties": {
+        "on_behalf_of": {
+          "minLength": 1,
+          "title": "On Behalf Of",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "owner",
+            "engineer",
+            "dispatcher",
+            "executor",
+            "machine"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "via": {
+          "enum": [
+            "local",
+            "panel",
+            "timer"
+          ],
+          "title": "Via",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "via"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "AfterFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "after-failure",
+          "title": "Code",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "main",
+            "restore",
+            "finally"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "phase",
+        "stack",
+        "name"
+      ],
+      "title": "AfterFailure",
+      "type": "object"
+    },
+    "AfterInterrupt": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "after-interrupt",
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "AfterInterrupt",
+      "type": "object"
+    },
+    "BoxSnapshot": {
+      "additionalProperties": false,
+      "description": "The state of a box, measured at ``measured_at``.\n\n``lock_open_by`` -- the processes that hold the file of the box's lock\nopen, read from ``/proc``: an open file of the lock, not a test of\n``flock`` (taking the lock, even for a moment, is a write). A command\nrunning, or a process it left behind -- never more.\n\n``journals_without_verdict`` -- the journals in ``journal/`` that have no\nverdict in ``history/``. A run going on now and a run that died are not\ntold apart: the lock keeps the name of a verb, not a ``run_id``. The\nnext command under the lock (``recover``) gives a dead run its verdict.",
+      "properties": {
+        "journals_without_verdict": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Journals Without Verdict",
+          "type": "array"
+        },
+        "lock_open_by": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Lock Open By",
+          "type": "array"
+        },
+        "machine": {
+          "$ref": "#/$defs/Machine"
+        },
+        "machine_stacks": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/MachineStackPart"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Machine Stacks"
+        },
+        "measured_at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+          "title": "Measured At",
+          "type": "string"
+        },
+        "passport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PassportPart"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Passport"
+        },
+        "resources": {
+          "$ref": "#/$defs/Resources"
+        },
+        "schema": {
+          "const": 1,
+          "title": "Schema",
+          "type": "integer"
+        },
+        "ssl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SslPart"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Ssl"
+        },
+        "stacks": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/StackPart"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Stacks"
+        }
+      },
+      "required": [
+        "schema",
+        "measured_at",
+        "machine",
+        "passport",
+        "lock_open_by",
+        "journals_without_verdict",
+        "stacks",
+        "machine_stacks",
+        "resources",
+        "ssl"
+      ],
+      "title": "BoxSnapshot",
+      "type": "object"
+    },
+    "Command": {
+      "additionalProperties": false,
+      "description": "``GET commands/next``: a verb of the machine and its arguments, as the\nconsole would run it; ``confirmed_at`` -- when a person confirmed a\ndestructive one. The agent checks it against the verb's own schema.",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Json"
+          },
+          "title": "Args",
+          "type": "object"
+        },
+        "confirmed_at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+          "title": "Confirmed At",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "verb": {
+          "minLength": 1,
+          "title": "Verb",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "verb",
+        "args"
+      ],
+      "title": "Command",
+      "type": "object"
+    },
+    "CommandFailedReason": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Argv",
+          "type": "array"
+        },
+        "code": {
+          "const": "command-failed",
+          "title": "Code",
+          "type": "string"
+        },
+        "exit_code": {
+          "title": "Exit Code",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code",
+        "argv",
+        "exit_code"
+      ],
+      "title": "CommandFailedReason",
+      "type": "object"
+    },
+    "CommandNotStartedReason": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Argv",
+          "type": "array"
+        },
+        "code": {
+          "const": "command-not-started",
+          "title": "Code",
+          "type": "string"
+        },
+        "errno": {
+          "anyOf": [
+            {
+              "pattern": "^E[A-Z0-9]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Errno"
+        }
+      },
+      "required": [
+        "code",
+        "argv",
+        "errno"
+      ],
+      "title": "CommandNotStartedReason",
+      "type": "object"
+    },
+    "CommandRefusal": {
+      "additionalProperties": false,
+      "description": "``POST commands/<id>/refusal``: the agent refused the command before\nany run -- so there is no journal and no verdict to say it.",
+      "properties": {
+        "code": {
+          "enum": [
+            "verb-unknown",
+            "args-refused",
+            "confirmation-missing"
+          ],
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "CommandRefusal",
+      "type": "object"
+    },
+    "CommandTimedOutReason": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Argv",
+          "type": "array"
+        },
+        "code": {
+          "const": "command-timed-out",
+          "title": "Code",
+          "type": "string"
+        },
+        "timeout_s": {
+          "minimum": 0,
+          "title": "Timeout S",
+          "type": "number"
+        }
+      },
+      "required": [
+        "code",
+        "argv",
+        "timeout_s"
+      ],
+      "title": "CommandTimedOutReason",
+      "type": "object"
+    },
+    "Disk": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "space": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Space"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Space"
+        }
+      },
+      "required": [
+        "path",
+        "space"
+      ],
+      "title": "Disk",
+      "type": "object"
+    },
+    "DnsCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "domain": {
+          "minLength": 1,
+          "title": "Domain",
+          "type": "string"
+        },
+        "expected": {
+          "minLength": 1,
+          "title": "Expected",
+          "type": "string"
+        },
+        "resolves_to": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Resolves To",
+          "type": "array"
+        }
+      },
+      "required": [
+        "domain",
+        "resolves_to",
+        "expected"
+      ],
+      "title": "DnsCheck",
+      "type": "object"
+    },
+    "DoctorDiff": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ]
+      },
+      "description": "What ``doctor`` found a step would do: ``name`` is the step of ``code``.",
+      "properties": {
+        "code": {
+          "pattern": "^[a-z][a-z0-9_]*:[a-z][a-z0-9-]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stack",
+        "name"
+      ],
+      "title": "DoctorDiff",
+      "type": "object"
+    },
+    "DomainPart": {
+      "additionalProperties": false,
+      "description": "A domain of the passport, and whether the box's one certificate names\nit (a wildcard covers one label).",
+      "properties": {
+        "covered": {
+          "title": "Covered",
+          "type": "boolean"
+        },
+        "domain": {
+          "title": "Domain",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domain",
+        "covered"
+      ],
+      "title": "DomainPart",
+      "type": "object"
+    },
+    "EntryPart": {
+      "additionalProperties": false,
+      "description": "An entry of a stack (``stacks.<entry>`` of its ``primer.yaml``): every\nservice of the compose of its current release, by its container.",
+      "properties": {
+        "entry": {
+          "title": "Entry",
+          "type": "string"
+        },
+        "persistent": {
+          "title": "Persistent",
+          "type": "boolean"
+        },
+        "services": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ServiceState"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Services"
+        }
+      },
+      "required": [
+        "entry",
+        "persistent",
+        "services"
+      ],
+      "title": "EntryPart",
+      "type": "object"
+    },
+    "EventBatch": {
+      "additionalProperties": false,
+      "description": "``POST runs/<run_id>/events``: lines of the run's journal, from\n``from_seq`` on, in their order. The Panel keeps them by ``(run_id,\nseq)``: a repeated line changes nothing.",
+      "properties": {
+        "events": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "header": "#/$defs/HeaderLine",
+                "log": "#/$defs/LogLineLine",
+                "notice": "#/$defs/NoticeLine",
+                "run_finished": "#/$defs/RunFinishedLine",
+                "step_finished": "#/$defs/StepFinishedLine",
+                "step_started": "#/$defs/StepStartedLine"
+              },
+              "propertyName": "event"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/HeaderLine"
+              },
+              {
+                "$ref": "#/$defs/StepStartedLine"
+              },
+              {
+                "$ref": "#/$defs/StepFinishedLine"
+              },
+              {
+                "$ref": "#/$defs/LogLineLine"
+              },
+              {
+                "$ref": "#/$defs/NoticeLine"
+              },
+              {
+                "$ref": "#/$defs/RunFinishedLine"
+              }
+            ]
+          },
+          "title": "Events",
+          "type": "array"
+        },
+        "from_seq": {
+          "minimum": 1,
+          "title": "From Seq",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "from_seq",
+        "events"
+      ],
+      "title": "EventBatch",
+      "type": "object"
+    },
+    "EventsAccepted": {
+      "additionalProperties": false,
+      "description": "The last ``seq`` of the run the Panel holds with no gap before it: the\nagent goes on from the next.",
+      "properties": {
+        "last_seq": {
+          "minimum": 0,
+          "title": "Last Seq",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "last_seq"
+      ],
+      "title": "EventsAccepted",
+      "type": "object"
+    },
+    "ExceptionReason": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "exception",
+          "title": "Code",
+          "type": "string"
+        },
+        "type": {
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "type"
+      ],
+      "title": "ExceptionReason",
+      "type": "object"
+    },
+    "ExitCode": {
+      "description": "Exit code of a pridem command.",
+      "enum": [
+        0,
+        1,
+        2
+      ],
+      "title": "ExitCode",
+      "type": "integer"
+    },
+    "Failure": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "minLength": 1,
+          "title": "File",
+          "type": "string"
+        },
+        "line": {
+          "minimum": 1,
+          "title": "Line",
+          "type": "integer"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "request_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Request Ids",
+          "type": "array"
+        },
+        "test": {
+          "minLength": 1,
+          "title": "Test",
+          "type": "string"
+        },
+        "traceback_project_frames": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Traceback Project Frames",
+          "type": "array"
+        }
+      },
+      "required": [
+        "test",
+        "file",
+        "line",
+        "message",
+        "traceback_project_frames",
+        "request_ids"
+      ],
+      "title": "Failure",
+      "type": "object"
+    },
+    "HeaderLine": {
+      "additionalProperties": false,
+      "description": "The first line of a journal: its header, ``seq`` 1.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/Actor"
+        },
+        "args": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Json"
+          },
+          "title": "Args",
+          "type": "object"
+        },
+        "at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$",
+          "title": "At",
+          "type": "string"
+        },
+        "composition_before": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Composition Before",
+          "type": "object"
+        },
+        "event": {
+          "const": "header",
+          "title": "Event",
+          "type": "string"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "install",
+                "deploy",
+                "doctor",
+                "reinstall",
+                "destroy",
+                "gc",
+                "renew",
+                "command"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "status",
+                "check"
+              ],
+              "type": "string"
+            }
+          ],
+          "title": "Mode"
+        },
+        "passport_version": {
+          "minimum": 1,
+          "title": "Passport Version",
+          "type": "integer"
+        },
+        "run_id": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z-[0-9a-f]{4}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "seq": {
+          "maximum": 1,
+          "minimum": 1,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "started": {
+          "format": "date-time",
+          "title": "Started",
+          "type": "string"
+        },
+        "verb": {
+          "minLength": 1,
+          "title": "Verb",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "verb",
+        "mode",
+        "args",
+        "actor",
+        "started",
+        "composition_before",
+        "event",
+        "seq",
+        "at"
+      ],
+      "title": "HeaderLine",
+      "type": "object"
+    },
+    "Heartbeat": {
+      "additionalProperties": false,
+      "description": "``POST heartbeat``: light -- what the box says of itself every few\nseconds; full -- with ``state``, the whole form ``box-state.v1`` (DM-136).\nThe answer is empty: what the Panel wants of the box is in its queue.",
+      "properties": {
+        "journals_without_verdict": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Journals Without Verdict",
+          "type": "array"
+        },
+        "last_run_id": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z-[0-9a-f]{4}$",
+          "title": "Last Run Id",
+          "type": "string"
+        },
+        "lock_open_by": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Lock Open By",
+          "type": "array"
+        },
+        "machine_version": {
+          "minLength": 1,
+          "title": "Machine Version",
+          "type": "string"
+        },
+        "measured_at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+          "title": "Measured At",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/BoxSnapshot"
+        }
+      },
+      "required": [
+        "measured_at",
+        "machine_version",
+        "lock_open_by",
+        "journals_without_verdict"
+      ],
+      "title": "Heartbeat",
+      "type": "object"
+    },
+    "HistoryAccepted": {
+      "additionalProperties": false,
+      "description": "The runs the Panel holds now: the agent's cursor moves past them.",
+      "properties": {
+        "run_ids": {
+          "items": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z-[0-9a-f]{4}$",
+            "type": "string"
+          },
+          "title": "Run Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "run_ids"
+      ],
+      "title": "HistoryAccepted",
+      "type": "object"
+    },
+    "HistoryBatch": {
+      "additionalProperties": false,
+      "description": "``POST history``: verdicts of ``history/`` the Panel has not\nconfirmed, after registration and after every return of the\nconnection.",
+      "properties": {
+        "envelopes": {
+          "items": {
+            "$ref": "#/$defs/VerdictEnvelope"
+          },
+          "title": "Envelopes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "envelopes"
+      ],
+      "title": "HistoryBatch",
+      "type": "object"
+    },
+    "Images": {
+      "additionalProperties": false,
+      "description": "docker's line ``Images`` of ``system df``: every image of the box.",
+      "properties": {
+        "bytes": {
+          "minimum": 0,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "count": {
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "reclaimable_bytes": {
+          "minimum": 0,
+          "title": "Reclaimable Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count",
+        "bytes",
+        "reclaimable_bytes"
+      ],
+      "title": "Images",
+      "type": "object"
+    },
+    "Interrupted": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "interrupted",
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "Interrupted",
+      "type": "object"
+    },
+    "JournalCut": {
+      "additionalProperties": false,
+      "description": "The run's output past ``limit`` bytes is not in its journal (DM-24).",
+      "properties": {
+        "code": {
+          "const": "cut",
+          "title": "Code",
+          "type": "string"
+        },
+        "limit": {
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "what": {
+          "const": "journal",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code",
+        "limit"
+      ],
+      "title": "JournalCut",
+      "type": "object"
+    },
+    "JournalDamaged": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "journal-damaged",
+          "title": "Code",
+          "type": "string"
+        },
+        "line": {
+          "minimum": 1,
+          "title": "Line",
+          "type": "integer"
+        },
+        "what": {
+          "const": "run",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code",
+        "line"
+      ],
+      "title": "JournalDamaged",
+      "type": "object"
+    },
+    "JournalQuarantined": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "quarantined",
+          "title": "Code",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z-[0-9a-f]{4}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "what": {
+          "const": "journal",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code",
+        "run_id"
+      ],
+      "title": "JournalQuarantined",
+      "type": "object"
+    },
+    "JournalWriteFailed": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "write-failed",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "const": "journal",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code"
+      ],
+      "title": "JournalWriteFailed",
+      "type": "object"
+    },
+    "Json": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/Json"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Json"
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "Junit": {
+      "additionalProperties": false,
+      "properties": {
+        "failed": {
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "skipped": {
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "total": {
+          "minimum": 0,
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "failed",
+        "skipped"
+      ],
+      "title": "Junit",
+      "type": "object"
+    },
+    "KeyNeededNotice": {
+      "additionalProperties": false,
+      "properties": {
+        "again": {
+          "title": "Again",
+          "type": "boolean"
+        },
+        "key": {
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "const": "key_needed",
+          "title": "Kind",
+          "type": "string"
+        },
+        "page": {
+          "title": "Page",
+          "type": "string"
+        },
+        "repo": {
+          "minLength": 1,
+          "title": "Repo",
+          "type": "string"
+        },
+        "wait_s": {
+          "title": "Wait S",
+          "type": "number"
+        },
+        "why": {
+          "title": "Why",
+          "type": "string"
+        },
+        "write": {
+          "title": "Write",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "repo",
+        "key",
+        "write",
+        "wait_s",
+        "again"
+      ],
+      "title": "KeyNeededNotice",
+      "type": "object"
+    },
+    "LogLineLine": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$",
+          "title": "At",
+          "type": "string"
+        },
+        "continued": {
+          "default": false,
+          "title": "Continued",
+          "type": "boolean"
+        },
+        "event": {
+          "const": "log",
+          "title": "Event",
+          "type": "string"
+        },
+        "line": {
+          "title": "Line",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "main",
+            "restore",
+            "finally"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "seq": {
+          "minimum": 1,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        },
+        "stream": {
+          "enum": [
+            "stdout",
+            "stderr"
+          ],
+          "title": "Stream",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "seq",
+        "at",
+        "phase",
+        "stack",
+        "name",
+        "stream",
+        "line"
+      ],
+      "title": "LogLineLine",
+      "type": "object"
+    },
+    "Machine": {
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "Machine",
+      "type": "object"
+    },
+    "MachineStackPart": {
+      "additionalProperties": false,
+      "description": "A stack of the machine's own (``pridem-edge``, ``pridem-egress``) by\nthe containers that carry its label.",
+      "properties": {
+        "services": {
+          "items": {
+            "$ref": "#/$defs/ServiceState"
+          },
+          "title": "Services",
+          "type": "array"
+        },
+        "stack": {
+          "title": "Stack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stack",
+        "services"
+      ],
+      "title": "MachineStackPart",
+      "type": "object"
+    },
+    "Memory": {
+      "additionalProperties": false,
+      "properties": {
+        "available_bytes": {
+          "minimum": 0,
+          "title": "Available Bytes",
+          "type": "integer"
+        },
+        "total_bytes": {
+          "minimum": 0,
+          "title": "Total Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_bytes",
+        "available_bytes"
+      ],
+      "title": "Memory",
+      "type": "object"
+    },
+    "NoFact": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "no-fact",
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "NoFact",
+      "type": "object"
+    },
+    "NoVerdict": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "no-verdict",
+          "title": "Code",
+          "type": "string"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "description": "A step of a plan: where a journal ends.",
+              "properties": {
+                "name": {
+                  "minLength": 1,
+                  "title": "Name",
+                  "type": "string"
+                },
+                "phase": {
+                  "enum": [
+                    "main",
+                    "restore",
+                    "finally"
+                  ],
+                  "title": "Phase",
+                  "type": "string"
+                },
+                "stack": {
+                  "minLength": 1,
+                  "title": "Stack",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "phase",
+                "stack",
+                "name"
+              ],
+              "title": "At",
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "what": {
+          "const": "run",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code",
+        "ended_at"
+      ],
+      "title": "NoVerdict",
+      "type": "object"
+    },
+    "NoticeLine": {
+      "additionalProperties": false,
+      "description": "What the console showed a person (a key to add): ``notice`` holds it.",
+      "properties": {
+        "at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$",
+          "title": "At",
+          "type": "string"
+        },
+        "event": {
+          "const": "notice",
+          "title": "Event",
+          "type": "string"
+        },
+        "notice": {
+          "discriminator": {
+            "mapping": {
+              "key_needed": "#/$defs/KeyNeededNotice",
+              "recipient_needed": "#/$defs/RecipientNeededNotice"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/KeyNeededNotice"
+            },
+            {
+              "$ref": "#/$defs/RecipientNeededNotice"
+            }
+          ],
+          "title": "Notice"
+        },
+        "seq": {
+          "minimum": 1,
+          "title": "Seq",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "event",
+        "seq",
+        "at",
+        "notice"
+      ],
+      "title": "NoticeLine",
+      "type": "object"
+    },
+    "PassportPart": {
+      "additionalProperties": false,
+      "description": "The version of the box's passport copy; nothing else of it -- no\nvalue of ``asked`` -- is in the form.",
+      "properties": {
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "PassportPart",
+      "type": "object"
+    },
+    "RecipientNeededNotice": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "const": "recipient_needed",
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "wait_s": {
+          "title": "Wait S",
+          "type": "number"
+        }
+      },
+      "required": [
+        "kind",
+        "key",
+        "wait_s"
+      ],
+      "title": "RecipientNeededNotice",
+      "type": "object"
+    },
+    "Refusal": {
+      "additionalProperties": false,
+      "description": "The Panel's answer to a request it refuses.",
+      "properties": {
+        "code": {
+          "enum": [
+            "token-unknown",
+            "token-used",
+            "token-expired",
+            "name-taken",
+            "product-mismatch",
+            "protocol-too-old",
+            "protocol-too-new",
+            "clock-skew",
+            "signature-bad",
+            "box-unknown"
+          ],
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "Refusal",
+      "type": "object"
+    },
+    "RegisterRequest": {
+      "additionalProperties": false,
+      "description": "``POST register``: the one-time token and what the Panel checks it with\n-- the server's name, free in the whole Panel; the product's repository,\nthe project's; the public half of the box's key.",
+      "properties": {
+        "box_key_public": {
+          "minLength": 1,
+          "title": "Box Key Public",
+          "type": "string"
+        },
+        "machine_version": {
+          "minLength": 1,
+          "title": "Machine Version",
+          "type": "string"
+        },
+        "product_repo": {
+          "minLength": 1,
+          "title": "Product Repo",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "test",
+            "prod",
+            "preview"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "server_name": {
+          "minLength": 1,
+          "title": "Server Name",
+          "type": "string"
+        },
+        "token": {
+          "minLength": 1,
+          "title": "Token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "token",
+        "server_name",
+        "role",
+        "product_repo",
+        "machine_version",
+        "box_key_public"
+      ],
+      "title": "RegisterRequest",
+      "type": "object"
+    },
+    "RegisterResponse": {
+      "additionalProperties": false,
+      "description": "The box's ``box_id``, where the agent goes from now on, and its\nintervals: a light heartbeat, the full state, the long-poll.",
+      "properties": {
+        "agent_url": {
+          "pattern": "^https://[^\\s]+/agent/v1/$",
+          "title": "Agent Url",
+          "type": "string"
+        },
+        "box_id": {
+          "minLength": 1,
+          "title": "Box Id",
+          "type": "string"
+        },
+        "full_state_s": {
+          "minimum": 1,
+          "title": "Full State S",
+          "type": "integer"
+        },
+        "heartbeat_s": {
+          "minimum": 1,
+          "title": "Heartbeat S",
+          "type": "integer"
+        },
+        "poll_s": {
+          "minimum": 1,
+          "title": "Poll S",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "box_id",
+        "agent_url",
+        "heartbeat_s",
+        "full_state_s",
+        "poll_s"
+      ],
+      "title": "RegisterResponse",
+      "type": "object"
+    },
+    "Report": {
+      "additionalProperties": false,
+      "properties": {
+        "dns": {
+          "items": {
+            "$ref": "#/$defs/DnsCheck"
+          },
+          "title": "Dns",
+          "type": "array"
+        },
+        "doctor_diff": {
+          "items": {
+            "$ref": "#/$defs/DoctorDiff"
+          },
+          "title": "Doctor Diff",
+          "type": "array"
+        },
+        "failures": {
+          "items": {
+            "$ref": "#/$defs/Failure"
+          },
+          "title": "Failures",
+          "type": "array"
+        },
+        "incomplete": {
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/NoVerdict"
+              },
+              {
+                "$ref": "#/$defs/JournalDamaged"
+              },
+              {
+                "$ref": "#/$defs/RunUnbuildable"
+              },
+              {
+                "$ref": "#/$defs/JournalWriteFailed"
+              },
+              {
+                "$ref": "#/$defs/JournalQuarantined"
+              },
+              {
+                "$ref": "#/$defs/JournalCut"
+              },
+              {
+                "$ref": "#/$defs/StateQuarantined"
+              },
+              {
+                "$ref": "#/$defs/RestoreNeeded"
+              },
+              {
+                "$ref": "#/$defs/StepIncomplete"
+              }
+            ]
+          },
+          "title": "Incomplete",
+          "type": "array"
+        }
+      },
+      "required": [
+        "failures",
+        "incomplete"
+      ],
+      "title": "Report",
+      "type": "object"
+    },
+    "Resources": {
+      "additionalProperties": false,
+      "properties": {
+        "disk": {
+          "items": {
+            "$ref": "#/$defs/Disk"
+          },
+          "title": "Disk",
+          "type": "array"
+        },
+        "images": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Images"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Images"
+        },
+        "memory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Memory"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Memory"
+        },
+        "swap": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Swap"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Swap"
+        }
+      },
+      "required": [
+        "disk",
+        "memory",
+        "swap",
+        "images"
+      ],
+      "title": "Resources",
+      "type": "object"
+    },
+    "RestoreNeeded": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "needed",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "const": "restore",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code"
+      ],
+      "title": "RestoreNeeded",
+      "type": "object"
+    },
+    "RoleSkip": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "role",
+          "title": "Code",
+          "type": "string"
+        },
+        "role": {
+          "minLength": 1,
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "role"
+      ],
+      "title": "RoleSkip",
+      "type": "object"
+    },
+    "RunFinishedLine": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$",
+          "title": "At",
+          "type": "string"
+        },
+        "event": {
+          "const": "run_finished",
+          "title": "Event",
+          "type": "string"
+        },
+        "exit_code": {
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "title": "Exit Code",
+          "type": "integer"
+        },
+        "result": {
+          "enum": [
+            "green",
+            "incomplete",
+            "red"
+          ],
+          "title": "Result",
+          "type": "string"
+        },
+        "seq": {
+          "minimum": 1,
+          "title": "Seq",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "event",
+        "seq",
+        "at",
+        "exit_code",
+        "result"
+      ],
+      "title": "RunFinishedLine",
+      "type": "object"
+    },
+    "RunUnbuildable": {
+      "additionalProperties": false,
+      "description": "The verdict of the run could not be built (``type`` of the error); this\none holds what could be, the journal the rest (DM-92).",
+      "properties": {
+        "code": {
+          "const": "unbuildable",
+          "title": "Code",
+          "type": "string"
+        },
+        "type": {
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        },
+        "what": {
+          "const": "run",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code",
+        "type"
+      ],
+      "title": "RunUnbuildable",
+      "type": "object"
+    },
+    "ServiceState": {
+      "additionalProperties": false,
+      "properties": {
+        "health": {
+          "enum": [
+            "healthy",
+            "unhealthy",
+            "starting",
+            "none"
+          ],
+          "title": "Health",
+          "type": "string"
+        },
+        "service": {
+          "title": "Service",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "running",
+            "exited",
+            "restarting",
+            "paused",
+            "created",
+            "dead",
+            "removing",
+            "absent"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "state",
+        "health"
+      ],
+      "title": "ServiceState",
+      "type": "object"
+    },
+    "Space": {
+      "additionalProperties": false,
+      "properties": {
+        "free_bytes": {
+          "minimum": 0,
+          "title": "Free Bytes",
+          "type": "integer"
+        },
+        "total_bytes": {
+          "minimum": 0,
+          "title": "Total Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_bytes",
+        "free_bytes"
+      ],
+      "title": "Space",
+      "type": "object"
+    },
+    "SslPart": {
+      "additionalProperties": false,
+      "description": "The one certificate nginx serves for every domain: its end, whether it\nsigns itself, from when the machine renews it (``RENEW_BEFORE`` ahead of\nits end, the daily timer) -- in ``provided`` the passport brings a new\none, never the machine.",
+      "properties": {
+        "domains": {
+          "items": {
+            "$ref": "#/$defs/DomainPart"
+          },
+          "title": "Domains",
+          "type": "array"
+        },
+        "expires": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+          "title": "Expires",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "letsencrypt",
+            "self-signed",
+            "defer",
+            "provided"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "renews_from": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Renews From"
+        },
+        "self_signed": {
+          "title": "Self Signed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mode",
+        "expires",
+        "self_signed",
+        "renews_from",
+        "domains"
+      ],
+      "title": "SslPart",
+      "type": "object"
+    },
+    "StackPart": {
+      "additionalProperties": false,
+      "description": "A stack with the machine's mark on the box (``/opt/<stack>/.pridem``):\nthe release ``current`` points to, and each of its entries.",
+      "properties": {
+        "entries": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/EntryPart"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Entries"
+        },
+        "release": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/Unmeasured"
+            }
+          ],
+          "title": "Release"
+        },
+        "stack": {
+          "title": "Stack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stack",
+        "release",
+        "entries"
+      ],
+      "title": "StackPart",
+      "type": "object"
+    },
+    "StateQuarantined": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "quarantined",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "const": "state",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code"
+      ],
+      "title": "StateQuarantined",
+      "type": "object"
+    },
+    "Step": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_s": {
+          "minimum": 0,
+          "title": "Duration S",
+          "type": "number"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "title": "Order",
+          "type": "integer"
+        },
+        "phase": {
+          "enum": [
+            "main",
+            "restore",
+            "finally"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RoleSkip"
+            },
+            {
+              "$ref": "#/$defs/AfterFailure"
+            },
+            {
+              "$ref": "#/$defs/AfterInterrupt"
+            },
+            {
+              "$ref": "#/$defs/Interrupted"
+            },
+            {
+              "$ref": "#/$defs/NoFact"
+            },
+            {
+              "$ref": "#/$defs/CommandFailedReason"
+            },
+            {
+              "$ref": "#/$defs/CommandTimedOutReason"
+            },
+            {
+              "$ref": "#/$defs/CommandNotStartedReason"
+            },
+            {
+              "$ref": "#/$defs/ExceptionReason"
+            },
+            {
+              "$ref": "#/$defs/StepCode"
+            }
+          ],
+          "title": "Reason"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        },
+        "started": {
+          "format": "date-time",
+          "title": "Started",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "failed",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "verify": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Json"
+          },
+          "title": "Verify",
+          "type": "object"
+        }
+      },
+      "required": [
+        "stack",
+        "name",
+        "phase",
+        "order",
+        "status"
+      ],
+      "title": "Step",
+      "type": "object"
+    },
+    "StepCode": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ]
+      },
+      "description": "A step's own code, ``<step>:<code>``, with its parameters.",
+      "properties": {
+        "code": {
+          "pattern": "^[a-z][a-z0-9_]*:[a-z][a-z0-9-]*$",
+          "title": "Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "StepCode",
+      "type": "object"
+    },
+    "StepFinishedLine": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$",
+          "title": "At",
+          "type": "string"
+        },
+        "duration_s": {
+          "title": "Duration S",
+          "type": "number"
+        },
+        "event": {
+          "const": "step_finished",
+          "title": "Event",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "title": "Order",
+          "type": "integer"
+        },
+        "phase": {
+          "enum": [
+            "main",
+            "restore",
+            "finally"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RoleSkip"
+            },
+            {
+              "$ref": "#/$defs/AfterFailure"
+            },
+            {
+              "$ref": "#/$defs/AfterInterrupt"
+            },
+            {
+              "$ref": "#/$defs/Interrupted"
+            },
+            {
+              "$ref": "#/$defs/NoFact"
+            },
+            {
+              "$ref": "#/$defs/CommandFailedReason"
+            },
+            {
+              "$ref": "#/$defs/CommandTimedOutReason"
+            },
+            {
+              "$ref": "#/$defs/CommandNotStartedReason"
+            },
+            {
+              "$ref": "#/$defs/ExceptionReason"
+            },
+            {
+              "$ref": "#/$defs/StepCode"
+            }
+          ],
+          "title": "Reason"
+        },
+        "seq": {
+          "minimum": 1,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        },
+        "started": {
+          "format": "date-time",
+          "title": "Started",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "failed",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "verify": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Json"
+          },
+          "default": {},
+          "title": "Verify",
+          "type": "object"
+        }
+      },
+      "required": [
+        "event",
+        "seq",
+        "at",
+        "phase",
+        "stack",
+        "name",
+        "order",
+        "status"
+      ],
+      "title": "StepFinishedLine",
+      "type": "object"
+    },
+    "StepIncomplete": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ]
+      },
+      "description": "Something a step left undone: ``what`` is the step, ``code`` its own.",
+      "properties": {
+        "code": {
+          "pattern": "^[a-z][a-z0-9_]*:[a-z][a-z0-9-]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "minLength": 1,
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "what"
+      ],
+      "title": "StepIncomplete",
+      "type": "object"
+    },
+    "StepStartedLine": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$",
+          "title": "At",
+          "type": "string"
+        },
+        "event": {
+          "const": "step_started",
+          "title": "Event",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "title": "Order",
+          "type": "integer"
+        },
+        "phase": {
+          "enum": [
+            "main",
+            "restore",
+            "finally"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "seq": {
+          "minimum": 1,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "stack": {
+          "minLength": 1,
+          "title": "Stack",
+          "type": "string"
+        },
+        "started": {
+          "format": "date-time",
+          "title": "Started",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "seq",
+        "at",
+        "phase",
+        "stack",
+        "name",
+        "order",
+        "started"
+      ],
+      "title": "StepStartedLine",
+      "type": "object"
+    },
+    "Swap": {
+      "additionalProperties": false,
+      "description": "``total_bytes`` 0 -- the box has no swap.",
+      "properties": {
+        "free_bytes": {
+          "minimum": 0,
+          "title": "Free Bytes",
+          "type": "integer"
+        },
+        "total_bytes": {
+          "minimum": 0,
+          "title": "Total Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_bytes",
+        "free_bytes"
+      ],
+      "title": "Swap",
+      "type": "object"
+    },
+    "Unmeasured": {
+      "additionalProperties": false,
+      "description": "A part that was not measured, and why -- never a default value.",
+      "properties": {
+        "unmeasured": {
+          "enum": [
+            "no-passport",
+            "passport-unreadable",
+            "docker-unreachable",
+            "no-current",
+            "primer-yaml-unreadable",
+            "compose-unread",
+            "path-missing",
+            "meminfo-unreadable",
+            "no-certificate",
+            "certificate-unreadable",
+            "renewed-by-passport"
+          ],
+          "title": "Unmeasured",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unmeasured"
+      ],
+      "title": "Unmeasured",
+      "type": "object"
+    },
+    "Verdict": {
+      "additionalProperties": false,
+      "description": "What a pridem command ends with (contract 2 section 1).",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/Actor"
+        },
+        "args": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Json"
+          },
+          "title": "Args",
+          "type": "object"
+        },
+        "composition_after": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Composition After",
+          "type": "object"
+        },
+        "composition_before": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Composition Before",
+          "type": "object"
+        },
+        "exit_code": {
+          "$ref": "#/$defs/ExitCode"
+        },
+        "finished": {
+          "format": "date-time",
+          "title": "Finished",
+          "type": "string"
+        },
+        "junit": {
+          "$ref": "#/$defs/Junit"
+        },
+        "log_ref": {
+          "minLength": 1,
+          "title": "Log Ref",
+          "type": "string"
+        },
+        "passport_version": {
+          "minimum": 1,
+          "title": "Passport Version",
+          "type": "integer"
+        },
+        "report": {
+          "$ref": "#/$defs/Report"
+        },
+        "result": {
+          "enum": [
+            "green",
+            "red",
+            "incomplete"
+          ],
+          "title": "Result",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z-[0-9a-f]{4}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema": {
+          "const": 1,
+          "title": "Schema",
+          "type": "integer"
+        },
+        "started": {
+          "format": "date-time",
+          "title": "Started",
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "title": "Steps",
+          "type": "array"
+        },
+        "verb": {
+          "pattern": "^[a-z][a-z0-9-]*( [a-z][a-z0-9-]*)*$",
+          "title": "Verb",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema",
+        "run_id",
+        "verb",
+        "args",
+        "actor",
+        "started",
+        "finished",
+        "exit_code",
+        "result",
+        "composition_before",
+        "composition_after",
+        "steps",
+        "report"
+      ],
+      "title": "Verdict",
+      "type": "object"
+    },
+    "VerdictEnvelope": {
+      "additionalProperties": false,
+      "description": "``POST runs/<run_id>/verdict``: the verdict of ``history/`` as it is\n(contract 2), its signature with the box's key (DM-140) and the report for\na model (``report --llm``). ``signed_on_send`` -- the verdict was written\nbefore the box had its key and was signed when sent.",
+      "properties": {
+        "report_llm": {
+          "title": "Report Llm",
+          "type": "string"
+        },
+        "signature": {
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+          "title": "Signature",
+          "type": "string"
+        },
+        "signed_on_send": {
+          "title": "Signed On Send",
+          "type": "boolean"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "verdict",
+        "signature",
+        "report_llm",
+        "signed_on_send"
+      ],
+      "title": "VerdictEnvelope",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "agent protocol v1"
+}
