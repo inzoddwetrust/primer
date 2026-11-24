@@ -37,6 +37,14 @@ another version and refused by its form, never another box's action. The
 window of time (±300 s, ``clock-skew``) is the Panel's to check, not the
 form's.
 
+**A verdict's signature.** ``VerdictEnvelope.signature`` signs
+``verdict_bytes`` (DM-140): the verdict as a JSON object -- the box reads
+``history/<run_id>.json`` by ``json.loads``, the Panel dumps the envelope's
+verdict by ``model_dump(mode="json")`` -- keys sorted, no spaces, UTF-8. No
+model stands between the file and the bytes: they do not depend on the
+reader's version of contract 2, and for a verdict the box sends the two forms
+are the same bytes (the box builds no envelope where they differ).
+
 The models are the contract: ``python -m pridem.protocol --export`` writes
 ``contract/schema/agent-protocol.v1.json``, every message in its ``$defs``.
 The verdict of a run is contract 2's model, the full state of a box is
@@ -46,6 +54,7 @@ contract names them, never copies them.
 
 import argparse
 import hashlib
+import json
 import sys
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal
@@ -260,6 +269,16 @@ def signing_string(method: str, path: str, time: int, body: bytes) -> str:
     it (see the module)."""
     digest = hashlib.sha256(body).hexdigest()
     return f"{method.upper()}\n{path}\n{time}\n{digest}"
+
+
+def verdict_bytes(verdict: Mapping[str, Json]) -> bytes:
+    """What the signature of a verdict's envelope signs: the verdict as a JSON
+    object, keys sorted at every level, ``,`` and ``:`` with no spaces,
+    non-ASCII as it is, in UTF-8 (see the module)."""
+    text = json.dumps(
+        verdict, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return text.encode("utf-8")
 
 
 # --- versions ---------------------------------------------------------------------

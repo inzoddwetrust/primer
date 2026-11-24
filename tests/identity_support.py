@@ -224,6 +224,7 @@ def register(
     token: str | None = TOKEN,
     argv: tuple[str, ...] = (),
     owner: Callable[[], int] = os.geteuid,
+    now: Callable[[], datetime] = lambda: NOW,
 ) -> Ran:
     """``pridem --json register`` on the box at ``fs_root``, the Panel
     ``panel``; no command may run (a strict empty ``FakeRunner``)."""
@@ -231,7 +232,7 @@ def register(
         monkeypatch.delenv(TOKEN_ENV, raising=False)
     else:
         monkeypatch.setenv(TOKEN_ENV, token)
-    verb = make_register(transport=lambda: panel, owner=owner, now=lambda: NOW)
+    verb = make_register(transport=lambda: panel, owner=owner, now=now)
     monkeypatch.setitem(VERBS, "register", verb)
     out, err = io.StringIO(), io.StringIO()
     with FakeRunner() as runner:

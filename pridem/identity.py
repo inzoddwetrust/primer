@@ -18,13 +18,16 @@ The Panel holds the public half alone (``PRIMER-PANEL-TZ-2`` 3): it reads
 ``box_key_public`` as the base64 of the key's 32 raw bytes, and a signature as
 the base64 of its 64 raw bytes (gate of DM-153). A request of the agent is
 signed over ``signing_string`` of contract 4 (``pridem.protocol``) in UTF-8 --
-the bytes the Panel checks. The seed is never in a fact, a log, a reason or a
-message: what leaves this module of it is the public half and signatures.
+the bytes the Panel checks; a verdict's envelope is signed over
+``verdict_bytes`` of contract 4 (``sign_verdict``, DM-140). The seed is never
+in a fact, a log, a reason or a message: what leaves this module of it is the
+public half and signatures.
 """
 
 import base64
 import os
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -38,6 +41,7 @@ from cryptography.hazmat.primitives.serialization import (
 from pydantic import Field, ValidationError
 
 from pridem.contract import Strict
+from pridem.events import Json
 from pridem.files import atomic_write, private_dir
 from pridem.protocol import (
     BOX_HEADER,
@@ -47,6 +51,7 @@ from pridem.protocol import (
     TIME_HEADER,
     RegisterResponse,
     signing_string,
+    verdict_bytes,
 )
 from pridem.report.box_snapshot import Moment
 from pridem.report.schema import Text
@@ -159,6 +164,12 @@ def sign(seed: bytes, message: bytes) -> str:
     """The signature of ``message`` by the box's key: base64 of 64 bytes."""
     signature = Ed25519PrivateKey.from_private_bytes(seed).sign(message)
     return base64.b64encode(signature).decode()
+
+
+def sign_verdict(seed: bytes, verdict: Mapping[str, Json]) -> str:
+    """The signature of a verdict's envelope: ``verdict_bytes`` of contract 4
+    signed by the box's key, base64 of 64 bytes (DM-140)."""
+    return sign(seed, verdict_bytes(verdict))
 
 
 def signed_headers(
