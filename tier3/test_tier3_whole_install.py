@@ -1619,6 +1619,149 @@ def test_tier3_certbot_tag_has_the_pinned_digest(image: str) -> None:
     assert f"{repository}@{digest}" in digests, (tag, digests)
 
 
+PANEL_PROXY = "pridem-dm146-proxy"
+PANEL_PROXY_PORT = 3146
+CONNECT_SCRIPT = """\
+import selectors, socket, sys
+host, port, proxy, proxy_port = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+conn = socket.create_connection((proxy, proxy_port), 10)
+first = f"CONNECT {host}:{port} HTTP/1.1\\r\\n"
+conn.sendall((first + f"Host: {host}:{port}\\r\\n\\r\\n").encode())
+head = b""
+while b"\\r\\n\\r\\n" not in head:
+    more = conn.recv(1)
+    if not more:
+        sys.exit("the proxy closed")
+    head += more
+if head.split()[1] != b"200":
+    sys.exit("the proxy said " + head.split(b"\\r\\n")[0].decode())
+sel = selectors.DefaultSelector()
+sel.register(sys.stdin.buffer, selectors.EVENT_READ)
+sel.register(conn, selectors.EVENT_READ)
+while True:
+    for key, _ in sel.select():
+        if key.fileobj is conn:
+            data = conn.recv(65536)
+            if not data:
+                sys.exit(0)
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+        else:
+            data = sys.stdin.buffer.read1(65536)
+            if not data:
+                conn.shutdown(socket.SHUT_WR)
+                sel.unregister(sys.stdin.buffer)
+            else:
+                conn.sendall(data)
+"""
+"""ssh's ProxyCommand through an HTTP CONNECT proxy, the way git of the Panel
+goes out (DM-146): a Python script, not a shell file."""
+
+
+def _connect(host: str, port: int) -> tuple[str, bytes]:
+    """``CONNECT host:port`` to the Panel's proxy on the runner: its status
+    line and the first bytes after it."""
+    import socket
+
+    request = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
+    with socket.create_connection(("127.0.0.1", PANEL_PROXY_PORT), 15) as conn:
+        conn.sendall(request.encode("ascii"))
+        head = b""
+        while b"\r\n\r\n" not in head:
+            more = conn.recv(1)
+            if not more:
+                break
+            head += more
+        status = head.split(b"\r\n")[0].decode(errors="replace")
+        after = b""
+        if " 200 " in f"{status} ":
+            conn.settimeout(15)
+            after = conn.recv(64)
+    return status, after
+
+
+def test_tier3_the_panel_s_host_through_the_machine_s_proxy(tmp_path: Path) -> None:
+    """DM-146, on the runner after the machine's host steps (group a): the
+    machine's proxy -- its image ``SQUID_IMAGE``, its config rendered for the
+    rows of ``primer-panel`` -- lets ``CONNECT ssh.github.com:443`` through,
+    and ssh through it reaches GitHub, the way git of the Panel goes; not
+    ``github.com``, not port 22. And a process on the box's host -- the agent
+    -- goes out without the machine in the way. Measured into the run's log
+    first (par0 14.3)."""
+    import socket
+
+    from pridem.stacks.egress import listed
+    from pridem.steps.egress import (
+        CONTAINER_CONFIG,
+        SQUID_COMMAND,
+        SQUID_IMAGE,
+        SQUID_USER,
+        config_text,
+    )
+
+    config = tmp_path / "squid.conf"
+    config.write_text(config_text(sorted(listed("primer-panel"))), encoding="utf-8")
+    config.chmod(0o644)
+    script = tmp_path / "connect.py"
+    script.write_text(CONNECT_SCRIPT, encoding="utf-8")
+    _run(["docker", "pull", "-q", SQUID_IMAGE], timeout=300)
+    _run(["docker", "rm", "-f", PANEL_PROXY], expect=tuple(range(256)))
+    _run(
+        ["docker", "run", "-d", "--name", PANEL_PROXY, "--user", SQUID_USER,
+         "--label", "pridem.test=DM-146",
+         "-p", f"127.0.0.1:{PANEL_PROXY_PORT}:3128",
+         "-v", f"{config}:{CONTAINER_CONFIG}:ro",
+         "--entrypoint", "/usr/sbin/squid", "--", SQUID_IMAGE, *SQUID_COMMAND],
+    )  # fmt: skip
+    try:
+        status: dict[str, tuple[str, bytes]] = {}
+        for _ in range(30):
+            try:
+                status["ssh.github.com:443"] = _connect("ssh.github.com", 443)
+                break
+            except OSError:
+                time.sleep(1)
+        status["github.com:443"] = _connect("github.com", 443)
+        status["ssh.github.com:22"] = _connect("ssh.github.com", 22)
+        ssh = _run(
+            ["ssh", "-T", "-p", "443",
+             "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+             "-o", "UserKnownHostsFile=/dev/null",
+             "-o", f"ProxyCommand=python3 {script} %h %p 127.0.0.1 {PANEL_PROXY_PORT}",
+             "git@ssh.github.com"],
+            expect=tuple(range(256)), timeout=60,
+        )  # fmt: skip
+        log = _run(["docker", "logs", PANEL_PROXY], expect=tuple(range(256)))
+    finally:
+        _run(["docker", "rm", "-f", PANEL_PROXY], expect=tuple(range(256)))
+    # the agent: a process of the box's host, straight out
+    host_https = _run(
+        ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
+         "https://api.github.com"],
+        expect=tuple(range(256)), timeout=60,
+    )  # fmt: skip
+    with socket.create_connection(("ssh.github.com", 443), 15) as direct:
+        banner = direct.recv(64)
+    rules = {
+        "iptables": _run(["iptables", "-S"], expect=tuple(range(256))),
+        "nft": _run(["nft", "list", "ruleset"], expect=tuple(range(256))),
+    }
+    print(
+        "DM-146 measure:",
+        {"proxy": status, "ssh": ssh[-3:], "log": log[-6:],
+         "host https": host_https, "host ssh banner": banner, "rules": rules},
+    )  # fmt: skip
+    line, after = status["ssh.github.com:443"]
+    assert " 200 " in f"{line} " and after.startswith(b"SSH-2.0-"), status
+    assert " 403 " in f"{status['github.com:443'][0]} ", status
+    assert " 403 " in f"{status['ssh.github.com:22'][0]} ", status
+    assert any("Permission denied (publickey)" in line for line in ssh), ssh
+    assert host_https[-1:] == ["200"], host_https
+    assert banner.startswith(b"SSH-2.0-"), banner
+    for lines in rules.values():
+        assert not any("pridem" in line for line in lines), rules
+
+
 def _container(project: str, service: str) -> str:
     [container] = _stdout(
         [

@@ -62,6 +62,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_check_of_the_blank_and_of_a_planted_copy", "a"),
     ("test_tier3_compose_takes_a_single_quoted_value_as_it_is", "a"),
     ("test_tier3_certbot_tag_has_the_pinned_digest", "a"),
+    ("test_tier3_the_panel_s_host_through_the_machine_s_proxy", "a"),  # DM-146
     # the last of a: SIGKILL with a process left holding the lock (DM-24);
     # it leaves the box half installed
     ("test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild", "a"),

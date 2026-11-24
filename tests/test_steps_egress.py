@@ -165,9 +165,11 @@ def test_a_service_has_no_egress() -> None:
 
 def test_the_list_is_the_cards_first_edition() -> None:
     """Changed by DM-70: the blank's row is under its own name, ``primer-blank``
-    (contract 3 rule 32)."""
+    (contract 3 rule 32). Changed by DM-146: the Panel's row, ``ssh.github.com``
+    of ``primer-panel``, the owner's word of 24.11."""
     assert sorted((row.product, row.host) for row in LISTING) == [
         ("primer-blank", "api.github.com"),
+        ("primer-panel", "ssh.github.com"),
         ("velo", "api.zoom.us"),
         ("velo", "chatgpt.com"),
         ("velo", "claude.ai"),
