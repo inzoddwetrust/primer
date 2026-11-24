@@ -196,6 +196,14 @@ class Step(ABC):
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         """Read the result back; return a non-empty fact."""
 
+    def crossed_data(self) -> bool:
+        """A step of ``point_of_no_return`` whose ``act`` began: was there
+        data on the far side -- something a restore would bring back. ``True``
+        unless the step measured otherwise (``migrate`` of an empty database,
+        DM-132): a plan stopped past it says ``restore/empty`` only when no
+        step crossed data."""
+        return True
+
 
 @dataclass(frozen=True)
 class Waiting:

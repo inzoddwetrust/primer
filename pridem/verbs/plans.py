@@ -94,6 +94,7 @@ from pridem.steps.frontend import Frontend
 from pridem.steps.gc import GC_STACK, gc_steps
 from pridem.steps.git import repo
 from pridem.steps.host import EnsureNetwork, host_steps
+from pridem.steps.host_policy import host_policy_steps
 from pridem.steps.keys import DeployKey, FreshKeys, WriteKey
 from pridem.steps.migrate import Migrate, StartStopped, StopForMigrate, Stopped
 from pridem.steps.nginx import Nginx
@@ -805,6 +806,9 @@ def deploy_plan(
     stacks: list[Stack] = [
         StackSteps(machine.HOST, host),
         StackSteps(machine.PASSPORT, first),
+        # policies.host once the passport is read, before destroy of reinstall
+        # and the first build: the host ladder has no passport with --ops (DM-132)
+        StackSteps(machine.HOST_POLICY, host_policy_steps(root, fetched=fetched)),
     ]
     if wanted.mode == "reinstall":
         stacks.append(

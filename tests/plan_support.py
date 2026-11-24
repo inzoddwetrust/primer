@@ -73,6 +73,7 @@ class ScriptedStep(Step):
         incomplete: Code | None = None,
         signal_in: str | None = None,
         signal_stops: bool = True,
+        crossed_data: bool = True,
     ) -> None:
         """``signal_in``: the phase in which a SIGTERM arrives; with
         ``signal_stops`` the step then asks the interrupt, as a command or a
@@ -82,6 +83,7 @@ class ScriptedStep(Step):
         self.order = order
         self.modes = modes
         self.point_of_no_return = point_of_no_return
+        self._crossed_data = crossed_data
         self.roles = roles
         self._journal = journal
         self._needed = needed
@@ -100,6 +102,11 @@ class ScriptedStep(Step):
             ctx.interrupt.receive(signal.SIGTERM)
             if self._signal_stops:
                 ctx.interrupt.check()
+
+    def crossed_data(self) -> bool:
+        """``crossed_data=False``: a point of no return over an empty database
+        (DM-132)."""
+        return self._crossed_data
 
     def check(self, ctx: StepContext) -> CheckResult:
         self._log(ctx, "check")

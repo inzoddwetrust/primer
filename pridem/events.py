@@ -318,6 +318,9 @@ class PlanOutcome:
     incomplete: tuple[Incomplete, ...] = ()
     doctor_diff: tuple[DoctorItem, ...] = ()
     needs_restore: bool = False
+    restore_empty: bool = False
+    """With ``needs_restore``: every step that crossed the point of no return
+    crossed no data -- ``restore/empty``, nothing to restore (DM-132)."""
     interrupted: bool = False
 
 

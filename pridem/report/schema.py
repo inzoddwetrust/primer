@@ -404,6 +404,14 @@ class RestoreNeeded(Strict):
     code: Literal["needed"]
 
 
+class RestoreEmpty(Strict):
+    """Past the point of no return, and every database it crossed was empty
+    before the run: there is nothing to restore (DM-132)."""
+
+    what: Literal["restore"]
+    code: Literal["empty"]
+
+
 class StepIncomplete(StepCode):
     """Something a step left undone: ``what`` is the step, ``code`` its own."""
 
@@ -434,6 +442,7 @@ IncompleteEntry = Annotated[
     | Annotated[JournalCut, Tag("journal/cut")]
     | Annotated[StateQuarantined, Tag("state/quarantined")]
     | Annotated[RestoreNeeded, Tag("restore/needed")]
+    | Annotated[RestoreEmpty, Tag("restore/empty")]
     | Annotated[StepIncomplete, Tag("step")],
     Discriminator(_incomplete_tag),
 ]
@@ -446,6 +455,7 @@ INCOMPLETE_MODELS: dict[str, type[Strict]] = {
     "journal/cut": JournalCut,
     "state/quarantined": StateQuarantined,
     "restore/needed": RestoreNeeded,
+    "restore/empty": RestoreEmpty,
 }
 
 
@@ -605,8 +615,9 @@ def build_verdict(
     if absent:
         raise ValueError(f"no text in the catalog for codes {absent} (rule 6)")
     incomplete: list[Json] = [item.as_json() for item in outcome.incomplete]
-    if outcome.needs_restore:
-        incomplete.append({"what": "restore", "code": "needed"})
+    if outcome.needs_restore:  # nothing to restore past an empty database (DM-132)
+        code = "empty" if outcome.restore_empty else "needed"
+        incomplete.append({"what": "restore", "code": code})
     report: dict[str, Json] = {
         "failures": [dict(item) for item in failures],
         "incomplete": incomplete,

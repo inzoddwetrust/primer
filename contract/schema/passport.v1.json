@@ -63,6 +63,24 @@
       "title": "Gc",
       "type": "object"
     },
+    "HostPolicy": {
+      "additionalProperties": false,
+      "description": "What the machine makes of the host itself (DM-132), each optional.\n\n``swap`` -- the size of a swap the machine makes when the box has none\nswitched on at all (a hand-made one is kept as it is); absent -- the\nmachine makes none. The memory the box needs is judged whether or not the\nfield is there. ``password_login: closed`` -- the machine closes the login\nby password, only when root has a key it can read; absent -- it touches\nnothing. There is no ``open``: the machine never opens a login.",
+      "properties": {
+        "password_login": {
+          "const": "closed",
+          "title": "Password Login",
+          "type": "string"
+        },
+        "swap": {
+          "pattern": "^[1-9][0-9]*[KMG]$",
+          "title": "Swap",
+          "type": "string"
+        }
+      },
+      "title": "HostPolicy",
+      "type": "object"
+    },
     "Package": {
       "additionalProperties": false,
       "properties": {
@@ -96,6 +114,9 @@
         },
         "gc": {
           "$ref": "#/$defs/Gc"
+        },
+        "host": {
+          "$ref": "#/$defs/HostPolicy"
         },
         "ssl": {
           "enum": [

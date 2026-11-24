@@ -135,7 +135,7 @@ def _named(verb: str, confirm: str, passport: Passport | None) -> None:
         raise Refused(f"{verb}: the box has no passport to confirm against")
     if confirm != passport.server.name:
         name = passport.server.name
-        said = f"{verb}: {confirm!r} is not the server's name -- --confirm {name}"
+        said = f"{verb}: {confirm!r} is not the server's name — --confirm {name}"
         raise Refused(said)
 
 

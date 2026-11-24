@@ -16,6 +16,8 @@ its name, reserved whole (gate of DM-102)."""
 
 HOST = "pridem-host"
 PASSPORT = "pridem-passport"
+HOST_POLICY = "pridem-host-policy"
+"""``policies.host`` of the passport: swap, memory, password login (DM-132)."""
 NETWORK = "pridem-network"
 TIMERS = "pridem-timers"
 SOURCES = "pridem-sources"
@@ -41,9 +43,9 @@ VERDICT = "pridem-verdict"
 
 MACHINE_STACKS: frozenset[str] = frozenset(
     {
-        HOST, PASSPORT, NETWORK, TIMERS, SOURCES, DEPENDENCIES, ROLLBACK,
-        POINTS, SERVICES, PRODUCT, SEAMS, EDGE, FRONTEND, FINALIZE, DESTROY, STOPPED,
-        BOX, BACKUP, SEED, VERDICT,
+        HOST, PASSPORT, HOST_POLICY, NETWORK, TIMERS, SOURCES, DEPENDENCIES,
+        ROLLBACK, POINTS, SERVICES, PRODUCT, SEAMS, EDGE, FRONTEND, FINALIZE,
+        DESTROY, STOPPED, BOX, BACKUP, SEED, VERDICT,
     }
 )  # fmt: skip
 

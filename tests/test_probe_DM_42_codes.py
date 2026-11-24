@@ -140,6 +140,21 @@ def _plan_verdicts() -> list[Verdict]:
         )
         out.append(run.run())
 
+    # DM-132: past the point of no return over an empty database -- nothing
+    # to restore (restore/empty), the same plan as above with no data crossed
+    runner = FakeRunner(FakeCall(("make", "build"), code=1))
+    with runner:
+        empty, _ = plan(
+            _root(
+                ScriptedStep(
+                    "migrate", 1, journal, point_of_no_return=True, crossed_data=False
+                ),
+                ScriptedStep("build", 2, journal, act_argv=["make", "build"]),
+            ),
+            runner=runner,
+        )
+        out.append(empty.run())
+
     runner = FakeRunner(FakeCall(("make", "wait"), outcome="timeout"))
     with runner:
         step = ScriptedStep("wait", 1, journal, act_argv=["make", "wait"])
@@ -227,6 +242,10 @@ def _entries(verdict: Verdict) -> list[tuple[str, BaseModel]]:
 
 
 def test_probe_DM_42_verdict_carries_no_prose(tmp_path: Path) -> None:
+    """Changed by DM-132, on the dispatcher's word 24.11: one plan more --
+    ``migrate`` over an empty database, then a red ``build`` -- writes the new
+    code ``restore/empty``; the assertions are as they were: every code of the
+    machine is written."""
     verdicts = [*_plan_verdicts(), *_recovered_verdicts(tmp_path)]
     seen: set[str] = set()
     for verdict in verdicts:

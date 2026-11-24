@@ -293,12 +293,28 @@ class Timers(Strict):
     gc: Literal["daily"]
 
 
+class HostPolicy(Strict):
+    """What the machine makes of the host itself (DM-132), each optional.
+
+    ``swap`` -- the size of a swap the machine makes when the box has none
+    switched on at all (a hand-made one is kept as it is); absent -- the
+    machine makes none. The memory the box needs is judged whether or not the
+    field is there. ``password_login: closed`` -- the machine closes the login
+    by password, only when root has a key it can read; absent -- it touches
+    nothing. There is no ``open``: the machine never opens a login.
+    """
+
+    swap: Size | None = None
+    password_login: Literal["closed"] | None = None
+
+
 class Policies(Strict):
     ssl: Literal["letsencrypt", "self-signed", "defer", "provided"]
     tls: Tls | None = None
     gc: Gc
     backup: Backup
     timers: Timers
+    host: HostPolicy | None = None
 
 
 class Package(Strict):

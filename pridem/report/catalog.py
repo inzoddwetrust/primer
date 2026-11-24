@@ -44,6 +44,8 @@ ENGLISH: Catalog = {
     "journal/cut": "the run's output past {limit} bytes is not in its journal",
     "state/quarantined": "state.json was damaged and is in quarantine",
     "restore/needed": "past the point of no return: restore from backup is needed",
+    "restore/empty": "past the point of no return on databases that were empty "
+    "before this run: there is nothing to restore — fix the cause and run it again",
     "@at": "{phase} {stack} · {name}",
     "@unknown": "{code} ({params}) — no words in this catalog",
     "@null:ended_at": "the start",

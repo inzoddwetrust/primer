@@ -430,7 +430,12 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
 
     Changed by DM-23 (velo-dev 19.11): ``pridem-points`` -- the networks of the
     box's pairs -- stands before the services: a service that takes a point of
-    the product runs first and finds its network."""
+    the product runs first and finds its network.
+
+    Changed by DM-132: ``pridem-host-policy`` -- swap, memory, the login by
+    password of ``policies.host`` -- stands right after the passport is read,
+    before ``destroy`` of ``reinstall`` and the first build: the host ladder
+    has no passport with ``--ops``."""
     box = Box(tmp_path / "opt" / "pridem")
     wanted = Wanted(mode=mode, source=Source(file=tmp_path / "x"))
     planned = deploy_plan(
@@ -441,6 +446,7 @@ def test_the_machine_makes_the_whole_ladder_of_protocol_6(
     assert names == [
         "pridem-host",
         "pridem-passport",
+        "pridem-host-policy",
         *middle,
         "pridem-network",
         "pridem-timers",
@@ -480,6 +486,11 @@ ALLOWED_BEFORE_DESTROY = {
     "daemon_json": "/etc/docker/daemon.json: destroy does not remove it",
     "locale": "update-locale: destroy does not touch it",
     "fetch_passport": "the passport's copy: destroy keeps it",
+    "swap": "/opt/pridem/host/swapfile and its line of /etc/fstab: destroy "
+    "touches neither (DM-132)",
+    "memory": "reads /proc/meminfo",
+    "password_login": "/etc/ssh/sshd_config.d/00-pridem.conf: destroy does not "
+    "touch it (DM-132)",
 }
 """Every step that stands before ``destroy`` in ``reinstall``, and why
 ``destroy`` does not undo what it made (DM-86 FIX)."""

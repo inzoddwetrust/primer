@@ -1547,6 +1547,9 @@
                 "$ref": "#/$defs/RestoreNeeded"
               },
               {
+                "$ref": "#/$defs/RestoreEmpty"
+              },
+              {
                 "$ref": "#/$defs/StepIncomplete"
               }
             ]
@@ -1613,6 +1616,28 @@
         "images"
       ],
       "title": "Resources",
+      "type": "object"
+    },
+    "RestoreEmpty": {
+      "additionalProperties": false,
+      "description": "Past the point of no return, and every database it crossed was empty\nbefore the run: there is nothing to restore (DM-132).",
+      "properties": {
+        "code": {
+          "const": "empty",
+          "title": "Code",
+          "type": "string"
+        },
+        "what": {
+          "const": "restore",
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "code"
+      ],
+      "title": "RestoreEmpty",
       "type": "object"
     },
     "RestoreNeeded": {

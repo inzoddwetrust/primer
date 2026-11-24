@@ -56,6 +56,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_probe_DM_12_host_steps_on_a_clean_runner", "a"),
     ("test_probe_DM_12_planted_dpkg_lock_waits_then_passes", "a"),
     ("test_probe_DM_12_planted_dpkg_lock_over_timeout_is_red_without_checkmark", "a"),
+    ("test_probe_DM_132_swap_on_the_box_and_memory_refused", "a"),  # DM-132
     ("test_tier3_box_decrypts_its_passport_from_the_ops_repository", "a"),
     ("test_tier3_passport_not_for_this_box_is_red_with_its_key", "a"),
     ("test_probe_DM_10_blank_is_fetched_by_ref_over_ssh", "a"),

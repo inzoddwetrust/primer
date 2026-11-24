@@ -19,7 +19,9 @@ is not crossed; another, no answer, no running ``app`` (a first install) --
 ``act`` runs the declared ``migrate`` in ``run --rm <app>`` -- its database
 comes up by ``depends_on`` -- and ``verify`` reads ``alembic current`` back:
 it must be the head. Once ``act`` has started, nothing automatic undoes it: a
-red step after it ends the plan with "restore needed".
+red step after it ends the plan with "restore needed" -- or, when no app
+answered ``check`` and ``alembic current`` before the migration read no
+revision, with "nothing to restore": the database was empty (DM-132).
 
 ``stop_for_migrate`` (DM-22, protocol 6.3, contract 3 rule 35) runs just before
 ``migrate``, before the point of no return: the services of the entry's
@@ -169,6 +171,11 @@ class Migrate(Step):
         self.acted = False
         """``act`` has started: the point of no return of this entry is
         crossed, ``start_stopped`` starts nothing for it (DM-22)."""
+        self.live: str | None = None
+        """The head the running app reported to ``check``."""
+        self.had_data = True
+        """``act`` found a revision in the database, or did not look: an app
+        that answers with a head has a database with one (DM-132)."""
 
     def _heads(self, ctx: StepContext) -> tuple[list[str], int]:
         """Heads of the built image, by ``docker run`` on it; and the line count."""
@@ -247,6 +254,7 @@ class Migrate(Step):
         head = self.target_head(ctx)
         data: dict[str, Json] = {"head": head}
         live = running_head(ctx, self.compose)
+        self.live = live
         if live == head:
             return CheckResult(False, None, data)
         if live is not None:
@@ -261,11 +269,18 @@ class Migrate(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         self.acted = True
+        if self.live is None:  # no app said a head: a first install, or one down
+            self.had_data = bool(self._current(ctx))
         out(
             ctx,
             self.compose.argv("run", "--rm", operands=(self.app, *self.command)),
             timeout=MIGRATE_TIMEOUT_S,
         )
+
+    def crossed_data(self) -> bool:
+        """An empty database before ``act`` -- no revision of alembic -- had
+        nothing a restore would bring back (DM-132)."""
+        return self.had_data
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         head = check.data.get("head")

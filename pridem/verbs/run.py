@@ -308,7 +308,7 @@ def _verdict(
                 console.close()  # no ticker outlives the plan (DM-107)
         restore = planned.restore_on
         if any(_failed_by(record, restore) for record in outcome.steps):
-            outcome = replace(outcome, needs_restore=True)
+            outcome = replace(outcome, needs_restore=True, restore_empty=False)
     except BaseException:
         # an error of the machine: the journal ends with no run_finished --
         # a run that did not end, which recover closes (DM-137)

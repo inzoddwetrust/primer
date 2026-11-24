@@ -153,7 +153,10 @@ def test_build_release_and_commit_come_back_from_health(
 def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
     """Changed by DM-124, on the dispatcher's word: ``heads_call`` is two calls
     now -- ``config`` of the app's environment and ``docker run --env-file``;
-    the assertions are as they were."""
+    the assertions are as they were. Changed by DM-132, on the dispatcher's
+    word 24.11: with no app to say a head, ``act`` reads ``alembic current`` before
+    the migration (an empty database: nothing to restore); the assertions are
+    as they were."""
     cs = compose(tmp_path, app.port)
     parts = {
         "release": cs.release,
@@ -179,6 +182,7 @@ def test_probe_DM_18_no_down_in_step(tmp_path: Path, app: LiveApp) -> None:
         image_call(cs, "app", APP_IMAGE),
         *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs, running=False),
+        alembic_call(cs, "current", deps=True),  # no app: empty? (DM-132)
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
         *first_up(tmp_path, app.port),

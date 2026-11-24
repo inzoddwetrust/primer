@@ -56,6 +56,7 @@ INCOMPLETE_CODES: dict[str, tuple[str, ...]] = {
     "journal/cut": ("limit",),
     "state/quarantined": (),
     "restore/needed": (),
+    "restore/empty": (),
 }
 """Machine ``what/code`` of ``report.incomplete[]`` -> parameters; closed."""
 

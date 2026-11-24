@@ -27,6 +27,7 @@ from pathlib import Path
 from pridem import __version__
 from pridem.contract import Strict
 from pridem.events import said
+from pridem.hostinfo import meminfo
 from pridem.report.box_snapshot import (
     BoxSnapshot,
     ContainerState,
@@ -260,22 +261,6 @@ def _disk(root: Path, path: str) -> Disk:
     )
 
 
-def _meminfo(root: Path) -> dict[str, int] | None:
-    """``/proc/meminfo`` in bytes by its keys; ``None`` -- not readable."""
-    try:
-        text = (root / "proc" / "meminfo").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    found: dict[str, int] = {}
-    for line in text.splitlines():
-        key, _, rest = line.partition(":")
-        words = rest.split()
-        if words and words[0].isdigit():
-            unit = 1024 if words[1:2] == ["kB"] else 1
-            found[key.strip()] = int(words[0]) * unit
-    return found
-
-
 def _memory(info: dict[str, int] | None) -> Memory | Unmeasured:
     if info is None or "MemTotal" not in info or "MemAvailable" not in info:
         return Unmeasured(unmeasured="meminfo-unreadable")
@@ -382,7 +367,7 @@ def snapshot(ctx: Context, now: Callable[[], datetime] | None = None) -> BoxSnap
         containers: list[Container] | None = _containers(ctx)
     except DockerGone:
         containers = None
-    info = _meminfo(ctx.fs_root)
+    info = meminfo(ctx.fs_root)
     history, journal = ctx.root / HISTORY, ctx.root / JOURNAL
     verdicts = {p.stem for p in history.glob("*.json")} if history.is_dir() else set()
     journals = (

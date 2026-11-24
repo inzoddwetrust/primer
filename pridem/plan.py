@@ -280,6 +280,8 @@ class _Run:
     """Mutable bookkeeping of one run; never leaves the plan."""
 
     crossed: bool = False
+    crossed_by: list[Step] = field(default_factory=list)
+    """The steps of ``point_of_no_return`` whose ``act`` began (DM-132)."""
     interrupted: bool = False
     incomplete: list[Incomplete] = field(default_factory=list)
     sink_failed: bool = False
@@ -531,6 +533,9 @@ class Plan:
                 finally_=tuple(final),
                 incomplete=incomplete,
                 needs_restore=stopped and state.crossed,
+                restore_empty=stopped
+                and state.crossed
+                and not any(step.crossed_data() for step in state.crossed_by),
                 interrupted=state.interrupted,
             )
         )
@@ -634,6 +639,7 @@ class Plan:
                 if check.needed:
                     if step.point_of_no_return:
                         state.crossed = True
+                        state.crossed_by.append(step)
                     step.act(ctx, check)
                 verified = step.verify(ctx, check)
                 fact = dict(verified.fact)

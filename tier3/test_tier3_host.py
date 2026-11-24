@@ -10,6 +10,7 @@ the first probes found fresh.
 """
 
 import fcntl
+import json
 import threading
 from pathlib import Path
 
@@ -182,3 +183,136 @@ def test_probe_DM_12_planted_dpkg_lock_over_timeout_is_red_without_checkmark() -
     assert not any("✓ Install host packages" in line for line in lines)
     assert any("✗ Install host packages" in line for line in lines), lines
     assert not _installed("cowsay")
+
+
+POLICY_SCRIPT = """
+import json, sys
+from pathlib import Path
+from pridem.plan import Plan, StackSteps
+from pridem.runner import SubprocessRunner
+from pridem.stacks.passport import load_passport
+from pridem.steps.host_policy import Memory, Swap
+from pridem.steps.passport import Fetched
+
+class Sink:
+    def emit(self, event):
+        pass
+
+fetched = Fetched(passport=load_passport(Path(sys.argv[1])))
+floor = float(sys.argv[2])
+memory = Memory(min_memory_gib=floor) if floor else Memory()
+outcome = Plan(
+    [StackSteps("pridem-host-policy", [Swap(fetched=fetched), memory], root=True)],
+    mode="install", role="test", runner=SubprocessRunner(), sink=Sink(),
+).run()
+print("OUTCOME " + json.dumps({"code": int(outcome.code), "steps": [
+    {"name": r.name, "status": r.status, "verify": r.verify,
+     "reason": r.reason.as_json() if r.reason is not None else None}
+    for r in outcome.steps
+]}))
+"""
+"""``swap`` and ``memory`` of ``pridem-host-policy`` alone, on the runner as on a
+box (DM-132); ``argv[2]`` -- a floor of memory planted for the refusal, or 0."""
+SWAPFILE = "/opt/pridem/host/swapfile"
+
+
+def _policy_passport(tmp: Path, swap: str) -> Path:
+    data = {
+        "schema": 1,
+        "version": 1,
+        "server": {"name": "tier3-host", "role": "test", "os": "ubuntu-24.04"},
+        "product": {"repo": "file:///srv/tier3/primer-blank.git", "ref": "main"},
+        "domains": {"api": "api.tier3-host.test"},
+        "access": {"mode": "deploy-keys"},
+        "asked": {},
+        "params": {},
+        "policies": {
+            "ssl": "self-signed",
+            "gc": {
+                "keep_releases": 2,
+                "builder_cache_budget": "3G",
+                "journal_budget": "200M",
+            },
+            "backup": {"enabled": False},
+            "timers": {"gc": "daily"},
+            "host": {"swap": swap},
+        },
+        "packages": {},
+        "cloud": {},
+    }
+    file = tmp / "passport.yaml"
+    file.write_text(json.dumps(data), encoding="utf-8")  # JSON is YAML
+    return file
+
+
+def _policy(passport: Path, floor: float = 0) -> dict[str, object]:
+    code, lines = _run([PYTHON, "-c", POLICY_SCRIPT, str(passport), str(floor)])
+    [line] = [line for line in lines if line.startswith("OUTCOME ")]
+    found = json.loads(line.removeprefix("OUTCOME "))
+    assert isinstance(found, dict), lines
+    print("DM-132 measure:", json.dumps(found))
+    return found
+
+
+def _swaps() -> list[str]:
+    code, lines = _run(["swapon", "--show=NAME,TYPE,SIZE", "--bytes", "--noheadings"])
+    assert code == 0, lines
+    return [line for line in lines if line.strip()]
+
+
+def test_probe_DM_132_swap_on_the_box_and_memory_refused(tmp_path: Path) -> None:
+    """DM-132 on the runner. Measured first and printed (par0 14.3): the swap
+    the runner has, its memory, sshd and root's keys. Then: a swap switched on
+    is kept -- no file of the machine; with none on (the test, not the
+    machine, switches the runner's off), the machine makes its own of the
+    passport's size, in ``/etc/fstab`` once, and the repeat makes nothing.
+    ``memory`` with a floor planted above any runner's memory is refused with
+    its numbers -- the floor is planted, the runner's memory is real."""
+    sshd = Path("/usr/sbin/sshd").exists()
+    keys = Path("/root/.ssh/authorized_keys")
+    said: tuple[int, list[str]] = (-1, [])
+    if sshd:  # any exit: 255 is sshd refusing (a missing /run/sshd), measured
+        lines: list[str] = []
+        result = SubprocessRunner().run(
+            ["sshd", "-T", "-C", "user=root,host=localhost,addr=127.0.0.1"],
+            expect=tuple(range(256)),
+            timeout=60,
+            on_line=lambda stream, line, cut: lines.append(line),
+        )
+        said = (result.code, lines)
+    login = [x for x in said[1] if x.startswith(("passwordauth", "kbdinteractive"))]
+    measure = {
+        "swaps": _swaps(),
+        "meminfo": [
+            line
+            for line in Path("/proc/meminfo").read_text().splitlines()
+            if line.startswith(("MemTotal", "SwapTotal"))
+        ],
+        "sshd": sshd,
+        "sshd_T": [said[0], *login],
+        "root_keys": keys.is_file() and bool(keys.read_text().strip()),
+    }
+    print("DM-132 runner:", json.dumps(measure))
+    passport = _policy_passport(tmp_path, "1G")
+    before = _swaps()
+    if before:  # a swap on is kept: no file of the machine
+        kept = _policy(passport)
+        assert kept["code"] == 0, kept
+        assert not Path(SWAPFILE).exists()
+        assert _swaps() == before
+        _run(["swapoff", "-a"])  # the test's hand, never the machine's
+    assert _swaps() == []
+    made = _policy(passport)
+    assert made["code"] == 0, made
+    assert any(line.split()[0] == SWAPFILE for line in _swaps()), _swaps()
+    fstab = Path("/etc/fstab").read_text()
+    assert fstab.count(f"{SWAPFILE} none swap sw 0 0") == 1, fstab
+    again = _policy(passport)
+    assert again["code"] == 0, again
+    assert Path("/etc/fstab").read_text() == fstab
+    refused = _policy(passport, floor=10**6)
+    steps = refused["steps"]
+    assert isinstance(steps, list)
+    [memory] = [step for step in steps if step["name"] == "memory"]
+    assert memory["status"] == "failed", refused
+    assert memory["reason"]["code"] == "memory:memory-low", refused

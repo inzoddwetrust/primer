@@ -70,13 +70,17 @@ def test_probe_DM_18_migrate_is_point_of_no_return(
 ) -> None:
     """Changed by DM-124, on the dispatcher's word: ``heads_call`` is two calls
     now -- ``config`` of the app's environment and ``docker run --env-file``;
-    the assertions are as they were."""
+    the assertions are as they were. Changed by DM-132, on the dispatcher's
+    word 24.11: with no app to say a head, ``act`` reads ``alembic current`` before
+    the migration (an empty database: nothing to restore); the assertions are
+    as they were."""
     cs = compose(tmp_path, app.port)
     assert Migrate.point_of_no_return is True
     first_install = [
         image_call(cs, "app", APP_IMAGE),
         *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs, running=False),
+        alembic_call(cs, "current", deps=True),  # no app: empty? (DM-132)
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
@@ -182,7 +186,12 @@ def test_another_refusal_of_alembic_show_is_a_failed_command(
 
 def test_no_head_read_is_red_before_act(tmp_path: Path) -> None:
     """A stack that declares ``migrate`` has a head: none read is red in
-    ``check`` -- never "no migration", never a skipped ``act``."""
+    ``check`` -- never "no migration", never a skipped ``act``.
+
+    Changed by DM-132, on the dispatcher's word 24.11: with no app to say a
+    head, ``act`` reads ``alembic current`` before the migration -- one
+    call more in the script; the assertions are as they were.
+    """
     cs = compose(tmp_path)
     script = [
         image_call(cs, "app", APP_IMAGE),
@@ -201,6 +210,7 @@ def test_no_head_read_is_red_before_act(tmp_path: Path) -> None:
         image_call(cs, "app", APP_IMAGE),
         *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs, running=False),
+        alembic_call(cs, "current", deps=True),  # no app: empty? (DM-132)
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ) as runner:
@@ -220,11 +230,15 @@ def test_heads_without_the_built_image_is_red(tmp_path: Path) -> None:
 def test_database_not_at_head_after_migrate_is_red(
     tmp_path: Path, app: LiveApp
 ) -> None:
+    """Changed by DM-132, on the dispatcher's word 24.11: with no app to
+    say a head, ``act`` reads ``alembic current`` before the migration --
+    one call more in the script; the assertions are as they were."""
     cs = compose(tmp_path, app.port)
     script = [
         image_call(cs, "app", APP_IMAGE),
         *heads_call(cs, APP_IMAGE, f"{HEAD} (head)"),
         *observe_calls(cs, running=False),
+        alembic_call(cs, "current", deps=True),  # no app: empty? (DM-132)
         migrate_call(cs),
         alembic_call(cs, "current", "0000", deps=True),
     ]

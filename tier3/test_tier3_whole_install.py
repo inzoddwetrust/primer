@@ -538,6 +538,12 @@ def test_tier3_the_whole_install_of_the_blank(tmp_path: Path, mirror: Path) -> N
     checkout, passport = _blank(tmp_path), _passport(tmp_path)
 
     verdict, printed = _install(passport)
+    # DM-132: what policies.host found on the runner, measured, not asserted
+    host = [(s.name, s.status, s.verify) for s in verdict.steps]
+    print(
+        "DM-132 measure:",
+        [h for h in host if h[0] in ("swap", "memory", "password_login")],
+    )
 
     # the install (R1, W1)
     assert verdict.result == "green", printed
