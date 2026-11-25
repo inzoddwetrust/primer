@@ -1732,7 +1732,15 @@ def test_tier3_the_panel_s_host_through_the_machine_s_proxy(tmp_path: Path) -> N
 
     FIX: the host's way out is any HTTP answer of ``api.github.com`` (a
     status, not ``000``) and the banner of ``ssh.github.com:443`` -- not a
-    200, which GitHub's limit per address decides."""
+    200, which GitHub's limit per address decides.
+
+    DM-188 FIX, the dispatcher's word: the window of docker-proxy before squid
+    listens. ``docker run -d`` returns before squid listens, and docker-proxy
+    takes the connection all the same and ends it in ``EOF`` or a reset; the
+    loop retried an ``OSError`` alone, so an ``EOF`` passed for the answer of
+    ``ssh.github.com:443`` (an empty status line) and the probe was red by
+    chance. Now one wait for squid's status line before the first request
+    (``_ready``); the assertions are as they were."""
     import socket
 
     from pridem.stacks.egress import listed
@@ -1759,13 +1767,9 @@ def test_tier3_the_panel_s_host_through_the_machine_s_proxy(tmp_path: Path) -> N
          "--entrypoint", "/usr/sbin/squid", "--", SQUID_IMAGE, *SQUID_COMMAND],
     )  # fmt: skip
     try:
+        ready = _ready(PANEL_PROXY_PORT, "ready.pridem-dm146.invalid")
         status: dict[str, tuple[str, bytes]] = {}
-        for _ in range(30):
-            try:
-                status["ssh.github.com:443"] = _connect("ssh.github.com", 443)
-                break
-            except OSError:
-                time.sleep(1)
+        status["ssh.github.com:443"] = _connect("ssh.github.com", 443)
         status["github.com:443"] = _connect("github.com", 443)
         status["ssh.github.com:22"] = _connect("ssh.github.com", 22)
         ssh = _run(
@@ -1793,7 +1797,7 @@ def test_tier3_the_panel_s_host_through_the_machine_s_proxy(tmp_path: Path) -> N
     }
     print(
         "DM-146 measure:",
-        {"proxy": status, "ssh": ssh[-3:], "log": log[-6:],
+        {"ready": ready, "proxy": status, "ssh": ssh[-3:], "log": log[-6:],
          "host https": host_https, "host ssh banner": banner, "rules": rules},
     )  # fmt: skip
     line, after = status["ssh.github.com:443"]
@@ -1815,30 +1819,39 @@ def test_tier3_the_panel_s_host_through_the_machine_s_proxy(tmp_path: Path) -> N
 
 DNS_PROXY = "pridem-dm188-proxy"
 DNS_PROXY_PORT = 3188
+READY_S = 60.0
+"""How long the probe waits for squid to answer through docker's port."""
 
 
 class _Resolver:
     """A resolver on the runner that answers every question NXDOMAIN and keeps
     the names it was asked: squid's lookups, seen where they go (DM-188).
     UDP on port 53 of ``address`` -- the gateway of docker's ``bridge``, which
-    the probe's squid is given by ``--dns``."""
+    the probe's squid is given by ``--dns``.
+
+    FIX: the socket is read with a timeout and the thread stops on a flag --
+    a ``close`` alone does not wake a ``recvfrom`` blocked in another thread,
+    and the port stayed bound (measured: a second resolver in the same
+    process failed with ``Address already in use``)."""
 
     def __init__(self, address: str) -> None:
         import socket
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((address, 53))
+        self.sock.settimeout(0.2)
         self.lock = threading.Lock()
         self.asked: list[str] = []
+        self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._serve, daemon=True)
         self.thread.start()
 
     def _serve(self) -> None:
-        while True:
+        while not self.stopped.is_set():
             try:
                 data, peer = self.sock.recvfrom(512)
-            except OSError:
-                return  # closed
+            except TimeoutError:
+                continue
             labels, at = [], 12
             while at < len(data) and data[at]:
                 size = data[at]
@@ -1855,19 +1868,56 @@ class _Resolver:
             return list(self.asked)
 
     def close(self) -> None:
-        self.sock.close()
+        self.stopped.set()
         self.thread.join(5)
+        self.sock.close()
 
 
-def _status(port: int, host: str) -> str:
-    """``CONNECT host:443`` to a proxy on the runner: its status line."""
+def _answer(port: int, request: str) -> str:
+    """``request`` to a proxy on the runner: its status line, ``EOF`` when the
+    connection closed without one, or the error -- never raised: an outcome
+    is a fact for the log, the probe decides what it means (DM-188 FIX)."""
     import socket
 
-    request = f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n"
-    with socket.create_connection(("127.0.0.1", port), 30) as conn:
-        conn.settimeout(60)
-        conn.sendall(request.encode("ascii"))
-        return conn.makefile("rb").readline(256).decode(errors="replace").strip()
+    try:
+        with socket.create_connection(("127.0.0.1", port), 10) as conn:
+            conn.settimeout(60)
+            conn.sendall(request.encode("ascii"))
+            line = conn.makefile("rb").readline(256)
+    except OSError as error:
+        return repr(error)
+    return line.decode(errors="replace").strip() or "EOF"
+
+
+def _connect_request(host: str) -> str:
+    return f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n"
+
+
+def _ready(port: int, host: str) -> list[str]:
+    """Until squid answers through docker's port: the outcomes on the way,
+    each one once in a row. One wait, before the first request of the probe.
+
+    docker returns from ``run -d`` before squid listens, and docker-proxy
+    takes the connection all the same: in that window a request ends in
+    ``EOF`` or ``ConnectionResetError``, never ``Connection refused``
+    (measured with docker 29.1.3 and squid 6.6: the first look ends either
+    way, the next one, 50 ms later, has squid's status line). The request is
+    ``GET`` of a name off the list: refused by the first rule of either order
+    -- ``deny !egress`` or ``deny !CONNECT`` -- with no lookup."""
+    seen: list[str] = []
+    deadline = time.monotonic() + READY_S
+    while True:
+        got = _answer(port, f"GET http://{host}/ HTTP/1.1\r\nHost: {host}\r\n\r\n")
+        if not seen or seen[-1] != got:
+            seen.append(got)
+        if got.startswith("HTTP/") or time.monotonic() >= deadline:
+            return seen
+        time.sleep(0.1)
+
+
+def _proxy_log() -> list[str]:
+    """``docker logs`` of the probe's proxy, whatever state it is in."""
+    return _run(["docker", "logs", DNS_PROXY], expect=tuple(range(256)))
 
 
 def _group_elapsed_s() -> float:
@@ -1888,13 +1938,26 @@ def test_probe_DM_188_an_unlisted_name_is_never_resolved_by_the_proxy(
     that keeps every name it is asked; the names are new on every run, so no
     cache answers for them.
 
-    Its selftest, in the same run: the order before DM-188 (the planted
-    defect -- ``deny !egress`` taken out) must make the resolver hear the name
-    off the list; a resolver that hears nothing of it cannot see a lookup at
-    all, and the probe is red with that fact, never green. The pair in both
-    orders: the name of the list is looked up (``private`` is a ``dst``).
-    Measured into the run's log first (par0 14.3): the squid of the image, the
-    names heard, the statuses, the proxy's log, the group's time."""
+    What it asserts, and only that: the name off the list is not looked up --
+    in pair with squid's own log line of that name (the request reached squid
+    and was decided: a silence of the resolver means something). Its selftest,
+    in the same run: the order before DM-188 (the planted defect -- ``deny
+    !egress`` taken out) must make the resolver hear the name off the list; a
+    resolver that hears nothing of it cannot see a lookup at all, and the probe
+    is red with that fact, never green. The pair in both orders: the resolver
+    hears the name of the list (``private`` is a ``dst``) -- by the resolver,
+    not by an HTTP status.
+
+    FIX (tier 3 #164, group a red, green again on a rerun): the readiness loop
+    retried only an ``OSError``, and docker-proxy answers the window before
+    squid listens with ``EOF`` as often as with a reset -- an ``EOF`` passed for
+    the answer to the name off the list, and the next request, the listed
+    name's, fell into the same window: ``ConnectionResetError``. Now one wait
+    for squid's status line before the first request (``_ready``), every
+    outcome is recorded and never raised, statuses are not asserted, and the
+    measure -- squid's version, the names heard, every outcome, ``docker logs``
+    of the proxy, the group's time -- is printed in ``finally``, before any
+    assertion and on any failure (par0 14.3)."""
     from pridem.steps.egress import (
         CONTAINER_CONFIG,
         SQUID_COMMAND,
@@ -1917,11 +1980,14 @@ def test_probe_DM_188_an_unlisted_name_is_never_resolved_by_the_proxy(
     text = config_text([listed])
     planted = text.replace("http_access deny !egress\n", "", 1)
     assert text.count("http_access deny !egress\n") == 1 and planted != text
-    resolver = _Resolver(gateway)
     measured: dict[str, dict[str, object]] = {}
+    resolver = _Resolver(gateway)
     try:
         for order, config_body in (("DM-188", text), ("planted", planted)):
             unlisted = f"unlisted-{order.lower()}-{token}.pridem-dm188.invalid"
+            ready = f"ready-{order.lower()}-{token}.pridem-dm188.invalid"
+            entry: dict[str, object] = {"unlisted": unlisted}
+            measured[order] = entry
             before = len(resolver.names())  # what this order's squid asked
             config = tmp_path / f"{order}.conf"
             config.write_text(config_body, encoding="utf-8")
@@ -1935,45 +2001,49 @@ def test_probe_DM_188_an_unlisted_name_is_never_resolved_by_the_proxy(
                  "--entrypoint", "/usr/sbin/squid", "--", SQUID_IMAGE, *SQUID_COMMAND],
             )  # fmt: skip
             try:
-                status: dict[str, str] = {}
-                for _ in range(30):
-                    try:
-                        status["unlisted"] = _status(DNS_PROXY_PORT, unlisted)
+                entry["ready"] = _ready(DNS_PROXY_PORT, ready)
+                entry["unlisted status"] = _answer(
+                    DNS_PROXY_PORT, _connect_request(unlisted)
+                )
+                entry["listed status"] = _answer(
+                    DNS_PROXY_PORT, _connect_request(listed)
+                )
+                for _ in range(50):  # squid writes the line when it is done
+                    if any(f"host={unlisted} " in x for x in _proxy_log()):
                         break
-                    except OSError:
-                        time.sleep(1)
-                status["listed"] = _status(DNS_PROXY_PORT, listed)
-                log = _run(["docker", "logs", DNS_PROXY], expect=tuple(range(256)))
+                    time.sleep(0.1)
             finally:
+                logs = _proxy_log()
+                entry["state"] = _run(
+                    ["docker", "inspect", "-f", "{{json .State}}", DNS_PROXY],
+                    expect=tuple(range(256)),
+                )
+                entry["log"] = logs[-30:]
                 _run(["docker", "rm", "-f", DNS_PROXY], expect=tuple(range(256)))
             heard = resolver.names()[before:]
-            measured[order] = {
-                "unlisted": unlisted,
-                "status": status,
-                "heard unlisted": unlisted in heard,
-                "heard listed": listed in heard,
-                "log": [line for line in log if "pridem-egress" in line][-4:],
-            }
-        heard = resolver.names()
+            entry["heard"] = heard
+            entry["heard unlisted"] = unlisted in heard
+            entry["heard listed"] = listed in heard
+            entry["logged unlisted"] = any(f"host={unlisted} " in x for x in logs)
     finally:
         resolver.close()
-    warnings.warn(
-        f"DM-188 measure: squid {version[:1]}, resolver {gateway}:53, "
-        f"heard {heard}, {measured}",
-        stacklevel=1,
-    )
-    warnings.warn(f"group time so far: {_group_elapsed_s():.0f} s", stacklevel=1)
+        warnings.warn(
+            f"DM-188 measure: squid {version[:1]}, resolver {gateway}:53, "
+            f"{json.dumps(measured, indent=1, default=str)}",
+            stacklevel=1,
+        )
+        warnings.warn(f"group time so far: {_group_elapsed_s():.0f} s", stacklevel=1)
     # the selftest: the order before DM-188 makes squid ask for the name
     assert measured["planted"]["heard unlisted"] is True, (
         "the resolver heard nothing of a name off the list under the planted "
-        f"order: the probe cannot see squid's lookups -- heard {heard}"
+        f"order: the probe cannot see squid's lookups -- {measured['planted']}"
     )
-    for order in ("DM-188", "planted"):
-        assert measured[order]["heard listed"] is True, (order, heard)  # the pair
-        found = measured[order]["status"]
-        assert isinstance(found, dict) and " 403 " in f"{found['unlisted']} ", found
-    # the probe: the machine's order refuses the name without asking for it
-    assert measured["DM-188"]["heard unlisted"] is False, (heard, measured)
+    for order in ("DM-188", "planted"):  # the pair: the listed name is looked up
+        assert measured[order]["heard listed"] is True, (order, measured[order])
+    # the probe: squid decided on the name off the list without asking for it
+    found = measured["DM-188"]
+    assert found["logged unlisted"] is True, found  # it reached squid
+    assert found["heard unlisted"] is False, found
 
 
 def _container(project: str, service: str) -> str:
