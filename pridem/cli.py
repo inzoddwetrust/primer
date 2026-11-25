@@ -7,7 +7,9 @@ actor is the machine), and only a verb a timer runs takes it. ``--command``
 names the command of the Panel's queue the agent runs the verb for (DM-138):
 its id goes to the journal's header, the lock and the verdict, the actor is
 the Panel; a verb without a verdict refuses it. ``--json`` may also follow the
-verb. Anything refused before a run -- an unknown verb, option or argument, a
+verb. ``pridem agent`` runs the box's agent (DM-141): it takes no argument
+and is no verb of ``VERBS``. Anything refused before a run -- an unknown verb,
+option or argument, a
 busy box -- exits 1 with a message on stderr and no verdict; a busy box with
 ``--json`` prints the refusal's object on stdout too
 (``pridem/report/refusal.py``). 2 is never a parse error here, it means "not
@@ -36,6 +38,7 @@ from typing import TextIO
 import click
 from pydantic import TypeAdapter, ValidationError
 
+from pridem.agent.service import run_agent
 from pridem.events import ShortSecret, said
 from pridem.interrupt import Interrupt, Interrupted
 from pridem.report.schema import CommandId
@@ -77,6 +80,10 @@ def _command(
 
 
 _COMMAND_ID: TypeAdapter[str] = TypeAdapter(CommandId)
+
+AGENT = "agent"
+"""``pridem agent`` -- the agent of the box (``pridem/agent/service.py``):
+not a verb of ``VERBS``, so never a command of the Panel's queue."""
 
 
 def _arguments(
@@ -143,6 +150,16 @@ def run(
             )
         except click.ClickException as error:
             raise Refused(error.format_message()) from None
+        if name == AGENT:  # the agent of the box: no verb of VERBS (DM-141)
+            if as_json or by_timer or command is not None or rest:
+                raise Refused("agent takes no arguments and no flags")
+            return run_agent(
+                root,
+                out,
+                lambda: interrupt.count > 0,
+                fs_root=fs_root,
+                runner=runner,
+            )
         verb = VERBS.get(name)
         if verb is None:
             raise Refused(f"unknown verb {name!r}; verbs: {', '.join(sorted(VERBS))}")

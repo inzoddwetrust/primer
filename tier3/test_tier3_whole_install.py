@@ -71,26 +71,46 @@ import json
 import os
 import re
 import shutil
+import signal
 import threading
 import time
 import warnings
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
+from urllib.parse import urlsplit
 
 import pytest
 import yaml
 from conftest import SERVICE_MIRROR, SERVICE_PINS
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from groups import NEEDS_BOX
 
 from pridem.conformance.stack import check_health, check_logs
-from pridem.protocol import PROTOCOL_HEADER, Refusal, RegisterRequest, RegisterResponse
+from pridem.protocol import (
+    PROTOCOL_HEADER,
+    EventBatch,
+    Heartbeat,
+    Refusal,
+    RegisterRequest,
+    RegisterResponse,
+    VerdictEnvelope,
+    signed_headers,
+    signing_string,
+    verdict_bytes,
+)
 from pridem.report.schema import Verdict
 from pridem.runner import (
     CommandNotStarted,
     CommandTimedOut,
+    RunnerError,
     Stream,
     SubprocessRunner,
     clean_env,
@@ -3665,6 +3685,151 @@ def test_probe_DM_139_register_on_the_runner() -> None:
         journal = (Path("/opt/pridem") / verdict.log_ref).read_text(encoding="utf-8")
         assert _TOKEN not in journal and _FOREIGN not in journal
         assert _TOKEN not in verdict.model_dump_json()
+
+
+class _AgentPanel(BaseHTTPRequestHandler):
+    """The Panel's side of the agent on the runner's loopback (DM-141): every
+    request's signature checked by the box's public half, one command
+    (``status``) given with its term, the lines kept by ``seq``, the verdict
+    checked by the Panel's bytes of it."""
+
+    public: ClassVar[bytes] = b""
+    queue: ClassVar[list[dict[str, object]]] = []
+    seen: ClassVar[list[tuple[str, str, int]]] = []
+    lines: ClassVar[dict[int, dict[str, object]]] = {}
+    verdicts: ClassVar[list[tuple[str, bool, str | None]]] = []
+    beats: ClassVar[list[bool]] = []
+
+    def _any(self) -> None:
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        status, answer = self._answer(body)
+        self.seen.append((self.command, self.path, status))
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(answer)))
+        self.end_headers()
+        self.wfile.write(answer)
+
+    do_GET = do_POST = _any  # noqa: N815
+
+    def _answer(self, body: bytes) -> tuple[int, bytes]:
+        signed = signed_headers(dict(self.headers.items()))
+        message = signing_string(self.command, self.path, signed.time, body)
+        Ed25519PublicKey.from_public_bytes(self.public).verify(
+            base64.b64decode(signed.signature), message.encode()
+        )  # a signature that does not hold fails the request: no answer
+        where = self.path.removeprefix("/agent/v1/")
+        if where == "heartbeat":
+            self.beats.append(Heartbeat.model_validate_json(body).state is not None)
+            return 204, b""
+        if where == "commands/next":
+            if not self.queue:
+                time.sleep(1)  # the Panel holds a long-poll (queue.py): a short one
+                return 204, b""
+            return 200, json.dumps(self.queue.pop(0)).encode()
+        if where.endswith("/events"):
+            batch = EventBatch.model_validate_json(body)
+            for line in batch.events:
+                self.lines.setdefault(line.seq, line.model_dump(mode="json"))
+            last = 0
+            while last + 1 in self.lines:
+                last += 1
+            return 200, json.dumps({"last_seq": last}).encode()
+        if where.endswith("/verdict"):
+            envelope = VerdictEnvelope.model_validate_json(body)
+            signed_bytes = verdict_bytes(envelope.verdict.model_dump(mode="json"))
+            try:
+                Ed25519PublicKey.from_public_bytes(self.public).verify(
+                    base64.b64decode(envelope.signature), signed_bytes
+                )
+                verified = True
+            except InvalidSignature:
+                verified = False
+            self.verdicts.append(
+                (envelope.verdict.run_id, verified, envelope.verdict.command)
+            )
+            return 204, b""
+        return 404, b""
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+
+def test_probe_DM_141_agent_on_the_runner() -> None:
+    """DM-141, after the registration of DM-139 in group ``c``: ``pridem
+    agent`` -- a real process -- against the Panel's side on the loopback, at
+    the address the box registered with. The Panel gives one command,
+    ``status``; the agent runs it as the console would (``pridem --json
+    --command``); every line of its journal reaches the Panel by ``seq`` with
+    no gap, the verdict arrives naming the command and its signature holds by
+    the box's public half; the first heartbeat is the full one. SIGTERM stops
+    the agent. Measured into the run's journal (``warnings.warn``): the
+    requests and the time to the verdict."""
+    agent_dir = Path("/opt/pridem/agent")
+    registration = json.loads((agent_dir / "registration.json").read_text())
+    origin = urlsplit(registration["panel"])
+    assert origin.scheme == "http" and origin.hostname == "127.0.0.1"
+    seed = (agent_dir / "box.key").read_bytes()
+    public = Ed25519PrivateKey.from_private_bytes(seed).public_key()
+    expires = (datetime.now(UTC) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    handler = type(
+        "Panel",
+        (_AgentPanel,),
+        {
+            "public": public.public_bytes(Encoding.Raw, PublicFormat.Raw),
+            "queue": [
+                {"id": "cmd-1", "verb": "status", "args": {}, "expires_at": expires}
+            ],
+            "seen": [],
+            "lines": {},
+            "verdicts": [],
+            "beats": [],
+        },
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", origin.port or 80), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    said: list[str] = []
+    ended: list[BaseException] = []
+
+    def agent() -> None:
+        try:
+            SubprocessRunner().run(
+                ["sh", "-c", f"echo $$; exec {PRIDEM} agent"],
+                timeout=600,
+                on_line=lambda stream, line, cut: said.append(line),
+            )
+        except RunnerError as error:
+            ended.append(error)
+
+    began = time.monotonic()
+    thread = threading.Thread(target=agent, daemon=True)
+    thread.start()
+    try:
+        while not handler.verdicts:  # type: ignore[attr-defined]
+            assert time.monotonic() - began < 300, ("no verdict", said)
+            assert thread.is_alive(), ("the agent ended", said, ended)
+            time.sleep(0.5)
+        spent = round(time.monotonic() - began, 1)
+        os.kill(int(said[0]), signal.SIGTERM)
+        thread.join(120)
+        assert not thread.is_alive(), ("the agent did not stop", said)
+    finally:
+        server.shutdown()
+        server.server_close()
+    seen = handler.seen  # type: ignore[attr-defined]
+    warnings.warn(
+        f"DM-141 measure: verdict in {spent} s; requests {seen}; agent said {said}",
+        stacklevel=1,
+    )
+    [(run_id, verified, command)] = handler.verdicts  # type: ignore[attr-defined]
+    assert verified and command == "cmd-1"
+    lines = handler.lines  # type: ignore[attr-defined]
+    journal = Path("/opt/pridem/journal") / f"{run_id}.jsonl"
+    written = journal.read_text(encoding="utf-8").splitlines()
+    assert sorted(lines) == list(range(1, len(written) + 1))
+    assert all(status != 404 for _, _, status in seen), seen
+    assert handler.beats and handler.beats[0], handler.beats  # type: ignore[attr-defined]
+    assert ended == [], ended
 
 
 def test_tier3_a_project_verb_runs_in_its_service(tmp_path: Path, mirror: Path) -> None:

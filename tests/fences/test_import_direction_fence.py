@@ -142,7 +142,17 @@ LAYERS: Layers = (
             "pridem.verbs.version",
         ),
     ),
-    ("top", ("pridem.agent", "pridem.agent.envelope", "pridem.cli")),
+    (
+        "top",
+        (
+            "pridem.agent",
+            "pridem.agent.client",
+            "pridem.agent.command",
+            "pridem.agent.envelope",
+            "pridem.agent.service",
+            "pridem.cli",
+        ),
+    ),
 )
 
 IMPORT_FUNCTIONS = frozenset(

@@ -167,6 +167,23 @@ class Transport(Protocol):
         ...
 
 
+class Requests(Protocol):
+    """How the agent's requests reach the Panel (DM-141): any method, a
+    timeout of its own -- the long-poll waits longer than the rest."""
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> Answer:
+        """``method`` ``url`` with ``body``; the answer, or
+        ``PanelUnreachable``."""
+        ...
+
+
 class HttpTransport:
     """``http.client`` of the standard library: TLS with the system's trust
     for ``https``, plain for the loopback's ``http``."""
@@ -175,20 +192,30 @@ class HttpTransport:
         self.timeout = timeout
 
     def post(self, url: str, body: bytes, headers: Mapping[str, str]) -> Answer:
+        return self.request("POST", url, body, headers, self.timeout)
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> Answer:
         parts = urlsplit(url)
         host = parts.hostname or ""
         connection = (
             http.client.HTTPSConnection(
                 host,
                 parts.port,
-                timeout=self.timeout,
+                timeout=timeout,
                 context=ssl.create_default_context(),
             )
             if parts.scheme == "https"
-            else http.client.HTTPConnection(host, parts.port, timeout=self.timeout)
+            else http.client.HTTPConnection(host, parts.port, timeout=timeout)
         )
         try:
-            connection.request("POST", parts.path, body=body, headers=dict(headers))
+            connection.request(method, parts.path, body=body, headers=dict(headers))
             response = connection.getresponse()
             return Answer(response.status, response.read(ANSWER_MAX + 1))
         except socket.gaierror:
