@@ -149,6 +149,7 @@ LAYERS: Layers = (
             "pridem.agent.client",
             "pridem.agent.command",
             "pridem.agent.envelope",
+            "pridem.agent.history",
             "pridem.agent.service",
             "pridem.cli",
         ),

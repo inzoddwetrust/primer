@@ -11,7 +11,11 @@ the box known, the time in ±300 s, the signature by the box's public half
 over ``signing_string`` (``cryptography``). Giving a command is taking it.
 Lines are kept by ``(run_id, seq)``, a repeat changes nothing, the answer is
 the last ``seq`` held with no gap. A verdict is kept once by its ``run_id``,
-``verified`` by the Panel's bytes of it.
+``verified`` over its JSON object as the envelope carries it -- the Panel at
+``29b3e35`` (DM-196); ``history`` keeps each envelope of a batch the same way
+and answers the runs it holds (``drop`` -- runs it leaves out of the answer);
+a batch with a run of ``unreadable`` is 422 whole, as a body the Panel cannot
+read.
 
 The Panel is strict: a request to a path it has not is a failure of the
 test (``unplanned``), and what a test scripts -- answers it gives instead of
@@ -27,6 +31,7 @@ machine has no root but ``/opt/pridem`` for a process.
 
 import base64
 import io
+import json
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -39,6 +44,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
 
 from pridem import identity
+from pridem.agent.history import Cursor, write_cursor
 from pridem.cli import run
 from pridem.events import Json
 from pridem.protocol import (
@@ -50,6 +56,8 @@ from pridem.protocol import (
     EventsAccepted,
     HeaderMissing,
     Heartbeat,
+    HistoryAccepted,
+    HistoryBatch,
     Refusal,
     RefusalCode,
     VerdictEnvelope,
@@ -66,7 +74,7 @@ from pridem.runner import (
     Result,
     Stream,
 )
-from pridem.state import HeaderLine
+from pridem.state import Box, HeaderLine
 from pridem.steps.identity import Answer, PanelUnreachable
 
 STATUS: dict[RefusalCode, int] = {
@@ -138,6 +146,10 @@ class AgentPanel:
     owners: dict[str, str] = field(default_factory=dict)
     """``run_id or command id -> box_id``."""
     batches: list[tuple[str, int, int]] = field(default_factory=list)
+    histories: list[list[str]] = field(default_factory=list)
+    """The runs of every ``history`` batch, in order."""
+    drop: set[str] = field(default_factory=set)
+    unreadable: set[str] = field(default_factory=set)
     """``(run_id, from_seq, lines)`` of every batch of lines, in order."""
     requests: list[tuple[str, str]] = field(default_factory=list)
     unplanned: list[tuple[str, str]] = field(default_factory=list)
@@ -222,6 +234,8 @@ class AgentPanel:
                     return self._events(signed.box, parts[1], body)
                 if parts[2] == "verdict":
                     return self._verdict(signed.box, parts[1], body)
+            if (method, where) == ("POST", "history"):
+                return self._history(signed.box, body)
         except ValidationError:
             return _invalid()
         self.unplanned.append((method, path))
@@ -273,20 +287,46 @@ class AgentPanel:
 
     def _verdict(self, box: str, run_id: str, body: bytes) -> Answer:
         envelope = VerdictEnvelope.model_validate_json(body)
+        raw: dict[str, Json] = json.loads(body)["verdict"]
+        if run_id in self.unreadable:
+            return _invalid()
+        return self._keep(box, run_id, envelope, raw)
+
+    def _keep(
+        self, box: str, run_id: str, envelope: VerdictEnvelope, raw: dict[str, Json]
+    ) -> Answer:
         if envelope.verdict.run_id != run_id:
             return _invalid()
         if not self._owned(box, run_id):
             return refused("run-foreign")
-        signed = verdict_bytes(envelope.verdict.model_dump(mode="json"))
         try:
             Ed25519PublicKey.from_public_bytes(self.keys[box]).verify(
-                base64.b64decode(envelope.signature), signed
+                base64.b64decode(envelope.signature), verdict_bytes(raw)
             )
             verified = True
         except InvalidSignature:
             verified = False
         self.verdicts.setdefault(run_id, Kept(envelope, verified))
         return Answer(204, b"")
+
+    def _history(self, box: str, body: bytes) -> Answer:
+        batch = HistoryBatch.model_validate_json(body)
+        raws: list[dict[str, Json]] = [
+            e["verdict"] for e in json.loads(body)["envelopes"]
+        ]
+        runs = [envelope.verdict.run_id for envelope in batch.envelopes]
+        self.histories.append(runs)
+        if self.unreadable & set(runs):
+            return _invalid()
+        held: list[str] = []
+        for envelope, raw in zip(batch.envelopes, raws, strict=True):
+            run_id = envelope.verdict.run_id
+            answer = self._keep(box, run_id, envelope, raw)
+            if answer.status != 204:
+                return answer
+            if run_id not in self.drop:
+                held.append(run_id)
+        return Answer(200, HistoryAccepted(run_ids=held).model_dump_json().encode())
 
 
 @dataclass
@@ -345,3 +385,11 @@ class PridemInProcess:
     def assert_clean(self) -> None:
         assert self.errors == [], self.errors
         assert len(self.calls) >= len(self.inner), "a script of docker never ran"
+
+
+def held_so_far(root: Path) -> None:
+    """The box's past is with the Panel: the cursor through its last run --
+    a test of the queue alone sends none of it."""
+    ids = Box(root).history_ids()
+    if ids:
+        write_cursor(root, Cursor.model_validate({"through": ids[-1], "held": ids}))

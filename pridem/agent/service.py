@@ -1,5 +1,5 @@
-"""``pridem agent``: the agent of the box (``PRIMER-PANEL-TZ-2`` 5-8, 10;
-DM-141, part A).
+"""``pridem agent``: the agent of the box (``PRIMER-PANEL-TZ-2`` 5-10;
+DM-141).
 
 One process per box: it holds ``agent/agent.lock`` of the box's agent
 directory by ``flock`` for its whole life; a second agent is refused, the
@@ -14,7 +14,9 @@ Two loops, two threads:
   the state of ``pridem state --json`` (DM-136) measured in the process.
 - **The queue** -- while the box's lock is held (a run of the console or a
   timer) the agent does not ask for a command: it looks again in
-  ``BUSY_PAUSE_S``. Free: the long-poll ``commands/next``. A command is
+  ``BUSY_PAUSE_S``. Free: first what of ``history/`` the Panel does not hold
+  (``sync``, below), then the long-poll ``commands/next``; a 204 faster than
+  ``QUIET_POLL_S`` is followed by a pause to it. A command is
   checked (``pridem.agent.command``) and refused by its code before any run,
   or run as the console would run it: ``pridem --json --command <id> <verb>
   ...``, a process of the runner. A run refused by a busy box (a race with
@@ -27,17 +29,27 @@ The run's journal is the one whose header names the command, written since
 the run began. Every ``STREAM_TICK_S`` the agent reads it whole and sends the
 lines after the last ``seq`` the Panel holds with no gap, in batches of
 ``BATCH``; the Panel's answer is where it goes on. When the run is over the
-rest of the lines go, then the verdict in its signed envelope (DM-140); the
-next heartbeat is a full one.
+rest of the lines go, then the verdict in its signed envelope (DM-140) --
+one try; the next heartbeat is a full one.
 
-The Panel away: every request is repeated after a pause of 1, 2, 4 ... up to
-300 s, with no end (``Backoff``); so are the codes of the transport
-(``signature-bad``, ``box-unknown``, ``protocol-too-old``,
+**No verdict lost** (part B): the cursor of ``history/``
+(``pridem.agent.history``) says which runs the Panel holds. Before every
+long-poll -- so when the agent starts and when the Panel is back -- every
+pending run goes, oldest first: its lines while its journal lives, then its
+envelope; envelopes in batches of ``HISTORY_BATCH`` by ``history``, a
+batch the Panel cannot read (422) one by one. A run of the console, of a
+timer, of a command whose verdict did not go, of a command whose run died
+with the agent (its verdict written by ``recover`` of the next run under the
+lock) -- all go the same way. The cursor's hour before ``through`` and its
+KNOWN CEILING (a clock set back by more than it): ``pridem.agent.history``.
+
+The Panel away: the queue's turn and the heartbeat are repeated after a
+pause of 1, 2, 4 ... up to 300 s, with no end (``Backoff``); so are the codes
+of the transport (``signature-bad``, ``box-unknown``, ``protocol-too-old``,
 ``protocol-too-new``, ``clock-skew``) -- the Panel mends them on its side. A
-run goes on while the Panel is away; its lines and its verdict wait. A
-refusal of one message (``run-foreign``, an answer not of contract 4) gives
-that message up and says so: what is given up waits for the cursor of
-``history/`` (part B).
+run goes on while the Panel is away; its lines and its verdict wait in
+``history/`` and ``journal/``. A refusal of one run (``run-foreign``, an
+answer not of contract 4) is kept in the cursor by its code.
 
 The log of the agent says codes, verbs, command ids and run ids -- never a
 body, never a value.
@@ -69,6 +81,16 @@ from pridem.agent.client import (
 )
 from pridem.agent.command import checked
 from pridem.agent.envelope import EnvelopeRefused, envelope
+from pridem.agent.history import (
+    RETRY_UNREAD_S,
+    UNREAD,
+    Cursor,
+    CursorDamaged,
+    advanced,
+    pending,
+    read_cursor,
+    write_cursor,
+)
 from pridem.files import private_dir
 from pridem.identity import (
     KeyDamaged,
@@ -77,7 +99,14 @@ from pridem.identity import (
     load_seed,
     read_registration,
 )
-from pridem.protocol import Command, EventBatch, Heartbeat, RefusalCode
+from pridem.protocol import (
+    Command,
+    EventBatch,
+    Heartbeat,
+    HistoryBatch,
+    RefusalCode,
+    VerdictEnvelope,
+)
 from pridem.report.box_snapshot import BoxSnapshot
 from pridem.runner import Runner, RunnerError, Stream, SubprocessRunner
 from pridem.state import (
@@ -97,6 +126,10 @@ AGENT_LOCK = "agent.lock"
 BUSY_PAUSE_S = 5.0
 STREAM_TICK_S = 1.0
 BATCH = 200
+QUIET_POLL_S = 1.0
+"""A long-poll the Panel answers 204 faster than this is followed by a pause
+to it: a Panel that holds no long-poll is not asked in a loop."""
+HISTORY_BATCH = 20
 RUN_TIMEOUT_S = 24 * 3600.0
 """A run the agent started longer than a day is stopped: no rollout lasts so
 long; ``recover`` of the next run gives it its verdict."""
@@ -206,7 +239,10 @@ class Agent:
     heartbeat_s: int
     full_state_s: int
     executable: str = "pridem"
+    monotonic: Callable[[], float] = time.monotonic
     full_due: threading.Event = field(default_factory=threading.Event)
+    _cursor: Cursor | None = None
+    _retried: float | None = None
 
     # --- the heartbeat ----------------------------------------------------------
 
@@ -245,9 +281,15 @@ class Agent:
         if holders(self.root / LOCK):
             self.pause(BUSY_PAUSE_S)
             return
+        self.sync()
+        asked = self.monotonic()
         command = self.client.next_command()
         if command is not None:
             self.handle(command)
+            return
+        quick = self.monotonic() - asked
+        if quick < QUIET_POLL_S:  # a Panel that holds no long-poll
+            self.pause(QUIET_POLL_S - quick)
 
     def handle(self, command: Command) -> None:
         """A command taken: refused by its code, or run."""
@@ -315,20 +357,116 @@ class Agent:
         return "ran"
 
     def finish(self, path: Path, last: int) -> None:
-        """A run that is over: its lines after ``last`` until the Panel holds
-        them all, then its verdict; the next heartbeat a full one."""
+        """A run that is over: its lines after ``last``, then its verdict --
+        one try; what does not go stays pending for ``sync``. The next
+        heartbeat a full one."""
         run_id = path.name.partition(".")[0]
-        held = [last]
-
-        def rest() -> None:
-            held[0] = self._send_lines(path, held[0])
-            lines = journal_lines(path)
-            if lines and held[0] < lines[-1].seq:
-                raise NotHeld(held[0])
-
-        self._deliver(rest, f"events {run_id}")
-        self._send_verdict(run_id)
         self.full_due.set()
+        try:
+            held = self._send_lines(path, last)
+            lines = journal_lines(path)
+            if lines and held < lines[-1].seq:
+                raise NotHeld(held)
+            self._send_verdicts([run_id])
+        except (PanelUnreachable, PanelDown, Refused, Unread, NotHeld) as failed:
+            self.say(f"run {run_id}: waits for the Panel ({_said(failed)})")
+
+    # --- history/ ------------------------------------------------------------------
+
+    def sync(self) -> None:
+        """Every pending run of ``history/`` to the Panel, oldest first: its
+        lines while its journal lives, then its envelope, in batches. A
+        failed request raises to the queue's loop: what did not go stays
+        pending."""
+        cursor = self.cursor()
+        now = self.monotonic()
+        retry = self._retried is None or now - self._retried >= RETRY_UNREAD_S
+        runs = pending(self.root, cursor, retry)
+        if retry:
+            self._retried = now
+        for start in range(0, len(runs), HISTORY_BATCH):
+            self._send_verdicts(runs[start : start + HISTORY_BATCH], lines=True)
+
+    def cursor(self) -> Cursor:
+        """The cursor, read once; a damaged file said and taken as none."""
+        if self._cursor is None:
+            try:
+                self._cursor = read_cursor(self.root)
+            except CursorDamaged:
+                self.say("history: agent/cursor.json cannot be read: all of it again")
+                self._cursor = Cursor()
+        return self._cursor
+
+    def _keep(self, held: list[str], refused: dict[str, str]) -> None:
+        old = self.cursor()
+        merged = Cursor.model_validate(
+            {
+                **({"through": old.through} if old.through is not None else {}),
+                "held": sorted({*old.held, *held}),
+                "refused": {
+                    **{r: c for r, c in old.refused.items() if r not in held},
+                    **refused,
+                },
+            }
+        )
+        self._cursor = advanced(self.root, merged)
+        write_cursor(self.root, self._cursor)
+
+    def _send_verdicts(self, runs: list[str], lines: bool = False) -> None:
+        """The envelopes of ``runs`` -- one by ``runs/<id>/verdict``, more by
+        ``history``; a batch refused whole -- 422, ``run-foreign`` -- sends its
+        envelopes one by one, to find whose."""
+        sealed: list[VerdictEnvelope] = []
+        refused: dict[str, str] = {}
+        for run_id in runs:
+            try:
+                sealed.append(envelope(self.root, run_id, owner=self.owner))
+            except EnvelopeRefused as no:
+                self.say(f"run {run_id}: no envelope: {no.code}")
+                refused[run_id] = no.code
+                continue
+            path = self.root / JOURNAL / f"{run_id}.jsonl"
+            if lines and path.is_file():
+                try:
+                    self._send_lines(path, 0)
+                except Refused as no:
+                    if no.code in TRANSPORT:
+                        raise
+                    self.say(f"run {run_id}: refused: {no.code}")
+                    refused[run_id] = no.code
+                    sealed.pop()
+                except Unread as unread:  # the lines are the Panel's to lose
+                    self.say(f"run {run_id}: lines unread ({unread.status})")
+        if refused:
+            self._keep([], refused)
+        if not sealed:
+            return
+        if len(sealed) > 1:
+            try:
+                held = self.client.history(HistoryBatch(envelopes=sealed))
+            except Unread as unread:
+                if unread.status != 422:
+                    raise
+            except Refused as no:  # one run of the batch refused: whose?
+                if no.code in TRANSPORT:
+                    raise
+            else:
+                self._keep(held, {})
+                return
+        for one in sealed:
+            run_id = one.verdict.run_id
+            try:
+                self.client.verdict(run_id, one)
+            except Refused as no:
+                if no.code in TRANSPORT:
+                    raise
+                self.say(f"run {run_id}: refused: {no.code}")
+                self._keep([], {run_id: no.code})
+            except Unread as unread:
+                self.say(f"run {run_id}: an answer not of contract 4 ({unread.status})")
+                self._keep([], {run_id: f"{UNREAD}{unread.status}"})
+            else:
+                self._keep([run_id], {})
 
     # --- a run's lines and its verdict -------------------------------------------
 
@@ -352,14 +490,6 @@ class Agent:
             return self._send_lines(path, last)
         except (PanelUnreachable, PanelDown, Refused, Unread):
             return last  # the rest goes when the run is over
-
-    def _send_verdict(self, run_id: str) -> None:
-        try:
-            sealed = envelope(self.root, run_id, owner=self.owner)
-        except EnvelopeRefused as refused:
-            self.say(f"run {run_id}: no envelope: {refused.code}")
-            return
-        self._deliver(lambda: self.client.verdict(run_id, sealed), f"verdict {run_id}")
 
     # --- delivery ---------------------------------------------------------------
 
@@ -424,6 +554,17 @@ class Agent:
                 backoff.reset()
             elif not backoff.wait(self.pause):
                 return
+
+
+def _said(failed: Exception) -> str:
+    """A failure of a request in the agent's words: its code, no body."""
+    if isinstance(failed, PanelUnreachable):
+        return f"no answer, {failed.cause}"
+    if isinstance(failed, PanelDown | Unread):
+        return f"answer {failed.status}"
+    if isinstance(failed, Refused):
+        return f"refused: {failed.code}"
+    return f"lines held to seq {failed}"
 
 
 class NotHeld(Exception):

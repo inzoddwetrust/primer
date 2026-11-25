@@ -282,6 +282,13 @@ At = Annotated[str, Field(pattern=r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")]
 """The moment a line was written: UTC to the millisecond."""
 
 
+def _absent(value: object) -> bool:
+    """A line of a journal leaves out a field with nothing to say: the file
+    has none, and its model's dump -- a line of contract 4 (DM-141) -- writes
+    none either (DM-189: no explicit ``null``)."""
+    return value is None
+
+
 class StepStartedLine(Strict):
     event: Literal["step_started"]
     seq: Seq
@@ -302,9 +309,9 @@ class StepFinishedLine(Strict):
     name: Text
     order: int
     status: Literal["ok", "failed", "skipped"]
-    reason: Reason | None = None
-    started: Moment | None = None
-    duration_s: float | None = None
+    reason: Reason | None = Field(default=None, exclude_if=_absent)
+    started: Moment | None = Field(default=None, exclude_if=_absent)
+    duration_s: float | None = Field(default=None, exclude_if=_absent)
     verify: dict[str, Json] = {}
 
 
@@ -324,9 +331,9 @@ class KeyNeededNotice(Strict):
     kind: Literal["key_needed"]
     repo: Text
     key: Text
-    page: str | None = None  # absent: not a GitHub address
+    page: str | None = Field(default=None, exclude_if=_absent)  # not a GitHub address
     write: bool
-    why: str | None = None
+    why: str | None = Field(default=None, exclude_if=_absent)
     wait_s: float
     again: bool
 
@@ -334,7 +341,7 @@ class KeyNeededNotice(Strict):
 class RecipientNeededNotice(Strict):
     kind: Literal["recipient_needed"]
     key: Text
-    path: str | None = None  # absent: not known yet
+    path: str | None = Field(default=None, exclude_if=_absent)  # not known yet
     wait_s: float
 
 

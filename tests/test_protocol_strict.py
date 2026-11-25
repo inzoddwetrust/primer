@@ -9,6 +9,7 @@ its term.
 import json
 import typing
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from identity_support import FakePanel, box_root, register, with_passport
@@ -20,6 +21,7 @@ from pridem.protocol import (
     MESSAGES,
     Command,
     CommandRefusal,
+    EventBatch,
     Heartbeat,
     VerdictEnvelope,
     rendered_schema,
@@ -256,3 +258,98 @@ def test_the_schema_says_the_token_is_a_secret_of_16_or_more() -> None:
         "type": "string",
         "writeOnly": True,
     }
+
+
+# --- no explicit null in a dump (DM-141, part B) -------------------------------------
+
+
+def _null_dumped(models: set[type[BaseModel]]) -> list[str]:
+    """The fields that dump an explicit ``null``: ``None`` by default, no
+    ``exclude_if``, not named in the model's ``NULLABLE`` (contract 2 keeps
+    ``errno`` and ``ended_at`` null on purpose)."""
+    found: list[str] = []
+    for model in models:
+        nullable: frozenset[str] = getattr(model, "NULLABLE", frozenset())
+        for name, field in model.model_fields.items():
+            if field.default is None and field.exclude_if is None:
+                if name not in nullable:
+                    found.append(f"{model.__name__}.{name}")
+    return sorted(found)
+
+
+def test_no_model_of_the_protocol_dumps_an_explicit_null() -> None:
+    """The whole graph of ``MESSAGES`` -- the verdict, the box's state and the
+    lines of a journal inside it."""
+    graph = _graph()
+    names = {model.__name__ for model in graph}
+    assert {
+        "Verdict",
+        "BoxSnapshot",
+        "StepFinishedLine",
+        "KeyNeededNotice",
+        "RecipientNeededNotice",
+        "CommandNotStartedReason",
+    } <= names
+    assert _null_dumped(graph) == []
+
+
+def test_the_walk_names_a_field_that_dumps_null() -> None:
+    """The pair of the walk: a field ``None`` by default without
+    ``exclude_if`` is named; with it, or named ``NULLABLE``, it is not."""
+
+    class Planted(Strict):
+        x: str | None = None
+
+    class Left(Strict):
+        x: str | None = Field(default=None, exclude_if=lambda v: v is None)
+
+    class Named(Strict):
+        NULLABLE: ClassVar[frozenset[str]] = frozenset({"x"})
+        x: str | None = None
+
+    assert _null_dumped({Planted, Left, Named}) == ["Planted.x"]
+
+
+LINES = [
+    '{"event": "header", "seq": 1, "at": "2026-11-25T10:00:00.000Z", '
+    '"run_id": "2026-11-25T10:00:00Z-a3f9", "verb": "update", "mode": "deploy", '
+    '"args": {}, "actor": {"type": "engineer", "via": "panel"}, '
+    '"started": "2026-11-25T10:00:00Z", "composition_before": {"pridem": "0.1.10"}, '
+    '"command": "cmd-1"}',
+    '{"event": "step_started", "seq": 2, "at": "2026-11-25T10:00:00.001Z", '
+    '"phase": "main", "stack": "pridem-host", "name": "provision_host", "order": 1, '
+    '"started": "2026-11-25T10:00:00.001000Z"}',
+    '{"event": "step_finished", "seq": 3, "at": "2026-11-25T10:00:01.000Z", '
+    '"phase": "main", "stack": "pridem-host", "name": "provision_host", "order": 1, '
+    '"status": "ok", "started": "2026-11-25T10:00:00.001000Z", "duration_s": 0.999, '
+    '"verify": {"docker": "29.1.3"}}',
+    '{"event": "notice", "seq": 4, "at": "2026-11-25T10:00:01.100Z", "notice": '
+    '{"kind": "key_needed", "repo": "git@github.com:a/velo.git", '
+    '"key": "ssh-ed25519 AAAA", "write": false, "wait_s": 30.0, "again": false}}',
+    '{"event": "notice", "seq": 5, "at": "2026-11-25T10:00:01.200Z", "notice": '
+    '{"kind": "recipient_needed", "key": "age1qyqszqgpqyqszqgp", "wait_s": 30.0}}',
+    '{"event": "log", "seq": 6, "at": "2026-11-25T10:00:02.000Z", "phase": "main", '
+    '"stack": "aivis", "name": "up", "stream": "stderr", "line": "no such service"}',
+    '{"event": "step_finished", "seq": 7, "at": "2026-11-25T10:00:02.100Z", '
+    '"phase": "main", "stack": "aivis", "name": "up", "order": 14, '
+    '"status": "failed", "reason": {"code": "command-failed", '
+    '"argv": ["docker", "compose", "up"], "exit_code": 1}}',
+    '{"event": "run_finished", "seq": 8, "at": "2026-11-25T10:00:03.000Z", '
+    '"exit_code": 1, "result": "red"}',
+]
+"""Lines of a journal as the machine writes them: steps ``ok`` and
+``failed``, both notices with their optional fields absent, a line of log."""
+
+
+def test_lines_of_a_journal_go_and_come_back_with_no_null() -> None:
+    """The lines -> ``EventBatch`` -> its dump -> read strictly: the same
+    batch, and no ``null`` on the wire."""
+    body = '{"from_seq": 1, "events": [' + ", ".join(LINES) + "]}"
+    batch = EventBatch.model_validate_json(body)
+    wire = batch.model_dump_json()
+    assert "null" not in wire
+    assert EventBatch.model_validate_json(wire) == batch
+    sent = json.loads(wire)["events"]
+    for given, line in zip(LINES, sent, strict=True):
+        written = json.loads(given)
+        assert {k: v for k, v in line.items() if k in written} == written

@@ -96,6 +96,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_probe_DM_139_register_on_the_runner", "c"),
     # after it: the agent of the box registered there (DM-141)
     ("test_probe_DM_141_agent_on_the_runner", "c"),
+    # after it: the Panel away and back (DM-141 part B)
+    ("test_probe_DM_141_no_verdict_lost_on_the_runner", "c"),
     # g: a job, the project's verbs, logs and a session
     ("test_tier3_a_project_verb_runs_in_its_service", "g"),
     ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "g"),

@@ -31,6 +31,7 @@ from agent_support import (
     AgentPanel,
     Clock,
     PridemInProcess,
+    held_so_far,
     refused,
 )
 from identity_support import FakePanel, box_root, register, with_passport
@@ -40,6 +41,7 @@ from pridem import __version__
 from pridem.agent import service
 from pridem.agent.client import BaseMismatch, PanelClient, agent_base
 from pridem.agent.command import NotArgv, argv_of, checked
+from pridem.agent.history import read_cursor
 from pridem.agent.service import (
     Agent,
     AgentRunning,
@@ -49,13 +51,14 @@ from pridem.agent.service import (
     light_beat,
 )
 from pridem.cli import _arguments, run
-from pridem.events import Json
+from pridem.events import Json, Secrets
 from pridem.identity import Registration, key_path, read_registration
 from pridem.protocol import Command
 from pridem.report.box_snapshot import BoxSnapshot
+from pridem.report.schema import Verdict
 from pridem.runner import RunnerError, SubprocessRunner
-from pridem.state import Box
-from pridem.steps.identity import Answer, HttpTransport
+from pridem.state import Box, JournalHeader
+from pridem.steps.identity import Answer, HttpTransport, PanelUnreachable
 from pridem.verbs import VERBS
 
 # --- the box and the agent ----------------------------------------------------------
@@ -93,10 +96,15 @@ def _agent(
     machine: PridemInProcess,
     pauses: Pauses,
     said: list[str],
+    ticks: "Ticks | None" = None,
+    *,
+    past_held: bool = True,
 ) -> Agent:
     root = box_root(fs_root)
     registration = read_registration(root)
     assert registration is not None
+    if past_held:
+        held_so_far(root)
     panel.enrol(root)
     return Agent(
         root=root,
@@ -111,7 +119,39 @@ def _agent(
         owner=os.geteuid(),
         heartbeat_s=registration.heartbeat_s,
         full_state_s=registration.full_state_s,
+        monotonic=ticks if ticks is not None else Ticks(),
     )
+
+
+class Ticks:
+    """The agent's ``monotonic``: still unless a test moves it."""
+
+    def __init__(self) -> None:
+        self.at = 1000.0
+        self.steps: list[float] = []
+
+    def __call__(self) -> float:
+        if self.steps:
+            self.at += self.steps.pop(0)
+        return self.at
+
+
+def _a_run_over(fs_root: Path, verb: str = "status") -> Path:
+    """A run of the console, over: its journal (a run ``recover`` gave a
+    verdict to on the way is not it -- its journal was there before)."""
+    root = box_root(fs_root)
+    journals = root / "journal"
+    before = set(Box(root).history_ids()) | {p.stem for p in journals.glob("*.jsonl")}
+    PridemInProcess(fs_root).run(
+        ["pridem", "--json", verb], expect=(0, 1, 2), timeout=60,
+        on_line=lambda *line: None,
+    )  # fmt: skip
+    [run_id] = set(Box(root).history_ids()) - before
+    return journals / f"{run_id}.jsonl"
+
+
+def _all_held(path: Path) -> bytes:
+    return f'{{"last_seq":{journal_lines(path)[-1].seq}}}'.encode()
 
 
 @contextmanager
@@ -486,51 +526,83 @@ def test_the_queue_waits_out_a_panel_away_and_its_refusals(fs_root: Path) -> Non
     panel.assert_consumed()
 
 
-def test_a_verdict_waits_out_a_refusal_of_the_transport(fs_root: Path) -> None:
-    clock = Clock()
-    panel, pauses = AgentPanel(clock), Pauses(clock)
-    said: list[str] = []
-    machine = PridemInProcess(fs_root)
-    agent = _agent(fs_root, panel, machine, pauses, said)
-    run_id = _one_run(agent, panel)
-    panel.verdicts.clear()
-    panel.outages = [refused("clock-skew"), "timed-out"]
-    agent._send_verdict(run_id)  # noqa: SLF001 -- the delivery alone
-    assert pauses.seen == [1, 2] and run_id in panel.verdicts
-
-
-def test_a_run_of_another_box_is_given_up(fs_root: Path) -> None:
-    clock = Clock()
-    panel, pauses = AgentPanel(clock), Pauses(clock, stop_after=3)
-    said: list[str] = []
-    machine = PridemInProcess(fs_root)
-    agent = _agent(fs_root, panel, machine, pauses, said)
-    run_id = _one_run(agent, panel)
-    panel.verdicts.clear()
-    panel.owners[run_id] = "box-of-someone"
-    agent._send_verdict(run_id)  # noqa: SLF001
-    assert pauses.seen == [] and panel.verdicts == {}
-    assert said == [f"verdict {run_id}: refused: run-foreign"]
-
-
-def test_the_lines_of_a_run_over_go_until_the_panel_holds_them_all(
+def test_a_verdict_the_transport_refuses_waits_for_the_next_turn(
     fs_root: Path,
 ) -> None:
-    """The Panel holds nothing after a batch (its gap): the agent pauses and
-    sends again from where it holds."""
+    """Changed by DM-141 part B: a verdict is sent once when its run is over;
+    a refusal of the transport (or no answer) leaves it pending, and the next
+    turn's ``sync`` sends it. Part A repeated it then and there, the queue
+    standing still."""
     clock = Clock()
     panel, pauses = AgentPanel(clock), Pauses(clock)
     said: list[str] = []
     agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
-    run_id = _one_run(agent, panel)
-    panel.lines.clear()
-    panel.verdicts.clear()
-    path = box_root(fs_root) / "journal" / f"{run_id}.jsonl"
+    path = _a_run_over(fs_root)
+    run_id = path.name.partition(".")[0]
+    panel.outages = [Answer(200, _all_held(path)), refused("clock-skew")]
+    agent.finish(path, 0)
+    assert run_id not in panel.verdicts and pauses.seen == []
+    assert said == [f"run {run_id}: waits for the Panel (refused: clock-skew)"]
+    agent.sync()
+    assert panel.verdicts[run_id].verified
+    assert run_id in read_cursor(box_root(fs_root)).held
+
+
+def test_a_run_of_another_box_is_given_up_for_good(fs_root: Path) -> None:
+    """Changed by DM-141 part B: ``run-foreign`` is kept in the cursor; no
+    turn sends it again, a day later neither."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    ticks = Ticks()
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said, ticks)
+    path = _a_run_over(fs_root)
+    run_id = path.name.partition(".")[0]
+    panel.owners[run_id] = "box-of-someone"
+    agent.sync()
+    cursor = read_cursor(box_root(fs_root))
+    assert cursor.refused == {run_id: "run-foreign"}
+    assert f"run {run_id}: refused: run-foreign" in said
+    panel.requests.clear()
+    ticks.at += 2 * 86400
+    agent.sync()
+    assert panel.requests == []
+
+
+def test_a_verdict_of_another_box_s_run_is_given_up_for_good(fs_root: Path) -> None:
+    """``run-foreign`` on the verdict itself (its journal gone): kept in the
+    cursor, not sent again."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    [other] = _copies(fs_root, path, _ids(path.name, 1))
+    panel.owners[other] = "box-of-someone"
+    agent.sync()
+    assert read_cursor(box_root(fs_root)).refused == {other: "run-foreign"}
+    panel.requests.clear()
+    agent.sync()
+    assert panel.requests == []
+
+
+def test_lines_the_panel_does_not_hold_wait_with_the_verdict(fs_root: Path) -> None:
+    """Changed by DM-141 part B: the Panel holds nothing after a batch (its
+    gap) -- the verdict is not sent yet; ``sync`` sends the lines from the
+    first and the verdict after."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    run_id = path.name.partition(".")[0]
     panel.outages = [Answer(200, b'{"last_seq":0}')]
     agent.finish(path, 0)
-    assert pauses.seen == [1]
+    assert run_id not in panel.verdicts
+    assert said == [f"run {run_id}: waits for the Panel (lines held to seq 0)"]
+    agent.sync()
     assert sorted(panel.lines[run_id]) == [line.seq for line in journal_lines(path)]
-    assert said == [f"events {run_id}: the Panel holds up to seq 0"]
+    assert panel.verdicts[run_id].verified
 
 
 def test_the_lines_go_in_batches(
@@ -706,6 +778,7 @@ def test_a_command_through_http_client_on_the_loopback(
         root = box_root(tmp_path)
         registration = read_registration(root)
         assert registration is not None
+        held_so_far(root)
         panel.enrol(root)
         machine = PridemInProcess(tmp_path)
         agent = Agent(
@@ -779,3 +852,289 @@ def test_the_run_dies_with_the_agent() -> None:
         time.sleep(0.02)
     thread.join(15)
     assert not thread.is_alive() and len(box) == 1
+
+
+# --- part B: no verdict lost -------------------------------------------------------
+
+
+def _copies(fs_root: Path, of: Path, run_ids: list[str]) -> list[str]:
+    """Verdicts of runs with ``run_ids``: the verdict of ``of`` written again
+    as the machine writes every verdict -- a box's history grown by them."""
+    box = Box(box_root(fs_root))
+    verdict = box.read_verdict(of.name.partition(".")[0])
+    with box.lock("test"):
+        for run_id in run_ids:
+            box.write_verdict(
+                Verdict.model_validate(
+                    {
+                        **verdict.model_dump(mode="json"),
+                        "run_id": run_id,
+                        "log_ref": f"journal/{run_id}.jsonl",
+                    }
+                )
+            )
+    return run_ids
+
+
+def _ids(after: str, *hours: float, suffix: str = "b0b0") -> list[str]:
+    start = datetime.strptime(after.partition("Z")[0], "%Y-%m-%dT%H:%M:%S")
+    return [
+        (start + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ") + f"-{suffix}"
+        for h in hours
+    ]
+
+
+def test_runs_of_one_second_in_reverse_order_of_their_ids_both_go(
+    fs_root: Path,
+) -> None:
+    """The second run of a second sorts before the first by its token: the
+    cursor that has passed the first still sends the second."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    first = path.name.partition(".")[0]
+    second = first.partition("Z")[0] + "Z-0000"  # the same second, sorted first
+    agent.sync()
+    assert first in panel.verdicts
+    _copies(fs_root, path, [second])
+    assert second < first
+    agent.sync()
+    assert second in panel.verdicts
+
+
+def test_verdicts_of_a_panel_away_longer_than_the_window_all_go(
+    fs_root: Path,
+) -> None:
+    """The Panel away for days, verdicts piling up hours apart: when it is
+    back every one goes -- older than an hour is not taken for sent."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    run = path.name.partition(".")[0]
+    later = _copies(fs_root, path, _ids(run, 2, 26, 50))
+    panel.outages = ["refused"]
+    with pytest.raises(PanelUnreachable):
+        agent.sync()
+    clock.move(3 * 86400)
+    agent.sync()
+    assert {run, *later} <= set(panel.verdicts)
+    cursor = read_cursor(box_root(fs_root))
+    assert cursor.through == later[-1]
+
+
+def test_through_never_steps_over_a_run_not_sent(fs_root: Path) -> None:
+    """A run the Panel leaves out of its answer stays pending, and the
+    cursor stops before it -- the runs after it held or not."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    run = path.name.partition(".")[0]
+    later = _copies(fs_root, path, _ids(run, 2, 3, 4))
+    panel.drop = {later[0]}
+    agent.sync()
+    cursor = read_cursor(box_root(fs_root))
+    assert cursor.through is not None and cursor.through < later[0]
+    assert later[0] not in cursor.held
+    panel.drop = set()
+    panel.histories.clear()
+    agent.sync()
+    assert panel.histories == [[later[0]]] or later[0] in panel.verdicts
+    assert read_cursor(box_root(fs_root)).through == later[-1]
+
+
+def test_a_late_run_not_sent_never_falls_out_of_the_window(fs_root: Path) -> None:
+    """A run with an id ten minutes before ``through`` (a clock set back) the
+    Panel cannot read yet: newer runs hours later do not move ``through`` so
+    far that it falls out of the window -- a day later it goes."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    ticks = Ticks()
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said, ticks)
+    path = _a_run_over(fs_root)
+    run = path.name.partition(".")[0]
+    agent.sync()
+    [late] = _copies(fs_root, path, _ids(run, -1 / 6))
+    panel.unreadable = {late}
+    agent.sync()
+    assert read_cursor(box_root(fs_root)).refused == {late: "unread-422"}
+    later = _copies(fs_root, path, _ids(run, 2, 3))
+    agent.sync()
+    cursor = read_cursor(box_root(fs_root))
+    assert set(later) <= set(panel.verdicts) and late in cursor.refused
+    panel.unreadable = set()
+    ticks.at += 86400
+    agent.sync()
+    assert late in panel.verdicts
+    assert read_cursor(box_root(fs_root)).through == later[-1]
+
+
+def test_the_cursor_does_not_grow_with_history(fs_root: Path) -> None:
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    run = path.name.partition(".")[0]
+    later = _copies(fs_root, path, _ids(run, *range(1, 8)))
+    agent.sync()
+    cursor = read_cursor(box_root(fs_root))
+    assert cursor.through == later[-1]
+    assert cursor.held == [r for r in later if r >= _ids(later[-1], -1)[0][:20]]
+    assert len(cursor.held) == 2  # the last two, an hour apart: the window
+
+
+def test_envelopes_go_in_batches_of_twenty_oldest_first(fs_root: Path) -> None:
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    run = path.name.partition(".")[0]
+    later = _copies(fs_root, path, _ids(run, *[i / 60 + 1 for i in range(44)]))
+    agent.sync()
+    every = sorted([run, *later])
+    assert panel.histories == [every[:20], every[20:40], every[40:]]
+
+
+def test_a_batch_the_panel_cannot_read_goes_one_by_one(fs_root: Path) -> None:
+    """422 of a batch: its envelopes one by one -- the one the Panel cannot
+    read kept as ``unread-422``, the rest held."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    run = path.name.partition(".")[0]
+    later = _copies(fs_root, path, _ids(run, 1, 2))
+    panel.unreadable = {later[0]}
+    agent.sync()
+    assert set(panel.verdicts) >= {run, later[1]} and later[0] not in panel.verdicts
+    assert read_cursor(box_root(fs_root)).refused == {later[0]: "unread-422"}
+
+
+def test_unread_is_tried_again_at_start_and_once_a_day(fs_root: Path) -> None:
+    """``unread-422`` is not for good: the next start of the agent and a day
+    later try it again; a turn between does not."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    ticks = Ticks()
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said, ticks)
+    path = _a_run_over(fs_root)
+    run = path.name.partition(".")[0]
+    panel.unreadable = {run}
+    agent.sync()
+    assert read_cursor(box_root(fs_root)).refused == {run: "unread-422"}
+    panel.unreadable = set()
+    panel.requests.clear()
+    ticks.at += 3600
+    agent.sync()
+    assert panel.requests == []
+    ticks.at += 86400
+    agent.sync()
+    assert run in panel.verdicts and read_cursor(box_root(fs_root)).refused == {}
+    again = _agent(fs_root, AgentPanel(clock), PridemInProcess(fs_root), pauses,
+                   said, past_held=False)  # fmt: skip
+    assert again.cursor().refused == {}
+
+
+def test_a_new_agent_tries_unread_again(fs_root: Path) -> None:
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    run = path.name.partition(".")[0]
+    panel.unreadable = {run}
+    agent.sync()
+    panel.unreadable = set()
+    fresh = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said,
+                   past_held=False)  # fmt: skip
+    fresh.sync()
+    assert run in panel.verdicts
+
+
+def test_an_envelope_the_builder_refuses_is_given_up(fs_root: Path) -> None:
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    path = _a_run_over(fs_root)
+    run = path.name.partition(".")[0]
+    (box_root(fs_root) / "history" / f"{run}.json").write_text("{")
+    agent.sync()
+    assert read_cursor(box_root(fs_root)).refused == {run: "verdict-damaged"}
+    assert run not in panel.verdicts
+
+
+def test_a_damaged_cursor_sends_all_history_again(fs_root: Path) -> None:
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    (box_root(fs_root) / "agent" / "cursor.json").write_text("{")
+    agent.sync()
+    assert said[0] == "history: agent/cursor.json cannot be read: all of it again"
+    assert set(panel.verdicts) == set(Box(box_root(fs_root)).history_ids())
+
+
+def test_a_dead_run_s_verdict_goes_when_the_next_run_writes_it(
+    fs_root: Path,
+) -> None:
+    """The agent died with its command's run: a journal, no verdict. The
+    next run under the lock writes it (``recover``, with the command) and
+    ``sync`` sends both."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said)
+    box = Box(box_root(fs_root))
+    dead = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") + "-dead"
+    head = JournalHeader.model_validate(
+        {
+            "run_id": dead,
+            "verb": "status",
+            "mode": "command",
+            "args": {},
+            "actor": {"type": "engineer", "via": "panel"},
+            "started": dead.partition("-dead")[0],
+            "composition_before": {"pridem": __version__},
+            "command": "cmd-7",
+        }
+    )
+    with box.lock("dying"):
+        box.open_journal(head, Secrets(())).close()
+    agent.sync()
+    assert dead not in panel.verdicts
+    after = _a_run_over(fs_root)
+    agent.sync()
+    kept = panel.verdicts[dead]
+    assert kept.verified and kept.envelope.verdict.command == "cmd-7"
+    assert after.name.partition(".")[0] in panel.verdicts
+
+
+def test_a_quick_204_is_followed_by_a_pause_to_a_second(fs_root: Path) -> None:
+    """A 204 in 0.25 s: a pause of 0.75 s; one in 60 s: none; a command:
+    none."""
+    clock = Clock()
+    panel, pauses = AgentPanel(clock), Pauses(clock)
+    said: list[str] = []
+    ticks = Ticks()
+    agent = _agent(fs_root, panel, PridemInProcess(fs_root), pauses, said, ticks)
+    ticks.steps = [0, 0, 0.25]  # sync, the long-poll asked, answered
+    agent.turn()
+    assert pauses.seen == [0.75]
+    ticks.steps = [0, 0, 60]
+    agent.turn()
+    assert pauses.seen == [0.75]
+    panel.queue.append({"verb": "status", "args": {}})
+    ticks.steps = [0, 0, 0.1]
+    agent.turn()
+    assert pauses.seen == [0.75] and len(panel.verdicts) == 1

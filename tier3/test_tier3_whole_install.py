@@ -75,7 +75,8 @@ import signal
 import threading
 import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -3855,14 +3856,16 @@ def test_probe_DM_139_register_on_the_runner() -> None:
 class _AgentPanel(BaseHTTPRequestHandler):
     """The Panel's side of the agent on the runner's loopback (DM-141): every
     request's signature checked by the box's public half, one command
-    (``status``) given with its term, the lines kept by ``seq``, the verdict
-    checked by the Panel's bytes of it."""
+    (``status``) given with its term, the lines kept by run and ``seq``, a
+    verdict checked over its JSON object as the envelope carries it -- by
+    ``runs/<id>/verdict`` or in a batch of ``history`` (the Panel at
+    ``29b3e35``)."""
 
     public: ClassVar[bytes] = b""
     queue: ClassVar[list[dict[str, object]]] = []
     seen: ClassVar[list[tuple[str, str, int]]] = []
-    lines: ClassVar[dict[int, dict[str, object]]] = {}
-    verdicts: ClassVar[list[tuple[str, bool, str | None]]] = []
+    lines: ClassVar[dict[str, dict[int, dict[str, object]]]] = {}
+    verdicts: ClassVar[dict[str, tuple[bool, str | None, str]]] = {}
     beats: ClassVar[list[bool]] = []
 
     def _any(self) -> None:
@@ -3876,6 +3879,22 @@ class _AgentPanel(BaseHTTPRequestHandler):
         self.wfile.write(answer)
 
     do_GET = do_POST = _any  # noqa: N815
+
+    def _keep(self, raw: dict[str, object]) -> str:
+        envelope = VerdictEnvelope.model_validate(raw)
+        try:
+            Ed25519PublicKey.from_public_bytes(self.public).verify(
+                base64.b64decode(envelope.signature),
+                verdict_bytes(raw["verdict"]),  # type: ignore[arg-type]
+            )
+            verified = True
+        except InvalidSignature:
+            verified = False
+        verdict = envelope.verdict
+        self.verdicts.setdefault(
+            verdict.run_id, (verified, verdict.command, verdict.actor.via)
+        )
+        return verdict.run_id
 
     def _answer(self, body: bytes) -> tuple[int, bytes]:
         signed = signed_headers(dict(self.headers.items()))
@@ -3893,31 +3912,95 @@ class _AgentPanel(BaseHTTPRequestHandler):
                 return 204, b""
             return 200, json.dumps(self.queue.pop(0)).encode()
         if where.endswith("/events"):
+            run_id = where.split("/")[1]
             batch = EventBatch.model_validate_json(body)
+            held = self.lines.setdefault(run_id, {})
             for line in batch.events:
-                self.lines.setdefault(line.seq, line.model_dump(mode="json"))
+                held.setdefault(line.seq, line.model_dump(mode="json"))
             last = 0
-            while last + 1 in self.lines:
+            while last + 1 in held:
                 last += 1
             return 200, json.dumps({"last_seq": last}).encode()
         if where.endswith("/verdict"):
-            envelope = VerdictEnvelope.model_validate_json(body)
-            signed_bytes = verdict_bytes(envelope.verdict.model_dump(mode="json"))
-            try:
-                Ed25519PublicKey.from_public_bytes(self.public).verify(
-                    base64.b64decode(envelope.signature), signed_bytes
-                )
-                verified = True
-            except InvalidSignature:
-                verified = False
-            self.verdicts.append(
-                (envelope.verdict.run_id, verified, envelope.verdict.command)
-            )
+            self._keep(json.loads(body))
             return 204, b""
+        if where == "history":
+            held_runs = [self._keep(raw) for raw in json.loads(body)["envelopes"]]
+            return 200, json.dumps({"run_ids": held_runs}).encode()
         return 404, b""
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         return
+
+
+def _agent_panel(
+    port: int, queue: list[dict[str, object]]
+) -> tuple[type[_AgentPanel], ThreadingHTTPServer]:
+    """The Panel's side of the agent on the loopback at ``port``: the box's
+    public half from its key."""
+    seed = Path("/opt/pridem/agent/box.key").read_bytes()
+    public = Ed25519PrivateKey.from_private_bytes(seed).public_key()
+    handler = type(
+        "Panel",
+        (_AgentPanel,),
+        {
+            "public": public.public_bytes(Encoding.Raw, PublicFormat.Raw),
+            "queue": queue,
+            "seen": [],
+            "lines": {},
+            "verdicts": {},
+            "beats": [],
+        },
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return handler, server
+
+
+def _panel_port() -> int:
+    registration = json.loads(Path("/opt/pridem/agent/registration.json").read_text())
+    origin = urlsplit(registration["panel"])
+    assert origin.scheme == "http" and origin.hostname == "127.0.0.1"
+    return origin.port or 80
+
+
+@contextmanager
+def _an_agent() -> Iterator[list[str]]:
+    """``pridem agent``, a real process, until the block ends (SIGTERM)."""
+    said: list[str] = []
+    ended: list[BaseException] = []
+
+    def agent() -> None:
+        try:
+            SubprocessRunner().run(
+                ["sh", "-c", f"echo $$; exec {PRIDEM} agent"],
+                timeout=900,
+                on_line=lambda stream, line, cut: said.append(line),
+            )
+        except RunnerError as error:
+            ended.append(error)
+
+    thread = threading.Thread(target=agent, daemon=True)
+    thread.start()
+    began = time.monotonic()
+    while not said:
+        assert time.monotonic() - began < 30, "the agent never started"
+        time.sleep(0.1)
+    try:
+        yield said
+    finally:
+        os.kill(int(said[0]), signal.SIGTERM)
+        thread.join(120)
+        assert not thread.is_alive(), ("the agent did not stop", said)
+        assert ended == [], ended
+
+
+def _waited(test: Callable[[], bool], what: str, said: list[str]) -> float:
+    began = time.monotonic()
+    while not test():
+        assert time.monotonic() - began < 300, (what, said)
+        time.sleep(0.5)
+    return round(time.monotonic() - began, 1)
 
 
 def test_probe_DM_141_agent_on_the_runner() -> None:
@@ -3929,72 +4012,88 @@ def test_probe_DM_141_agent_on_the_runner() -> None:
     no gap, the verdict arrives naming the command and its signature holds by
     the box's public half; the first heartbeat is the full one. SIGTERM stops
     the agent. Measured into the run's journal (``warnings.warn``): the
-    requests and the time to the verdict."""
-    agent_dir = Path("/opt/pridem/agent")
-    registration = json.loads((agent_dir / "registration.json").read_text())
-    origin = urlsplit(registration["panel"])
-    assert origin.scheme == "http" and origin.hostname == "127.0.0.1"
-    seed = (agent_dir / "box.key").read_bytes()
-    public = Ed25519PrivateKey.from_private_bytes(seed).public_key()
+    requests and the time to the verdict.
+
+    Changed by DM-141 part B (the same card): the agent sends the box's
+    history too -- the Panel keeps verdicts by run, ``history`` answered; the
+    command's verdict is the one naming it."""
     expires = (datetime.now(UTC) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    handler = type(
-        "Panel",
-        (_AgentPanel,),
-        {
-            "public": public.public_bytes(Encoding.Raw, PublicFormat.Raw),
-            "queue": [
-                {"id": "cmd-1", "verb": "status", "args": {}, "expires_at": expires}
-            ],
-            "seen": [],
-            "lines": {},
-            "verdicts": [],
-            "beats": [],
-        },
-    )
-    server = ThreadingHTTPServer(("127.0.0.1", origin.port or 80), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    said: list[str] = []
-    ended: list[BaseException] = []
-
-    def agent() -> None:
-        try:
-            SubprocessRunner().run(
-                ["sh", "-c", f"echo $$; exec {PRIDEM} agent"],
-                timeout=600,
-                on_line=lambda stream, line, cut: said.append(line),
-            )
-        except RunnerError as error:
-            ended.append(error)
-
-    began = time.monotonic()
-    thread = threading.Thread(target=agent, daemon=True)
-    thread.start()
+    command: dict[str, object] = {
+        "id": "cmd-1",
+        "verb": "status",
+        "args": {},
+        "expires_at": expires,
+    }
+    handler, server = _agent_panel(_panel_port(), [command])
     try:
-        while not handler.verdicts:  # type: ignore[attr-defined]
-            assert time.monotonic() - began < 300, ("no verdict", said)
-            assert thread.is_alive(), ("the agent ended", said, ended)
-            time.sleep(0.5)
-        spent = round(time.monotonic() - began, 1)
-        os.kill(int(said[0]), signal.SIGTERM)
-        thread.join(120)
-        assert not thread.is_alive(), ("the agent did not stop", said)
+        with _an_agent() as said:
+            spent = _waited(
+                lambda: any(v[1] == "cmd-1" for v in handler.verdicts.values()),
+                "no verdict of the command",
+                said,
+            )
     finally:
         server.shutdown()
         server.server_close()
-    seen = handler.seen  # type: ignore[attr-defined]
     warnings.warn(
-        f"DM-141 measure: verdict in {spent} s; requests {seen}; agent said {said}",
+        f"DM-141 measure: verdict in {spent} s; requests {handler.seen}; "
+        f"agent said {said}",
         stacklevel=1,
     )
-    [(run_id, verified, command)] = handler.verdicts  # type: ignore[attr-defined]
-    assert verified and command == "cmd-1"
-    lines = handler.lines  # type: ignore[attr-defined]
+    [run_id] = [r for r, v in handler.verdicts.items() if v[1] == "cmd-1"]
+    assert all(verified for verified, _, _ in handler.verdicts.values())
     journal = Path("/opt/pridem/journal") / f"{run_id}.jsonl"
     written = journal.read_text(encoding="utf-8").splitlines()
-    assert sorted(lines) == list(range(1, len(written) + 1))
-    assert all(status != 404 for _, _, status in seen), seen
-    assert handler.beats and handler.beats[0], handler.beats  # type: ignore[attr-defined]
-    assert ended == [], ended
+    assert sorted(handler.lines[run_id]) == list(range(1, len(written) + 1))
+    assert all(status != 404 for _, _, status in handler.seen), handler.seen
+    assert handler.beats and handler.beats[0], handler.beats
+
+
+def test_probe_DM_141_no_verdict_lost_on_the_runner() -> None:
+    """DM-141 part B, after part A in group ``c``: the Panel away, the
+    console's ``pridem --json status`` runs as ever; the Panel back at the
+    same address, the agent sends that run -- its lines by ``seq`` with no
+    gap, its verdict holding by the box's key, the actor the console. A new
+    agent on the box sends nothing again: the cursor is on the box. Measured
+    into the run's journal: the time the Panel was away and to the verdict."""
+    port = _panel_port()
+    handler, server = _agent_panel(port, [])
+    with _an_agent() as said:
+        _waited(lambda: len(handler.beats) > 0, "no heartbeat", said)
+        server.shutdown()
+        server.server_close()
+        away = time.monotonic()
+        result = SubprocessRunner().run(
+            [PRIDEM, "--json", "status"], expect=(0,), timeout=300,
+            on_line=lambda stream, line, cut: None,
+        )  # fmt: skip
+        assert result.code == 0
+        run_id = max(p.stem for p in Path("/opt/pridem/history").glob("*.json"))
+        time.sleep(5)
+        handler, server = _agent_panel(port, [])
+        try:
+            spent = _waited(lambda: run_id in handler.verdicts, "not sent", said)
+        finally:
+            gone = round(time.monotonic() - away, 1)
+    try:
+        verified, command, via = handler.verdicts[run_id]
+        assert verified and command is None and via == "local"
+        journal = Path("/opt/pridem/journal") / f"{run_id}.jsonl"
+        written = journal.read_text(encoding="utf-8").splitlines()
+        assert sorted(handler.lines[run_id]) == list(range(1, len(written) + 1))
+        handler.seen.clear()
+        with _an_agent() as again:
+            _waited(lambda: len(handler.beats) > 1, "no heartbeat again", again)
+        sent = [s for s in handler.seen if "/runs/" in s[1] or "history" in s[1]]
+        assert sent == [], sent
+    finally:
+        server.shutdown()
+        server.server_close()
+    warnings.warn(
+        f"DM-141 part B measure: the Panel away {gone} s, the verdict "
+        f"{spent} s after it was back; agent said {said}",
+        stacklevel=1,
+    )
 
 
 def test_tier3_a_project_verb_runs_in_its_service(tmp_path: Path, mirror: Path) -> None:

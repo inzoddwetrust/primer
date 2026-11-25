@@ -34,6 +34,8 @@ from pridem.protocol import (
     EventBatch,
     EventsAccepted,
     Heartbeat,
+    HistoryAccepted,
+    HistoryBatch,
     Refusal,
     RefusalCode,
     VerdictEnvelope,
@@ -165,6 +167,16 @@ class PanelClient:
             raise Unread(answer.status)
         try:
             return EventsAccepted.model_validate_json(answer.body).last_seq
+        except ValidationError:
+            raise Unread(answer.status) from None
+
+    def history(self, batch: HistoryBatch) -> list[str]:
+        """``POST history``: the runs of the batch the Panel holds now."""
+        answer = self._send("POST", "history", batch, REQUEST_TIMEOUT_S)
+        if answer.status != 200:
+            raise Unread(answer.status)
+        try:
+            return HistoryAccepted.model_validate_json(answer.body).run_ids
         except ValidationError:
             raise Unread(answer.status) from None
 
