@@ -10,6 +10,8 @@ run that replaces it; E12 what dpkg left half done. E14 and E15 are in
 
 import io
 import json
+import multiprocessing.synchronize
+import time
 from pathlib import Path
 
 import pytest
@@ -249,3 +251,90 @@ def test_what_dpkg_left_half_done_is_configured_first(tmp_path: Path) -> None:
     assert outcome.code.value == 0, outcome.steps
     red = run_host([ProvisionHost(root)], [*packages, half, configure, *packages, half])
     assert red.steps[0].reason == Code("provision_host:dpkg-unconfigured")
+
+
+# --- DM-190 FIX: dpkg's lock -------------------------------------------------------
+
+
+def _hold(lock: Path, seconds: float, ready: multiprocessing.synchronize.Event) -> None:
+    """Another process holds dpkg's frontend lock as apt does (fcntl)."""
+    import fcntl
+
+    with lock.open("w") as handle:
+        fcntl.lockf(handle, fcntl.LOCK_EX)
+        ready.set()
+        time.sleep(seconds)
+
+
+def test_dpkg_configure_waits_for_a_held_lock_as_apt_does(tmp_path: Path) -> None:
+    """DM-190 FIX (E12, red on tier 3): ``dpkg --configure -a`` fails on a
+    held lock at once (exit 2); the step waits for dpkg's locks as ``apt-get
+    -o DPkg::Lock::Timeout`` does, then runs it. The pair: a lock held past
+    the timeout -- the wait ends at the timeout, and dpkg says so itself."""
+    import multiprocessing
+
+    from pridem.steps.host import _dpkg_free, wait_dpkg
+
+    lock = tmp_path / "var" / "lib" / "dpkg" / "lock-frontend"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    ready = multiprocessing.Event()
+    holder = multiprocessing.Process(target=_hold, args=(lock, 1.5, ready))
+    holder.start()
+    try:
+        assert ready.wait(10)
+        assert not _dpkg_free(tmp_path)
+        ctx = StepContext(
+            FakeRunner(), "install", "test", "pridem-host", lambda *_: None
+        )
+        started = time.monotonic()
+        wait_dpkg(ctx, tmp_path, 30)
+        waited = time.monotonic() - started
+        assert 0.5 < waited < 15, waited
+        assert _dpkg_free(tmp_path)
+    finally:
+        holder.join()
+    # the pair: held past the timeout -- the wait gives up at it
+    ready = multiprocessing.Event()
+    holder = multiprocessing.Process(target=_hold, args=(lock, 5, ready))
+    holder.start()
+    try:
+        assert ready.wait(10)
+        started = time.monotonic()
+        wait_dpkg(ctx, tmp_path, 1)
+        assert time.monotonic() - started < 4
+        assert not _dpkg_free(tmp_path)
+    finally:
+        holder.join()
+
+
+def test_provision_host_waits_before_dpkg_configure(tmp_path: Path) -> None:
+    """The step itself waits for the lock before ``dpkg --configure -a``:
+    another process holds dpkg's frontend lock for a while, and the command
+    comes only after it lets go (DM-190 FIX)."""
+    root = box(tmp_path)
+    lock = root / "var" / "lib" / "dpkg" / "lock-frontend"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.touch()
+    packages = [dpkg(p) for p in HOST_PACKAGES]
+    half = call("dpkg", "--audit", lines=("The following packages are only half",))
+    configure = FakeCall(("dpkg", "--configure", "-a"), env=apt_env())
+    tail = [
+        active("docker", True),
+        call("docker", "version", "--format", "{{.Server.Version}}", lines=("27.5.1",)),
+        BUILDX,
+    ]
+    ready = multiprocessing.Event()
+    holder = multiprocessing.Process(target=_hold, args=(lock, 1.5, ready))
+    holder.start()
+    try:
+        assert ready.wait(10)
+        started = time.monotonic()
+        outcome = run_host(
+            [ProvisionHost(root)], [*packages, half, configure, *packages, AUDIT, *tail]
+        )
+        waited = time.monotonic() - started
+    finally:
+        holder.join()
+    assert outcome.code.value == 0, outcome.steps
+    assert waited > 1.0, waited

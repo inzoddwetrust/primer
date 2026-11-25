@@ -37,6 +37,7 @@ Steps get their inputs from whoever builds the plan (domains, limits) and read
 host files under ``root``; the machine's limits are constants.
 """
 
+import fcntl
 import ipaddress
 import json
 import os
@@ -140,6 +141,46 @@ def _installed(ctx: StepContext, package: str) -> bool:
         ctx, ["dpkg-query", "-W", "-f=${Status}", package], expect=(0, 1)
     )
     return code == 0 and lines == ["install ok installed"]
+
+
+DPKG_LOCKS = ("var/lib/dpkg/lock-frontend", "var/lib/dpkg/lock")
+"""The locks dpkg takes, the frontend's first -- what ``apt`` holds while it
+works and ``dpkg --configure -a`` would fail on at once (exit 2)."""
+
+
+def _dpkg_free(root: Path) -> bool:
+    """Whether no process holds a lock of dpkg: each taken and let go at once,
+    as ``apt`` takes them (``fcntl``). A lock file not there is free."""
+    for name in DPKG_LOCKS:
+        path = root / name
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except FileNotFoundError:
+            continue
+        try:
+            fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.lockf(fd, fcntl.LOCK_UN)
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+    return True
+
+
+def wait_dpkg(
+    ctx: StepContext,
+    root: Path,
+    timeout_s: float,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Wait for the locks of dpkg as ``apt-get -o DPkg::Lock::Timeout`` does:
+    up to ``timeout_s``, a signal ending the wait (DM-190 FIX, E12). dpkg has
+    no such wait of its own; past the timeout the command runs and says so
+    itself."""
+    deadline = clock() + timeout_s
+    while not _dpkg_free(root) and clock() < deadline:
+        ctx.interrupt.sleep(1.0)
 
 
 def _audit(ctx: StepContext) -> list[str]:
@@ -516,6 +557,8 @@ class ProvisionHost(_HostStep):
             # a dpkg run cut midway (a reboot, a killed apt) leaves packages
             # half done: apt refuses everything until they are configured
             # (DM-190, E12) -- only when dpkg itself says so
+            # dpkg fails on a held lock at once: wait as apt does (DM-190 FIX)
+            wait_dpkg(ctx, self.root, self.lock_timeout_s)
             _out(ctx, ["dpkg", "--configure", "-a"], timeout=timeout, env=apt_env())
         if not missing:
             return

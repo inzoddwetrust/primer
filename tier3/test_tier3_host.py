@@ -109,8 +109,21 @@ def _held(seconds: float) -> threading.Timer:
     return timer
 
 
-DOCKER_CE = ("docker-ce", "docker-ce-cli", "containerd.io")
-"""Docker's own packages, as a host prepared by hand has them (DM-190, E12)."""
+DOCKER_CE = (
+    "docker-ce",
+    "docker-ce-cli",
+    "containerd.io",
+    "docker-buildx-plugin",
+    "docker-compose-plugin",
+)
+"""Docker's own packages, as a host prepared by hand has them -- the list of
+Docker's install page (DM-190, E12). FIX: its plugins too; left behind, they
+hold the files of ``docker-buildx`` and ``docker-compose-v2`` and the next
+``apt-get install`` ends with 100."""
+TAKEN_AWAY = (*DOCKER_CE, "docker-ce-rootless-extras", "docker.io",
+              "docker-compose-v2", "docker-buildx", "containerd", "runc")  # fmt: skip
+"""What the measure takes away after it: every docker package either way --
+the probes after it find the runner as group ``a`` found it, no docker."""
 DOCKER_REPO = Path("/etc/apt/sources.list.d/dm190-docker.list")
 DOCKER_KEY = Path("/etc/apt/keyrings/dm190-docker.asc")
 
@@ -166,10 +179,18 @@ def test_tier3_provision_host_on_a_host_with_docker_ce() -> None:
             ),
         )
     finally:
-        _run([*apt, "purge", "-y", *DOCKER_CE])
+        # FIX: the host as the measure found it -- no docker of either kind,
+        # nothing half done -- or the probes after it fail on what it left
+        _run(["dpkg", "--configure", "-a"])
+        _run([*apt, "purge", "-y", *(p for p in TAKEN_AWAY if _installed(p))])
+        _run([*apt, "autoremove", "-y", "--purge"])
         DOCKER_REPO.unlink(missing_ok=True)
         DOCKER_KEY.unlink(missing_ok=True)
         _run([*apt, "update"])
+        left = [p for p in TAKEN_AWAY if _installed(p)]
+        audit = _run(["dpkg", "--audit"])[1]
+        print("DM-190 E12 measure, after its clean-up:", {"left": left, "audit": audit})
+        assert not left and not audit, (left, audit)
 
 
 def test_probe_DM_12_host_steps_on_a_clean_runner() -> None:
