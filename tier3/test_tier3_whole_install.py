@@ -1810,6 +1810,171 @@ def test_tier3_the_panel_s_host_through_the_machine_s_proxy(tmp_path: Path) -> N
         assert not any("pridem" in line for line in lines), rules
 
 
+# --- DM-188 (S11): the proxy refuses a name off its list before resolving it ---
+
+DNS_PROXY = "pridem-dm188-proxy"
+DNS_PROXY_PORT = 3188
+
+
+class _Resolver:
+    """A resolver on the runner that answers every question NXDOMAIN and keeps
+    the names it was asked: squid's lookups, seen where they go (DM-188).
+    UDP on port 53 of ``address`` -- the gateway of docker's ``bridge``, which
+    the probe's squid is given by ``--dns``."""
+
+    def __init__(self, address: str) -> None:
+        import socket
+
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((address, 53))
+        self.lock = threading.Lock()
+        self.asked: list[str] = []
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                data, peer = self.sock.recvfrom(512)
+            except OSError:
+                return  # closed
+            labels, at = [], 12
+            while at < len(data) and data[at]:
+                size = data[at]
+                labels.append(data[at + 1 : at + 1 + size].decode(errors="replace"))
+                at += 1 + size
+            with self.lock:
+                self.asked.append(".".join(labels).lower())
+            # the header back as an answer (QR, RD, RA), NXDOMAIN, the question
+            reply = data[:2] + b"\x81\x83" + data[4:6] + bytes(6) + data[12 : at + 5]
+            self.sock.sendto(reply, peer)
+
+    def names(self) -> list[str]:
+        with self.lock:
+            return list(self.asked)
+
+    def close(self) -> None:
+        self.sock.close()
+        self.thread.join(5)
+
+
+def _status(port: int, host: str) -> str:
+    """``CONNECT host:443`` to a proxy on the runner: its status line."""
+    import socket
+
+    request = f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n"
+    with socket.create_connection(("127.0.0.1", port), 30) as conn:
+        conn.settimeout(60)
+        conn.sendall(request.encode("ascii"))
+        return conn.makefile("rb").readline(256).decode(errors="replace").strip()
+
+
+def _group_elapsed_s() -> float:
+    """Seconds since this pytest process started: the group's time so far."""
+    fields = Path("/proc/self/stat").read_text().rpartition(")")[2].split()
+    started = int(fields[19]) / os.sysconf("SC_CLK_TCK")  # field 22: starttime
+    return float(Path("/proc/uptime").read_text().split()[0]) - started
+
+
+def test_probe_DM_188_an_unlisted_name_is_never_resolved_by_the_proxy(
+    tmp_path: Path,
+) -> None:
+    """DM-188 (REVIEW-0006, S11), on the runner after the machine's host steps
+    (group a): the machine's proxy -- its image ``SQUID_IMAGE``, its config
+    ``config_text`` -- refuses ``CONNECT`` to a name off its list without a
+    lookup of that name: ``deny !egress`` is its first rule. squid is given a
+    resolver of the probe's (``--dns``: its config is the machine's, untouched)
+    that keeps every name it is asked; the names are new on every run, so no
+    cache answers for them.
+
+    Its selftest, in the same run: the order before DM-188 (the planted
+    defect -- ``deny !egress`` taken out) must make the resolver hear the name
+    off the list; a resolver that hears nothing of it cannot see a lookup at
+    all, and the probe is red with that fact, never green. The pair in both
+    orders: the name of the list is looked up (``private`` is a ``dst``).
+    Measured into the run's log first (par0 14.3): the squid of the image, the
+    names heard, the statuses, the proxy's log, the group's time."""
+    from pridem.steps.egress import (
+        CONTAINER_CONFIG,
+        SQUID_COMMAND,
+        SQUID_USER,
+        config_text,
+    )
+
+    [inet] = [
+        line
+        for line in _stdout(["ip", "-4", "-o", "addr", "show", "docker0"])
+        if " inet " in line
+    ]
+    gateway = inet.split(" inet ")[1].split("/")[0]
+    _run(["docker", "pull", "-q", SQUID_IMAGE], timeout=300)
+    version = _run(
+        ["docker", "run", "--rm", "--entrypoint", "/usr/sbin/squid", SQUID_IMAGE, "-v"]
+    )
+    token = os.urandom(4).hex()
+    listed = f"listed-{token}.pridem-dm188.invalid"
+    text = config_text([listed])
+    planted = text.replace("http_access deny !egress\n", "", 1)
+    assert text.count("http_access deny !egress\n") == 1 and planted != text
+    resolver = _Resolver(gateway)
+    measured: dict[str, dict[str, object]] = {}
+    try:
+        for order, config_body in (("DM-188", text), ("planted", planted)):
+            unlisted = f"unlisted-{order.lower()}-{token}.pridem-dm188.invalid"
+            before = len(resolver.names())  # what this order's squid asked
+            config = tmp_path / f"{order}.conf"
+            config.write_text(config_body, encoding="utf-8")
+            config.chmod(0o644)
+            _run(["docker", "rm", "-f", DNS_PROXY], expect=tuple(range(256)))
+            _run(
+                ["docker", "run", "-d", "--name", DNS_PROXY, "--user", SQUID_USER,
+                 "--label", "pridem.test=DM-188", "--dns", gateway,
+                 "-p", f"127.0.0.1:{DNS_PROXY_PORT}:3128",
+                 "-v", f"{config}:{CONTAINER_CONFIG}:ro",
+                 "--entrypoint", "/usr/sbin/squid", "--", SQUID_IMAGE, *SQUID_COMMAND],
+            )  # fmt: skip
+            try:
+                status: dict[str, str] = {}
+                for _ in range(30):
+                    try:
+                        status["unlisted"] = _status(DNS_PROXY_PORT, unlisted)
+                        break
+                    except OSError:
+                        time.sleep(1)
+                status["listed"] = _status(DNS_PROXY_PORT, listed)
+                log = _run(["docker", "logs", DNS_PROXY], expect=tuple(range(256)))
+            finally:
+                _run(["docker", "rm", "-f", DNS_PROXY], expect=tuple(range(256)))
+            heard = resolver.names()[before:]
+            measured[order] = {
+                "unlisted": unlisted,
+                "status": status,
+                "heard unlisted": unlisted in heard,
+                "heard listed": listed in heard,
+                "log": [line for line in log if "pridem-egress" in line][-4:],
+            }
+        heard = resolver.names()
+    finally:
+        resolver.close()
+    warnings.warn(
+        f"DM-188 measure: squid {version[:1]}, resolver {gateway}:53, "
+        f"heard {heard}, {measured}",
+        stacklevel=1,
+    )
+    warnings.warn(f"group time so far: {_group_elapsed_s():.0f} s", stacklevel=1)
+    # the selftest: the order before DM-188 makes squid ask for the name
+    assert measured["planted"]["heard unlisted"] is True, (
+        "the resolver heard nothing of a name off the list under the planted "
+        f"order: the probe cannot see squid's lookups -- heard {heard}"
+    )
+    for order in ("DM-188", "planted"):
+        assert measured[order]["heard listed"] is True, (order, heard)  # the pair
+        found = measured[order]["status"]
+        assert isinstance(found, dict) and " 403 " in f"{found['unlisted']} ", found
+    # the probe: the machine's order refuses the name without asking for it
+    assert measured["DM-188"]["heard unlisted"] is False, (heard, measured)
+
+
 def _container(project: str, service: str) -> str:
     [container] = _stdout(
         [

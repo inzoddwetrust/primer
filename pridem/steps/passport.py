@@ -262,11 +262,31 @@ class AgeKey(Step):
 
 
 class _OpsKey(DeployKey):
-    """The ops repository's deploy key, after the age key in the ladder."""
+    """The ops repository's deploy key, after the age key in the ladder.
+
+    The host key of the ops repository is the passport's only authentication:
+    whoever answers for that host serves the box its passport. So the ops
+    repository is on GitHub's ssh -- ``github.com`` on 22 or ``ssh.github.com``
+    on 443, whose keys are the machine's own copy (``Repo.pinned``) -- or on
+    the box itself (``file://``), and any other host is refused in ``check``,
+    before a key is minted, a file written or a command run (DM-188). No host
+    key comes from the passport: it is needed before the passport is read.
+    """
 
     name = "ops_key"  # the class's own: the report's catalog finds its codes
     title = "Ops repository key"
     order = 2
+    codes: ClassVar[dict[str, str]] = {
+        **DeployKey.codes,
+        "host-unpinned": "the ops repository {repo} is not on github.com:22 or "
+        "ssh.github.com:443: the machine keeps no host key for it, and the "
+        "passport trusts that host key alone",
+    }
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        if not self.repo.local and not self.repo.pinned:
+            raise StepFailed("host-unpinned", {"repo": self.repo.address})
+        return super().check(ctx)
 
 
 def _object(value: object) -> dict[str, Json]:

@@ -408,11 +408,17 @@ def test_the_pinned_keys_are_the_ones_github_publishes() -> None:
 def test_the_machine_copy_of_github_keys_is_written_with_the_config(
     tmp_path: Path,
 ) -> None:
+    """Changed by DM-188: the copy names GitHub's ssh on both of its hosts --
+    ``github.com`` and ``[ssh.github.com]:443`` -- for every key; it named
+    ``github.com`` alone."""
     write_ssh_config(tmp_path, [repo("git@gitlab.com:a/b.git")])
     pinned = tmp_path / KEYS / PINNED
     assert not pinned.exists()  # no GitHub repository, no copy
     write_ssh_config(tmp_path, [repo(ADDRESS)])
-    assert pinned.read_text() == "".join(f"github.com {k}\n" for k in GITHUB_HOST_KEYS)
+    assert pinned.read_text() == "".join(
+        [f"github.com {k}\n" for k in GITHUB_HOST_KEYS]
+        + [f"[ssh.github.com]:443 {k}\n" for k in GITHUB_HOST_KEYS]
+    )
     assert stat.S_IMODE(pinned.stat().st_mode) == 0o600
     pinned.write_text("github.com ssh-ed25519 AAAAforged\n")
     write_ssh_config(tmp_path, [repo(ADDRESS)])  # a changed copy is written again

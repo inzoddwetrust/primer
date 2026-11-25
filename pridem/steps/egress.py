@@ -26,11 +26,15 @@ The config (``/opt/pridem/egress/squid.conf``, rendered by ``config_text``) lets
 through ``CONNECT`` to port 443 of a host of ``egress``, by its name exactly
 (``dstdomain -n``, no leading dot: ``zoom.us`` is not ``api.zoom.us``), and
 nothing else: any other method, any other port, any address of a private range
-(a name that resolves into the box is refused) and any other host get 403. It
-keeps no cache. Its access log goes to the container's stdout (the host's
-docker keeps it, driver ``local``): one line per request, ``LOG_TAG``, the
-host, the port, the status sent and squid's result -- ``TCP_TUNNEL`` let
-through, ``TCP_DENIED`` 403 -- and never a path, a query or a body.
+(a name that resolves into the box is refused) and any other host get 403. The
+list is its first rule (``deny !egress``): a name off the list is refused
+before any rule that resolves it -- ``private`` is a ``dst`` and asks DNS, so
+under it a name off the list was resolved first and refused after (DM-188;
+measured with squid 6.14 and a recording resolver). It keeps no cache. Its
+access log goes to the container's stdout (the host's docker keeps it, driver
+``local``): one line per request, ``LOG_TAG``, the host, the port, the status
+sent and squid's result -- ``TCP_TUNNEL`` let through, ``TCP_DENIED`` 403 --
+and never a path, a query or a body.
 
 The step runs once per product, in its ladder after ``migrate`` -- the point of
 no return: a failed migration leaves the old code on the old list -- and before
@@ -198,6 +202,9 @@ def config_text(hosts: Sequence[str]) -> str:
         "acl CONNECT method CONNECT",
         f"acl private dst {' '.join(PRIVATE)}",
         f"acl egress dstdomain -n {' '.join(hosts)}",
+        # the list first: ``private`` is a ``dst`` -- it resolves the name, and
+        # a name off the list is never resolved (DM-188, S11; measured)
+        "http_access deny !egress",
         "http_access deny !CONNECT",
         "http_access deny !SSL_ports",
         "http_access deny private",

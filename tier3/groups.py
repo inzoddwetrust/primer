@@ -62,10 +62,13 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_box_decrypts_its_passport_from_the_ops_repository", "a"),
     ("test_tier3_passport_not_for_this_box_is_red_with_its_key", "a"),
     ("test_probe_DM_10_blank_is_fetched_by_ref_over_ssh", "a"),
+    ("test_tier3_ssh_github_on_443_serves_the_pinned_keys", "a"),  # DM-188
     ("test_tier3_check_of_the_blank_and_of_a_planted_copy", "a"),
     ("test_tier3_compose_takes_a_single_quoted_value_as_it_is", "a"),
     ("test_tier3_certbot_tag_has_the_pinned_digest", "a"),
     ("test_tier3_the_panel_s_host_through_the_machine_s_proxy", "a"),  # DM-146
+    # the proxy refuses a name off its list before any lookup of it (DM-188)
+    ("test_probe_DM_188_an_unlisted_name_is_never_resolved_by_the_proxy", "a"),
     # the last of a: SIGKILL with a process left holding the lock (DM-24);
     # it leaves the box half installed
     ("test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild", "a"),

@@ -27,7 +27,12 @@ from pathlib import Path
 from pridem.report.schema import Verdict
 from pridem.runner import Stream, SubprocessRunner
 from pridem.steps.git import KEYS, git_env, repo
-from pridem.steps.keys import GITHUB_HOST_KEYS, PINNED
+from pridem.steps.keys import (
+    GITHUB_HOST_KEYS,
+    PINNED,
+    pinned_known_hosts,
+    write_ssh_config,
+)
 
 PYTHON = "/opt/pridem/current/venv/bin/python"
 ADDRESS = "git@github.com:inzoddwetrust/primer-blank.git"
@@ -225,3 +230,74 @@ def test_probe_DM_10_blank_is_fetched_by_ref_over_ssh() -> None:
     # the pair: the copy back, GitHub answers
     code, said = _ls_remote(url)
     assert code == 0, said
+
+
+ON_443 = "ssh://git@ssh.github.com:443/inzoddwetrust/primer-blank.git"
+
+
+def test_tier3_ssh_github_on_443_serves_the_pinned_keys(tmp_path: Path) -> None:
+    """DM-188: ``ssh.github.com`` on port 443 serves the keys of the machine's
+    copy -- ``ssh-keyscan -p 443`` reads them under ``[ssh.github.com]:443``,
+    so a rotation turns tier 3 red as for ``github.com`` -- and ssh through the
+    machine's ``ssh_config`` takes GitHub's host key there by the copy alone.
+    No secret: with a throwaway key GitHub answers ``Permission denied
+    (publickey)``, which comes only after the host key is accepted; with the
+    copy emptied, ``Host key verification failed`` (the pair), and no line of
+    ``ssh.github.com`` lands in the machine's ``known_hosts``. On a root of
+    its own (``tmp_path``): the box's ``keys/`` is not touched. Measured into
+    the run's log first (par0 14.3)."""
+    scanned = _stdout(
+        ["ssh-keyscan", "-p", "443", "-t", "ed25519,ecdsa,rsa", "ssh.github.com"]
+    )
+    found = _Drawn443(tmp_path)
+    code, said = _ls_remote_in(tmp_path, found.url)
+    found.pinned.write_text("")
+    empty_code, empty_said = _ls_remote_in(tmp_path, found.url)
+    found.pinned.write_text(pinned_known_hosts())
+    print("DM-188 measure:", {"keyscan": scanned, "ls-remote": (code, said),
+                              "copy emptied": (empty_code, empty_said)})  # fmt: skip
+    served = {
+        line.split(None, 1)[1]
+        for line in scanned
+        if line.startswith("[ssh.github.com]:443 ")
+    }
+    assert served == set(GITHUB_HOST_KEYS), scanned
+    assert code == 128, said
+    assert any("Permission denied (publickey)" in line for line in said), said
+    assert not any("Host key verification failed" in line for line in said), said
+    assert empty_code == 128, empty_said
+    assert any("Host key verification failed" in line for line in empty_said)
+    accepted = tmp_path / KEYS / "known_hosts"
+    lines = accepted.read_text().splitlines() if accepted.exists() else []
+    assert not [line for line in lines if "github.com" in line], lines
+
+
+class _Drawn443:
+    """``ON_443`` drawn into the machine's files under ``root`` with a
+    throwaway key of its alias: ``ssh_config``, ``known_hosts.github``."""
+
+    def __init__(self, root: Path) -> None:
+        found = repo(ON_443)
+        assert found.pinned
+        write_ssh_config(root, [found])
+        key = root / KEYS / found.alias
+        _run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)])
+        self.url = found.url()
+        self.pinned = root / KEYS / PINNED
+
+
+def _ls_remote_in(root: Path, url: str) -> tuple[int, list[str]]:
+    """``git ls-remote`` with the machine's environment under ``root``."""
+    lines: list[str] = []
+
+    def keep(stream: Stream, line: str, cut: bool) -> None:
+        lines.append(line)
+
+    result = SubprocessRunner().run(
+        ["git", "ls-remote", "--heads", url],
+        expect=(0, 128),
+        timeout=120,
+        env=git_env(root),
+        on_line=keep,
+    )
+    return result.code, lines

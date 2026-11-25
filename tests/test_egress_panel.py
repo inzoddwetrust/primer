@@ -29,19 +29,24 @@ def test_probe_DM_146_the_panel_reaches_its_host_not_another() -> None:
     """``ssh.github.com`` is a row of ``primer-panel``: its ``egress`` passes,
     and the proxy rendered for it lets ``CONNECT`` through to that name on
     443 alone. The pair: ``github.com`` of the Panel and ``ssh.github.com`` of
-    another product are refused before any build."""
+    another product are refused before any build.
+
+    Changed by DM-188 (S11), the dispatcher's word on its gate: squid does not
+    resolve a name before it checks the list -- ``deny !egress`` is the first
+    rule of ``http_access``, the order is a literal still."""
     assert listed("primer-panel") == frozenset({"ssh.github.com"})
     assert unlisted(_product("primer-panel", "ssh.github.com")) == []
     assert unlisted(_product("primer-panel", "github.com")) == ["github.com"]
     for other in ("primer-blank", "velo"):
         assert unlisted(_product(other, "ssh.github.com")) == ["ssh.github.com"]
     text = config_text(sorted(listed("primer-panel"))).splitlines()
-    assert text[1:11] == [
+    assert text[1:12] == [
         f"http_port {PROXY_PORT}",
         "acl SSL_ports port 443",
         "acl CONNECT method CONNECT",
         f"acl private dst {' '.join(PRIVATE)}",
         "acl egress dstdomain -n ssh.github.com",
+        "http_access deny !egress",
         "http_access deny !CONNECT",
         "http_access deny !SSL_ports",
         "http_access deny private",

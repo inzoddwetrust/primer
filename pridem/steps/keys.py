@@ -6,11 +6,15 @@ waits until the repository answers ``git ls-remote`` with it -- the owner adds
 the public part as a read-only deploy key meanwhile. ssh goes through the
 machine's ``ssh_config``: ``Host <alias>`` per repository with its user, its
 port when the address names one, its key only (``IdentitiesOnly yes``) and no
-prompt ever (``BatchMode yes``). GitHub on its ssh port is checked against the
+prompt ever (``BatchMode yes``). GitHub over ssh -- ``github.com`` on port 22
+and ``ssh.github.com`` on port 443 (``Repo.pinned``) -- is checked against the
 machine's own copy of GitHub's host keys, ``known_hosts.github``, and nothing
 else (``StrictHostKeyChecking yes``, ``GlobalKnownHostsFile none``): no trust on
-first use. Every other host goes to the machine's ``known_hosts``
-(``StrictHostKeyChecking accept-new``). A repository's block is drawn again from
+first use (DM-52, DM-188). Every other host of a product, a service or a
+package goes to the machine's ``known_hosts`` (``StrictHostKeyChecking
+accept-new``); the ops repository may not be on another host at all -- its
+host key is the passport's only authentication (``steps/passport.py``,
+``ops_key:host-unpinned``). A repository's block is drawn again from
 its address each time, the blocks of other repositories are kept; root's
 ``~/.ssh`` is never touched.
 A key already in place with access and files already as drawn need no
@@ -115,16 +119,25 @@ GITHUB_HOST_KEYS: tuple[str, ...] = (
 GitHub's publication "GitHub's SSH key fingerprints",
 https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints,
 read on 2026-11-01. Their SHA256 fingerprints are the ones the same page lists
-(tier 1 checks it); tier 3 checks them against ``ssh-keyscan github.com`` and
-``api.github.com/meta`` on every run, so a rotation turns tier 3 red."""
+(tier 1 checks it); tier 3 checks them against ``ssh-keyscan github.com``,
+``ssh-keyscan -p 443 ssh.github.com`` and ``api.github.com/meta`` on every
+run, so a rotation turns tier 3 red. ``ssh.github.com`` on port 443 serves the
+same keys (DM-188, measured by tier 3)."""
 
 PINNED = "known_hosts.github"
 """The machine's copy of GitHub's host keys, beside its ``known_hosts``."""
 
+PINNED_HOSTS: tuple[str, ...] = ("github.com", "[ssh.github.com]:443")
+"""The names of GitHub's ssh in ``known_hosts.github``, as ssh looks them up:
+``github.com`` on port 22, ``[ssh.github.com]:443`` on port 443 (DM-188)."""
+
 
 def pinned_known_hosts() -> str:
-    """``known_hosts.github``: one line per GitHub host key."""
-    return "".join(f"github.com {key}\n" for key in GITHUB_HOST_KEYS)
+    """``known_hosts.github``: one line per GitHub host key and name -- one
+    file of one form, whichever of GitHub's ssh hosts the box reaches."""
+    return "".join(
+        f"{host} {key}\n" for host in PINNED_HOSTS for key in GITHUB_HOST_KEYS
+    )
 
 
 def _block(keys: Path, found: Repo) -> str:

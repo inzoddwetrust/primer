@@ -39,6 +39,9 @@ _WEB = re.compile(r"^(?P<scheme>https?)://", re.IGNORECASE)
 DEFAULT_USER = "git"
 """The ssh user when an address names none: the user of git hostings."""
 GITHUB = "github.com"
+GITHUB_443 = "ssh.github.com"
+"""GitHub's ssh on port 443 (its ssh port 22 closed): the same host keys, read
+by ssh as ``[ssh.github.com]:443`` (DM-188)."""
 
 Form = Literal["scp", "ssh", "file"]
 
@@ -65,8 +68,14 @@ class Repo:
 
     @property
     def pinned(self) -> bool:
-        """GitHub on its ssh port: its host keys are the machine's own copy."""
-        return self.host.lower() == GITHUB and self.port in (None, 22)
+        """GitHub over ssh -- ``github.com`` on port 22 or ``ssh.github.com``
+        on port 443: its host keys are the machine's own copy (DM-52, DM-188).
+        Any other host or port is not: ``ssh.github.com`` on 22 and
+        ``github.com`` on 443 included."""
+        host = self.host.lower()
+        if host == GITHUB:
+            return self.port in (None, 22)
+        return host == GITHUB_443 and self.port == 443
 
     @property
     def alias(self) -> str:

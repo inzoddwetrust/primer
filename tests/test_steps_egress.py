@@ -366,11 +366,15 @@ def test_a_service_keeps_its_networks_and_its_way_out() -> None:
 
 
 def test_the_config_lets_through_connect_to_the_hosts_by_name_alone() -> None:
+    """Changed by DM-188 (S11): ``deny !egress`` is the first rule -- a name
+    off the list is refused before ``private``, a ``dst`` that resolves it;
+    the order began with ``deny !CONNECT``."""
     lines = config_text(ZOOM).splitlines()
     assert "acl egress dstdomain -n zoom.us api.zoom.us" in lines
     assert not any(" ." in line for line in lines if "dstdomain" in line)
     access = [line for line in lines if line.startswith("http_access")]
     assert access == [
+        "http_access deny !egress",
         "http_access deny !CONNECT",
         "http_access deny !SSL_ports",
         "http_access deny private",
