@@ -119,6 +119,7 @@ from pridem.runner import (
 from pridem.steps.compose import PROXY_URL as PROXY
 from pridem.steps.edge import CERTBOT_IMAGE, live_config
 from pridem.steps.egress import SQUID_IMAGE
+from pridem.steps.engine import build_cache
 from pridem.steps.gc import reclaimable_size
 from pridem.verbs.register import TOKEN_ENV
 
@@ -4761,6 +4762,147 @@ PROFILED = """\
 """A privileged service behind a profile (DM-182, S2): ``config`` without
 ``--profile`` hides it; ``compose run`` or ``COMPOSE_PROFILES`` would start
 it."""
+
+
+DM207_MOVED = "dm207-planted:moved"
+DM207_HELD = "dm207-planted:held"
+DM207_CONTAINER = "dm207-planted-held"
+
+
+def _dm207_commit(container: str, mark: str, tag: str) -> str:
+    """An image committed from ``container`` under ``tag``, told from every
+    other by ``mark``; its ID."""
+    _run(
+        [
+            "docker",
+            "commit",
+            "--pause=false",
+            "--change",
+            f"LABEL dm207={mark}",
+            container,
+            tag,
+        ]  # fmt: skip
+    )
+    [ident] = _stdout(["docker", "image", "inspect", "-f", "{{.Id}}", tag])
+    return ident
+
+
+def _dm207_there(image: str) -> bool:
+    done = SubprocessRunner().run(
+        ["docker", "image", "inspect", "-f", "{{.Id}}", image],
+        expect=(0, 1),
+        timeout=60,
+        on_line=lambda stream, line, cut: None,
+    )
+    return done.code == 0
+
+
+def test_tier3_gc_removes_a_dangling_image_and_measures_the_cache_in_bytes(
+    tmp_path: Path,
+) -> None:
+    """DM-207, in group ``h`` before the pair of ``destroy``, on the box the
+    earlier tests left. Two images lose their tag to a second commit under
+    the same name -- the way a build of the same tag leaves one: ``loose``,
+    which no container holds, and ``held``, which a container that never ran
+    was made from. ``pridem gc``: its step is ok; ``loose`` is gone and the
+    fact names it (``removed.dangling``); ``held`` is there, and so is every
+    image the
+    box had before that the fact does not name -- the images of the running
+    containers, of the releases, postgres and nginx with no label of the
+    machine's. The build cache in the fact is the bytes the Engine API gives,
+    read here the same way after the run; the fact holds the free bytes of
+    the disk before and after.
+
+    Measured into the run's output first (par0 14.3): what docker 29 lists as
+    dangling, with ``--all`` and without, the two images as ``inspect`` gives
+    them, docker's own line of the build cache, the fact of ``gc``."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    [nginx] = _stdout(
+        [
+            "docker",
+            "ps",
+            "-q",
+            "--filter",
+            "label=com.docker.compose.project=pridem-edge",
+            "--filter",
+            "label=com.docker.compose.service=nginx",
+        ]  # fmt: skip
+    )
+    dangling = ["docker", "image", "ls", "-q", "--no-trunc",
+                "--filter", "dangling=true"]  # fmt: skip
+    try:
+        loose = _dm207_commit(nginx, "loose", DM207_MOVED)
+        _dm207_commit(nginx, "over-loose", DM207_MOVED)  # the tag moves off it
+        held = _dm207_commit(nginx, "held", DM207_HELD)
+        _run(["docker", "create", "--name", DM207_CONTAINER, DM207_HELD])
+        _dm207_commit(nginx, "over-held", DM207_HELD)
+        listed = set(_stdout(dangling))
+        every = set(_stdout(["docker", "image", "ls", "-q", "--no-trunc"]))
+        with_all = set(_stdout(["docker", "image", "ls", "-a", "-q", "--no-trunc"]))
+        containers = sorted(_stdout(["docker", "ps", "-aq", "--no-trunc"]))
+        used = set(_stdout(["docker", "inspect", "-f", "{{.Image}}", *containers]))
+        print(
+            "DM-207 measure: loose", loose, "held", held,
+            "| dangling=true lists loose:", loose in listed, "held:", held in listed,
+            "| image ls lists loose:", loose in every, "with -a:", loose in with_all,
+            "| dangling", sorted(listed),
+            "| inspect loose",
+            _stdout(["docker", "image", "inspect", "-f",
+                     "{{json .RepoTags}} {{json .RepoDigests}}", loose]),
+            "| docker's line of the cache", _cache_line(),
+        )  # fmt: skip
+        assert loose in listed, (
+            "docker does not list as dangling the image a second commit took "
+            f"the tag off: this test proves nothing -- {sorted(listed)}"
+        )
+        assert held in used and loose not in used, used
+        before = every | with_all | listed | used
+        verdict, printed = _verdict_of("gc")
+        [step] = verdict.steps
+        fact = step.verify or {}
+        print("DM-207 measure: the fact of gc", json.dumps(fact, default=str))
+        assert step.status == "ok" and verdict.result != "red", printed
+        removed = fact["removed"]
+        assert isinstance(removed, dict), fact
+        went, images = removed["dangling"], removed["images"]
+        assert isinstance(went, list) and isinstance(images, list), removed
+        assert loose.removeprefix("sha256:")[:12] in went, removed
+        assert not _dm207_there(loose), "the dangling image is still on the box"
+        # the needed ones: held by its container, and everything gc did not name
+        assert _dm207_there(held), "gc took an image a container was made from"
+        named = {str(image) for image in images}
+        kept = {i for i in before if i.removeprefix("sha256:")[:12] not in named}
+        assert used <= kept and len(kept) > len(used), (used, kept)
+        gone = sorted(i for i in kept if not _dm207_there(i))
+        assert gone == [], f"gc removed images its fact does not name: {gone}"
+        # the cache: the bytes of the Engine API, as this test reads them now
+        records = build_cache(Path("/"))
+        after = fact["after"]
+        assert isinstance(after, dict), fact
+        cache = after["build_cache"]
+        assert cache == {
+            "count": len(records),
+            "bytes": sum(r.size for r in records),
+            "reclaimable": sum(r.size for r in records if not (r.in_use or r.shared)),
+        }, (cache, _cache_line())
+        assert isinstance(fact["prune_calls"], int), fact
+        for when in ("before", "after"):
+            measured = fact[when]
+            assert isinstance(measured, dict), fact
+            disk = measured["disk"]
+            assert isinstance(disk, dict), measured
+            free = disk["free_bytes"]
+            assert isinstance(free, int) and free > 0, measured
+    finally:
+        every_code = tuple(range(256))
+        _run(["docker", "rm", "-f", DM207_CONTAINER], expect=every_code)
+        for image in (DM207_MOVED, DM207_HELD):
+            _run(["docker", "image", "rm", image], expect=every_code)
+        planted = ["docker", "image", "ls", "-a", "-q", "--no-trunc",
+                   "--filter", "label=dm207"]  # fmt: skip
+        for image in _stdout(planted):
+            _run(["docker", "image", "rm", image], expect=every_code)
+        warnings.warn(f"group time so far: {_group_elapsed_s():.0f} s", stacklevel=1)
 
 
 def test_tier3_a_privileged_service_behind_a_profile_never_comes_up(

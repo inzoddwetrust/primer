@@ -95,6 +95,7 @@ LAYERS: Layers = (
             "pridem.steps.destroy",
             "pridem.steps.edge",
             "pridem.steps.egress",
+            "pridem.steps.engine",
             "pridem.steps.finalize",
             "pridem.steps.frontend",
             "pridem.steps.env",

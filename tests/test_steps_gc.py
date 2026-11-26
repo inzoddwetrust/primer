@@ -2,17 +2,21 @@
 
 git runs for real on a bare repository and its release worktrees in ``tmp``;
 docker follows a strict script, so a command ``gc`` must never run -- a volume
-command, an unfiltered image list -- fails the test where it is made.
+command, an unfiltered image list -- fails the test where it is made. The
+build cache is the Engine API's (DM-207): a cache that stays under the budget
+unless a test gives ``run_gc`` its script of measurements, strict as well.
 """
 
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
 
 import pytest
+from engine_support import GB, cache, engine_raises, engine_says, engine_steady
 from env_support import box as passport_box
 from env_support import passport_data
 from plan_support import Journal, ListSink, ScriptedStep, red
@@ -32,6 +36,7 @@ from pridem.runner import (
 )
 from pridem.state import Box, JournalHeader
 from pridem.steps import gc as gc_module
+from pridem.steps.engine import CacheRecord
 from pridem.steps.gc import GC_STACK, Gc, docker_size, gc_steps
 from pridem.steps.passport import PASSPORT_COPY, Fetched
 from pridem.steps.sources import mark
@@ -59,7 +64,24 @@ IMAGES = (
     "--filter",
     "label=pridem.commit",
 )
+DANGLING = (
+    "docker",
+    "image",
+    "ls",
+    "--quiet",
+    "--no-trunc",
+    "--filter",
+    "dangling=true",
+)
 GIB = 1024**3
+
+
+@pytest.fixture(autouse=True)
+def _calm_cache() -> Iterator[None]:
+    """A test that builds its plan itself and is not about the build cache:
+    the Engine API says the cache is under the budget."""
+    with engine_steady():
+        yield
 
 
 def _git(*args: str) -> list[str]:
@@ -110,25 +132,21 @@ def df(
     images: tuple[int, str] = (4, "2GB"),
     containers: tuple[int, str] = (3, "10MB"),
     volumes: tuple[int, str] = (2, "100MB"),
-    cache: tuple[int, str] | None = (5, "1GB"),
-    own: str | None = None,
 ) -> FakeCall:
-    """``docker system df``. ``own`` -- ``Reclaimable`` of the build cache,
-    the records no image holds, which its budget is of (FIX of DM-126, owner's
-    decision of 22.11); by default all of the cache -- it printed ``0B (0%)``
-    for every line, when the machine read ``Size`` alone."""
+    """``docker system df``. Its line of the build cache is rounded, and the
+    machine does not read it (DM-207): it says ``9GB`` here, over every
+    budget of these tests -- a ``gc`` that read it would prune."""
     rows = [
         ("Images", images),
         ("Containers", containers),
         ("Local Volumes", volumes),
+        ("Build Cache", (5, "9GB")),
     ]
-    if cache is not None:
-        rows.append(("Build Cache", cache))
     lines = [
         json.dumps(
             {
                 "Active": "1",
-                "Reclaimable": (own or size) if kind == "Build Cache" else "0B (0%)",
+                "Reclaimable": size if kind == "Build Cache" else "0B (0%)",
                 "Size": size,
                 "TotalCount": str(number),
                 "Type": kind,
@@ -157,16 +175,47 @@ def image(n: int, commit: str, tags: Sequence[str] = ()) -> dict[str, Json]:
     }
 
 
-def listed(found: Sequence[dict[str, Json]], *, kind: str) -> list[FakeCall]:
-    """``ls`` of ``kind`` and, when it lists anything, ``inspect`` of them."""
-    ids = sorted(str(item["Id"]) for item in found)
-    ls = CONTAINERS if kind == "container" else IMAGES
-    calls = [FakeCall(ls, lines=out(*ids))]
-    if ids:
-        calls.append(
-            FakeCall(("docker", kind, "inspect", *ids), lines=out(json.dumps(found)))
-        )
-    return calls
+def listed(
+    found: Sequence[dict[str, Json]],
+    *,
+    kind: str,
+    dangling: Sequence[dict[str, Json]] = (),
+) -> list[FakeCall]:
+    """``ls`` of ``kind`` and, when it lists anything, ``inspect`` of them.
+    For images, the list of the dangling ones first, as ``check`` asks
+    (DM-207): ``dangling``, by default none."""
+
+    def asked(ls: tuple[str, ...], items: Sequence[dict[str, Json]]) -> list[FakeCall]:
+        ids = sorted(str(item["Id"]) for item in items)
+        calls = [FakeCall(ls, lines=out(*ids))]
+        if ids:
+            ordered = sorted(items, key=lambda item: str(item["Id"]))
+            inspect = ("docker", kind, "inspect", *ids)
+            calls.append(FakeCall(inspect, lines=out(json.dumps(ordered))))
+        return calls
+
+    if kind == "container":
+        return asked(CONTAINERS, found)
+    return [*asked(DANGLING, dangling), *asked(IMAGES, found)]
+
+
+def loose(n: int, labels: Mapping[str, str] | None = None) -> dict[str, Json]:
+    """A dangling image: no name points at it; by default no label either."""
+    return {
+        "Id": image_id(n)[:71],
+        "RepoTags": [],
+        "RepoDigests": [],
+        "Config": {"Labels": dict[str, Json](labels) if labels else None},
+    }
+
+
+def alive(image: Mapping[str, Json], *, there: bool) -> FakeCall:
+    """``verify`` asks for a dangling image it removed by its ID."""
+    ident = str(image["Id"])
+    argv = ("docker", "image", "inspect", "--format", "{{.Id}}", ident)
+    if there:
+        return FakeCall(argv, lines=out(ident))
+    return FakeCall(argv, code=1)
 
 
 def container(n: int, image_ref: str, mounts: Sequence[str] = ()) -> dict[str, Json]:
@@ -275,11 +324,26 @@ class World:
 
 
 def run_gc(
-    world: World, runner: FakeRunner, *, run_id: str = "2026-11-01T00:00:00Z-0000"
+    world: World,
+    runner: FakeRunner,
+    *,
+    run_id: str = "2026-11-01T00:00:00Z-0000",
+    cache: Sequence[Sequence[CacheRecord]] | Exception | None = None,
 ) -> tuple[PlanOutcome, ListSink]:
+    """``gc`` as the whole plan. ``cache`` -- what the Engine API says of the
+    build cache, read by read, to the end; an exception -- what every read
+    of it raises; none -- a cache under the budget, however often it is
+    read."""
     ticks = count()
     sink = ListSink()
-    with world.box.lock("gc"):
+    says: AbstractContextManager[object]
+    if cache is None:
+        says = engine_steady()
+    elif isinstance(cache, Exception):
+        says = engine_raises(cache)
+    else:
+        says = engine_says(*cache)
+    with says, world.box.lock("gc"):
         outcome = Plan(
             [StackSteps(GC_STACK, gc_steps(world.root, box=world.box, run_id=run_id,
                                            fetched=world.fetched), root=True)],
@@ -316,7 +380,12 @@ def test_probe_DM_20_planted_noop_prune_makes_verify_red(tmp_path: Path) -> None
     dispatcher's word, before the change): the prune of the build cache is
     ``--max-used-space`` and the machine reads the cache after it -- the
     scenario holds one more ``docker system df``. What the probe asserts is
-    as it was: a prune that removed nothing is ``not-removed``."""
+    as it was: a prune that removed nothing is ``not-removed``.
+
+    Changed by DM-207 (the dispatcher's word of 26.11): the build cache is
+    measured in bytes of the Engine API -- the sizes of the cache in the
+    third part come from its script (``cache=``), not from lines of ``df``.
+    No assertion is changed."""
     world, _, _ = kept_world(tmp_path)
     old = image(3, world.commits[0])
     script = [
@@ -349,15 +418,16 @@ def test_probe_DM_20_planted_noop_prune_makes_verify_red(tmp_path: Path) -> None
     assert isinstance(removed, dict) and removed["images"] == [short(3)]
     # a build cache over budget that a prune left as it was is red the same way
     world, _, _ = kept_world(tmp_path / "cache")
+    stuck = cache(5 * GB, count=9)
     with GitReal(
-        df(cache=(9, "5GB")),
+        df(),
         *listed([], kind="container"),
         *listed([], kind="image"),
         FakeCall(prune_argv(3 * GIB)),
-        df(cache=(9, "5GB")),  # act reads the cache: as it was -- no more calls
-        df(cache=(9, "5GB")),
+        df(),
     ) as runner:
-        outcome, _ = run_gc(world, runner)
+        # check; act reads the cache: as it was -- no more calls; verify
+        outcome, _ = run_gc(world, runner, cache=[stuck, stuck, stuck])
     assert outcome.steps[0].reason == Code(
         "gc:not-removed", {"objects": ["build-cache"]}
     )
@@ -392,6 +462,12 @@ def test_probe_DM_20_previous_release_image_is_kept(tmp_path: Path) -> None:
 
 
 def test_probe_DM_20_unlabelled_and_base_images_are_kept(tmp_path: Path) -> None:
+    """Changed by DM-207 (the dispatcher's word of 26.11): ``gc`` lists the
+    dangling images first -- the list of ``image ls`` commands is the
+    dangling ones' filter, then the label's twice. What the probe holds of
+    the outcome is as it was: the one ``image rm`` names the labelled image
+    of a foreign commit, and no image without the label, a base image or one
+    with a name, is named by any."""
     world, _, _ = kept_world(tmp_path)
     old = image(3, world.commits[0])
     runner = GitReal(
@@ -408,9 +484,14 @@ def test_probe_DM_20_unlabelled_and_base_images_are_kept(tmp_path: Path) -> None
         outcome, _ = run_gc(world, runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     docker = [argv for argv in runner.argvs if argv[0] == "docker"]
-    # every image command names the label or one labelled ID: nothing else is
-    # ever listed, so nothing else can be removed
-    assert [a for a in docker if a[:3] == ("docker", "image", "ls")] == [IMAGES] * 2
+    # every image command names the label, the dangling ones or one labelled
+    # ID: no image with a name and without the label is ever listed, so none
+    # can be removed
+    assert [a for a in docker if a[:3] == ("docker", "image", "ls")] == [
+        DANGLING,
+        IMAGES,
+        IMAGES,
+    ]
     assert [a for a in docker if a[:3] == ("docker", "image", "rm")] == [
         ("docker", "image", "rm", str(old["Id"]))
     ]
@@ -428,22 +509,31 @@ def test_probe_DM_20_volumes_never_touched(tmp_path: Path) -> None:
     dispatcher's word, before the change): the machine reads the build cache
     after the images went and after the prune -- the scenario holds two more
     ``docker system df``. What the probe asserts of the volumes is as it
-    was."""
+    was.
+
+    Changed by DM-207 (the dispatcher's word of 26.11): the build cache is
+    measured in bytes of the Engine API -- those two reads of the cache come
+    from its script (``cache=``), not from lines of ``df``. No assertion is
+    changed."""
     world, _, _ = kept_world(tmp_path)
     old = image(3, world.commits[0])
     runner = GitReal(
-        df(volumes=(3, "800MB"), cache=(9, "4GB")),
+        df(volumes=(3, "800MB")),
         *listed([], kind="container"),
         *listed([old], kind="image"),
         FakeCall(("docker", "image", "rm", str(old["Id"]))),
-        df(volumes=(3, "800MB"), cache=(9, "4GB")),  # the cache, images gone
         FakeCall(prune_argv(3 * GIB)),
-        df(volumes=(3, "800MB"), cache=(2, "1GB")),  # under the budget: enough
-        df(volumes=(3, "800MB"), cache=(2, "1GB")),
+        df(volumes=(3, "800MB")),
         FakeCall(IMAGES),
     )
+    measures = [
+        cache(4 * GB, count=9),
+        cache(4 * GB, count=9),  # the cache, images gone
+        cache(1 * GB, count=2),  # under the budget: enough
+        cache(1 * GB, count=2),
+    ]
     with runner:  # strict: any volume command would be unplanned
-        outcome, _ = run_gc(world, runner)
+        outcome, _ = run_gc(world, runner, cache=measures)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert not [a for a in runner.argvs if "volume" in a]
     found = fact(outcome)
@@ -511,19 +601,26 @@ def test_probe_DM_20_over_budget_gives_exit_2_with_numbers(tmp_path: Path) -> No
     dispatcher's word, before the change): the machine repeats the prune
     while the cache shrinks -- the scenario holds two prunes, the second
     changing nothing, and the reads of the cache between them. The numbers
-    and the exit code are as they were."""
+    and the exit code are as they were.
+
+    Changed by DM-207 (the dispatcher's word of 26.11): the build cache is
+    measured in bytes of the Engine API -- the sizes of the cache come from
+    its script (``cache=``), not from lines of ``df``. No assertion is
+    changed."""
     world, _, _ = kept_world(tmp_path)
+    left = cache(4 * GB, count=7)
     with GitReal(
-        df(cache=(9, "5GB")),
+        df(),
         *listed([], kind="container"),
         *listed([], kind="image"),
         FakeCall(prune_argv(3 * GIB)),
-        df(cache=(7, "4GB")),  # shrank, yet over: once more
         FakeCall(prune_argv(3 * GIB)),
-        df(cache=(7, "4GB")),  # as it was: the rest is in use
-        df(cache=(7, "4GB")),
+        df(),
     ) as runner:
-        outcome, _ = run_gc(world, runner)
+        # check; shrank, yet over: once more; as it was: no more; verify
+        outcome, _ = run_gc(
+            world, runner, cache=[cache(5 * GB, count=9), left, left, left]
+        )
     assert outcome.code is ExitCode.INCOMPLETE
     [entry] = outcome.incomplete
     assert entry.what == "gc"
@@ -744,19 +841,21 @@ def test_journals_go_to_the_budget_and_the_current_one_stays(tmp_path: Path) -> 
 
 def test_an_empty_box_measures_and_is_green(tmp_path: Path) -> None:
     """Changed by the FIX of DM-126: the measurement of the build cache has
-    ``reclaimable`` -- the bytes no image holds -- zero too with no line."""
+    ``reclaimable`` -- the bytes no image holds. Changed by DM-207: the cache
+    is the Engine API's, and a cache with no record is zero in all three."""
     data = passport_data()
     root, fetched = passport_box(tmp_path, data)
     box = Box(root / "opt" / "pridem")
     step = Gc(box=box, run_id="2026-11-01T00:00:00Z-0000", fetched=fetched, root=root)
     ticks = count()
     with (
+        engine_says([], []),  # no record of the build cache at all
         box.lock("gc"),
         GitReal(
-            df(cache=None),  # no build cache line at all
+            df(),
             *listed([], kind="container"),
             *listed([], kind="image"),
-            df(cache=None),
+            df(),
         ) as runner,
     ):
         outcome = Plan(

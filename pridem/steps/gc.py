@@ -2,8 +2,9 @@
 incident II).
 
 ``check`` measures -- ``docker system df`` by category (images, containers,
-volumes, build cache), the releases of every stack in ``/opt/<stack>/releases``
-and the size of ``journal/`` -- and decides what ``act`` removes:
+volumes), the build cache by the Engine API, the free bytes of the disk, the
+releases of every stack in ``/opt/<stack>/releases`` and the size of
+``journal/`` -- and decides what ``act`` removes:
 
 - images: only those labelled ``pridem.commit``; never one whose commit is the
   current or the previous release of a stack, never one a container, running or
@@ -13,23 +14,31 @@ and the size of ``journal/`` -- and decides what ``act`` removes:
   is not even listed. The key is the commit: ``pridem.release`` holds the
   ref, on test a branch that every commit shares. An image with tags loses
   them all and goes with the last; one without goes by its ID;
+- dangling images (DM-207): what ``docker image ls --filter dangling=true``
+  lists -- an image no name points at, left where the same tag was built
+  again -- whatever its labels, the machine's or none: nothing can ask for
+  it by a name. One a container, running or stopped, was made from stays;
+  the others go by their ID, without ``--force``. An image with a tag is
+  never taken this way, whoever it belongs to;
 - the build cache: ``docker builder prune --all --max-used-space <budget>``
   when it is over ``policies.gc.builder_cache_budget``. The cache the budget
-  is of is what no image holds -- ``Reclaimable`` of docker's ``Build Cache``
-  line (owner's decision of 22.11, DM-126 FIX): ``Size`` counts the records
-  shared with images as well, which are the images' own layers, already
-  counted there, and which a prune with a limit neither counts nor has to
-  remove. Measured on docker 29.1.3 with buildx 0.30.1: one such prune stops
-  early -- it starts from the sum of the records no image holds and takes
-  off every record it removes, a shared one too -- so the prune is repeated
-  while the cache is over the budget and the last call made its ``Size``
-  smaller (a call may remove shared records alone: the cache no image holds
-  is the same after it, and the next call goes on); a ``Size`` that did not
-  shrink ends it, so the calls are as many as the cache can shrink; and
-  ``--keep-storage``, ``--reserved-space`` and ``--max-used-space`` trim
+  is of is what no image holds (owner's decision of 22.11, DM-126 FIX): the
+  records neither in use nor shared. The records shared with images are the
+  images' own layers, already counted there, and a prune with a limit neither
+  counts nor has to remove them. Both numbers are bytes of the Engine API
+  (``steps/engine.py``; REVIEW-0006 B18, DM-207), not docker's text, which is
+  rounded to a megabyte and more. Measured on docker 29.1.3 with buildx
+  0.30.1: one such prune stops early -- it starts from the sum of the records
+  no image holds and takes off every record it removes, a shared one too --
+  so the prune is repeated while the cache is over the budget and the last
+  call made the whole cache smaller (a call may remove shared records alone:
+  the cache no image holds is the same after it, and the next call goes on);
+  a cache that did not shrink ends it, and so does the call number
+  ``PRUNE_CALLS`` -- a cache still over the budget then is ``over-budget``;
+  and ``--keep-storage``, ``--reserved-space`` and ``--max-used-space`` trim
   alike, the last is the one docker describes as the most the cache may
   take. Removing an image leaves its layers to the cache alone: after images
-  went, a cache whose ``Size`` is over the budget is measured again before
+  went, a cache that is over the budget as a whole is measured again before
   the decision;
 - releases: per stack ``policies.gc.keep_releases`` worktrees stay -- the
   current and any directory a container mounts, whatever the number, then the
@@ -61,14 +70,20 @@ its commit comes from that verdict's ``fetch_root`` and ``fetch_services``
 facts, else from its worktree. ``state.json`` is not read:
 it is a record of the box, not a basis of decisions.
 
-``verify`` measures again. What ``act`` removed and is still there -- an image,
-a release, a journal it could evict, a build cache that was pruned and is no
-smaller than before the first prune -- is red, ``gc:not-removed``. A number
+``verify`` measures again. What ``act`` removed and is still there -- an image
+(a dangling one is asked for by its ID, ``image inspect``: a list is not
+where it shows), a release, a journal it could evict, a build cache that was
+pruned and is no smaller than before the first prune -- is red,
+``gc:not-removed``. A number
 over budget after everything allowed went -- the build cache, ``journal/``
 holding the current journal alone, more protected releases than
 ``keep_releases`` -- is ``incomplete {what: gc, code: gc:over-budget}`` with
-the numbers, exit code 2. Sizes are docker's text
-(decimal units) turned into bytes; budgets are the passport's (binary units).
+the numbers, exit code 2. The sizes of images, containers and volumes are
+docker's text (decimal units) turned into bytes -- facts, nothing is decided
+by them; the build cache is in bytes; budgets are the passport's (binary
+units). The fact names what went (``removed``, its ``dangling`` among the
+images), the calls of the prune (``prune_calls``) and the free bytes of the
+disk before and after (``disk.free_bytes``, as ``preflight`` reads them).
 
 The passport is the one ``fetch_passport`` read, else the box's copy. A
 ``check`` that cannot measure -- no passport, a copy that does not load, docker
@@ -100,6 +115,7 @@ from pridem.stacks.loader import ContractError
 from pridem.stacks.passport import Gc as GcPolicy
 from pridem.stacks.passport import Passport, load_passport, size_bytes
 from pridem.state import Box
+from pridem.steps import engine
 from pridem.steps.base import (
     CheckResult,
     Mode,
@@ -120,15 +136,26 @@ GC_STACK = machine.BOX
 
 GC_MODES: frozenset[Mode] = frozenset({"install", "deploy", "reinstall", "gc"})
 PRUNE_TIMEOUT_S = 1800
+PRUNE_CALLS = 20
+"""The most calls of ``builder prune`` in one ``gc`` (REVIEW-0006 B18)."""
 _CATEGORIES = {
     "Images": "images",
     "Containers": "containers",
     "Local Volumes": "volumes",
-    "Build Cache": "build_cache",
 }
 CACHE = "build_cache"
 RECLAIMABLE = "reclaimable"
 """The key of the build cache's own bytes in the measurement."""
+DISK = "disk"
+DANGLING = (
+    "docker",
+    "image",
+    "ls",
+    "--quiet",
+    "--no-trunc",
+    "--filter",
+    "dangling=true",
+)
 _UNITS = {
     "B": 1,
     "kB": 1000,
@@ -155,17 +182,15 @@ def docker_size(text: str) -> int:
 
 
 def system_df(ctx: StepContext) -> dict[str, Json]:
-    """``docker system df`` by category: ``{count, bytes}``, and for the build
-    cache ``reclaimable`` too -- the bytes of the records no image holds,
-    which is what its budget is of; a category docker did not print is
-    zero."""
+    """``docker system df`` by category: ``{count, bytes}``; a category
+    docker did not print is zero. The build cache is not read here: its line
+    is rounded (``cache_measure``)."""
     _, lines = out(
         ctx, ["docker", "system", "df", "--format", "{{json .}}"], passed_on=False
     )
     found: dict[str, Json] = {
         name: {"count": 0, "bytes": 0} for name in _CATEGORIES.values()
     }
-    found[CACHE] = {"count": 0, "bytes": 0, RECLAIMABLE: 0}
     for line in lines:
         if not line.strip():
             continue
@@ -183,19 +208,33 @@ def system_df(ctx: StepContext) -> dict[str, Json]:
                 "count": int(count),
                 "bytes": docker_size(str(row.get("Size"))),
             }
-            if name == CACHE:
-                found[name] = {
-                    "count": int(count),
-                    "bytes": docker_size(str(row.get("Size"))),
-                    RECLAIMABLE: reclaimable_size(str(row.get("Reclaimable"))),
-                }
     return found
 
 
 def reclaimable_size(text: str) -> int:
     """``Reclaimable`` of a line of ``docker system df`` -> bytes: a size,
-    and for some categories its share in brackets after it (``20MB (7%)``)."""
+    and for some categories its share in brackets after it (``20MB (7%)``).
+    ``state`` reads the images' line with it; ``gc`` decides nothing by it."""
     return docker_size(text.split("(", 1)[0])
+
+
+def cache_measure(root: Path) -> dict[str, Json]:
+    """The build cache in bytes, by the Engine API: ``count`` and ``bytes``
+    of all its records, ``reclaimable`` -- of the records no image holds,
+    neither in use nor shared, which is what its budget is of."""
+    records = engine.build_cache(root)
+    return {
+        "count": len(records),
+        "bytes": sum(r.size for r in records),
+        RECLAIMABLE: sum(r.size for r in records if not (r.in_use or r.shared)),
+    }
+
+
+def free_bytes(root: Path) -> int:
+    """The bytes of the disk of ``root`` a process may still take, as
+    ``preflight`` reads them."""
+    disk = os.statvfs(root)
+    return disk.f_bavail * disk.f_frsize
 
 
 def _own(cache: Json) -> int:
@@ -245,6 +284,21 @@ def labelled_images(ctx: StepContext) -> list[str]:
             "label=pridem.commit",
         ],
     )
+
+
+def dangling_images(ctx: StepContext, in_use: set[str]) -> list[str]:
+    """IDs of the dangling images ``gc`` removes: docker's word that no name
+    points at the image (the filter) and the image's own list of names empty;
+    one a container was made from (``in_use``) stays."""
+    found: list[str] = []
+    for image in _inspect(ctx, "image", _lines(ctx, DANGLING)):
+        ident = image.get("Id")
+        if not isinstance(ident, str) or not ident:
+            raise UnreadableOutput("a dangling image without its Id")
+        if _strings(image.get("RepoTags")) or ident in in_use:
+            continue
+        found.append(ident)
+    return found
 
 
 def _dicts(value: Json | None) -> list[dict[str, Json]]:
@@ -383,6 +437,7 @@ class Gc(Step):
         self.root = root
         self.now = now
         self._pruned_from: int | None = None
+        self._prune_calls = 0
 
     def _old_sessions(self) -> list[Path]:
         """The logs of ``db connect`` older than ``CONNECT_KEEP_DAYS``: they hold
@@ -496,7 +551,11 @@ class Gc(Step):
             return _not_started(cause, " ".join(error.argv[:3]))
         except ContractError:
             return _not_started("passport-invalid", str(self.root / PASSPORT_COPY))
-        except (UnreadableOutput, json.JSONDecodeError) as error:
+        except (
+            UnreadableOutput,
+            engine.EngineUnread,
+            json.JSONDecodeError,
+        ) as error:
             # what docker printed, not a fault of the machine: that one is red
             return _not_started("unreadable", type(error).__name__)
         except (OSError, IndexError) as error:
@@ -513,6 +572,8 @@ class Gc(Step):
             for package in passport.packages.values()
         }
         df = system_df(ctx)
+        df[CACHE] = cache_measure(self.root)
+        df[DISK] = {"free_bytes": free_bytes(self.root)}
         stacks = self._stacks()
         known = self._known(ctx, stacks)
         containers = _inspect(
@@ -529,18 +590,22 @@ class Gc(Step):
             for m in _dicts(c.get("Mounts"))
             if m.get("Source")
         ]
+        dangling = list[Json](dangling_images(ctx, in_use))
         images: list[Json] = []
         for image in _inspect(ctx, "image", labelled_images(ctx)):
             config = image.get("Config")
             labels = config.get("Labels") if isinstance(config, dict) else None
             commit = labels.get("pridem.commit") if isinstance(labels, dict) else None
             ident = str(image.get("Id"))
+            if ident in dangling:
+                continue  # goes as a dangling image, once
             # KNOWN CEILING (DM-61): the images of one commit are kept whole.
             # 1. Mechanism: a service a package is built into (apply: build) has
             #    an image per edition and package versions on one commit
             #    (steps.packages.image_key); a new skin version on the same
             #    commit leaves the image of the old one, kept here by its
-            #    commit until the commit is neither current nor previous.
+            #    commit until the commit is neither current nor previous. (An
+            #    image no name points at is not kept: it goes as dangling.)
             # 2. Status: acknowledged by design.
             # 3. Task: none -- no box changes package versions often enough on
             #    one commit to fill a disk before its next release.
@@ -579,6 +644,7 @@ class Gc(Step):
         data: dict[str, Json] = {
             "before": {**df, "journal": {"bytes": journal}},
             "images": images,
+            "dangling": dangling,
             "releases": removed,
             "data": copies,
             "prune": prune,
@@ -590,7 +656,7 @@ class Gc(Step):
         }
         sessions = self._old_sessions()
         data["connect"] = list[Json](str(path) for path in sessions)
-        if not (images or removed or copies or prune or evict or sessions):
+        if not (images or dangling or removed or copies or prune or evict or sessions):
             return CheckResult(False, data=data)
         names: list[Json] = [
             f"{r['stack']}/{Path(str(r['path'])).name}" for r in _dicts(removed)
@@ -599,7 +665,7 @@ class Gc(Step):
         would = local_code(
             "clean",
             {
-                "images": len(images),
+                "images": len(images) + len(dangling),
                 "releases": names,
                 "build_cache": prune,
                 "journals": evict,
@@ -612,7 +678,9 @@ class Gc(Step):
         limit, again while the cache no image holds is over the budget and
         the last call made the whole cache smaller -- one call stops early
         (see the module's text); a cache that did not shrink, or grew, ends
-        the calls. The cache is as ``check`` measured it, unless images
+        the calls, and so does call ``PRUNE_CALLS``: what is over the budget
+        then is ``verify``'s to say. Every number is bytes of the Engine
+        API. The cache is as ``check`` measured it, unless images
         went since and the whole cache, shared records and all, is over the
         budget: the layers of an image that went are the cache's alone now,
         and only then can they take it over -- it is measured anew.
@@ -622,12 +690,13 @@ class Gc(Step):
         if not isinstance(before, dict):
             raise ValueError("gc act needs the measurement of its check")
         seen = before.get(CACHE)
-        if check.data.get("images") and _number(before, CACHE, "bytes") > budget:
-            seen = system_df(ctx)[CACHE]
+        went = check.data.get("images") or check.data.get("dangling")
+        if went and _number(before, CACHE, "bytes") > budget:
+            seen = cache_measure(self.root)
         if _own(seen) <= budget:
             return
         self._pruned_from = _own(seen)
-        while True:
+        for _ in range(PRUNE_CALLS):
             out(
                 ctx,
                 [
@@ -641,7 +710,8 @@ class Gc(Step):
                 ],
                 timeout=PRUNE_TIMEOUT_S,
             )
-            now = system_df(ctx)[CACHE]
+            self._prune_calls += 1
+            now = cache_measure(self.root)
             if _own(now) <= budget or _whole(now) >= _whole(seen):
                 return
             seen = now
@@ -716,6 +786,17 @@ class Gc(Step):
         room = max(policy.keep_releases - len(stay), 0)
         return [*others[room:], *(c for p in stay for c in _copies_gone(p, mounts))]
 
+    def _alive(self, ctx: StepContext, ident: str) -> bool:
+        """Is the image ``ident`` still on the box: asked by its ID, since a
+        list does not show every image that is there (docker 29, DM-61)."""
+        code, _ = out(
+            ctx,
+            ["docker", "image", "inspect", "--format", "{{.Id}}", ident],
+            expect=(0, 1),
+            passed_on=False,
+        )
+        return code == 0
+
     def _journal_files(self) -> list[Path]:
         return [
             *self.box.journals.glob("*.jsonl"),
@@ -730,6 +811,8 @@ class Gc(Step):
         for image in _dicts(check.data.get("images")):
             tags = _strings(image.get("tags"))
             out(ctx, ["docker", "image", "rm", *(tags or [str(image["id"])])])
+        for ident in _strings(check.data.get("dangling")):
+            out(ctx, ["docker", "image", "rm", ident])  # no --force, ever
         bares: set[str] = set()
         for release in _dicts(check.data.get("releases")):
             bare = str(release["bare"])
@@ -765,17 +848,29 @@ class Gc(Step):
         if not isinstance(before, dict):
             raise ValueError("gc verify needs the measurement of its check")
         after = system_df(ctx)
+        after[CACHE] = cache_measure(self.root)
+        after[DISK] = {"free_bytes": free_bytes(self.root)}
         journal = self._journal_bytes()
         cache_budget = size_bytes(policy.builder_cache_budget)
         journal_budget = size_bytes(policy.journal_budget)
         images = _dicts(data.get("images"))
         releases = _dicts(data.get("releases"))
+        dangling = _strings(data.get("dangling"))
         listed = set(labelled_images(ctx)) if images else set()
+        alive = [ident for ident in dangling if self._alive(ctx, ident)]
         fact: Fact = {
             "before": before,
             "after": {**after, "journal": {"bytes": journal}},
             "removed": {
-                "images": [_short(str(i["id"])) for i in images],
+                "images": [
+                    *(_short(str(i["id"])) for i in images),
+                    *(_short(ident) for ident in dangling),
+                ],
+                **(
+                    {"dangling": list[Json](_short(ident) for ident in dangling)}
+                    if dangling
+                    else {}
+                ),
                 "releases": [
                     *(str(r["path"]) for r in releases),
                     *_strings(data.get("data")),
@@ -796,6 +891,7 @@ class Gc(Step):
                 "journal": journal_budget,
                 "keep_releases": policy.keep_releases,
             },
+            "prune_calls": self._prune_calls,
         }
         if self._old_sessions():
             stale = [str(path) for path in self._old_sessions()]
@@ -809,6 +905,7 @@ class Gc(Step):
                 "volumes-changed", {"before": volumes[0], "after": volumes[1]}, fact
             )
         still: list[str] = [_short(str(i["id"])) for i in images if i["id"] in listed]
+        still += [_short(ident) for ident in alive]
         still += [str(r["path"]) for r in releases if Path(str(r["path"])).exists()]
         still += [p for p in _strings(data.get("data")) if Path(p).exists()]
         cache = _number(after, CACHE, RECLAIMABLE)

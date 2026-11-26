@@ -1,16 +1,19 @@
 """The verbs ``gc`` and ``ssl renew`` (DM-20) behind the CLI: one step as the
 whole plan, under the box lock, a journal and one verdict; ``--timer`` makes
 the machine the actor. The file system root is the test's directory
-(``fs_root``), the box root ``<fs_root>/opt/pridem``.
+(``fs_root``), the box root ``<fs_root>/opt/pridem``. The build cache ``gc``
+reads from the Engine API (DM-207) is an empty one here.
 """
 
 import functools
 import io
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from edge_support import DOMAINS, Edge, Mixed, passport, self_signed_pair
+from engine_support import engine_steady
 from env_support import box as passport_box
 from env_support import passport_data
 
@@ -33,6 +36,21 @@ IMAGES = (
     "--filter",
     "label=pridem.commit",
 )
+DANGLING = (
+    "docker",
+    "image",
+    "ls",
+    "--quiet",
+    "--no-trunc",
+    "--filter",
+    "dangling=true",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_build_cache() -> Iterator[None]:
+    with engine_steady([]):
+        yield
 
 
 def df() -> FakeCall:
@@ -41,7 +59,7 @@ def df() -> FakeCall:
 
 
 def empty_gc() -> list[FakeCall]:
-    return [df(), FakeCall(CONTAINERS), FakeCall(IMAGES), df()]
+    return [df(), FakeCall(CONTAINERS), FakeCall(DANGLING), FakeCall(IMAGES), df()]
 
 
 def cli(argv: list[str], fs_root: Path, runner: Runner) -> tuple[int, str, str]:
