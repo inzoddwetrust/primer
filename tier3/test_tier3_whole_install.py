@@ -3705,13 +3705,21 @@ def test_tier3_a_dump_of_the_blank_restores_what_was_in_it() -> None:
 
 def test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was() -> None:
     """DM-93 (R2-S7), after the dump test: a dump; then, in the live
-    database, a row the dump has not and a view on ``app_settings`` -- its
-    ``DROP TABLE`` by ``pg_restore --clean`` fails half-way (no ``CASCADE``).
-    One transaction, stopped at the first error: the restore is red, and the
-    row and the view are there -- the database as it was. Measured into the
-    journal first (par0 14.3): how long the restore took, its reason, the
-    lines of ``pg_restore``. The services the restore stopped are started
-    again (``start``) for the tests after it; the view and the row go."""
+    database, a row the dump has not and a view on ``app_settings``. The
+    restore fails half-way: one transaction, stopped at the first error -- the
+    restore is red, and the row and the view are there: the database as it
+    was. Measured into the journal first (par0 14.3): how long the restore
+    took, its reason, the lines of ``pg_restore``.
+
+    Changed by DM-186 FIX (S9): ``db_restore`` restores into a new database,
+    so the view in the live one no longer stops it -- the old way to fail
+    half-way (the ``DROP TABLE`` of ``pg_restore --clean`` under a view) is
+    gone. It fails half-way here by a table ``app_settings`` the test puts in
+    ``template1`` -- the new database is made from it, so the ``CREATE TABLE``
+    of the dump fails after the first ones. Now also: the new database is
+    dropped, ``db_swap`` never acts (no restore asked), ``finally`` starts the
+    stopped services again -- no ``start`` by the test; ``template1`` is put
+    back."""
     assert (OPT / "current").is_symlink(), "the whole install runs first"
     verdict, printed = _verdict_of("db", "dump", STACK)
     assert verdict.result == "green", printed
@@ -3719,11 +3727,15 @@ def test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was() -> 
     path = str((dump.verify or {})["path"])
     _psql("INSERT INTO app_settings (key, value) VALUES ('dm93-after', 'kept')")
     _psql("CREATE VIEW dm93_v AS SELECT key FROM app_settings")
-    started = time.monotonic()
-    verdict, printed = _verdict_of(
-        "db", "restore", STACK, path, "--confirm", "tier3-env"
-    )
-    took = round(time.monotonic() - started, 1)
+    _psql_on("template1", "CREATE TABLE app_settings (key text)")
+    try:
+        started = time.monotonic()
+        verdict, printed = _verdict_of(
+            "db", "restore", STACK, path, "--confirm", "tier3-env"
+        )
+        took = round(time.monotonic() - started, 1)
+    finally:  # template1 as it was, whatever the restore did
+        _psql_on("template1", "DROP TABLE IF EXISTS app_settings")
     [restore] = [s for s in verdict.steps if s.name == "db_restore"]
     journal = Path("/opt/pridem") / str(verdict.log_ref)
     said = [
@@ -3731,19 +3743,23 @@ def test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was() -> 
         for line in journal.read_text(encoding="utf-8").splitlines()
         if '"db_restore"' in line and '"log"' in line
     ]
+    facts = {s.name: (s.status, s.verify) for s in verdict.steps}
     print(
-        "DM-93 measure:", {"seconds": took, "reason": restore.reason, "said": said[-6:]}
+        "DM-93 measure:",
+        {"seconds": took, "reason": restore.reason, "said": said[-6:], "steps": facts},
     )
     assert verdict.result == "red", printed
     assert restore.reason is not None and restore.reason.code == "command-failed"
     assert _psql("SELECT value FROM app_settings WHERE key = 'dm93-after'") == ["kept"]
     assert _psql("SELECT to_regclass('public.dm93_v')") == ["dm93_v"]
+    names = _psql_on("postgres", "SELECT datname FROM pg_database ORDER BY 1")
+    assert "pridem_restore_new" not in names, names
+    assert facts["db_swap"][0] == "skipped", facts
+    assert not verdict.report.incomplete  # no restore asked: nothing crossed
+    assert _container(STACK, "app")  # started again by finally
 
     _psql("DROP VIEW dm93_v")
     _psql("DELETE FROM app_settings WHERE key = 'dm93-after'")
-    verdict, printed = _verdict_of("start", STACK)
-    assert verdict.result == "green", printed
-    assert _container(STACK, "app")
 
 
 def test_tier3_a_reset_of_the_blank_makes_its_database_new() -> None:
