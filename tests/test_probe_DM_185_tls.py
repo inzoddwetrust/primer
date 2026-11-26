@@ -433,3 +433,100 @@ def test_nginx_not_answering_is_no_reason_to_reload(tmp_path: Path) -> None:
         found = files.check(_ctx(runner))
     assert found.needed and found.would is not None
     assert found.would.code == "serve"
+
+
+# --- DM-185 FIX: ten in a row, not ten in all; the limit never says "the file" --
+
+
+class _Clock:
+    """The step's clock and its pauses on one counter: the number of
+    handshakes before ``SERVED_WAIT_S`` is exact, not the machine's speed."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+class _Pauses(Interrupt):
+    def __init__(self, clock: _Clock) -> None:
+        super().__init__()
+        self.clock = clock
+
+    def sleep(self, seconds: float) -> None:
+        self.clock.now += seconds
+
+
+def _turns(tmp: Path, mixed: int) -> tuple[Path, Edge, str]:
+    """A box whose nginx served pair A and was reloaded on pair B: the old
+    and the new in turn ``mixed`` handshakes, A first. A's fingerprint."""
+    root, _ = passport(tmp)
+    _placed(root, *_pair(tmp, "a"))
+    edge = Edge(root, mixed=mixed)
+    edge.up()
+    old = file_fingerprint(root)
+    _placed(root, *_pair(tmp, "b"))
+    edge.reload()
+    return root, edge, old
+
+
+def test_ten_in_a_row_after_the_turns_is_the_file(tmp_path: Path) -> None:
+    """The old and the new pair in turn for 15 handshakes after the reload
+    (the old first and last), then the new alone: ``served_steady`` gives the
+    file only after ten of the new in a row -- 25 handshakes, never fewer;
+    the seven of the new among the turns do not count."""
+    root, edge, old = _turns(tmp_path, 15)
+    with edge, Mixed() as runner:
+        got = ssl_steps.served_steady(
+            _ctx(runner), NAMES[0], edge.port, file_fingerprint(root)
+        )
+    assert got == file_fingerprint(root) != old
+    assert edge.handshakes >= edge.mixed + ssl_steps.SERVED_STEADY, edge.handshakes
+
+
+@pytest.mark.parametrize(("limit", "last"), [(0.6, "old"), (0.7, "new")])
+def test_turns_past_the_limit_are_not_served_whichever_came_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: float, last: str
+) -> None:
+    """The old and the new in turn past ``SERVED_WAIT_S`` -- ``not-served``
+    with the old pair's fingerprint, whether the last handshake gave the old
+    (7 handshakes, a limit of 0.6 s) or the new (8, 0.7 s): measured on the
+    code before the FIX, the limit's parity made the step green. The clock
+    counts the pauses, so the number of handshakes is exact."""
+    clock = _Clock()
+    monkeypatch.setattr(ssl_steps, "time", clock)
+    monkeypatch.setattr(ssl_steps, "SERVED_WAIT_S", limit)
+    root, edge, old = _turns(tmp_path, 100_000)
+    with edge, Mixed() as runner:
+        ctx = StepContext(
+            runner, "install", "test", "x", lambda *_: None, _Pauses(clock)
+        )
+        with pytest.raises(StepFailed) as failed:
+            ssl_steps.served_fact(ctx, root, NAMES[0], edge.port, required=True)
+    count = {"old": 7, "new": 8}[last]
+    assert edge.handshakes == count  # odd -- the old came last, even -- the new
+    assert failed.value.reason == Code(
+        "not-served", {"served": old, "file": file_fingerprint(root)}
+    )
+
+
+def test_nothing_answering_up_to_the_limit_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nginx answers no handshake up to the limit: ``not-served`` with
+    ``served: none``, as before the FIX."""
+    clock = _Clock()
+    monkeypatch.setattr(ssl_steps, "time", clock)
+    root, _ = passport(tmp_path)
+    _placed(root, *_pair(tmp_path, "a"))
+    with Edge(root) as edge, Mixed() as runner:  # never up
+        ctx = StepContext(
+            runner, "install", "test", "x", lambda *_: None, _Pauses(clock)
+        )
+        with pytest.raises(StepFailed) as failed:
+            ssl_steps.served_fact(ctx, root, NAMES[0], edge.port, required=True)
+    assert edge.handshakes == 0
+    assert failed.value.reason == Code(
+        "not-served", {"served": "none", "file": file_fingerprint(root)}
+    )

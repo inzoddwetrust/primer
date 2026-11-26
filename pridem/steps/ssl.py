@@ -266,17 +266,28 @@ def served_once(name: str, port: int) -> str | None:
 
 
 def served_steady(ctx: StepContext, name: str, port: int, want: str) -> str | None:
-    """What nginx serves once ``SERVED_STEADY`` handshakes in a row give
-    ``want``, ``SERVED_PAUSE_S`` apart; at ``SERVED_WAIT_S`` -- the last seen.
-    A reload leaves the old workers answering for a moment: the old and the
-    new certificate alternate first (DM-185, measured)."""
+    """``want`` once ``SERVED_STEADY`` handshakes in a row give it,
+    ``SERVED_PAUSE_S`` apart. A reload leaves the old workers answering for a
+    moment: the old and the new certificate alternate first (DM-185,
+    measured), so only a row counts. At ``SERVED_WAIT_S`` with no such row --
+    the last certificate seen that is not ``want`` (the old workers'), or
+    ``None`` when nothing else answered: never ``want``, whichever answered
+    last (DM-185 FIX: the last handshake of an alternation decided it)."""
     deadline = time.monotonic() + SERVED_WAIT_S
     row = 0
+    other: str | None = None
     while True:
         seen = served_once(name, port)
-        row = row + 1 if seen == want else 0
-        if row >= SERVED_STEADY or time.monotonic() >= deadline:
-            return seen
+        if seen == want:
+            row += 1
+            if row >= SERVED_STEADY:
+                return want
+        else:
+            row = 0
+            if seen is not None:
+                other = seen
+        if time.monotonic() >= deadline:
+            return other
         ctx.interrupt.sleep(SERVED_PAUSE_S)
 
 

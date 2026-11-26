@@ -199,12 +199,18 @@ class Edge:
     127.0.0.1 serving the pair it loaded last -- at ``up`` and at each
     ``reload`` -- never the files as they are: a pair placed and not reloaded
     is not served. ``lag`` -- handshakes after a reload still answered with
-    the old pair, as nginx's old workers do (measured). A pair that does not
-    load (torn) leaves it answering nothing, as a down nginx."""
+    the old pair; ``mixed`` -- handshakes after a reload answered by the old
+    and the new pair in turn, the old first, then the new alone: what nginx's
+    old workers do (measured on nginx 1.24: a, b, a, b ... for about 0.1 s).
+    ``handshakes`` -- every handshake answered with a pair. A pair that does
+    not load (torn) leaves it answering nothing, as a down nginx."""
 
-    def __init__(self, root: Path, *, lag: int = 0) -> None:
+    def __init__(self, root: Path, *, lag: int = 0, mixed: int = 0) -> None:
         self.root = root
         self.lag = lag
+        self.mixed = mixed
+        self._turns = 0
+        self.handshakes = 0
         self.context: ssl.SSLContext | None = None
         self._old: ssl.SSLContext | None = None
         self._left = 0
@@ -238,14 +244,22 @@ class Edge:
         with self._lock:
             self._old, self.context = self.context, self._load()
             self._left = self.lag
+            self._turns = self.mixed
             self.reloads += 1
 
     def _pick(self) -> ssl.SSLContext | None:
         with self._lock:
+            picked = self.context
             if self._left > 0:
                 self._left -= 1
-                return self._old
-            return self.context
+                picked = self._old
+            elif self._turns > 0:
+                self._turns -= 1
+                old_turn = (self.mixed - self._turns) % 2 == 1  # 1st, 3rd, ...
+                picked = self._old if old_turn else self.context
+            if picked is not None:
+                self.handshakes += 1
+            return picked
 
     def _serve(self) -> None:
         while not self._stop.is_set():
