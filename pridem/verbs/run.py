@@ -15,7 +15,8 @@ the copy's. Both compositions are what ``state.json`` holds, ``{pridem}``
 without it.
 
 What the verdict says of the box beside the plan, each once, in the verdict of
-the command that found it (code 2): ``state.json`` quarantined, a journal
+the command that found it (code 2): ``state.json`` quarantined (only by a
+verb that writes the composition, ``WRITES_COMPOSITION``, DM-191), a journal
 ``recover`` put in quarantine (``{journal, quarantined, run_id}``), and the
 journal that did not close (``{journal, write-failed}``) -- the journal closes
 before the verdict is built.
@@ -584,6 +585,15 @@ def _diff_lines(verdict: Verdict, catalog: Catalog) -> list[str]:
     return lines
 
 
+WRITES_COMPOSITION: frozenset[PlanMode] = frozenset(
+    {"install", "deploy", "reinstall", "destroy"}
+)
+"""The modes whose plan writes the composition of the box (``finalize``,
+``forget_state``): only they put a ``state.json`` that is no JSON in
+quarantine; ``doctor``, ``gc``, ``renew`` and the data verbs write a verdict
+and ``last_run`` but no composition -- refused, the file stays (DM-191)."""
+
+
 def run_plan_verb(
     ctx: Context,
     *,
@@ -598,7 +608,7 @@ def run_plan_verb(
 ) -> int:
     """Run the verb's plan under the box lock; print; return the exit code."""
     found = copy if copy is not None else read_copy(ctx)
-    box = Box(ctx.root)
+    box = Box(ctx.root, quarantine=mode in WRITES_COMPOSITION)
     held, started = lock_holder(ctx, box, verb)
     try:
         with box.lock(held.model_dump_json()):

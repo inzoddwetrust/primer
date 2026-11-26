@@ -74,7 +74,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal, TextIO
 
-from pydantic import Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pridem.contract import Strict
 from pridem.events import (
@@ -112,6 +112,12 @@ from pridem.report.schema import (
 from pridem.runner import Stream
 
 STATE = "state.json"
+STATE_SCHEMA = 1
+"""The schema of ``state.json`` this machine reads and writes (DM-191). A
+file with no ``schema`` is of schema 1 -- the form before DM-191 -- and at
+schema 1 the field is not written: a machine older than DM-191 put back on the
+box (``self-update`` back) reads the file as its own. The field appears with
+schema 2."""
 LOCK = "lock"
 HISTORY = "history"
 JOURNAL = "journal"
@@ -237,17 +243,43 @@ class VerdictDamaged(ValueError):
 
 
 class StateDamaged(ValueError):
-    """``state.json`` is there but cannot be read; read outside the lock.
+    """``state.json`` is there but cannot be read, and it is left as it is.
 
-    Under the lock a damaged ``state.json`` is quarantined instead. The message
-    never quotes the file: it names the kind of damage only.
+    Only a ``Box`` that may quarantine (a verb that writes the composition)
+    puts a file that is no JSON in quarantine instead. The message never
+    quotes the file: it names the kind of damage only.
     """
+
+
+class StateSchema(ValueError):
+    """``state.json`` is of another schema than this machine's (DM-191): a
+    machine of another release wrote it. Nothing reads it as data and nothing
+    writes it; the file stays as it is, byte for byte."""
+
+    def __init__(self, found: int) -> None:
+        super().__init__(f"state.json is of schema {found}, not {STATE_SCHEMA}")
+        self.found = found
+
+
+class StateStamp(BaseModel):
+    """The schema of a ``state.json``, read from a file of any machine: the
+    fields it does not know are ignored (``extra="ignore"``) -- a file a newer
+    machine wrote is told by its stamp, never taken for damage. Only the stamp
+    is read this way; the state of this machine's schema is ``BoxState``,
+    closed (DM-191)."""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
+    schema_: Annotated[int, Field(ge=1)] = Field(default=1, alias="schema")
 
 
 OpsCommit = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
 
 
 class BoxState(Strict):
+    schema_: Literal[1] = Field(
+        default=1, alias="schema", exclude_if=lambda value: value == 1
+    )
+    """``STATE_SCHEMA``: absent in the file at schema 1 (DM-191)."""
     composition: Composition
     passport_version: Annotated[int, Field(ge=1)]
     # absent for a passport given as a file: it has no ops repository (DM-13)
@@ -772,8 +804,13 @@ def _actor(actor: Actor) -> Mapping[str, str]:
 class Box:
     """The machine's directory on a box; writes only under the box lock."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, quarantine: bool = True) -> None:
         self.root = root
+        self.quarantine = quarantine
+        """It may put a ``state.json`` that is no JSON in quarantine, under the
+        lock. A verb that writes no composition of the box passes ``False``
+        (``status``, ``run_plan_verb`` by its mode): it is refused and the file
+        stays (DM-191). A file of another schema is quarantined by none."""
         self.history = root / HISTORY
         self.journals = root / JOURNAL
         self._locked = False
@@ -830,30 +867,51 @@ class Box:
     def read_state(self) -> BoxState | None:
         """The box state, or ``None`` when there is no ``state.json``.
 
-        A damaged ``state.json`` (not UTF-8, not JSON, not the schema, empty) is
-        quarantined under the lock -- renamed ``state.json.damaged`` over an
-        earlier one, ``state_quarantined`` set -- and the box lives as without
-        it (TZ section 7.3). Outside the lock it is ``StateDamaged`` and stays
-        where it is: ``None`` means only that there is no file.
+        Its stamp is read first (``StateStamp``): another schema than this
+        machine's is ``StateSchema`` -- nothing reads it as data, nothing
+        writes it, nothing renames it (DM-191). A file that is no JSON (not
+        UTF-8, not JSON, empty) is quarantined -- renamed ``state.json.damaged``
+        over an earlier one, ``state_quarantined`` set, the box lives as without
+        it (TZ section 7.3) -- only by a ``Box`` that may (``quarantine``) and
+        under the lock; to any other it is ``StateDamaged``, and so is JSON
+        that is not this schema's form, to every ``Box``: the file stays.
         """
         path = self.root / STATE
         if not path.exists():
             return None
         try:
-            return BoxState.model_validate_json(path.read_bytes().decode("utf-8"))
-        except ValueError as error:  # ValidationError and UnicodeDecodeError alike
-            kind = type(error).__name__
-        if not self._locked:
-            raise StateDamaged(f"{path} is damaged ({kind})") from None
+            data = json.loads(path.read_bytes().decode("utf-8"))
+        except ValueError as error:  # UnicodeDecodeError and JSONDecodeError alike
+            self._not_json(path, type(error).__name__)
+            return None
+        try:  # a value that is no object is no stamp either
+            stamp = StateStamp.model_validate(data)
+        except ValueError:
+            raise StateDamaged(f"{path} is damaged (schema)") from None
+        if stamp.schema_ != STATE_SCHEMA:
+            raise StateSchema(stamp.schema_)
+        try:
+            return BoxState.model_validate(data)
+        except ValueError as error:
+            raise StateDamaged(f"{path} is damaged ({type(error).__name__})") from None
+
+    def _not_json(self, path: Path, kind: str) -> None:
+        """A ``state.json`` that is no JSON: quarantined by a ``Box`` that may,
+        under the lock; ``StateDamaged`` to any other."""
+        if not (self._locked and self.quarantine):
+            raise StateDamaged(f"{path} is damaged ({kind})")
         os.replace(path, path.with_name(STATE + _QUARANTINE_SUFFIX))
         fsync_dir(self.root)
         self.state_quarantined = True
-        return None
 
     def write_state(self, state: BoxState) -> None:
         """Replace ``state.json`` atomically."""
         self._require_lock()
-        atomic_write(self.root / STATE, state.model_dump_json(indent=2), _FILE_MODE)
+        atomic_write(
+            self.root / STATE,
+            state.model_dump_json(indent=2, by_alias=True),
+            _FILE_MODE,
+        )
 
     def remove_state(self) -> None:
         """Remove ``state.json`` (``destroy``): the box has no composition left."""
@@ -983,8 +1041,10 @@ class Box:
         ``catalog``, as after an update of the machine that removed a step), is
         renamed ``<run_id>.jsonl.damaged`` and listed in the result; recovery
         goes on with the next journal.
-        ``state.json`` is read once, before the journals: a damaged one is
-        quarantined then, and every verdict written here carries
+        ``state.json`` is read once, before the journals: one that is no JSON
+        is quarantined then by a ``Box`` that may (a verb that writes the
+        composition, DM-191) -- any other is refused -- and every verdict
+        written here carries
         ``{what: state, code: quarantined}`` after its ``run`` entry -- its
         ``composition_after`` is the bare ``{pridem}`` for that reason. The
         ``run`` entry is ``{what: run, code: no-verdict, ended_at}`` (the last

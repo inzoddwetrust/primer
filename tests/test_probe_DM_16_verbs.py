@@ -121,18 +121,22 @@ def test_status_composition_comes_from_state_json(tmp_path: Path) -> None:
 
 
 def test_status_quarantines_a_damaged_state_json(tmp_path: Path) -> None:
+    """Changed by DM-191, the dispatcher's word on its gate: ``status`` writes
+    no composition, so it puts nothing in quarantine -- a ``state.json`` that
+    is no JSON refuses it before a verdict (``state-damaged``, code 1), and the
+    file stays where it is, byte for byte; it was quarantined, with
+    ``incomplete state/quarantined``. The name stays the probe's."""
     root = tmp_path / "box"
     root.mkdir(mode=0o700)
     (root / "state.json").write_bytes(b"{")
-    code, _, _ = _run(["status"], root)
-    assert code == 2
-    [verdict] = _verdicts(root)
-    assert verdict.result == "incomplete"
-    assert [i.model_dump() for i in verdict.report.incomplete] == [
-        {"what": "state", "code": "quarantined"}
-    ]
-    assert verdict.composition_before == {"pridem": __version__}
-    assert (root / "state.json.damaged").exists()
+    code, out, err = _run(["status"], root)
+    assert (code, out) == (1, "")
+    assert (
+        err == "pridem: state-damaged: state.json cannot be read; nothing is changed\n"
+    )
+    assert _verdicts(root) == []
+    assert (root / "state.json").read_bytes() == b"{"
+    assert not (root / "state.json.damaged").exists()
 
 
 def test_status_on_a_busy_box_is_refused_without_a_verdict(tmp_path: Path) -> None:

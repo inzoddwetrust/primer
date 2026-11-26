@@ -4,10 +4,12 @@ Under the lock: runs that ended without a verdict get theirs first
 (``recover``), then ``status`` opens its journal and writes its own verdict
 with no steps; for the console, the box's state follows it (``pridem state``,
 DM-136). Both compositions are what ``state.json`` holds, ``{pridem}``
-without it; a damaged ``state.json`` and a journal ``recover`` put in
-quarantine are named in ``incomplete`` (code 2), as is a journal that did not
-close. There is no passport yet, so ``passport_version`` is
-absent (contract 2 v1.9). A busy box is refused before anything runs.
+without it; a journal ``recover`` put in quarantine is named in ``incomplete``
+(code 2), as is a journal that did not close. ``status`` writes no
+composition, so it never puts ``state.json`` in quarantine: a damaged one, or
+one of another schema, refuses it and stays as it is (DM-191). There is no
+passport yet, so ``passport_version`` is absent (contract 2 v1.9). A busy box
+is refused before anything runs.
 """
 
 from datetime import datetime
@@ -110,7 +112,7 @@ def _status_verdict(
 
 
 def _run(args: Strict, ctx: Context) -> int:
-    box = Box(ctx.root)
+    box = Box(ctx.root, quarantine=False)  # it writes no composition (DM-191)
     held, started = lock_holder(ctx, box, "status")
     try:
         with box.lock(held.model_dump_json()):

@@ -50,11 +50,13 @@ from pridem.runner import Runner, SubprocessRunner
 from pridem.stacks.loader import ContractError
 from pridem.stacks.stack import CompositionCollision
 from pridem.state import (
+    STATE_SCHEMA,
     HistoryExists,
     JournalDamaged,
     JournalTaken,
     RunIdTaken,
     StateDamaged,
+    StateSchema,
     VerdictDamaged,
 )
 from pridem.verbs import VERBS, Context, Refused, Verb
@@ -243,6 +245,7 @@ MACHINE_ERRORS = (
     OSError,
     JournalTaken,
     StateDamaged,
+    StateSchema,
     VerdictDamaged,
     JournalDamaged,
     CompositionCollision,
@@ -257,6 +260,7 @@ def _said(
     error: OSError
     | JournalTaken
     | StateDamaged
+    | StateSchema
     | VerdictDamaged
     | JournalDamaged
     | CompositionCollision
@@ -266,7 +270,12 @@ def _said(
     if isinstance(error, RunIdTaken | HistoryExists | JournalTaken):
         return "run-id-taken: the run id of this second is taken; run again"
     if isinstance(error, StateDamaged):
-        return "state-damaged: state.json cannot be read; see pridem status"
+        return "state-damaged: state.json cannot be read; nothing is changed"
+    if isinstance(error, StateSchema):  # DM-191: another release's state.json
+        return (
+            f"state-schema: state.json is of schema {error.found}, this machine "
+            f"reads schema {STATE_SCHEMA}; nothing is changed"
+        )
     if isinstance(error, VerdictDamaged):
         return "verdict-damaged: a verdict of history/ cannot be read"
     if isinstance(error, JournalDamaged):

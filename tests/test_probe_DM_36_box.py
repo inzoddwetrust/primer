@@ -15,7 +15,7 @@ from state_support import AFTER, header, run_id, state, verdict
 
 from pridem.events import LogLine, StepFinished, StepRecord, StepStarted
 from pridem.runner import Stream
-from pridem.state import Box, JournalHeader, Recovery
+from pridem.state import Box, JournalHeader, Recovery, StateDamaged
 
 BUILD_STEP = {"phase": "main", "stack": "aivis", "name": "build"}
 
@@ -78,10 +78,23 @@ def test_probe_DM_36_damaged_state_is_quarantined(
     """DM-42 (contract 2 v1.6): reasons and incomplete entries are codes with
     parameters, not phrases; the data changed form only, each assertion keeps
     its strength.
+
+    Changed by DM-191, the dispatcher's word on its gate: only a file that is
+    no JSON goes to quarantine (by a ``Box`` of a verb that writes the
+    composition, as this one); JSON not of the schema's form (``schema``) is
+    ``StateDamaged`` and stays where it is, byte for byte. The rest is as it
+    was.
     """
     box = Box(tmp_path)
     _journal(box, run_id(1))  # DM-45: the dying run holds the lock of its own
     (tmp_path / "state.json").write_bytes(content)
+    if content.startswith(b'{"composition": "'):  # JSON, not of the form
+        with box.lock("next"), pytest.raises(StateDamaged):
+            box.recover(SECRETS, "0.3.1")
+        assert not box.state_quarantined
+        assert (tmp_path / "state.json").read_bytes() == content
+        assert not (tmp_path / "state.json.damaged").exists()
+        return
     with box.lock("next"):
         done = box.recover(SECRETS, "0.3.1")
         assert box.state_quarantined and done.state_quarantined
