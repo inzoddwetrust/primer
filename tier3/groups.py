@@ -2,9 +2,9 @@
 
 Tier 3 runs as a matrix of ``tier3.yml``: one job per group, each on its own
 clean runner with its own preparation of the box. A group that needs the
-blank installed gets it from a fixture (``NEEDS_BOX``) -- except ``b``, whose
-first test is the whole install itself. Inside a group the tests run in the
-order of their files.
+blank installed gets it from a fixture (``NEEDS_BOX``) -- except ``b`` and
+``d``, whose first test is an install on a clean box itself (``FIRST``).
+Inside a group the tests run in the order of their files.
 
 ``GROUPS`` is the one table: a test function of ``tier3/test_*.py`` and its
 group. ``python tier3/groups.py`` checks, without running a test, that every
@@ -12,6 +12,16 @@ test function is in exactly one group, every row names a test that exists,
 and the groups of the table are exactly the ``matrix.group`` of the job in
 ``tier3.yml``; ``--selftest`` plants each defect it must catch. A test without
 a group is not skipped quietly: tier 3 refuses to collect it (``select``).
+
+The groups are cut by what a group costs (DM-208): the preparation of its job
+and the install of its box -- about three and a half minutes before its first
+test -- and the durations of its tests, the worst of three full runs each; the
+sum of the worst of every group is under ten minutes. What a cut must keep is
+in three tables the same check reads (``stands``): ``FIRST`` and ``LAST`` --
+the tests that open and close their group -- and ``CHAINS`` -- the tests that
+stand on each other, together and one after another. A test moved to another
+group, or a new one put between two of a chain, is refused here, in tier 1,
+not found red on the stand.
 
     python tier3/groups.py
     python tier3/groups.py --selftest
@@ -72,102 +82,163 @@ GROUPS: tuple[tuple[str, str], ...] = (
     # the last of a: SIGKILL with a process left holding the lock (DM-24);
     # it leaves the box half installed
     ("test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild", "a"),
-    # b -- the whole install and the tests on the box it leaves
+    # b -- the whole install and tests on the box it leaves: the proxy of DM-64,
+    # reinstall, and last a budget of the build cache the box is over (FIX DM-126)
     ("test_tier3_the_whole_install_of_the_blank", "b"),
     ("test_tier3_the_new_health_of_the_blank_and_its_service", "b"),
     ("test_probe_DM_64_product_reaches_only_its_egress_hosts", "b"),
-    ("test_probe_DM_58_skin_version_switch_needs_no_rebuild", "b"),
-    ("test_tier3_both_slots_from_one_brand_package_by_subpath", "b"),
     ("test_tier3_reinstall_keeps_the_persistent_volume", "b"),
-    # the last of b: a budget of the build cache the box is over (FIX DM-126)
     ("test_tier3_gc_trims_the_build_cache_to_the_budget", "b"),
-    # c, g, h -- an install of their own each (c cut in three, DM-162: the
-    # longest group is the time of tier 3; the order of the file kept in each).
-    # c: services, languages, a stop for migrate, a dump and its restore -- the
-    # restore half-way stands on the dump (together, in order) -- a reset
-    ("test_tier3_a_service_of_the_edition_goes_up_before_the_product", "c"),
+    # c, and every group after d -- an install of their own each, by a fixture
+    # (NEEDS_BOX). c: languages, a stop for migrate and what stands on the head it
+    # leaves the database at -- a dump, its restore half-way, a reset -- then the
+    # box registers in a Panel on the loopback, its agent, the Panel away and back
+    # (DM-139, DM-141)
     ("test_tier3_two_instances_with_their_own_languages", "c"),
-    ("test_tier3_a_job_runs_before_its_dependent_on_every_deploy", "g"),
     ("test_tier3_services_stopped_for_migrate_come_back", "c"),
     ("test_tier3_a_dump_of_the_blank_restores_what_was_in_it", "c"),
     ("test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was", "c"),
     ("test_tier3_a_reset_of_the_blank_makes_its_database_new", "c"),
-    # the last of c: the box registers in a Panel on the loopback (DM-139)
     ("test_probe_DM_139_register_on_the_runner", "c"),
-    # after it: the agent of the box registered there (DM-141)
     ("test_probe_DM_141_agent_on_the_runner", "c"),
-    # after it: the Panel away and back (DM-141 part B)
     ("test_probe_DM_141_no_verdict_lost_on_the_runner", "c"),
-    # g: a job, the project's verbs, logs and a session
-    ("test_tier3_a_project_verb_runs_in_its_service", "g"),
-    ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "g"),
-    # the last of g: a command plan prints no secret of the box (DM-183)
-    ("test_tier3_a_command_plan_prints_no_secret_of_the_box", "g"),
-    # h: a failed job, seeds, a verb on a job and a seam -- last before destroy,
-    # then destroy and destroy --all (together, last, in order)
-    ("test_tier3_a_failed_job_runs_on_the_repeat", "h"),  # DM-126
-    ("test_tier3_seed_resets_run_the_products_commands", "h"),  # DM-133
-    ("test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked", "h"),
-    # gc: a dangling image goes, the cache is measured in bytes (DM-207)
-    (
-        "test_tier3_gc_removes_a_dangling_image_and_measures_the_cache_in_bytes",
-        "h",
-    ),
-    # before the pair of destroy: a privileged service behind a profile (DM-182)
-    ("test_tier3_a_privileged_service_behind_a_profile_never_comes_up", "h"),
-    ("test_tier3_destroy_takes_the_blank_off_the_box", "h"),
-    ("test_tier3_destroy_all_wipes_the_persistent_volume", "h"),
     # d -- a clean box: a first install red at the product's tests and its
-    # destroy (DM-126), then the blank without its service, then with it
+    # destroy (DM-126), the blank with its service (DM-59), every journal of the
+    # group (DM-137), and last the apt timers on (DM-105)
     ("test_tier3_red_tests_stop_before_any_migrate", "d"),
     ("test_tier3_destroy_after_an_interrupted_install", "d"),
     ("test_probe_DM_59_product_gets_the_seams_of_its_service_after_health", "d"),
-    # a command of the Panel's queue runs, a busy box names it (DM-138)
-    ("test_tier3_a_command_runs_and_a_busy_box_names_it", "d"),
-    # every journal the group wrote is a stream with its end (DM-137)
     ("test_tier3_every_journal_has_its_seq_and_its_end", "d"),
-    # the last of d: the apt timers on (DM-105) -- apt may hold dpkg after it
     ("test_tier3_doctor_is_empty_with_the_apt_timers_on", "d"),
-    # e, i -- an install of their own each: the build mode of packages (e cut in
-    # two, DM-162)
-    ("test_tier3_build_mode_of_the_blank", "e"),
+    # e -- the build mode of packages without its longest test (m); last a stream
+    # through a path of a route (DM-147)
     (
         "test_tier3_optional_build_slot_without_a_package_serves_the_repository_s_front",
         "e",
     ),
     ("test_tier3_a_skin_built_into_a_frontend_built_from_the_root", "e"),
-    # the last of e: a stream through a path of a route (DM-147)
     ("test_probe_DM_147_sse_arrives_in_parts_through_the_path", "e"),
-    # i: types and alembic, each on a copy of its own
-    ("test_tier3_types_are_made_by_the_products_commands", "i"),  # DM-63
+    # f -- options, a point; last the state of the box with its lock held (DM-136)
+    ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "f"),
+    ("test_tier3_only_the_declared_consumer_reaches_a_point", "f"),
+    ("test_tier3_state_of_the_box_with_its_lock_held", "f"),
+    # g -- runtime packages, the project's verbs, logs and a session; last a
+    # command plan that prints no secret of the box (DM-183)
+    ("test_probe_DM_58_skin_version_switch_needs_no_rebuild", "g"),
+    ("test_tier3_a_project_verb_runs_in_its_service", "g"),
+    ("test_tier3_logs_restart_stop_start_and_a_read_only_session", "g"),
+    ("test_tier3_a_command_plan_prints_no_secret_of_the_box", "g"),
+    # h -- seeds, a verb on a job and a seam, gc of dangling images (DM-207), a
+    # privileged service behind a profile (DM-182), then destroy and destroy --all
+    ("test_tier3_seed_resets_run_the_products_commands", "h"),  # DM-133
+    ("test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked", "h"),
+    ("test_tier3_gc_removes_a_dangling_image_and_measures_the_cache_in_bytes", "h"),
+    ("test_tier3_a_privileged_service_behind_a_profile_never_comes_up", "h"),
+    ("test_tier3_destroy_takes_the_blank_off_the_box", "h"),
+    ("test_tier3_destroy_all_wipes_the_persistent_volume", "h"),
+    # i -- alembic, a point of the product, then what nginx serves (DM-185)
     ("test_tier3_alembic_runs_with_the_apps_environment", "i"),  # DM-124
-    # what nginx serves is the file; renew leaves a CA's certificate (DM-185)
+    ("test_tier3_a_service_takes_a_point_of_the_product", "i"),  # DM-23
     ("test_probe_DM_185_served_is_the_file_after_renew", "i"),
     ("test_probe_DM_185_served_is_the_file_after_provided_changes", "i"),
     ("test_probe_DM_185_a_bad_provided_pair_leaves_the_working_one", "i"),
     ("test_probe_DM_185_renew_leaves_a_ca_certificate", "i"),
-    # f, j -- an install of their own each: options, derive, points (f out of
-    # c, DM-85; f cut in two, DM-162; the order of the file kept)
-    ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "f"),
-    ("test_tier3_product_derive_reaches_nothing", "f"),
-    ("test_tier3_only_the_declared_consumer_reaches_a_point", "f"),
-    # the last of f: the state of the box with its lock held (DM-136)
-    ("test_tier3_state_of_the_box_with_its_lock_held", "f"),
-    # j: a secret file (DM-145, out of e: j has the time), the data of a
-    # service, a point of the product, an entry named frontend
+    # j -- a secret file, the data of a service, an entry named frontend, and
+    # after it -- no deploy follows that entry -- first contact (DM-143)
     ("test_tier3_a_secret_file_in_the_live_container", "j"),  # DM-145
     ("test_tier3_every_listed_service_reads_the_data", "j"),  # DM-100
-    ("test_tier3_a_service_takes_a_point_of_the_product", "j"),  # DM-23
     ("test_tier3_an_entry_named_frontend_is_the_product_s_own", "j"),  # DM-102
-    # the last of j: first contact, the agent as a service (DM-143)
     ("test_probe_DM_143_no_token_installs_the_machine_and_says_why", "j"),
     ("test_probe_DM_143_one_command_installs_registers_and_runs_the_agent", "j"),
     ("test_probe_DM_143_the_agent_service_survives_a_restart", "j"),
     ("test_probe_DM_143_a_used_token_is_refused", "j"),
+    # k -- a job on every deploy: the longest test of tier 3, alone (DM-208)
+    ("test_tier3_a_job_runs_before_its_dependent_on_every_deploy", "k"),
+    # l -- both slots from one package, then the types (DM-63), the second longest
+    ("test_tier3_both_slots_from_one_brand_package_by_subpath", "l"),
+    ("test_tier3_types_are_made_by_the_products_commands", "l"),  # DM-63
+    # m -- the build mode of the blank (DM-61), the third longest, alone
+    ("test_tier3_build_mode_of_the_blank", "m"),
+    # n -- a service of the edition, then a failed job on the repeat (DM-126)
+    ("test_tier3_a_service_of_the_edition_goes_up_before_the_product", "n"),
+    ("test_tier3_a_failed_job_runs_on_the_repeat", "n"),  # DM-126
+    # o -- derive with no network, then a command of the Panel's queue and a busy
+    # box that names it (DM-138)
+    ("test_tier3_product_derive_reaches_nothing", "o"),
+    ("test_tier3_a_command_runs_and_a_busy_box_names_it", "o"),
 )
 
-NEEDS_BOX = frozenset({"c", "e", "f", "g", "h", "i", "j"})
+NEEDS_BOX = frozenset({"c", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o"})
 """Groups whose tests need the blank installed by a fixture first."""
+
+FIRST: tuple[str, ...] = (
+    "test_tier3_the_whole_install_of_the_blank",
+    "test_tier3_red_tests_stop_before_any_migrate",
+)
+"""The tests that are the first of their group: each installs on a clean box,
+and its group has no install of a fixture."""
+
+LAST: tuple[str, ...] = (
+    # it leaves the box half installed
+    "test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild",
+    "test_tier3_gc_trims_the_build_cache_to_the_budget",
+    "test_probe_DM_141_no_verdict_lost_on_the_runner",
+    # apt may hold dpkg after it
+    "test_tier3_doctor_is_empty_with_the_apt_timers_on",
+    "test_probe_DM_147_sse_arrives_in_parts_through_the_path",
+    "test_tier3_state_of_the_box_with_its_lock_held",
+    "test_tier3_a_command_plan_prints_no_secret_of_the_box",
+    "test_tier3_destroy_all_wipes_the_persistent_volume",
+    "test_probe_DM_185_renew_leaves_a_ca_certificate",
+    # it leaves the machine installed anew
+    "test_probe_DM_143_a_used_token_is_refused",
+)
+"""The tests that are the last of their group: no test of the group runs on
+the box they leave."""
+
+CHAINS: tuple[tuple[str, ...], ...] = (
+    ("test_tier3_the_whole_install_of_the_blank",
+     "test_tier3_the_new_health_of_the_blank_and_its_service"),
+    # the cache's budget runs on the box reinstall left
+    ("test_tier3_reinstall_keeps_the_persistent_volume",
+     "test_tier3_gc_trims_the_build_cache_to_the_budget"),
+    # the stop for migrate takes the database to a head the blank at its pin
+    # does not know: nothing deploys that pin after it; the restore half-way
+    # stands on the dump; the agent on the registration, part B on part A
+    ("test_tier3_services_stopped_for_migrate_come_back",
+     "test_tier3_a_dump_of_the_blank_restores_what_was_in_it",
+     "test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was",
+     "test_tier3_a_reset_of_the_blank_makes_its_database_new",
+     "test_probe_DM_139_register_on_the_runner",
+     "test_probe_DM_141_agent_on_the_runner",
+     "test_probe_DM_141_no_verdict_lost_on_the_runner"),
+    # each on the box the one before it left
+    ("test_tier3_red_tests_stop_before_any_migrate",
+     "test_tier3_destroy_after_an_interrupted_install",
+     "test_probe_DM_59_product_gets_the_seams_of_its_service_after_health",
+     "test_tier3_every_journal_has_its_seq_and_its_end",
+     "test_tier3_doctor_is_empty_with_the_apt_timers_on"),
+    # after the verb on a job no passport is deployed over its lock
+    ("test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked",
+     "test_tier3_gc_removes_a_dangling_image_and_measures_the_cache_in_bytes",
+     "test_tier3_a_privileged_service_behind_a_profile_never_comes_up",
+     "test_tier3_destroy_takes_the_blank_off_the_box",
+     "test_tier3_destroy_all_wipes_the_persistent_volume"),
+    # each after the one before: self-signed, provided, a bad pair, a CA's
+    ("test_probe_DM_185_served_is_the_file_after_renew",
+     "test_probe_DM_185_served_is_the_file_after_provided_changes",
+     "test_probe_DM_185_a_bad_provided_pair_leaves_the_working_one",
+     "test_probe_DM_185_renew_leaves_a_ca_certificate"),
+    # the entry named frontend stays on the box: no deploy follows it
+    ("test_tier3_an_entry_named_frontend_is_the_product_s_own",
+     "test_probe_DM_143_no_token_installs_the_machine_and_says_why",
+     "test_probe_DM_143_one_command_installs_registers_and_runs_the_agent",
+     "test_probe_DM_143_the_agent_service_survives_a_restart",
+     "test_probe_DM_143_a_used_token_is_refused"),
+)  # fmt: skip
+"""The tests that stand on each other (DM-208): the tests of a chain are in
+one group and run there one after another, in the order written -- no other
+test of the group between two of them."""
 
 
 def group_of(name: str) -> str:
@@ -222,7 +293,7 @@ def test_functions(directory: Path = HERE) -> list[str]:
     return out
 
 
-ALL = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
+ALL = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o")
 """Every group: the jobs of a full run of tier 3."""
 
 PLANNED = "${{ fromJSON(needs.plan.outputs.groups) }}"
@@ -319,10 +390,76 @@ def full_run(
     return True, f"in full on this commit is green: {last.get('html_url')}"
 
 
-def problems(
-    tests: Sequence[str], groups: Sequence[tuple[str, str]], jobs: Sequence[str]
+Stands = tuple[Sequence[str], Sequence[str], Sequence[Sequence[str]]]
+"""``FIRST``, ``LAST`` and ``CHAINS``, as ``stands`` reads them."""
+
+
+def stands(
+    tests: Sequence[str],
+    groups: Sequence[tuple[str, str]],
+    tables: Stands,
 ) -> list[str]:
-    """What breaks "each test in exactly one group, each group a job"."""
+    """What breaks ``FIRST``, ``LAST`` and ``CHAINS`` of ``tables``. ``tests``
+    -- every test in the order of the files, which is the order a group runs
+    its own in. A test of a table that is in no group, or in two, is said by
+    ``problems`` already and is passed over here."""
+    first, last, chains = tables
+    out: list[str] = []
+    group = {name: g for name, g in groups}
+    once = {name for name in tests if sum(1 for n, _ in groups if n == name) == 1}
+    ran: dict[str, list[str]] = {}
+    for name in tests:
+        if name in once:
+            ran.setdefault(group[name], []).append(name)
+    for table, names in (("FIRST", first), ("LAST", last)):
+        for name in dict.fromkeys(names):
+            if list(names).count(name) > 1:
+                out.append(f"{name}: twice in {table}")
+            if name not in tests:
+                out.append(f"{name}: in {table}, and no such test")
+    for name in first:
+        if name in once and ran[group[name]][0] != name:
+            before = ran[group[name]][0]
+            out.append(f"{name}: not the first of group {group[name]} -- {before} is")
+    for name in last:
+        if name in once and ran[group[name]][-1] != name:
+            after = ran[group[name]][-1]
+            out.append(f"{name}: not the last of group {group[name]} -- {after} is")
+    for chain in chains:
+        if len(chain) < 2:
+            out.append(f"a chain of {len(chain)}: {', '.join(chain) or 'no test'}")
+            continue
+        missing = [name for name in chain if name not in tests]
+        out += [f"{name}: in a chain, and no such test" for name in missing]
+        if missing or any(name not in once for name in chain):
+            continue
+        home = group[chain[0]]
+        apart = [name for name in chain if group[name] != home]
+        if apart:
+            out += [
+                f"{name}: in group {group[name]}, its chain in group {home}"
+                for name in apart
+            ]
+            continue
+        mine = ran[home]
+        for one, two in zip(chain, chain[1:], strict=False):
+            gap = mine.index(two) - mine.index(one)
+            if gap < 1:
+                out.append(f"{two}: runs before {one} of its chain")
+            elif gap > 1:
+                between = mine[mine.index(one) + 1]
+                out.append(f"{between}: between {one} and {two} of a chain")
+    return out
+
+
+def problems(
+    tests: Sequence[str],
+    groups: Sequence[tuple[str, str]],
+    jobs: Sequence[str],
+    tables: Stands | None = None,
+) -> list[str]:
+    """What breaks "each test in exactly one group, each group a job", and
+    what breaks ``tables`` -- by default ``FIRST``, ``LAST`` and ``CHAINS``."""
     out: list[str] = []
     for test in tests:
         count = sum(1 for name, _ in groups if name == test)
@@ -334,7 +471,7 @@ def problems(
     named = {group for _, group in groups}
     out += [f"group {g}: no job in tier3.yml" for g in sorted(named - set(jobs))]
     out += [f"job {g}: no test in tier3/groups.py" for g in jobs if g not in named]
-    return out
+    return out + stands(tests, groups, tables or (FIRST, LAST, CHAINS))
 
 
 def check() -> int:
@@ -348,7 +485,7 @@ def check() -> int:
 
 
 Rows = list[tuple[str, str]]
-Case = tuple[list[str], Rows, list[str]]
+Case = tuple[list[str], Rows, list[str]] | tuple[list[str], Rows, list[str], Stands]
 Plant = Callable[[list[str], Rows, list[str]], Case]
 
 
@@ -372,12 +509,64 @@ def _job_without_tests(t: list[str], g: Rows, j: list[str]) -> Case:
     return t, g, [*j, "z"]
 
 
+PLANTED = "test_planted_by_the_selftest"
+
+
+def _moved(g: Rows, name: str, to: str) -> Rows:
+    return [(test, to if test == name else group) for test, group in g]
+
+
+def _chain_apart(t: list[str], g: Rows, j: list[str]) -> Case:
+    """The middle of a chain in another group: neither first nor last of any."""
+    return t, _moved(g, CHAINS[2][2], "a"), j
+
+
+def _chain_out_of_order(t: list[str], g: Rows, j: list[str]) -> Case:
+    """Two tests of a chain change places in the files."""
+    one, two = t.index(CHAINS[2][0]), t.index(CHAINS[2][1])
+    swapped = list(t)
+    swapped[one], swapped[two] = swapped[two], swapped[one]
+    return swapped, g, j
+
+
+def _test_inside_a_chain(t: list[str], g: Rows, j: list[str]) -> Case:
+    """A new test of the group, in the files between two of its chain."""
+    at = t.index(CHAINS[2][2])
+    home = dict(g)[CHAINS[2][2]]
+    return [*t[:at], PLANTED, *t[at:]], [*g, (PLANTED, home)], j
+
+
+def _after_the_last(t: list[str], g: Rows, j: list[str]) -> Case:
+    """A new test at the end of the files, in the group of ``LAST[0]``."""
+    return [*t, PLANTED], [*g, (PLANTED, dict(g)[LAST[0]])], j
+
+
+def _before_the_first(t: list[str], g: Rows, j: list[str]) -> Case:
+    """A new test at the start of the files, in the group of ``FIRST[0]``."""
+    return [PLANTED, *t], [*g, (PLANTED, dict(g)[FIRST[0]])], j
+
+
+def _chain_of_one(t: list[str], g: Rows, j: list[str]) -> Case:
+    return t, g, j, (FIRST, LAST, [*CHAINS, (t[0],)])
+
+
+def _table_names_no_test(t: list[str], g: Rows, j: list[str]) -> Case:
+    return t, g, j, (FIRST, [*LAST, "test_planted_renamed_away"], CHAINS)
+
+
 DEFECTS: dict[str, Plant] = {
     "a test in no group": _no_group,
     "a test in two groups": _two_groups,
     "a row with no test": _row_without_test,
     "a group with no job": _group_without_job,
     "a job with no tests": _job_without_tests,
+    "a chain in two groups": _chain_apart,
+    "a chain out of its order": _chain_out_of_order,
+    "a test between two of a chain": _test_inside_a_chain,
+    "a test after the last of its group": _after_the_last,
+    "a test before the first of its group": _before_the_first,
+    "a chain of one test": _chain_of_one,
+    "a table that names no test": _table_names_no_test,
 }
 
 

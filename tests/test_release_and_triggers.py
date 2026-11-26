@@ -48,8 +48,9 @@ if "/actions/runs/" in sys.argv[2]:  # the jobs of a run (DM-125)
 workflow = sys.argv[2].split("/actions/workflows/")[1].split("/")[0]
 sys.stdout.write(open(os.path.join(os.environ["STUB_RUNS"], workflow)).read())
 """
-GROUPS = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
-"""Every group of tier 3: a full run (DM-125; ten groups since DM-162)."""
+GROUPS = tuple("abcdefghijklmno")
+"""Every group of tier 3: a full run (DM-125; ten groups since DM-162,
+fifteen since DM-208)."""
 
 
 def _text(name: str) -> str:

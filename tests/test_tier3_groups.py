@@ -108,12 +108,16 @@ def test_the_table_is_whole_and_its_selftest_catches_each_defect() -> None:
 
     Changed by DM-162: c is cut in three (c, g, h), e in two (e, i), f in two (f,
     j) -- ten groups, the cut ones each with its install; named by equality as
-    before."""
+    before.
+
+    Changed by DM-208: cut again by the durations of three full runs -- fifteen
+    groups, the five new ones (k, l, m, n, o) each with its install; named by
+    equality as before. The planted defects are twelve: seven of them of what
+    a cut must keep (``FIRST``, ``LAST``, ``CHAINS``)."""
     assert groups.check() == 0
     assert groups.selftest() == 0
+    assert len(groups.DEFECTS) == 12
     assert (
-        set(groups.matrix())
-        == {g for _, g in groups.GROUPS}
-        == {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+        set(groups.matrix()) == {g for _, g in groups.GROUPS} == set("abcdefghijklmno")
     )
-    assert groups.NEEDS_BOX == {"c", "e", "f", "g", "h", "i", "j"}
+    assert groups.NEEDS_BOX == set("cefghijklmno")

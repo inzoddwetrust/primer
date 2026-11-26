@@ -120,53 +120,148 @@ def test_the_matrix_of_box_is_the_plan_s(tmp_path: Path) -> None:
 def test_a_full_run_of_the_new_groups_is_a_release() -> None:
     """DM-162: tier 3 in ten groups, cut so that none takes more than 10 minutes
     -- a run where every one of them ran green is a release; a run without one
-    of the new groups (g, h, i, j) is not."""
-    assert ALL == ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+    of the new groups (g, h, i, j) is not.
+
+    Changed by DM-208: fifteen groups -- a run without one of k, l, m, n, o is
+    not a release either; a full run of the ten groups of before is none."""
+    assert ALL == list("abcdefghijklmno")
     full = _run(1, 10)
     assert groups.full_run([full], {1: _jobs(*ALL)})[0] is True
-    for missing in ("g", "h", "i", "j"):
+    assert groups.full_run([full], {1: _jobs(*"abcdefghij")})[0] is False
+    for missing in ("g", "h", "i", "j", "k", "l", "m", "n", "o"):
         some = [group for group in ALL if group != missing]
         assert groups.full_run([full], {1: _jobs(*some)})[0] is False, missing
 
 
 def _order() -> list[str]:
-    return [test for test, _ in groups.GROUPS]
+    """Every test of tier 3 in the order of the files: the order a group runs
+    its own in (``keep_group``), whatever the order of the rows of ``GROUPS``."""
+    return groups.test_functions()
+
+
+def _found(case: groups.Case) -> list[str]:
+    return groups.problems(*case)
+
+
+def _real() -> tuple[list[str], groups.Rows, list[str]]:
+    return _order(), list(groups.GROUPS), groups.matrix()
 
 
 def test_the_pairs_that_stand_on_each_other_stay_in_one_group_in_order() -> None:
     """N4: what a test of tier 3 stands on stays in its group, before it -- the
     restore half-way after the dump; the verb on a job, then destroy, then
-    destroy --all, last of their group; the last of a, b and d last."""
+    destroy --all, last of their group; the last of a, b and d last.
+
+    Changed by DM-208: the chains and the last tests are the tables of
+    ``tier3/groups.py`` (``CHAINS``, ``LAST``, ``FIRST``), which its check
+    reads -- not a list of this test's own. What N4 named is in them, held
+    here by name; the order is the files', which a group runs in -- not the
+    order of the rows of ``GROUPS``."""
     order = _order()
     group = dict(groups.GROUPS)
-    for chain in (
-        (
-            "test_tier3_a_dump_of_the_blank_restores_what_was_in_it",
-            "test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was",
-        ),
-        (
-            "test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked",
-            "test_tier3_destroy_takes_the_blank_off_the_box",
-            "test_tier3_destroy_all_wipes_the_persistent_volume",
-        ),
-    ):
-        assert len({group[test] for test in chain}) == 1, chain
-        assert [order.index(test) for test in chain] == sorted(
-            order.index(test) for test in chain
-        )
+    chained = {(one, two) for chain in groups.CHAINS for one, two in pairs(chain)}
+    assert (
+        "test_tier3_a_dump_of_the_blank_restores_what_was_in_it",
+        "test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was",
+    ) in chained
+    assert (
+        "test_tier3_destroy_takes_the_blank_off_the_box",
+        "test_tier3_destroy_all_wipes_the_persistent_volume",
+    ) in chained
+    assert any(
+        chain[0] == "test_tier3_a_verb_on_a_job_of_another_entry_and_a_seam_from_asked"
+        and chain[-1] == "test_tier3_destroy_all_wipes_the_persistent_volume"
+        for chain in groups.CHAINS
+    )
     for last in (
         "test_tier3_destroy_all_wipes_the_persistent_volume",
         "test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild",
         "test_tier3_gc_trims_the_build_cache_to_the_budget",
         "test_tier3_doctor_is_empty_with_the_apt_timers_on",
     ):
-        mine = [test for test in order if group[test] == group[last]]
-        assert mine[-1] == last, (last, mine[-1])
+        assert last in groups.LAST
+    # the tables hold on the real cut, read here apart from the check itself
+    for chain in groups.CHAINS:
+        assert len({group[test] for test in chain}) == 1, chain
+        mine = [test for test in order if group[test] == group[chain[0]]]
+        at = mine.index(chain[0])
+        assert tuple(mine[at : at + len(chain)]) == tuple(chain), chain
+    for last in groups.LAST:
+        assert [test for test in order if group[test] == group[last]][-1] == last
+    for first in groups.FIRST:
+        assert [test for test in order if group[test] == group[first]][0] == first
+    assert _found(_real()) == []
+
+
+def pairs(chain: tuple[str, ...]) -> list[tuple[str, str]]:
+    return list(zip(chain, chain[1:], strict=False))
+
+
+DUMP = "test_tier3_a_dump_of_the_blank_restores_what_was_in_it"
+RESTORE = "test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was"
+STOPPED = "test_tier3_services_stopped_for_migrate_come_back"
+PLANTED = groups.PLANTED
+
+
+def test_each_planted_defect_of_a_cut_is_refused_by_its_own_check() -> None:
+    """DM-208: the selftest of ``groups.py`` asks only that a planted defect
+    is refused. Here -- by what: each of the seven defects of ``FIRST``,
+    ``LAST`` and ``CHAINS`` gives exactly the finding of its own check, so a
+    check that stopped looking is red here even while another one still
+    refuses the same plant."""
+    t, g, j = _real()
+    plant = groups.DEFECTS
+    assert _found(plant["a chain in two groups"](t, g, j)) == [
+        f"{RESTORE}: in group a, its chain in group c"
+    ]
+    assert _found(plant["a chain out of its order"](t, g, j)) == [
+        f"{DUMP}: runs before {STOPPED} of its chain",
+        f"{STOPPED}: between {DUMP} and {RESTORE} of a chain",
+    ]
+    assert _found(plant["a test between two of a chain"](t, g, j)) == [
+        f"{PLANTED}: between {DUMP} and {RESTORE} of a chain"
+    ]
+    last = "test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild"
+    assert _found(plant["a test after the last of its group"](t, g, j)) == [
+        f"{last}: not the last of group a -- {PLANTED} is"
+    ]
+    first = "test_tier3_the_whole_install_of_the_blank"
+    assert _found(plant["a test before the first of its group"](t, g, j)) == [
+        f"{first}: not the first of group b -- {PLANTED} is"
+    ]
+    assert _found(plant["a chain of one test"](t, g, j)) == [f"a chain of 1: {t[0]}"]
+    assert _found(plant["a table that names no test"](t, g, j)) == [
+        "test_planted_renamed_away: in LAST, and no such test"
+    ]
+
+
+def test_a_table_of_a_cut_names_each_test_once_and_only_tests() -> None:
+    """Twins of the tables themselves: a name twice in ``LAST`` or ``FIRST``,
+    a name of ``FIRST`` or of a chain that is no test, a chain with no test at
+    all -- each said; the pair is the real tables, with nothing to say."""
+    t, g, j = _real()
+    twice = (groups.FIRST, [*groups.LAST, groups.LAST[0]], groups.CHAINS)
+    assert groups.stands(t, g, twice) == [f"{groups.LAST[0]}: twice in LAST"]
+    ghost = ([*groups.FIRST, "test_ghost"], groups.LAST, groups.CHAINS)
+    assert groups.stands(t, g, ghost) == ["test_ghost: in FIRST, and no such test"]
+    chain = (groups.FIRST, groups.LAST, [(DUMP, "test_ghost")])
+    assert groups.stands(t, g, chain) == ["test_ghost: in a chain, and no such test"]
+    empty = (groups.FIRST, groups.LAST, [()])
+    assert groups.stands(t, g, empty) == ["a chain of 0: no test"]
+    assert groups.stands(t, g, (groups.FIRST, groups.LAST, groups.CHAINS)) == []
 
 
 def test_every_part_of_an_installed_group_installs_its_box() -> None:
     """N1: c, e and f were installed by a fixture; every part cut out of them
     (g, h out of c; i out of e; j out of f) is too -- else its first test finds
-    no blank on the box."""
-    assert {"c", "e", "f", "g", "h", "i", "j"} <= groups.NEEDS_BOX
+    no blank on the box.
+
+    Changed by DM-208: the five groups cut out of them and of b and d (k, l,
+    m, n, o) are too; b and d, and only they, start with the install of their
+    first test (``FIRST``), and a has none."""
+    assert set("cefghijklmno") == groups.NEEDS_BOX
     assert {"a", "b", "d"}.isdisjoint(groups.NEEDS_BOX)
+    group = dict(groups.GROUPS)
+    assert {group[first] for first in groups.FIRST} == {"b", "d"}
+    # every group is one of the three kinds: a, its own install, a fixture's
+    assert set(groups.ALL) == {"a"} | {"b", "d"} | groups.NEEDS_BOX

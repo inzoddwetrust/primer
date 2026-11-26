@@ -34,8 +34,9 @@ name: tier3
 # that needs the blank installed gets it from a fixture. A red group does not
 # stop the others (fail-fast: false): one red hides no state of another. Tier
 # 3 is green when every group is. A run lasts as long as its longest group: the
-# groups are cut so that none takes more than 10 minutes (DM-162: ten groups,
-# each install-bound group with its own install).
+# groups are cut so that none takes more than 10 minutes by the sum of the
+# worst its preparation, its install and its tests took in three full runs
+# (DM-208: fifteen groups, each install-bound group with its own install).
 
 # A push runs the groups its files touch (DM-125): the job plan maps the files
 # between the push's before and its commit to groups (tier3/groups.py,

@@ -5450,8 +5450,8 @@ echo "update exit: $?"
 def test_tier3_a_command_runs_and_a_busy_box_names_it(
     tmp_path: Path, mirror: Path
 ) -> None:
-    """DM-138, in group ``d`` before the test of the journals, on the box
-    the probe of DM-59 left: ``pridem --json --command c-138 update`` -- the
+    """DM-138, in group ``o`` (DM-208: out of ``d``), on the box the test
+    before it left: ``pridem --json --command c-138 update`` -- the
     call of the agent -- waits in ``fetch_root`` on a git hook. Meanwhile
     ``pridem --json --command c-139 status`` is refused: exit 1, on stdout
     the object ``box-busy`` naming the run of the update (its journal), verb
@@ -5459,7 +5459,7 @@ def test_tier3_a_command_runs_and_a_busy_box_names_it(
     refused status. The update then ends: its verdict and its journal's header
     carry ``c-138``. Measured into the run's output first (par0 14.3): the
     scene's lines, the refusal, the verdict."""
-    assert (OPT / "current").is_symlink(), "the probe of DM-59 installs first"
+    assert (OPT / "current").is_symlink(), "the group's box is installed"
     bare = OPT / "git"
     work = tmp_path / "dm138"
     hooks = work / "hooks"
