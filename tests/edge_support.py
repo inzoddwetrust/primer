@@ -3,6 +3,9 @@
 (DM-17)."""
 
 import json
+import socket
+import ssl
+import threading
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from itertools import count
@@ -23,6 +26,7 @@ from pridem.steps.passport import Fetched
 DOMAINS = {"frontend": "blank.example.org", "api": "api.blank.example.org"}
 NOW = datetime(2026, 11, 1, tzinfo=UTC)
 CONTAINER = "edge0"
+CA_NAME = "Invented Test CA"
 
 
 def product(
@@ -129,8 +133,12 @@ def self_signed_pair(
     return cert.read_text(), key.read_text()
 
 
-def issued_pair(tmp: Path, names: Sequence[str]) -> tuple[str, str]:
-    """A leaf signed by a throwaway CA: what certbot leaves, issuer != subject."""
+def issued_pair(
+    tmp: Path, names: Sequence[str], *, days: int = 80, subject: str | None = None
+) -> tuple[str, str]:
+    """A leaf signed by a throwaway CA: what certbot leaves, issuer != subject.
+    ``subject`` -- the leaf's CN; the CA's own (``CA_NAME``) makes a leaf whose
+    issuer and subject read the same and that does not sign itself (DM-185)."""
     ca_key, ca_crt = tmp / "ca.key", tmp / "ca.crt"
     openssl(
         "req",
@@ -145,7 +153,7 @@ def issued_pair(tmp: Path, names: Sequence[str]) -> tuple[str, str]:
         "-days",
         "30",
         "-subj",
-        "/CN=Invented Test CA",
+        f"/CN={CA_NAME}",
     )
     key, csr, crt, ext = (
         tmp / "leaf.key",
@@ -163,7 +171,7 @@ def issued_pair(tmp: Path, names: Sequence[str]) -> tuple[str, str]:
         "-out",
         str(csr),
         "-subj",
-        f"/CN={names[0]}",
+        f"/CN={subject or names[0]}",
     )
     ext.write_text("subjectAltName=" + ",".join(f"DNS:{n}" for n in names) + "\n")
     openssl(
@@ -179,20 +187,106 @@ def issued_pair(tmp: Path, names: Sequence[str]) -> tuple[str, str]:
         "-out",
         str(crt),
         "-days",
-        "80",
+        str(days),
         "-extfile",
         str(ext),
     )
     return crt.read_text(), key.read_text()
 
 
-class Mixed(FakeRunner):
-    """``openssl`` runs for real; every other command follows the script."""
+class Edge:
+    """nginx of the box as the TLS steps see it (DM-185): TLS on a port of
+    127.0.0.1 serving the pair it loaded last -- at ``up`` and at each
+    ``reload`` -- never the files as they are: a pair placed and not reloaded
+    is not served. ``lag`` -- handshakes after a reload still answered with
+    the old pair, as nginx's old workers do (measured). A pair that does not
+    load (torn) leaves it answering nothing, as a down nginx."""
 
-    def __init__(self, *calls: FakeCall) -> None:
+    def __init__(self, root: Path, *, lag: int = 0) -> None:
+        self.root = root
+        self.lag = lag
+        self.context: ssl.SSLContext | None = None
+        self._old: ssl.SSLContext | None = None
+        self._left = 0
+        self._lock = threading.Lock()
+        self.reloads = 0
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.sock.settimeout(0.2)
+        self.port: int = self.sock.getsockname()[1]
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _load(self) -> ssl.SSLContext | None:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            context.load_cert_chain(
+                self.root / "opt/pridem/edge/certs/fullchain.pem",
+                self.root / "opt/pridem/edge/certs/privkey.pem",
+            )
+        except (OSError, ssl.SSLError):
+            return None
+        return context
+
+    def up(self) -> None:
+        with self._lock:
+            self.context = self._load()
+
+    def reload(self) -> None:
+        with self._lock:
+            self._old, self.context = self.context, self._load()
+            self._left = self.lag
+            self.reloads += 1
+
+    def _pick(self) -> ssl.SSLContext | None:
+        with self._lock:
+            if self._left > 0:
+                self._left -= 1
+                return self._old
+            return self.context
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            context = self._pick()
+            with conn:
+                if context is None:
+                    continue
+                conn.settimeout(5)
+                try:
+                    with context.wrap_socket(conn, server_side=True) as tls:
+                        tls.recv(1)  # until the client closes
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(5)
+        self.sock.close()
+
+    def __enter__(self) -> "Edge":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+class Mixed(FakeRunner):
+    """``openssl`` runs for real; every other command follows the script.
+    ``edge`` -- the scripted ``nginx -s reload`` reloads it (DM-185)."""
+
+    def __init__(self, *calls: FakeCall, edge: Edge | None = None) -> None:
         super().__init__(*calls)
         self.argvs: list[tuple[str, ...]] = []
         self._real = SubprocessRunner()
+        self.edge = edge
 
     def run(
         self,
@@ -209,9 +303,12 @@ class Mixed(FakeRunner):
             return self._real.run(
                 argv, expect=expect, timeout=timeout, cwd=cwd, env=env, on_line=on_line
             )
-        return super().run(
+        result = super().run(
             argv, expect=expect, timeout=timeout, cwd=cwd, env=env, on_line=on_line
         )
+        if self.edge is not None and tuple(argv[-3:]) == ("nginx", "-s", "reload"):
+            self.edge.reload()
+        return result
 
 
 def stdout(*lines: str) -> tuple[tuple[Stream, str], ...]:

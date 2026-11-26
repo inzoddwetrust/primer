@@ -4,11 +4,13 @@ the machine the actor. The file system root is the test's directory
 (``fs_root``), the box root ``<fs_root>/opt/pridem``.
 """
 
+import functools
 import io
 import json
 from pathlib import Path
 
-from edge_support import DOMAINS, Mixed, passport, self_signed_pair
+import pytest
+from edge_support import DOMAINS, Edge, Mixed, passport, self_signed_pair
 from env_support import box as passport_box
 from env_support import passport_data
 
@@ -17,7 +19,8 @@ from pridem.report.schema import Verdict
 from pridem.runner import FakeCall, FakeRunner, Runner, Stream
 from pridem.state import Box
 from pridem.steps.passport import PASSPORT_COPY
-from pridem.steps.ssl import cert_path, key_path
+from pridem.steps.ssl import SslRenew, cert_path, file_fingerprint, key_path
+from pridem.verbs import ssl as ssl_verb
 
 DF = ("docker", "system", "df", "--format", "{{json .}}")
 CONTAINERS = ("docker", "container", "ls", "--all", "--quiet", "--no-trunc")
@@ -135,17 +138,28 @@ def test_gc_without_a_passport_removes_nothing_with_its_code(tmp_path: Path) -> 
     assert "passport_version" not in verdict.model_dump_json()
 
 
-def test_ssl_renew_on_a_self_signed_box(tmp_path: Path) -> None:
+def test_ssl_renew_on_a_self_signed_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Changed by DM-107 (the console for a person, the gate): the run ends with
     its closing -- ``<verb>: done in ...`` -- not the summary line of contract 2
-    section 4; what the test holds is the same."""
+    section 4; what the test holds is the same.
+
+    Changed by DM-185: ``ssl renew`` reads what nginx serves on the box -- an
+    ``Edge`` on a port of localhost stands for nginx, given to the step the
+    verb builds; nothing else of the verb is changed."""
     root, _ = passport(tmp_path, ssl="self-signed")
     cert, key = self_signed_pair(tmp_path, list(DOMAINS.values()))
     cert_path(root).parent.mkdir(parents=True)
     cert_path(root).write_text(cert)
     key_path(root).write_text(key)
     key_path(root).chmod(0o600)
-    with Mixed() as runner:
+    edge = Edge(root)
+    edge.up()
+    monkeypatch.setattr(
+        ssl_verb, "SslRenew", functools.partial(SslRenew, port=edge.port)
+    )
+    with edge, Mixed() as runner:
         code, out, err = cli(["--timer", "ssl", "renew"], root, runner)
     assert (code, err) == (0, "")
     assert "ssl renew: done in " in out
@@ -154,6 +168,7 @@ def test_ssl_renew_on_a_self_signed_box(tmp_path: Path) -> None:
     [step] = verdict.steps
     assert (step.stack, step.name) == ("pridem-edge", "ssl_renew")
     assert step.verify is not None and step.verify["mode"] == "self-signed"
+    assert step.verify["served"] == file_fingerprint(root)  # what nginx serves
 
 
 def test_ssl_takes_renew_and_nothing_else(tmp_path: Path) -> None:

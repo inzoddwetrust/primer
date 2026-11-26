@@ -58,7 +58,7 @@ from pridem.steps.compose import ComposeStack
 from pridem.steps.destroy import machine_stacks
 from pridem.steps.edge import certs_dir
 from pridem.steps.gc import UnreadableOutput, docker_size, reclaimable_size
-from pridem.steps.ssl import CERT_ARGS, RENEW_BEFORE, read_cert
+from pridem.steps.ssl import CERT_ARGS, RENEW_BEFORE, read_cert, signs_itself
 from pridem.verbs.base import Context, NoArgs, Verb
 from pridem.verbs.run import read_copy
 
@@ -323,7 +323,7 @@ def _ssl(ctx: Context, passport: Passport | None) -> SslPart | Unmeasured:
     return SslPart(
         mode=mode,
         expires=expires.strftime(STAMP),
-        self_signed=bool(facts["self_signed"]),
+        self_signed=signs_itself(cert),  # its own key verifies it (DM-185)
         renews_from=(
             Unmeasured(unmeasured="renewed-by-passport")
             if mode == "provided"

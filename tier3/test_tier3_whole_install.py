@@ -278,6 +278,8 @@ def _passport(
     params: dict[str, dict[str, str]] | None = None,
     asked: dict[str, dict[str, str]] | None = None,
     cache_budget: str = "3G",
+    ssl: str = "self-signed",
+    tls: tuple[str, str] | None = None,
 ) -> Path:
     """A passport of the box; the blank declares ``languages: [en, ru]`` since
     ``BLANK_COMMIT`` 2e7580f, and an instance names its own (DM-46)."""
@@ -295,7 +297,8 @@ def _passport(
         "params": params or {},
         **({"options": options} if options is not None else {}),
         "policies": {
-            "ssl": "self-signed",
+            "ssl": ssl,
+            **({"tls": {"cert": tls[0], "key": tls[1]}} if tls is not None else {}),
             "gc": {
                 "keep_releases": 2,
                 "builder_cache_budget": cache_budget,
@@ -5620,3 +5623,210 @@ def test_probe_DM_147_sse_arrives_in_parts_through_the_path(
     times = legs["outside"]["times"]
     assert isinstance(times, list) and len(times) == SSE_EVENTS, legs
     assert times[0] >= times[-1] - 0.5 and times[-1] >= 3, legs
+
+
+# --- DM-185: what nginx serves is the file; renew leaves a CA's certificate ----
+
+TLS_NAMES = (FRONTEND, API)
+TLS_DIR = Path("/opt/pridem/edge/certs")
+PASSPORT_COPY_FILE = Path("/opt/pridem/passport.yaml")
+
+
+def _tls_self_signed(tmp: Path, name: str, days: int) -> tuple[str, str]:
+    """A self-signed pair over the box's names, ``days`` long."""
+    key, crt = tmp / f"{name}.key", tmp / f"{name}.crt"
+    _run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(key), "-out", str(crt), "-days", str(days),
+         "-subj", f"/CN={name}",
+         "-addext", "subjectAltName=" + ",".join(f"DNS:{n}" for n in TLS_NAMES)],
+    )  # fmt: skip
+    return crt.read_text(), key.read_text()
+
+
+def _tls_ca_issued(tmp: Path, days: int) -> tuple[str, str]:
+    """A leaf a throwaway CA signed over the box's names: issuer != subject."""
+    ca_key, ca_crt = tmp / "ca.key", tmp / "ca.crt"
+    _run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(ca_key), "-out", str(ca_crt), "-days", "30",
+         "-subj", "/CN=DM-185 Test CA"],
+    )  # fmt: skip
+    key, csr, crt, ext = (tmp / n for n in ("leaf.key", "leaf.csr", "leaf.crt", "x"))
+    _run(
+        ["openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key),
+         "-out", str(csr), "-subj", f"/CN={FRONTEND}"],
+    )  # fmt: skip
+    ext.write_text("subjectAltName=" + ",".join(f"DNS:{n}" for n in TLS_NAMES) + "\n")
+    _run(
+        ["openssl", "x509", "-req", "-in", str(csr), "-CA", str(ca_crt),
+         "-CAkey", str(ca_key), "-CAcreateserial", "-out", str(crt),
+         "-days", str(days), "-extfile", str(ext)],
+    )  # fmt: skip
+    return crt.read_text(), key.read_text()
+
+
+def _tls_place(cert: str, key: str) -> None:
+    """The pair into nginx's files, as an older machine left it: no reload."""
+    (TLS_DIR / "privkey.pem").write_text(key)
+    (TLS_DIR / "privkey.pem").chmod(0o600)
+    (TLS_DIR / "fullchain.pem").write_text(cert)
+
+
+def _tls_reload() -> None:
+    from pridem.steps.edge import argv as edge_argv
+
+    _run(edge_argv(Path("/"), "exec", "-T", "nginx", "nginx", "-s", "reload"))
+
+
+def _tls_seen(seconds: float) -> list[tuple[float, str | None]]:
+    """What nginx serves on 443 for the box's name, each change, for
+    ``seconds``: the measure of the old workers after a reload."""
+    from pridem.steps.ssl import served_once
+
+    seen: list[tuple[float, str | None]] = []
+    started = time.monotonic()
+    while time.monotonic() - started < seconds:
+        got = served_once(FRONTEND, 443)
+        if not seen or seen[-1][1] != got:
+            seen.append((round(time.monotonic() - started, 3), got and got[:12]))
+        time.sleep(0.01)
+    return seen
+
+
+def _tls_step(verdict: Verdict, name: str) -> dict[str, object]:
+    [step] = [s for s in verdict.steps if s.name == name]
+    return {"status": step.status, "reason": step.reason, "verify": step.verify}
+
+
+def test_probe_DM_185_served_is_the_file_after_renew(tmp_path: Path) -> None:
+    """DM-185, group i, on its self-signed box: a self-signed pair of ten days
+    is what nginx serves; ``ssl renew`` signs it again, reloads nginx, and
+    reads back from 443 that nginx serves the new file -- not the old.
+
+    Measured into the run's log first (par0 14.3): that 443 answers TLS from
+    the runner's host; a pair written without a reload is not served (B6);
+    the sequence of what nginx serves for 1 s after ``nginx -s reload`` (the
+    old workers, measured on nginx 1.24 of the sandbox)."""
+    from pridem.steps.ssl import file_fingerprint, served_once
+
+    assert (OPT / "current").is_symlink(), "the group's box is installed"
+    root = Path("/")
+    measured: dict[str, object] = {"443 before": served_once(FRONTEND, 443)}
+    measured["file before"] = file_fingerprint(root)
+    old = _tls_self_signed(tmp_path, "ten-days", 10)
+    _tls_place(*old)
+    measured["written, not reloaded"] = served_once(FRONTEND, 443)
+    measured["the file now"] = file_fingerprint(root)
+    _tls_reload()
+    measured["after a reload, 1 s"] = _tls_seen(1.0)
+    ten_days = file_fingerprint(root)
+    verdict, printed = _verdict_of("ssl", "renew")
+    renew = _tls_step(verdict, "ssl_renew")
+    measured["renew"] = renew
+    measured["served after"] = served_once(FRONTEND, 443)
+    warnings.warn(f"DM-185 renew measure: {measured}", stacklevel=1)
+    assert measured["443 before"] is not None, "443 answers TLS on the host"
+    assert measured["written, not reloaded"] == measured["file before"]  # B6
+    assert verdict.result == "green", printed
+    fact = renew["verify"]
+    assert isinstance(fact, dict)
+    assert fact["served"] == file_fingerprint(root) != ten_days
+    assert fact["renew_due"] is False and fact["self_signed"] is True
+    assert served_once(FRONTEND, 443) == file_fingerprint(root)
+
+
+def test_probe_DM_185_served_is_the_file_after_provided_changes(
+    tmp_path: Path,
+) -> None:
+    """DM-185, group i: the passport switches the box to ``provided`` with a
+    pair A -- ``update``: nginx serves A; then a pair B -- ``update``: nginx
+    serves B, reloaded by ``tls_files`` though nginx's config did not change
+    (B6). The pair: the files are the passport's each time."""
+    from pridem.steps.ssl import file_fingerprint, served_once
+
+    root = Path("/")
+    a = _tls_self_signed(tmp_path, "pair-a", 90)
+    b = _tls_self_signed(tmp_path, "pair-b", 90)
+    seen: dict[str, object] = {}
+    for version, (cert, key) in ((185, a), (186, b)):
+        passport = _passport(tmp_path, version=version, ssl="provided", tls=(cert, key))
+        verdict, printed = _install(passport, "update")
+        seen[f"v{version}"] = {
+            "result": verdict.result,
+            "tls_files": _tls_step(verdict, "tls_files"),
+            "served": served_once(FRONTEND, 443),
+            "file": file_fingerprint(root),
+        }
+        warnings.warn(f"DM-185 provided measure: {seen}", stacklevel=1)
+        assert verdict.result == "green", printed
+        assert (TLS_DIR / "fullchain.pem").read_text() == cert
+        assert served_once(FRONTEND, 443) == file_fingerprint(root)
+    assert seen["v185"] != seen["v186"]
+
+
+def test_probe_DM_185_a_bad_provided_pair_leaves_the_working_one(
+    tmp_path: Path,
+) -> None:
+    """DM-185, group i, after the box went ``provided``: a passport whose
+    certificate is not of its key -- ``update`` red at
+    ``tls_files:provided-pair-mismatch``; the pair on disk and what nginx
+    serves are what they were (B29)."""
+    from pridem.steps.ssl import served_once
+
+    before = (
+        (TLS_DIR / "fullchain.pem").read_text(),
+        (TLS_DIR / "privkey.pem").read_text(),
+    )
+    served = served_once(FRONTEND, 443)
+    cert, _ = _tls_self_signed(tmp_path, "other", 90)
+    passport = _passport(tmp_path, version=187, ssl="provided", tls=(cert, before[1]))
+    verdict, printed = _install(passport, "update")
+    files = _tls_step(verdict, "tls_files")
+    warnings.warn(f"DM-185 bad pair measure: {files}, {verdict.result}", stacklevel=1)
+    assert verdict.result == "red", printed
+    reason = files["reason"]
+    assert reason is not None and reason.code == "tls_files:provided-pair-mismatch"  # type: ignore[attr-defined]
+    after = (
+        (TLS_DIR / "fullchain.pem").read_text(),
+        (TLS_DIR / "privkey.pem").read_text(),
+    )
+    assert after == before
+    assert served_once(FRONTEND, 443) == served
+
+
+def test_probe_DM_185_renew_leaves_a_ca_certificate(tmp_path: Path) -> None:
+    """DM-185, group i, the last of it: the box's copy of the passport says
+    ``letsencrypt``, certbot has no lineage, and nginx serves a certificate a
+    CA issued with ten days left -- ``ssl renew`` does not sign over it (B7):
+    exit 2, ``no-lineage``; the file and what nginx serves are what they
+    were. Measured first: the mode ``ssl status`` reads from the copy."""
+    from pridem.steps.ssl import file_fingerprint, served_once
+
+    root = Path("/")
+    copy = yaml.safe_load(PASSPORT_COPY_FILE.read_text(encoding="utf-8"))
+    copy["policies"]["ssl"] = "letsencrypt"
+    copy["policies"].pop("tls", None)
+    PASSPORT_COPY_FILE.write_text(yaml.safe_dump(copy, sort_keys=False))
+    PASSPORT_COPY_FILE.chmod(0o600)
+    assert not Path("/opt/pridem/edge/letsencrypt/live/pridem").exists()
+    cert, key = _tls_ca_issued(tmp_path, 10)
+    _tls_place(cert, key)
+    _tls_reload()
+    _tls_seen(1.0)  # the old workers gone
+    served = served_once(FRONTEND, 443)
+    code, out, _ = _pridem("--json", "ssl", "status")
+    verdict, printed = _verdict_of("ssl", "renew")
+    measured = {
+        "status": out,
+        "code": code,
+        "renew": _tls_step(verdict, "ssl_renew"),
+        "incomplete": verdict.report.incomplete,
+    }
+    warnings.warn(f"DM-185 CA measure: {measured}", stacklevel=1)
+    warnings.warn(f"group time so far: {_group_elapsed_s():.0f} s", stacklevel=1)
+    assert verdict.result == "incomplete", printed
+    [entry] = verdict.report.incomplete or []
+    assert entry.code == "ssl_renew:no-lineage", entry
+    assert (TLS_DIR / "fullchain.pem").read_text() == cert
+    assert served_once(FRONTEND, 443) == served == file_fingerprint(root)

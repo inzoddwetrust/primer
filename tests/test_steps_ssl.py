@@ -1,6 +1,7 @@
 """``tls_files`` and ``ssl`` (DM-17), ``ssl_renew`` (DM-20): the four modes of
 ``policies.ssl``. ``openssl`` runs for real; docker and the network follow a
-strict script."""
+strict script; nginx is ``Edge``, a TLS server on localhost that serves the
+pair it loaded at its start and at each scripted reload (DM-185)."""
 
 import json
 import os
@@ -12,6 +13,7 @@ import pytest
 from edge_support import (
     DOMAINS,
     NOW,
+    Edge,
     Mixed,
     exec_call,
     issued_pair,
@@ -22,11 +24,18 @@ from edge_support import (
     stdout,
 )
 
-from pridem.events import Code, Secrets, strings
+from pridem.events import Code, Json, Secrets, strings
 from pridem.interrupt import Interrupt
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, SubprocessRunner
-from pridem.steps.base import CheckResult, Step, StepContext, StepFailed
+from pridem.steps.base import (
+    CheckResult,
+    Step,
+    StepContext,
+    StepFailed,
+    Verified,
+    local_code,
+)
 from pridem.steps.edge import (
     CERTBOT_IMAGE,
     argv,
@@ -41,25 +50,54 @@ from pridem.steps.ssl import Ssl, SslRenew, TlsFiles, cert_path, key_path
 NAMES = list(DOMAINS.values())
 
 
+class NginxUp(Step):
+    """The ``nginx`` step between ``tls_files`` and ``ssl`` as the TLS steps
+    see it: nginx down -- it starts and reads the pair on disk."""
+
+    name = "nginx"
+    title = "Start nginx"
+    order = 2
+    modes = frozenset({"install", "deploy", "reinstall"})
+    codes = {"up": "start nginx"}
+
+    def __init__(self, edge: Edge) -> None:
+        self.edge = edge
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        if self.edge.context is not None:
+            return CheckResult(False)
+        return CheckResult(True, local_code("up"))
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        self.edge.up()
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        return Verified({"up": self.edge.context is not None})
+
+
 def ladder(
     root: Path,
     fetched: Fetched,
     secrets: Secrets | None = None,
     *,
+    edge: Edge,
     clock: datetime | None = NOW,
 ) -> list[Step]:
     """``clock`` -- the steps' ``now``: ``NOW`` of the tests, or ``None`` for
     the real clock -- for a test whose certificate is made by ``openssl
-    -days`` to end a number of days from today."""
+    -days`` to end a number of days from today. ``edge`` -- nginx: started
+    between the two steps when it is down."""
     made = product()
     return [
-        TlsFiles(made, fetched=fetched, root=root, now=clock),
+        TlsFiles(made, fetched=fetched, root=root, now=clock, port=edge.port),
+        NginxUp(edge),
         Ssl(
             made,
             fetched=fetched,
             secrets=secrets or Secrets(()),
             root=root,
             now=clock,
+            port=edge.port,
         ),
     ]
 
@@ -69,17 +107,17 @@ def ladder(
 
 def test_probe_DM_17_defer_gives_exit_2_with_incomplete_ssl(tmp_path: Path) -> None:
     root, fetched = passport(tmp_path, ssl="defer")
-    with Mixed() as runner:  # openssl only: no certbot, no docker
-        outcome, _ = run(ladder(root, fetched), runner)
+    with Edge(root) as edge, Mixed() as runner:  # openssl only: no certbot
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.INCOMPLETE
     [entry] = outcome.incomplete
     assert (entry.what, entry.reason) == ("ssl", Code("ssl:deferred"))
-    assert outcome.steps[1].verify["self_signed"] is True
+    assert outcome.steps[2].verify["self_signed"] is True
     assert mode_of(key_path(root)) == oct(0o600)
     # the pair: self-signed is the same certificate and exit 0
     root, fetched = passport(tmp_path / "s", ssl="self-signed")
-    with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+    with Edge(root) as edge, Mixed() as runner:
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.OK and outcome.incomplete == ()
 
 
@@ -88,8 +126,8 @@ def test_the_certificate_is_0644_and_its_key_0600(tmp_path: Path) -> None:
     certificate world-readable, its key private -- not one mode for both."""
     cert, key = self_signed_pair(tmp_path, [*NAMES])
     root, fetched = passport(tmp_path, ssl="provided", tls=(cert, key))
-    with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+    with Edge(root) as edge, Mixed() as runner:
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert (mode_of(cert_path(root)), mode_of(key_path(root))) == (
         oct(0o644),
@@ -103,8 +141,8 @@ def test_probe_DM_17_provided_cert_installed_without_certbot_call(
     cert, key = self_signed_pair(tmp_path, ["*.preview.example.org", *NAMES])
     root, fetched = passport(tmp_path, role="preview", ssl="provided", tls=(cert, key))
     runner = Mixed()
-    with runner:  # no docker at all: certbot is never called
-        outcome, sink = run(ladder(root, fetched), runner)
+    with Edge(root) as edge, runner:  # no docker at all: certbot is never called
+        outcome, sink = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert cert_path(root).read_text() == cert and key_path(root).read_text() == key
     assert mode_of(key_path(root)) == oct(0o600)
@@ -123,12 +161,11 @@ def test_probe_DM_17_provided_cert_installed_without_certbot_call(
     (live / "fullchain.pem").write_text(issued_cert)
     (live / "privkey.pem").write_text(issued_key)
     calls = [*_dns_green(), *_issue(root)]
-    runner = Mixed(*calls)
-    with runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+    with Edge(root) as edge, Mixed(*calls, edge=edge) as runner:
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert any("certonly" in a for a in runner.argvs)
-    assert outcome.steps[1].verify["self_signed"] is False
+    assert outcome.steps[2].verify["self_signed"] is False
 
 
 # --- letsencrypt ----------------------------------------------------------------
@@ -182,9 +219,9 @@ def test_letsencrypt_with_dns_elsewhere_is_red_before_certbot(tmp_path: Path) ->
     calls[-1] = FakeCall(
         ("getent", "ahostsv4", NAMES[-1]), lines=stdout("198.51.100.1 x")
     )
-    with Mixed(*calls) as runner:  # certbot is not in the script
-        outcome, _ = run(ladder(root, fetched), runner)
-    assert outcome.steps[1].reason == Code(
+    with Edge(root) as edge, Mixed(*calls) as runner:  # certbot is not scripted
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
+    assert outcome.steps[2].reason == Code(
         "ssl:dns-not-ready", {"domains": [NAMES[-1]]}
     )
 
@@ -194,11 +231,11 @@ def test_letsencrypt_with_dns_elsewhere_is_red_before_certbot(tmp_path: Path) ->
 
 def test_a_key_that_is_not_0600_is_refused_not_remoded(tmp_path: Path) -> None:
     root, fetched = passport(tmp_path)
-    with Mixed() as runner:
-        run(ladder(root, fetched), runner)
-    key_path(root).chmod(0o644)
-    with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+    edge = Edge(root)
+    with edge, Mixed() as runner:
+        run(ladder(root, fetched, edge=edge), runner)
+        key_path(root).chmod(0o644)
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.steps[0].reason is not None
     assert outcome.steps[0].reason.code == "tls_files:key-mode"
     assert mode_of(key_path(root)) == oct(0o644)
@@ -215,28 +252,34 @@ def test_a_fresh_self_signed_pair_is_kept_an_expiring_one_is_made_again(
     was red for good. A certificate made by the real clock is judged by the
     real clock."""
     root, fetched = passport(tmp_path)
-    with Mixed() as runner:
-        run(ladder(root, fetched, clock=None), runner)
-    first = cert_path(root).read_text()
-    runner = Mixed()
-    with runner:
-        run(ladder(root, fetched, clock=None), runner)
-    assert cert_path(root).read_text() == first
-    assert not [a for a in runner.argvs if "req" in a]
-    cert, key = self_signed_pair(tmp_path, NAMES, days=10)
-    cert_path(root).write_text(cert)
-    key_path(root).write_text(key)
-    with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched, clock=None), runner)
-    assert outcome.code is ExitCode.OK
+    edge = Edge(root)
+    with edge:
+        with Mixed() as runner:
+            run(ladder(root, fetched, edge=edge, clock=None), runner)
+        first = cert_path(root).read_text()
+        runner = Mixed()
+        with runner:
+            run(ladder(root, fetched, edge=edge, clock=None), runner)
+        assert cert_path(root).read_text() == first
+        assert not [a for a in runner.argvs if "req" in a]
+        cert, key = self_signed_pair(tmp_path, NAMES, days=10)
+        cert_path(root).write_text(cert)
+        key_path(root).write_text(key)
+        reload = [
+            exec_call(root, "nginx", "-t"),
+            exec_call(root, "nginx", "-s", "reload"),
+        ]
+        with Mixed(*reload, edge=edge) as runner:  # nginx runs: reloaded (DM-185)
+            outcome, _ = run(ladder(root, fetched, edge=edge, clock=None), runner)
+    assert outcome.code is ExitCode.OK, outcome.steps
     assert cert_path(root).read_text() not in (first, cert)
 
 
 def test_status_reports_expiry_and_key_mode(tmp_path: Path) -> None:
     root, fetched = passport(tmp_path)
-    with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched), runner)
-    fact = outcome.steps[1].verify
+    with Edge(root) as edge, Mixed() as runner:
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
+    fact = outcome.steps[2].verify
     assert fact["mode"] == "self-signed"
     assert str(fact["cert_expires"]).endswith("Z")
     assert fact["domains"] == sorted(NAMES)
@@ -263,9 +306,8 @@ def test_probe_DM_49_certbot_image_is_pinned_by_digest(tmp_path: Path) -> None:
     live.mkdir(parents=True)
     (live / "fullchain.pem").write_text(issued_cert)
     (live / "privkey.pem").write_text(issued_key)
-    runner = Mixed(*_dns_green(), *_issue(root))
-    with runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+    with Edge(root) as edge, Mixed(*_dns_green(), *_issue(root), edge=edge) as runner:
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert any("certonly" in argv for argv in runner.argvs)
 
@@ -292,17 +334,18 @@ def test_ssl_renew_in_letsencrypt_runs_certbot_copies_and_reloads(
     (live / "privkey.pem").write_text(issued_key)
     renew = argv(root, "run", "--rm", "certbot", "renew", "--webroot", "-w",
                   "/var/www/acme")  # fmt: skip
-    secrets = Secrets(())
-    with Mixed(
-        FakeCall(tuple(renew)),
-        exec_call(root, "nginx", "-t"),
-        exec_call(root, "nginx", "-s", "reload"),
-    ) as runner:
-        outcome, _ = run(
-            [SslRenew(fetched=fetched, secrets=secrets, root=root)],
-            runner,
-            mode="renew",
-        )
+    edge = Edge(root)
+    edge.up()  # nginx serves the placed pair
+    with (
+        edge,
+        Mixed(
+            FakeCall(tuple(renew)),
+            exec_call(root, "nginx", "-t"),
+            exec_call(root, "nginx", "-s", "reload"),
+            edge=edge,
+        ) as runner,
+    ):
+        outcome, _ = run([_renew(root, fetched, edge=edge)], runner, mode="renew")
     assert outcome.code is ExitCode.OK, outcome.steps
     assert cert_path(root).read_text() == issued_cert
     verify = outcome.steps[0].verify
@@ -318,12 +361,10 @@ def test_ssl_renew_outside_letsencrypt_never_calls_certbot(tmp_path: Path) -> No
         root, fetched = passport(tmp_path / mode, ssl=mode)
         cert, key = self_signed_pair(tmp_path, NAMES)
         _placed(root, cert, key)
-        with Mixed() as runner:  # openssl only: no docker, no certbot
-            outcome, _ = run(
-                [SslRenew(fetched=fetched, secrets=Secrets(()), root=root)],
-                runner,
-                mode="renew",
-            )
+        edge = Edge(root)
+        edge.up()
+        with edge, Mixed() as runner:  # openssl only: no docker, no certbot
+            outcome, _ = run([_renew(root, fetched, edge=edge)], runner, mode="renew")
         assert outcome.code is ExitCode.OK, outcome.steps
         assert not [a for a in runner.argvs if a[0] != "openssl"]
         verify = outcome.steps[0].verify
@@ -347,8 +388,17 @@ def test_ssl_renew_without_a_passport_refuses(tmp_path: Path) -> None:
 def test_a_fresh_certificate_asks_no_echo_service_and_no_dns(tmp_path: Path) -> None:
     root, fetched = passport(tmp_path, ssl="letsencrypt")
     _placed(root, *issued_pair(tmp_path, NAMES))
-    step = Ssl(product(), fetched=fetched, secrets=Secrets(()), root=root, now=NOW)
-    with Mixed() as runner:  # openssl only: no curl, no getent, no docker
+    edge = Edge(root)
+    edge.up()
+    step = Ssl(
+        product(),
+        fetched=fetched,
+        secrets=Secrets(()),
+        root=root,
+        now=NOW,
+        port=edge.port,
+    )
+    with edge, Mixed() as runner:  # openssl only: no curl, no getent, no docker
         outcome, _ = run([step], runner, mode="deploy")
     assert outcome.code is ExitCode.OK, outcome.steps
     assert {argv[0] for argv in runner.argvs} == {"openssl"}
@@ -366,8 +416,12 @@ def test_a_fresh_certificate_asks_no_echo_service_and_no_dns(tmp_path: Path) -> 
 # --- DM-80: the end of the certificate, a torn pair, renew without an issue ----
 
 
-def _renew(root: Path, fetched: Fetched, now: datetime | None = None) -> SslRenew:
-    return SslRenew(fetched=fetched, secrets=Secrets(()), root=root, now=now)
+def _renew(
+    root: Path, fetched: Fetched, now: datetime | None = None, *, edge: Edge
+) -> SslRenew:
+    return SslRenew(
+        fetched=fetched, secrets=Secrets(()), root=root, now=now, port=edge.port
+    )
 
 
 def _ends(root: Path) -> datetime:
@@ -391,15 +445,15 @@ def test_probe_DM_80_expired_certificate_is_red_on_renew(tmp_path: Path) -> None
     root, fetched = passport(tmp_path, ssl="provided", tls=(cert, key))
     _placed(root, cert, key)
     ends = _ends(root)
-    with Mixed() as runner:  # openssl only: provided renews nothing
-        outcome, _ = run(
-            [_renew(root, fetched, ends + timedelta(seconds=1))], runner, mode="renew"
+    edge = Edge(root)
+    edge.up()
+    with edge, Mixed() as runner:  # openssl only: provided renews nothing
+        late = _renew(root, fetched, ends + timedelta(seconds=1), edge=edge)
+        outcome, _ = run([late], runner, mode="renew")
+        assert outcome.steps[0].reason == Code(
+            "ssl_renew:expired", {"cert_expires": ends.strftime("%Y-%m-%dT%H:%M:%SZ")}
         )
-    assert outcome.steps[0].reason == Code(
-        "ssl_renew:expired", {"cert_expires": ends.strftime("%Y-%m-%dT%H:%M:%SZ")}
-    )
-    with Mixed() as runner:
-        outcome, _ = run([_renew(root, fetched, NOW)], runner, mode="renew")
+        outcome, _ = run([_renew(root, fetched, NOW, edge=edge)], runner, mode="renew")
     assert outcome.code is ExitCode.OK, outcome.steps
     assert outcome.steps[0].verify["renew_due"] is False
 
@@ -410,6 +464,8 @@ def test_a_week_left_is_red_and_a_month_is_a_fact(tmp_path: Path) -> None:
     root, fetched = passport(tmp_path, ssl="provided", tls=(cert, key))
     _placed(root, cert, key)
     ends = _ends(root)
+    edge = Edge(root)
+    edge.up()
     cases = {
         timedelta(days=7) - timedelta(seconds=1): "expiring",
         timedelta(days=7): True,
@@ -420,7 +476,8 @@ def test_a_week_left_is_red_and_a_month_is_a_fact(tmp_path: Path) -> None:
     }
     for left, judged in cases.items():
         with Mixed() as runner:
-            outcome, _ = run([_renew(root, fetched, ends - left)], runner, mode="renew")
+            renewal = _renew(root, fetched, ends - left, edge=edge)
+            outcome, _ = run([renewal], runner, mode="renew")
         step = outcome.steps[0]
         if isinstance(judged, str):
             assert step.reason is not None and step.reason.code == (
@@ -428,6 +485,7 @@ def test_a_week_left_is_red_and_a_month_is_a_fact(tmp_path: Path) -> None:
             ), (left, step)
         else:
             assert step.verify["renew_due"] is judged, (left, step)
+    edge.close()
 
 
 def test_renew_signs_a_self_signed_pair_again_when_it_is_due(tmp_path: Path) -> None:
@@ -437,10 +495,17 @@ def test_renew_signs_a_self_signed_pair_again_when_it_is_due(tmp_path: Path) -> 
         root, fetched = passport(tmp_path / mode, ssl=mode)
         cert, key = self_signed_pair(tmp_path, NAMES, days=20)
         _placed(root, cert, key)
-        with Mixed(
-            exec_call(root, "nginx", "-t"), exec_call(root, "nginx", "-s", "reload")
-        ) as runner:
-            outcome, _ = run([_renew(root, fetched)], runner, mode="renew")
+        edge = Edge(root)
+        edge.up()
+        with (
+            edge,
+            Mixed(
+                exec_call(root, "nginx", "-t"),
+                exec_call(root, "nginx", "-s", "reload"),
+                edge=edge,
+            ) as runner,
+        ):
+            outcome, _ = run([_renew(root, fetched, edge=edge)], runner, mode="renew")
         assert outcome.code is ExitCode.OK, outcome.steps
         assert cert_path(root).read_text() != cert
         verify = outcome.steps[0].verify
@@ -456,8 +521,10 @@ def test_renew_before_the_issue_calls_no_certbot_and_is_incomplete(
     back and the result says the certificate is not issued yet."""
     root, fetched = passport(tmp_path, ssl="letsencrypt")
     _placed(root, *self_signed_pair(tmp_path, NAMES))
-    with Mixed() as runner:  # openssl only
-        outcome, _ = run([_renew(root, fetched)], runner, mode="renew")
+    edge = Edge(root)
+    edge.up()
+    with edge, Mixed() as runner:  # openssl only
+        outcome, _ = run([_renew(root, fetched, edge=edge)], runner, mode="renew")
     assert outcome.code is ExitCode.INCOMPLETE, outcome.steps
     [entry] = outcome.incomplete
     assert (entry.what, entry.reason) == ("ssl_renew", Code("ssl_renew:not-issued"))
@@ -477,8 +544,10 @@ def test_renew_with_nothing_new_copies_nothing_and_reloads_nothing(
     before = cert_path(root).stat().st_mtime_ns
     renew = argv(root, "run", "--rm", "certbot", "renew", "--webroot", "-w",
                   "/var/www/acme")  # fmt: skip
-    with Mixed(FakeCall(tuple(renew))) as runner:  # no nginx -t, no reload
-        outcome, _ = run([_renew(root, fetched)], runner, mode="renew")
+    edge = Edge(root)
+    edge.up()
+    with edge, Mixed(FakeCall(tuple(renew))) as runner:  # no nginx -t, no reload
+        outcome, _ = run([_renew(root, fetched, edge=edge)], runner, mode="renew")
     assert outcome.code is ExitCode.OK, outcome.steps
     assert cert_path(root).stat().st_mtime_ns == before
 
@@ -492,8 +561,9 @@ def test_a_torn_pair_is_placed_again_and_never_green(tmp_path: Path) -> None:
     cert, _ = self_signed_pair(tmp_path / "a", NAMES)
     _, other_key = self_signed_pair(tmp_path / "b", NAMES)
     _placed(root, cert, other_key)
-    with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+    edge = Edge(root)
+    with edge, Mixed() as runner:  # a torn pair: nginx does not start on it
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert cert_path(root).read_text() != cert  # signed again, a whole pair
     # verify of every step that places the pair refuses a torn one
@@ -502,7 +572,7 @@ def test_a_torn_pair_is_placed_again_and_never_green(tmp_path: Path) -> None:
     for step in (
         TlsFiles(made, fetched=fetched, root=root, now=NOW),
         Ssl(made, fetched=fetched, secrets=Secrets(()), root=root, now=NOW),
-        _renew(root, fetched, NOW),
+        _renew(root, fetched, NOW, edge=edge),
     ):
         with Mixed() as runner:
             ctx = StepContext(
@@ -530,8 +600,8 @@ def test_the_key_is_renamed_before_the_certificate(
     monkeypatch.setattr(os, "replace", spy)
     cert, key = self_signed_pair(tmp_path, NAMES)
     root, fetched = passport(tmp_path, ssl="provided", tls=(cert, key))
-    with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+    with Edge(root) as edge, Mixed() as runner:
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert [n for n in renamed if n.endswith(".pem")] == [
         "privkey.pem",
@@ -548,10 +618,16 @@ def test_renew_signs_a_torn_pair_again_even_when_fresh(tmp_path: Path) -> None:
     cert, _ = self_signed_pair(tmp_path / "a", NAMES)
     _, other_key = self_signed_pair(tmp_path / "b", NAMES)
     _placed(root, cert, other_key)
-    with Mixed(
-        exec_call(root, "nginx", "-t"), exec_call(root, "nginx", "-s", "reload")
-    ) as runner:
-        outcome, _ = run([_renew(root, fetched)], runner, mode="renew")
+    edge = Edge(root)
+    with (
+        edge,
+        Mixed(
+            exec_call(root, "nginx", "-t"),
+            exec_call(root, "nginx", "-s", "reload"),
+            edge=edge,
+        ) as runner,
+    ):
+        outcome, _ = run([_renew(root, fetched, edge=edge)], runner, mode="renew")
     assert outcome.code is ExitCode.OK, outcome.steps
     assert cert_path(root).read_text() != cert
 
@@ -563,16 +639,16 @@ def test_a_certs_directory_found_wider_is_made_0700(tmp_path: Path) -> None:
     root, fetched = passport(tmp_path / "s", ssl="self-signed")
     cert_path(root).parent.mkdir(parents=True)
     cert_path(root).parent.chmod(0o755)
-    with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+    with Edge(root) as edge, Mixed() as runner:
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert mode_of(cert_path(root).parent) == oct(0o700)
     cert, key = self_signed_pair(tmp_path, NAMES)
     root, fetched = passport(tmp_path / "p", ssl="provided", tls=(cert, key))
     cert_path(root).parent.mkdir(parents=True)
     cert_path(root).parent.chmod(0o755)
-    with Mixed() as runner:
-        outcome, _ = run(ladder(root, fetched), runner)
+    with Edge(root) as edge, Mixed() as runner:
+        outcome, _ = run(ladder(root, fetched, edge=edge), runner)
     assert outcome.code is ExitCode.OK, outcome.steps
     assert mode_of(cert_path(root).parent) == oct(0o700)
 
@@ -588,25 +664,39 @@ def test_every_file_of_the_edge_goes_into_a_0700_directory(tmp_path: Path) -> No
 
 
 def test_install_judges_the_end_in_tls_files_and_in_ssl(tmp_path: Path) -> None:
-    """DM-80: one ``expiry`` for the three steps: the steps of ``install``
-    refuse a certificate with under a week left, as ``ssl renew`` does."""
+    """DM-80: one ``expiry`` for the steps: ``ssl`` refuses a certificate with
+    under a week left, as ``ssl renew`` does.
+
+    Changed by DM-185 (REVIEW-0006 B8): ``tls_files`` refused it too, and a red
+    ``tls_files`` stops the deploy before anything can renew it. A
+    ``provided`` certificate in its last week is left undone there -- the
+    passport renews it -- ``tls_files:expiring`` in ``incomplete``, not red."""
     cert, key = self_signed_pair(tmp_path, NAMES)
     root, fetched = passport(tmp_path, ssl="provided", tls=(cert, key))
     _placed(root, cert, key)
     ends = _ends(root)
     made = product()
     soon = ends - timedelta(days=1)
-    for step in (
-        TlsFiles(made, fetched=fetched, root=root, now=soon),
-        Ssl(made, fetched=fetched, secrets=Secrets(()), root=root, now=soon),
-    ):
-        with Mixed() as runner:
-            ctx = StepContext(
-                runner, "install", "test", "x", lambda *_: None, Interrupt()
-            )
-            with pytest.raises(StepFailed) as failed:
-                step.verify(ctx, CheckResult(False))
-        assert failed.value.reason.code == "expiring", step.name
+    with Edge(root) as edge, Mixed() as runner:
+        edge.up()
+        ctx = StepContext(runner, "install", "test", "x", lambda *_: None, Interrupt())
+        files = TlsFiles(made, fetched=fetched, root=root, now=soon, port=edge.port)
+        verified = files.verify(ctx, CheckResult(False))
+        issue = Ssl(
+            made,
+            fetched=fetched,
+            secrets=Secrets(()),
+            root=root,
+            now=soon,
+            port=edge.port,
+        )
+        with pytest.raises(StepFailed) as failed:
+            issue.verify(ctx, CheckResult(False))
+    assert failed.value.reason.code == "expiring"
+    assert verified.incomplete == Code(
+        "expiring",
+        {"cert_expires": ends.strftime("%Y-%m-%dT%H:%M:%SZ"), "days_left": 1},
+    )
 
 
 # --- DM-80 FIX: the number of days left is checked, not only the bounds -------
@@ -615,51 +705,68 @@ def test_install_judges_the_end_in_tls_files_and_in_ssl(tmp_path: Path) -> None:
 def test_days_left_is_the_whole_days_to_the_end(tmp_path: Path) -> None:
     """The fact ``days_left`` of a green ``tls_files``, ``ssl`` and ``ssl renew``
     and the parameter ``days_left`` of ``expiring`` are the whole days to the
-    end on known clocks -- a fact is checked by its number (par0 10)."""
+    end on known clocks -- a fact is checked by its number (par0 10).
+
+    Changed by DM-185 (B8): under a week, ``tls_files`` of a ``provided``
+    certificate leaves ``expiring`` undone with the same parameters instead
+    of raising it; ``ssl`` and ``ssl renew`` raise it as before."""
     cert, key = self_signed_pair(tmp_path, NAMES)
     root, fetched = passport(tmp_path, ssl="provided", tls=(cert, key))
     _placed(root, cert, key)
     ends = _ends(root)
     made = product()
-    for left, days in (
-        (timedelta(days=20, hours=1), 20),
-        (timedelta(days=12, hours=23), 12),
-        (timedelta(days=7), 7),
-    ):
-        now = ends - left
-        for step in (
-            TlsFiles(made, fetched=fetched, root=root, now=now),
-            Ssl(made, fetched=fetched, secrets=Secrets(()), root=root, now=now),
-            _renew(root, fetched, now),
+    edge = Edge(root)
+    edge.up()
+
+    def steps(now: datetime) -> list[Step]:
+        return [
+            TlsFiles(made, fetched=fetched, root=root, now=now, port=edge.port),
+            Ssl(
+                made,
+                fetched=fetched,
+                secrets=Secrets(()),
+                root=root,
+                now=now,
+                port=edge.port,
+            ),
+            _renew(root, fetched, now, edge=edge),
+        ]
+
+    with edge:
+        for left, days in (
+            (timedelta(days=20, hours=1), 20),
+            (timedelta(days=12, hours=23), 12),
+            (timedelta(days=7), 7),
         ):
-            with Mixed() as runner:
-                ctx = StepContext(
-                    runner, "install", "test", "x", lambda *_: None, Interrupt()
-                )
-                verified = step.verify(ctx, CheckResult(False))
-            assert verified.fact["days_left"] == days, (step.name, left)
-    for left, days in (
-        (timedelta(days=6, hours=23), 6),
-        (timedelta(days=1, hours=1), 1),
-        (timedelta(hours=5), 0),
-    ):
-        now = ends - left
-        for step in (
-            TlsFiles(made, fetched=fetched, root=root, now=now),
-            Ssl(made, fetched=fetched, secrets=Secrets(()), root=root, now=now),
-            _renew(root, fetched, now),
+            for step in steps(ends - left):
+                with Mixed() as runner:
+                    ctx = StepContext(
+                        runner, "install", "test", "x", lambda *_: None, Interrupt()
+                    )
+                    verified = step.verify(ctx, CheckResult(False))
+                assert verified.fact["days_left"] == days, (step.name, left)
+        for left, days in (
+            (timedelta(days=6, hours=23), 6),
+            (timedelta(days=1, hours=1), 1),
+            (timedelta(hours=5), 0),
         ):
-            with Mixed() as runner:
-                ctx = StepContext(
-                    runner, "install", "test", "x", lambda *_: None, Interrupt()
-                )
-                with pytest.raises(StepFailed) as failed:
-                    step.verify(ctx, CheckResult(False))
-            assert failed.value.reason.code == "expiring", step.name
-            assert failed.value.reason.params == {
+            params: dict[str, Json] = {
                 "cert_expires": ends.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "days_left": days,
-            }, (step.name, left)
+            }
+            for step in steps(ends - left):
+                with Mixed() as runner:
+                    ctx = StepContext(
+                        runner, "install", "test", "x", lambda *_: None, Interrupt()
+                    )
+                    if step.name == "tls_files":
+                        undone = step.verify(ctx, CheckResult(False)).incomplete
+                        assert undone == Code("expiring", params), (step.name, left)
+                        continue
+                    with pytest.raises(StepFailed) as failed:
+                        step.verify(ctx, CheckResult(False))
+                assert failed.value.reason.code == "expiring", step.name
+                assert failed.value.reason.params == params, (step.name, left)
 
 
 def test_letsencrypt_with_no_public_ip_known_issues_without_the_precheck(
@@ -680,9 +787,8 @@ def test_letsencrypt_with_no_public_ip_known_issues_without_the_precheck(
         if not answered:
             for at in (0, 1):  # no host: curl 6
                 calls[at] = FakeCall(calls[at].argv, code=6)
-        runner = Mixed(*calls, *_issue(root))
-        with runner:
-            outcome, _ = run(ladder(root, fetched), runner)
+        with Edge(root) as edge, Mixed(*calls, *_issue(root), edge=edge) as runner:
+            outcome, _ = run(ladder(root, fetched, edge=edge), runner)
         assert outcome.code is ExitCode.OK, outcome.steps
         assert any("certonly" in a for a in runner.argvs)
-        assert outcome.steps[1].verify["precheck"] == said
+        assert outcome.steps[2].verify["precheck"] == said

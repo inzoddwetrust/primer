@@ -136,6 +136,11 @@ GROUPS: tuple[tuple[str, str], ...] = (
     # i: types and alembic, each on a copy of its own
     ("test_tier3_types_are_made_by_the_products_commands", "i"),  # DM-63
     ("test_tier3_alembic_runs_with_the_apps_environment", "i"),  # DM-124
+    # what nginx serves is the file; renew leaves a CA's certificate (DM-185)
+    ("test_probe_DM_185_served_is_the_file_after_renew", "i"),
+    ("test_probe_DM_185_served_is_the_file_after_provided_changes", "i"),
+    ("test_probe_DM_185_a_bad_provided_pair_leaves_the_working_one", "i"),
+    ("test_probe_DM_185_renew_leaves_a_ca_certificate", "i"),
     # f, j -- an install of their own each: options, derive, points (f out of
     # c, DM-85; f cut in two, DM-162; the order of the file kept)
     ("test_tier3_an_option_off_is_the_literal_and_on_the_value", "f"),
