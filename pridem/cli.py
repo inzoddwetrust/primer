@@ -6,8 +6,10 @@ in ``pridem.verbs``. ``--timer`` says a timer of the box started the verb (its
 actor is the machine), and only a verb a timer runs takes it. ``--command``
 names the command of the Panel's queue the agent runs the verb for (DM-138):
 its id goes to the journal's header, the lock and the verdict, the actor is
-the Panel; a verb without a verdict refuses it. ``--json`` may also follow the
-verb. ``pridem agent`` runs the box's agent (DM-141): it takes no argument
+the Panel; a run that ends with no verdict is refused it -- which one is the
+registry's to say (``Verb.without_verdict``, DM-198: a verb with none, and
+``ssl status``, ``db connect``). ``--json`` may also follow the verb.
+``pridem agent`` runs the box's agent (DM-141): it takes no argument
 and is no verb of ``VERBS``; ``pridem agent install`` makes it the box's
 service (DM-143). Anything refused before a run -- an unknown verb,
 option or argument, a
@@ -191,9 +193,10 @@ def run(
         if command is not None:  # a command of the Panel's queue (DM-138)
             if by_timer:
                 raise Refused("--command and --timer: a run comes from one of them")
-            if not verb.verdict:
+            silent = verb.without_verdict(given)  # the registry's mark (DM-198)
+            if silent is not None:
                 raise Refused(
-                    f"{name} writes no verdict: --command has nothing to carry"
+                    f"{silent} writes no verdict: --command has nothing to carry"
                 )
             try:
                 _COMMAND_ID.validate_python(command)
