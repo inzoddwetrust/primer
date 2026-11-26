@@ -113,11 +113,14 @@ def test_the_table_is_whole_and_its_selftest_catches_each_defect() -> None:
     Changed by DM-208: cut again by the durations of three full runs -- fifteen
     groups, the five new ones (k, l, m, n, o) each with its install; named by
     equality as before. The planted defects are twelve: seven of them of what
-    a cut must keep (``FIRST``, ``LAST``, ``CHAINS``)."""
+    a cut must keep (``FIRST``, ``LAST``, ``CHAINS``).
+
+    Changed by DM-163: a sixteenth group, ``p``, with its install -- the
+    machine updating itself from the Panel."""
     assert groups.check() == 0
     assert groups.selftest() == 0
     assert len(groups.DEFECTS) == 12
     assert (
-        set(groups.matrix()) == {g for _, g in groups.GROUPS} == set("abcdefghijklmno")
+        set(groups.matrix()) == {g for _, g in groups.GROUPS} == set("abcdefghijklmnop")
     )
-    assert groups.NEEDS_BOX == set("cefghijklmno")
+    assert groups.NEEDS_BOX == set("cefghijklmnop")

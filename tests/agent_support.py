@@ -72,6 +72,7 @@ from pridem.runner import (
     FakeRunner,
     OnLine,
     Result,
+    Runner,
     Stream,
 )
 from pridem.state import Box, HeaderLine
@@ -342,6 +343,9 @@ class PridemInProcess:
     """What a run raised that is no answer of a runner: a failure of the
     test, kept -- the agent runs the machine in a thread of its own."""
     before: Callable[[], None] | None = None
+    machine: Runner | None = None
+    """The runner of the machine's own commands instead of a script
+    (``self_update_support.Releases``, DM-163)."""
     """Done before each run (a test that frees a busy box)."""
 
     def run(
@@ -364,15 +368,25 @@ class PridemInProcess:
             self.before()
         out, err = io.StringIO(), io.StringIO()
         try:
-            with FakeRunner(*script) as runner:
+            if self.machine is not None:
                 code = run(
                     list(command[1:]),
                     root=self.fs_root / "opt" / "pridem",
                     out=out,
                     err=err,
-                    runner=runner,
+                    runner=self.machine,
                     fs_root=self.fs_root,
                 )
+            else:
+                with FakeRunner(*script) as runner:
+                    code = run(
+                        list(command[1:]),
+                        root=self.fs_root / "opt" / "pridem",
+                        out=out,
+                        err=err,
+                        runner=runner,
+                        fs_root=self.fs_root,
+                    )
         except BaseException as error:
             self.errors.append(error)
             raise

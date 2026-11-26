@@ -56,6 +56,7 @@ ARGV = {
     "stop": ["stop"],
     "restart": ["restart"],
     "register": ["register"],
+    "self-update": ["self-update", "v0.1.99"],
 }
 """The command line of each verb with a verdict."""
 ON_A_BOX = {"db", "backup", "seed", "verb", "start", "stop", "restart"}
@@ -69,6 +70,10 @@ release (a refusal, not a command); the probe gives it a prod box with one
 (``history_support.release_box``), and its plan's commands are refused here.
 The box's two green verdicts are the setup's, not the verb's: they are left
 out of what the probe reads."""
+SELF = {"self-update"}
+"""DM-163: ``self-update`` fetches its release by the runner -- refused here,
+the probe is about what comes before."""
+
 IDENTITY = {"register"}
 """DM-139: ``register`` refuses before the lock without its token and the
 passport's copy; the probe gives it both and a Panel that does not answer
@@ -125,9 +130,12 @@ def test_the_probe_covers_the_verbs_with_a_verdict() -> None:
     no verdict -- a verb without a box, beside ``check``.
 
     Changed by DM-139, on the dispatcher's word 24.11: ``register`` is a verb
-    with a verdict on a box."""
+    with a verdict on a box.
+
+    Changed by DM-163, on the dispatcher's word 26.11: ``self-update`` is a
+    verb with a verdict on a box."""
     assert WITH_VERDICT == sorted(
-        ["gc", "ssl", "status", *PLANS, *ON_A_BOX, *ROLLBACK, *IDENTITY]
+        ["gc", "ssl", "status", *PLANS, *ON_A_BOX, *ROLLBACK, *IDENTITY, *SELF]
     )
     assert "version" in VERBS and not VERBS["version"].verdict
     assert {name for name, verb in VERBS.items() if not verb.box} == {
@@ -204,7 +212,7 @@ def test_probe_DM_54_recover_runs_before_every_plan_verb(
     if name in ROLLBACK:  # a previous release to go back to (DM-24)
         release_box(tmp_path, "prod", NEW, released(1, OLD), released(2, NEW))
         seeded = {run_of(1), run_of(2)}
-    if name in PLANS | ON_A_BOX | ROLLBACK:
+    if name in PLANS | ON_A_BOX | ROLLBACK | SELF:
         run(argv, root=root, out=out, err=err, runner=Refusing(), fs_root=tmp_path)
     else:
         # no passport: the verbs' steps run nothing; status measures the

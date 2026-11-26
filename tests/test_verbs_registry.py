@@ -27,6 +27,7 @@ MARKS: dict[str, tuple[str, bool, Destructive, Values]] = {
     "state": ("server", True, NEVER, ()),
     "gc": ("host", True, NEVER, ()),
     "register": ("server", True, NEVER, ()),
+    "self-update": ("server", True, NEVER, ()),  # DM-163
     "ssl": ("host", True, NEVER, (("action", ("status",)),)),
     "check": ("deploy", False, NEVER, ()),
     "install": ("deploy", True, NEVER, ()),
@@ -64,8 +65,11 @@ def test_the_marks_of_every_verb_literally() -> None:
     """The table of the gate, verb by verb, in the registry's order: 23 verbs,
     each with its group, whether it works on a box, its destructiveness and
     the values of an argument that write no verdict. A verb added to the
-    registry is not here until its marks are named."""
-    assert len(MARKS) == 23
+    registry is not here until its marks are named.
+
+    Changed by DM-163: ``self-update``, of the server, on a box, never
+    destructive -- 24 verbs."""
+    assert len(MARKS) == 24
     assert list(VERBS) == list(MARKS)
     for name, verb in VERBS.items():
         found = (verb.group, verb.on_box, verb.destructive, verb.no_verdict)
@@ -73,6 +77,7 @@ def test_the_marks_of_every_verb_literally() -> None:
 
 
 def test_the_groups_are_six_in_their_order_and_none_is_empty() -> None:
+    """Changed by DM-163: ``self-update`` in ``server``, after ``register``."""
     assert GROUPS == ("server", "deploy", "data", "host", "logs", "project")
     assert set(get_args(Group)) == set(GROUPS)
     assert {verb.group for verb in VERBS.values()} == set(GROUPS)
@@ -86,6 +91,7 @@ def test_the_groups_are_six_in_their_order_and_none_is_empty() -> None:
             "status",
             "state",
             "register",
+            "self-update",
             "doctor",
             "start",
             "stop",

@@ -261,6 +261,10 @@ SAMPLES: dict[str, tuple[dict[str, Json], list[str]]] = {
         {"panel": "https://api.primer.team"},
         ["--panel", "https://api.primer.team"],
     ),
+    "self-update": (  # DM-163
+        {"tag": "v0.1.12", "source": "file:///tmp/tier3/releases/v0.1.12/install.sh"},
+        ["v0.1.12", "--from", "file:///tmp/tier3/releases/v0.1.12/install.sh"],
+    ),
     "ssl": ({"action": "renew"}, ["renew"]),
     "check": (
         {"path": "/srv/aivis", "packages": ["skin=/srv/skin"]},

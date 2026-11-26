@@ -32,6 +32,14 @@ lines after the last ``seq`` the Panel holds with no gap, in batches of
 rest of the lines go, then the verdict in its signed envelope (DM-140) --
 one try; the next heartbeat is a full one.
 
+**The machine replaced under the agent** (DM-163): a ``self-update`` the agent
+ran as a command and that went green turns ``current`` to another release.
+The agent sends that run's lines and verdict with the code it has in memory,
+then ends; its service (``Restart=always``) starts ``pridem agent`` again --
+the new machine -- and its first heartbeat says the new version. It does not
+restart its service itself: that would take the running command down with
+it.
+
 **No verdict lost** (part B): the cursor of ``history/``
 (``pridem.agent.history``) says which runs the Panel holds. Before every
 long-poll -- so when the agent starts and when the Panel is back -- every
@@ -130,6 +138,8 @@ QUIET_POLL_S = 1.0
 """A long-poll the Panel answers 204 faster than this is followed by a pause
 to it: a Panel that holds no long-poll is not asked in a loop."""
 HISTORY_BATCH = 20
+SELF_UPDATE = "self-update"
+"""The verb that replaces the machine under the agent (DM-163)."""
 RUN_TIMEOUT_S = 24 * 3600.0
 """A run the agent started longer than a day is stopped: no rollout lasts so
 long; ``recover`` of the next run gives it its verdict."""
@@ -241,6 +251,9 @@ class Agent:
     executable: str = "pridem"
     monotonic: Callable[[], float] = time.monotonic
     full_due: threading.Event = field(default_factory=threading.Event)
+    replaced: threading.Event = field(default_factory=threading.Event)
+    """A ``self-update`` the agent ran went green: the machine on disk is
+    another; the agent ends and systemd starts it (DM-163)."""
     _cursor: Cursor | None = None
     _retried: float | None = None
 
@@ -319,11 +332,12 @@ class Agent:
         refused it before a run."""
         printed: list[str] = []
         failed: list[RunnerError] = []
+        ended: list[int] = []
         since = time.time()
 
         def work() -> None:
             try:
-                self.runner.run(
+                result = self.runner.run(
                     argv,
                     expect=(0, 1, 2),
                     timeout=RUN_TIMEOUT_S,
@@ -331,6 +345,7 @@ class Agent:
                         printed.append(text) if stream is Stream.STDOUT else None
                     ),
                 )
+                ended.append(result.code)
             except RunnerError as error:
                 failed.append(error)
 
@@ -354,6 +369,12 @@ class Agent:
             self.say(f"command {command.id}: refused by the machine before a run")
             return "refused"
         self.finish(path, last)
+        if command.verb == SELF_UPDATE and ended == [0]:
+            self.say(
+                f"command {command.id}: the machine is the release now -- the "
+                "agent ends, its service starts the new one"
+            )
+            self.replaced.set()
         return "ran"
 
     def finish(self, path: Path, last: int) -> None:
@@ -538,12 +559,17 @@ class Agent:
     # --- the whole ----------------------------------------------------------------
 
     def serve(self, stopping: Callable[[], bool]) -> None:
-        """Both loops until ``stopping``."""
+        """Both loops until ``stopping`` -- or until the machine is replaced
+        under the agent (``replaced``)."""
+
+        def over() -> bool:
+            return stopping() or self.replaced.is_set()
+
         heart = threading.Thread(
-            target=self.beats, args=(stopping,), name="pridem-heartbeat", daemon=True
+            target=self.beats, args=(over,), name="pridem-heartbeat", daemon=True
         )
         heart.start()
-        self.queue(stopping)
+        self.queue(over)
         heart.join(self.heartbeat_s + 1)
 
     def queue(self, stopping: Callable[[], bool]) -> None:

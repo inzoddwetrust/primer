@@ -19,9 +19,12 @@ ALL = list(groups.ALL)
 
 def test_a_file_of_tier_3_runs_the_groups_of_its_tests() -> None:
     """G3: a file of tier 3 -- exactly the groups of its tests, as ``GROUPS``
-    has them; the pair: another file -- its own groups."""
+    has them; the pair: another file -- its own groups.
+
+    Changed by DM-163: the probes of DM-16 by their whole prefix,
+    ``test_probe_DM_16_`` -- ``test_probe_DM_163_`` is another card's."""
     box = {
-        group for test, group in groups.GROUPS if test.startswith("test_probe_DM_16")
+        group for test, group in groups.GROUPS if test.startswith("test_probe_DM_16_")
     }
     assert (
         set(groups.affected(["tier3/test_tier3_box.py"], FILES))
@@ -123,12 +126,14 @@ def test_a_full_run_of_the_new_groups_is_a_release() -> None:
     of the new groups (g, h, i, j) is not.
 
     Changed by DM-208: fifteen groups -- a run without one of k, l, m, n, o is
-    not a release either; a full run of the ten groups of before is none."""
-    assert ALL == list("abcdefghijklmno")
+    not a release either; a full run of the ten groups of before is none.
+
+    Changed by DM-163: sixteen -- a run without p is not a release."""
+    assert ALL == list("abcdefghijklmnop")
     full = _run(1, 10)
     assert groups.full_run([full], {1: _jobs(*ALL)})[0] is True
     assert groups.full_run([full], {1: _jobs(*"abcdefghij")})[0] is False
-    for missing in ("g", "h", "i", "j", "k", "l", "m", "n", "o"):
+    for missing in ("g", "h", "i", "j", "k", "l", "m", "n", "o", "p"):
         some = [group for group in ALL if group != missing]
         assert groups.full_run([full], {1: _jobs(*some)})[0] is False, missing
 
@@ -258,8 +263,8 @@ def test_every_part_of_an_installed_group_installs_its_box() -> None:
 
     Changed by DM-208: the five groups cut out of them and of b and d (k, l,
     m, n, o) are too; b and d, and only they, start with the install of their
-    first test (``FIRST``), and a has none."""
-    assert set("cefghijklmno") == groups.NEEDS_BOX
+    first test (``FIRST``), and a has none. Changed by DM-163: p too."""
+    assert set("cefghijklmnop") == groups.NEEDS_BOX
     assert {"a", "b", "d"}.isdisjoint(groups.NEEDS_BOX)
     group = dict(groups.GROUPS)
     assert {group[first] for first in groups.FIRST} == {"b", "d"}

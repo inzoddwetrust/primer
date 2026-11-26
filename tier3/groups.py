@@ -170,9 +170,12 @@ GROUPS: tuple[tuple[str, str], ...] = (
     # box that names it (DM-138)
     ("test_tier3_product_derive_reaches_nothing", "o"),
     ("test_tier3_a_command_runs_and_a_busy_box_names_it", "o"),
+    # the machine updates itself from the Panel (DM-163): a release made in the
+    # run, the agent a service -- a group of its own
+    ("test_probe_DM_163_self_update_from_the_panel", "p"),
 )
 
-NEEDS_BOX = frozenset({"c", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o"})
+NEEDS_BOX = frozenset({"c", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p"})
 """Groups whose tests need the blank installed by a fixture first."""
 
 FIRST: tuple[str, ...] = (
@@ -297,7 +300,7 @@ def test_functions(directory: Path = HERE) -> list[str]:
     return out
 
 
-ALL = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o")
+ALL = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p")
 """Every group: the jobs of a full run of tier 3."""
 
 PLANNED = "${{ fromJSON(needs.plan.outputs.groups) }}"

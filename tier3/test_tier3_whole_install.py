@@ -6433,3 +6433,124 @@ def test_probe_DM_144_the_panel_away_in_the_middle_of_a_run(
     )
     assert any("/runs/" in path for path in panel.unanswered), panel.unanswered
     assert _agent_round(panel, "cmd-144-away") == []
+
+
+# --- DM-163: self-update -- the machine of this run to a release the probe makes --
+
+
+class _VersionPanel(_FirstContactPanel):
+    """The Panel of the first contact that keeps the machine's version of
+    every heartbeat."""
+
+    versions: ClassVar[list[str]] = []
+
+    def _answer(self, body: bytes) -> tuple[int, bytes]:
+        if self.path == "/agent/v1/heartbeat":
+            self.versions.append(Heartbeat.model_validate_json(body).machine_version)
+        return super()._answer(body)
+
+
+def _release_after(version: str) -> tuple[str, str]:
+    """A release of the machine above this run's: the same code with its
+    version raised, committed and tagged in a repository of its own, its
+    wheel built, its ``install.sh`` rendered with its pins -- as
+    ``release.yml`` does. Its tag and the address of its ``install.sh``."""
+    major, minor, patch = version.split(".")
+    new = f"{major}.{minor}.{int(patch) + 100}"
+    tag = f"v{new}"
+    work = Path("/tmp/tier3/self-update")  # noqa: S108 -- tier3.yml's directory
+    shutil.rmtree(work, ignore_errors=True)
+    clone, bare = work / "clone", Path("/tmp/tier3/primer-next.git")  # noqa: S108
+    shutil.rmtree(bare, ignore_errors=True)
+    _run(["git", "clone", "--quiet", "/tmp/tier3/primer.git", str(clone)])  # noqa: S108
+    init = clone / "pridem" / "__init__.py"
+    init.write_text(init.read_text().replace(f'"{version}"', f'"{new}"'))
+    who = ["-c", "user.name=tier3", "-c", "user.email=tier3@primer.invalid"]
+    _run(["git", "-C", str(clone), *who, "commit", "--quiet", "-am", f"release {tag}"])
+    _run(["git", "-C", str(clone), "tag", tag])
+    [commit] = _stdout(["git", "-C", str(clone), "rev-parse", "HEAD"])
+    _run(["git", "clone", "--quiet", "--bare", str(clone), str(bare)])
+    dist = work / "dist"
+    _run(
+        ["/tmp/build/bin/python", "-m", "pip", "wheel", "--no-deps",  # noqa: S108
+         "--no-build-isolation", "--no-index", "-w", str(dist), str(clone)],
+    )  # fmt: skip
+    wheel = dist / f"pridem-{new}-py3-none-any.whl"
+    sha = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    script = (clone / "install.sh").read_text()
+    for pin, value in (
+        ("@PRIDEM_TAG@", tag),
+        ("@PRIDEM_COMMIT@", commit.strip()),
+        ("@PRIDEM_WHEEL_SHA256@", sha),
+        ("@PRIDEM_REPO@", "file:///tmp/tier3/primer-next"),
+        ("@PRIDEM_WHEEL_URL@", f"file://{wheel}"),
+    ):
+        assert script.count(pin) == 1, pin
+        script = script.replace(pin, value)
+    (work / "install.sh").write_text(script)
+    return tag, f"file://{work / 'install.sh'}"
+
+
+def test_probe_DM_163_self_update_from_the_panel() -> None:
+    """DM-163, group ``p``: the box registered in a Panel on the loopback,
+    its agent a service; the Panel gives ``self-update <N>`` -- N a release
+    the probe makes of this run's code with a higher version. The agent runs
+    it, sends its verdict green and ends; systemd starts the new machine:
+    ``pridem version`` is N, ``current`` is ``versions/vN``, and the next
+    heartbeats say N. Measured into the run's journal: the times and what the
+    agent said."""
+    [said] = _stdout([PRIDEM, "version"])
+    before = said.split()[1]
+    began = time.monotonic()
+    tag, source = _release_after(before)
+    made = round(time.monotonic() - began, 1)
+    handler: type[_VersionPanel] = type(
+        "Panel",
+        (_VersionPanel,),
+        {"used": set(), "queue": [], "seen": [], "lines": {}, "verdicts": {},
+         "beats": [], "versions": []},
+    )  # fmt: skip
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        result = SubprocessRunner().run(
+            [PRIDEM, "register", "--panel", origin],
+            timeout=120,
+            env={**clean_env(), "PRIDEM_REGISTER_TOKEN": FIRST_TOKEN},
+            on_line=lambda stream, line, cut: None,
+        )
+        assert result.code == 0
+        _run([PRIDEM, "agent", "install"])
+        _beats_after(handler, 0)
+        expires = (datetime.now(UTC) + timedelta(minutes=10)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        handler.queue.append(
+            {"id": "cmd-163", "verb": "self-update", "expires_at": expires,
+             "args": {"tag": tag, "source": source}}
+        )  # fmt: skip
+        asked = time.monotonic()
+        new = tag[1:]
+        while new not in handler.versions:
+            assert time.monotonic() - asked < 420, (handler.seen, handler.versions)
+            time.sleep(1)
+        updated = round(time.monotonic() - asked, 1)
+    finally:
+        _run(["systemctl", "disable", "--now", AGENT_UNIT], expect=(0, 1, 5))
+        Path("/etc/systemd/system", AGENT_UNIT).unlink(missing_ok=True)
+        _run(["systemctl", "daemon-reload"])
+        server.shutdown()
+        server.server_close()
+    warnings.warn(
+        f"DM-163 measure: the release made in {made} s, the agent on it "
+        f"{updated} s after the command; versions heard {handler.versions}",
+        stacklevel=1,
+    )
+    [(verified, command, _)] = [
+        kept for kept in handler.verdicts.values() if kept[1] == "cmd-163"
+    ]
+    assert verified
+    assert _stdout([PRIDEM, "version"]) == [f"pridem {new}"]
+    assert Path("/opt/pridem/current").resolve() == Path("/opt/pridem/versions", tag)
+    assert handler.versions[0] == before and handler.versions[-1] == new

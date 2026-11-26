@@ -42,6 +42,8 @@ IDENTITY = "pridem-identity"
 """The box's key and its registration in the Panel (``register``, DM-139)."""
 AGENT = "pridem-agent"
 """The agent's service (``pridem agent install``, DM-143)."""
+MACHINE = "pridem-machine"
+"""The machine installing a release of itself (``self-update``, DM-163)."""
 VERDICT = "pridem-verdict"
 """The stack of a journal line about the verdict itself (its build)."""
 
@@ -49,7 +51,8 @@ MACHINE_STACKS: frozenset[str] = frozenset(
     {
         HOST, PASSPORT, HOST_POLICY, NETWORK, TIMERS, SOURCES, DEPENDENCIES,
         ROLLBACK, POINTS, SERVICES, PRODUCT, SEAMS, EDGE, FRONTEND, FINALIZE,
-        DESTROY, STOPPED, BOX, BACKUP, SEED, IDENTITY, AGENT, VERDICT,
+        DESTROY, STOPPED, BOX, BACKUP, SEED, IDENTITY, AGENT, MACHINE,
+        VERDICT,
     }
 )  # fmt: skip
 
