@@ -636,7 +636,7 @@ def _verify(
             comms, "comms", root / "c", "v1.0.0", SHA, root, staged=True
         ),
     }
-    step = SeamsVerify(made, {"comms": comms}, stacks_of)
+    step = SeamsVerify(made, {"comms": comms}, stacks_of, frozenset())
     calls = [
         *_observe(stacks_of["aivis"], "app"),
         *_observe(stacks_of["comms"], "comms-app"),

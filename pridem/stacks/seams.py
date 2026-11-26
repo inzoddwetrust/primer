@@ -11,6 +11,14 @@ from the passport (``ProvideUrl``: ``https://<domain><path>``) or a verb
 providers is the services of the edition, then the product, and no cycle can
 be written; there is no cycle to look for.
 
+A seam under an option that is off has no provider to miss, in either
+direction: its value is the literal ``primer-switched-off`` (contract 3 rule
+38) -- a seam of the product from a service's variable under ``when: o``, and
+a ``requires`` of a service whose own variable is under ``when: o`` (DM-122:
+comms takes the product's storage under ``when: llm``; a product with no
+storage is no half seam while ``llm`` is off). ``seam_needed`` is that one
+predicate, for ``half_seams`` here and for the edges of ``seams_verify``.
+
 ``half_seams`` lists every seam with one end missing; a plan with one is
 refused before its first ``act`` (``seams_check``), and so is one whose data
 for a service (form D, ``given_kinds``) the service does not accept
@@ -138,6 +146,14 @@ def provider_order(
     return [*installed(product, edition, on=on), product.name]
 
 
+def seam_needed(var: Seam, on: Collection[str]) -> bool:
+    """A seam that has to have its other end: its option, if any, is on.
+    Off, the variable is the literal and nothing is taken from anyone
+    (contract 3 rules 38-39) -- for the product's seam from a service and
+    for a service's ``requires`` alike (DM-122)."""
+    return not off(var.when, on)
+
+
 def half_seams(
     product: Product,
     services: Mapping[str, Service],
@@ -147,12 +163,18 @@ def half_seams(
 ) -> list[str]:
     """Every seam of the box with one end missing, as ``<stack>.<NAME>: why``.
     A seam under an option that is off has no provider to miss: its value is
-    the literal."""
+    the literal -- the product's seam from a service, and a service's
+    ``requires`` whose variable is under that option (DM-122). The form of
+    the service's own file is checked whatever the options: a ``requires``
+    that is no seam of its ``env``, a seam from the product not in
+    ``requires``."""
     out: list[str] = []
     here = installed(product, edition, on=on)
     for key, var in product.env.items():
-        if not isinstance(var, Seam) or var.from_ not in here or off(var.when, on):
+        if not isinstance(var, Seam) or var.from_ not in here:
             continue  # outside the edition: ``outside_edition``
+        if not seam_needed(var, on):
+            continue
         provider = services[var.from_]
         if key not in provider.provides:
             out.append(f"{product.name}.{key}: {var.from_} does not provide it")
@@ -162,12 +184,15 @@ def half_seams(
             if provided not in service.env:
                 out.append(f"{name}.{provided}: provided without an env key")
         for required in service.requires:
+            taken = service.env.get(required)
+            if isinstance(taken, Seam) and not seam_needed(taken, on):
+                continue  # its option is off: the literal, no product's end
             offer = product.provides.get(required)
             if offer is None:
                 out.append(f"{name}.{required}: the product does not provide it")
             elif isinstance(offer, ProvideVerb):
                 out.append(f"{name}.{required}: the product provides a verb")
-            if not isinstance(service.env.get(required), Seam):
+            if not isinstance(taken, Seam):
                 out.append(f"{name}.{required}: required, not a seam in env")
         for key, var in service.env.items():
             if isinstance(var, Seam) and key not in service.requires:

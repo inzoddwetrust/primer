@@ -53,7 +53,9 @@ nothing behind the step has nothing to do.
 provider, not by a file. For a seam of the product from a service, the name is
 among ``/health.seams.provides`` of that service; for a ``requires`` of a
 service, among the product's; a stack that takes a seam says
-``requires_satisfied: true``.
+``requires_satisfied: true``. A seam under an option that is off is no edge
+(``seam_needed``, DM-122): its value is the literal, nobody provides it, and a
+stack left with no edge as a consumer is not asked ``requires_satisfied``.
 """
 
 import hashlib
@@ -62,7 +64,7 @@ import os
 import shlex
 import shutil
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -72,6 +74,7 @@ from pridem.events import Json
 from pridem.runner import CommandFailed
 from pridem.stacks.passport import Passport
 from pridem.stacks.schema import Product, Seam, Service
+from pridem.stacks.seams import seam_needed
 from pridem.steps.base import (
     NO_NETWORK,
     NO_PULL,
@@ -477,21 +480,29 @@ class SeamsVerify(Step):
         product: Product,
         services: Mapping[str, Service],
         stacks: Mapping[str, ComposeStack],
+        on: Collection[str],
     ) -> None:
         """``stacks`` -- the compose of the product and of each installed
-        service, by name: what is observed."""
+        service, by name: what is observed; ``on`` -- the options of the
+        instance that are on."""
         self.product = product
         self.services = dict(services)
         self.stacks = dict(stacks)
+        self.on = frozenset(on)
 
     def _edges(self) -> list[tuple[str, str, str]]:
-        """``(consumer, provider, name)`` of every seam of the box."""
+        """``(consumer, provider, name)`` of every seam of the box whose
+        option, if any, is on (DM-122)."""
         edges: list[tuple[str, str, str]] = []
         for key, var in self.product.env.items():
             if isinstance(var, Seam) and var.from_ in self.services:
-                edges.append((self.product.name, var.from_, key))
+                if seam_needed(var, self.on):
+                    edges.append((self.product.name, var.from_, key))
         for name, service in self.services.items():
             for required in service.requires:
+                taken = service.env.get(required)
+                if isinstance(taken, Seam) and not seam_needed(taken, self.on):
+                    continue
                 edges.append((name, self.product.name, required))
         return edges
 

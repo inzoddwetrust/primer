@@ -692,7 +692,7 @@ def deploy_plan(
                     root,
                     staged=True,
                 )
-        return SeamsVerify(product, services, stacks)
+        return SeamsVerify(product, services, stacks, on)
 
     def types() -> list[Step]:
         """``write_key`` and ``types``: in the root stack after ``finalize``
