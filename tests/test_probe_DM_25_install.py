@@ -1,4 +1,5 @@
-"""Probes DM-25: ``install.sh`` -- five actions, pins, no index, no questions.
+"""Probes DM-25: ``install.sh`` -- six actions (the sixth, the agent, DM-143),
+pins, no index, no questions.
 
 Tier 1: the script runs under ``bash`` through ``SubprocessRunner`` (the only
 place a process starts) with ``apt-get``, ``git``, ``curl``, ``uname``, ``id``,

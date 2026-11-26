@@ -39,9 +39,11 @@ contracts, the parts the machine is built from and its verbs:
   (`pridem [--json] [--timer] <verb> [arguments] [--option ...]`; `--json` may
   follow the verb too); an unknown verb, option or argument and
   a busy box are refused before anything runs: exit 1, stderr, no verdict;
-- `install.sh` -- the only shell file: the bootstrap of a box in five actions
+- `install.sh` -- the only shell file: the bootstrap of a box in six actions
   (host check; packages, `sops` by version and sha256; the pinned clone; a venv
-  without an index from `wheels/` plus the pridem wheel; the links). In the
+  without an index from `wheels/` plus the pridem wheel; the links; the agent --
+  with `PRIDEM_REGISTER_TOKEN` in the environment and the passport copy, the
+  box's registration and its agent's service, `pridem agent install`, DM-143). In the
   repository it is a template with five pins -- tag, commit, the wheel's sha256,
   the repository and the wheel's address -- and refuses until they are set;
 - `contract/schema/` -- the JSON Schema of each contract, exported from the
