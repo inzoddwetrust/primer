@@ -3798,6 +3798,114 @@ def test_tier3_a_reset_of_the_blank_makes_its_database_new() -> None:
     assert migrate.verify == {"stack": STACK, "alembic_head": reset["alembic_head"]}
 
 
+def _psql_on(database: str, sql: str) -> list[str]:
+    """``psql`` of the blank's user in ``database`` of its postgres."""
+    pg = _container(STACK, "postgres")
+    return _stdout(
+        ["docker", "exec", pg, "psql", "-U", "blank", "-d", database, "-tAc", sql]
+    )
+
+
+def _tables() -> list[str]:
+    return _psql(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1"
+    )
+
+
+def test_probe_DM_186_S9_an_older_dump_restores_the_database_it_was() -> None:
+    """DM-186, S9, group c after the chain of data: a dump; then a table a
+    newer migration would make (``dm186_later``) and a row; ``db restore`` of
+    the dump -- the tables are the dump's, the newer one gone (``pg_restore
+    --clean`` over the live database left it), no ``pridem_restore_new`` or
+    ``_old`` left, the app running.
+
+    Measured into the run's log first (par0 14.3, the gate's answer): the
+    rights of the blank's user (``CREATEDB``), the PostgreSQL of the blank's
+    image, what ``ALTER DATABASE ... RENAME`` does beside a session held in
+    the database (PostgreSQL 16 of the sandbox: it waits 5 s, then refuses),
+    and that compose's ``ps`` takes two ``--status``."""
+    assert (OPT / "current").is_symlink(), "the whole install runs first"
+    pg = _container(STACK, "postgres")
+    measured: dict[str, object] = {
+        "role": _psql(
+            "SELECT rolsuper, rolcreatedb FROM pg_roles WHERE rolname = 'blank'"
+        ),
+        "version": _psql("SHOW server_version"),
+    }
+    _psql_on("postgres", "DROP DATABASE IF EXISTS dm186_probe WITH (FORCE)")
+    _psql_on("postgres", "DROP DATABASE IF EXISTS dm186_probe_x WITH (FORCE)")
+    _psql_on("postgres", "CREATE DATABASE dm186_probe")
+    _run(["docker", "exec", "-d", pg, "psql", "-U", "blank", "-d", "dm186_probe",
+          "-c", "SELECT pg_sleep(12)"])  # fmt: skip
+    time.sleep(1)
+    started = time.monotonic()
+    said = _run(
+        ["docker", "exec", pg, "psql", "-U", "blank", "-d", "postgres", "-tAc",
+         "ALTER DATABASE dm186_probe RENAME TO dm186_probe_x"],
+        expect=(0, 1),
+    )  # fmt: skip
+    measured["rename beside a session"] = {
+        "said": said[-2:],
+        "s": round(time.monotonic() - started, 1),
+    }
+    _psql_on("postgres", "DROP DATABASE IF EXISTS dm186_probe WITH (FORCE)")
+    _psql_on("postgres", "DROP DATABASE IF EXISTS dm186_probe_x WITH (FORCE)")
+    project = [
+        *("docker", "compose", "-p", STACK, "--env-file", str(OPT / "env" / ".env")),
+        *("-f", str(OPT / "current" / "docker-compose.yml")),
+        *("-f", str(OPT / "compose" / f"{STACK}.yml")),
+    ]
+    measured["ps running+restarting"] = _stdout(
+        [*project, "ps", "--status", "running", "--status", "restarting", "-q", "app"]
+    )
+    before = _tables()
+    measured["tables"] = before
+    warnings.warn(f"DM-186 S9 measure: {measured}", stacklevel=1)
+
+    verdict, printed = _verdict_of("db", "dump", STACK)
+    assert verdict.result == "green", printed
+    [dump] = [s for s in verdict.steps if s.name == "db_dump"]
+    path = str((dump.verify or {})["path"])
+    _psql("CREATE TABLE dm186_later (id int)")
+    _psql("INSERT INTO dm186_later VALUES (1)")
+    assert "dm186_later" in _tables()
+    verdict, printed = _verdict_of(
+        "db", "restore", STACK, path, "--confirm", "tier3-env"
+    )
+    facts = {s.name: s.verify or {} for s in verdict.steps}
+    warnings.warn(f"DM-186 S9 restore: {facts}", stacklevel=1)
+    warnings.warn(f"group time so far: {_group_elapsed_s():.0f} s", stacklevel=1)
+    assert verdict.result == "green", printed
+    assert _tables() == before
+    names = _psql_on("postgres", "SELECT datname FROM pg_database ORDER BY 1")
+    assert "pridem_restore_new" not in names and "pridem_restore_old" not in names
+    assert facts["db_swap"]["database"] == "blank", facts
+    assert _container(STACK, "app")
+
+
+def test_probe_DM_186_B12_a_reset_is_green_ahead_of_and_behind_the_code() -> None:
+    """DM-186, B12, group c: the database at a revision the code does not
+    hold (ahead), then with none (behind) -- ``db reset`` green both times, at
+    the code's head; it was refused ahead (``alembic current`` failed in its
+    check) and red behind (the new database compared with the old
+    revision)."""
+    heads: list[str] = []
+    for state in ("ahead", "behind"):
+        if state == "ahead":
+            _psql("UPDATE alembic_version SET version_num = '9999dm186'")
+        else:
+            _psql("DELETE FROM alembic_version")
+        seen = _psql("SELECT coalesce(max(version_num), 'none') FROM alembic_version")
+        verdict, printed = _verdict_of("db", "reset", STACK, "--confirm", "tier3-env")
+        facts = {s.name: s.verify or {} for s in verdict.steps}
+        warnings.warn(f"DM-186 B12 {state}: {seen}, {facts}", stacklevel=1)
+        assert verdict.result == "green", printed
+        heads.append(str(facts["db_reset"]["alembic_head"]))
+        assert _psql("SELECT version_num FROM alembic_version") == [heads[-1]]
+    assert heads[0] == heads[1] != "9999dm186"
+    assert _container(STACK, "app")
+
+
 class _RegisterPanel(BaseHTTPRequestHandler):
     """The Panel's side of a registration on the runner's loopback (DM-139):
     contract 4 read strictly, the public half 32 raw bytes, one token

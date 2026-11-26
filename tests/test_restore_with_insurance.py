@@ -31,6 +31,7 @@ from test_verbs_data import (
     inside,
     insured,  # noqa: F401 -- the fixture
     plan,
+    psql_call,
     running_call,
 )
 
@@ -64,13 +65,14 @@ def test_a_red_insurance_dump_stops_everything_before_anything_stops(
         )
     verdict = _verdict(out)
     assert code == 1
-    assert [(s.stack, s.name, s.status) for s in verdict.steps[:4]] == [
+    assert [(s.stack, s.name, s.status) for s in verdict.steps[:5]] == [
         ("pridem-backup", "db_dump", "failed"),
         (STACK, "stop_for_restore", "skipped"),
         (STACK, "db_restore", "skipped"),
+        (STACK, "db_swap", "skipped"),  # DM-186: the point of no return
         (STACK, "start_restored", "skipped"),
     ]
-    assert verdict.steps[4].verify == {"started": {}}
+    assert verdict.steps[5].verify == {"started": {}}
     assert not verdict.report.incomplete
 
 
@@ -105,14 +107,18 @@ def test_the_way_back_is_said_before_pg_restore(tmp_path: Path) -> None:
     from env_support import context
 
     restore_inside = f"/tmp/pridem-restore-{STACK}.dump"  # noqa: S108
+    # changed by DM-186 (S9): the restore goes into a new database, made first
     calls = [
         config_call(cs),
         running_call(cs, "postgres", "c-pg"),
+        psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_new WITH (FORCE)"),
+        psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_old WITH (FORCE)"),
+        psql_call(cs, 'CREATE DATABASE pridem_restore_new OWNER "blank"'),
         FakeCall(tuple(cs.argv("cp", operands=(
             str(path), f"postgres:{restore_inside}")))),
         FakeCall(tuple(cs.argv("exec", "-T", operands=(
-            "postgres", "pg_restore", "--clean", "--if-exists", "--no-owner",
-            "--single-transaction", "--exit-on-error", "-U", "blank", "-d", "blank",
+            "postgres", "pg_restore", "--no-owner", "--single-transaction",
+            "--exit-on-error", "-U", "blank", "-d", "pridem_restore_new",
             restore_inside,
         )))),
         FakeCall(tuple(cs.argv("exec", "-T", operands=(
@@ -129,8 +135,8 @@ def test_the_way_back_is_said_before_pg_restore(tmp_path: Path) -> None:
     assert seen.index(said) < min(
         i
         for i, line in enumerate(seen)
-        if line.startswith("command:") and " cp " in line
-    )
+        if line.startswith("command:") and "DROP DATABASE" in line
+    )  # DM-186: before the first command of act, the drop of a leftover
 
 
 # --- R2-E13: the database runs ----------------------------------------------------
@@ -290,13 +296,17 @@ def test_a_restore_that_fails_leaves_no_file_in_the_container(tmp_path: Path) ->
     restore_inside = f"/tmp/pridem-restore-{STACK}.dump"  # noqa: S108
     rm = FakeCall(tuple(cs.argv("exec", "-T", operands=(
         "postgres", "rm", "-f", restore_inside))))  # fmt: skip
-    calls = [
+    calls = [  # changed by DM-186: the new database is made first, dropped after
         config_call(cs),
         running_call(cs, "postgres", "c-pg"),
+        psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_new WITH (FORCE)"),
+        psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_old WITH (FORCE)"),
+        psql_call(cs, 'CREATE DATABASE pridem_restore_new OWNER "blank"'),
         FakeCall(
             tuple(cs.argv("cp", operands=(str(path), f"postgres:{restore_inside}")))
         ),
         rm,
+        psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_new"),
     ]
     with Failing(*calls, fails="pg_restore") as runner:
         outcome = plan([step], runner)

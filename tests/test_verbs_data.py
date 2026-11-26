@@ -394,61 +394,72 @@ def _cli(fs_root: Path, argv: list[str], runner: FakeRunner) -> tuple[int, str, 
     return code, out.getvalue(), err.getvalue()
 
 
+def alive_call(cs: ComposeStack, service: str, *ids: str) -> FakeCall:
+    """``ps`` of a service running or restarting (DM-186, B15)."""
+    argv = cs.argv(
+        "ps", "--status", "running", "--status", "restarting", "-q", operands=(service,)
+    )
+    return FakeCall(tuple(argv), lines=lines(*ids))
+
+
+def psql_call(
+    cs: ComposeStack, sql: str, *said: str, database: str = "postgres"
+) -> FakeCall:
+    argv = cs.argv(
+        "exec",
+        "-T",
+        operands=("postgres", "psql", "-U", "blank", "-d", database, "-tAc", sql),
+    )
+    return FakeCall(tuple(argv), lines=lines(*said))
+
+
+REVISION_SQL = (
+    "SELECT CASE WHEN to_regclass('alembic_version') IS NULL THEN 'none' "
+    "ELSE (SELECT coalesce(max(version_num), 'none') FROM alembic_version) END"
+)
+SESSIONS_SQL = "SELECT count(*) FROM pg_stat_activity WHERE datname = 'blank'"
+NAMES_SQL = "SELECT datname FROM pg_database ORDER BY datname"
+SWAP_SQL = (
+    'BEGIN; ALTER DATABASE "blank" RENAME TO pridem_restore_old; '
+    'ALTER DATABASE pridem_restore_new RENAME TO "blank"; COMMIT;'
+)
+
+
+def _started(cs: ComposeStack) -> list[FakeCall]:
+    return [
+        FakeCall(tuple(cs.argv("start", operands=("app", "frontend")))),
+        running_call(cs, "app", "c-app"),
+        running_call(cs, "frontend", "c-front"),
+    ]
+
+
 def _restore_calls(
     cs: ComposeStack, path: Path, *, stop_code: int = 0, head: str = HEAD
 ) -> list[FakeCall]:
+    """The ladder of ``db restore`` (DM-186): ``stop_for_restore``,
+    ``db_restore`` into ``pridem_restore_new``, ``db_swap``, ``start_restored``.
+    ``head`` -- the revision the new database holds after ``pg_restore``."""
     restore_inside = f"/tmp/pridem-restore-{STACK}.dump"  # noqa: S108 -- the container
     calls = [
         config_call(cs),  # db_restore's check, before anything is stopped
         running_call(cs, "postgres", "c-pg"),  # DM-94: the database runs
         config_call(cs),
-        running_call(cs, "app", "c-app"),
-        running_call(cs, "frontend", "c-front"),
-        FakeCall(
-            tuple(
-                cs.argv(
-                    "stop",
-                    operands=(
-                        "app",
-                        "frontend",
-                    ),
-                )
-            ),
-            code=stop_code,
-        ),
+        alive_call(cs, "app", "c-app"),
+        alive_call(cs, "frontend", "c-front"),
+        FakeCall(tuple(cs.argv("stop", operands=("app", "frontend"))), code=stop_code),
     ]
     if stop_code:
-        return [
-            *calls,
-            FakeCall(
-                tuple(
-                    cs.argv(
-                        "start",
-                        operands=(
-                            "app",
-                            "frontend",
-                        ),
-                    )
-                )
-            ),
-            running_call(cs, "app", "c-app"),
-            running_call(cs, "frontend", "c-front"),
-        ]
+        return [*calls, *_started(cs)]
     calls += [
-        running_call(cs, "app"),
-        running_call(cs, "frontend"),
+        alive_call(cs, "app"),
+        alive_call(cs, "frontend"),
         config_call(cs),
         running_call(cs, "postgres", "c-pg"),
+        psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_new WITH (FORCE)"),
+        psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_old WITH (FORCE)"),
+        psql_call(cs, 'CREATE DATABASE pridem_restore_new OWNER "blank"'),
         FakeCall(
-            tuple(
-                cs.argv(
-                    "cp",
-                    operands=(
-                        str(path),
-                        f"postgres:{restore_inside}",
-                    ),
-                )
-            )
+            tuple(cs.argv("cp", operands=(str(path), f"postgres:{restore_inside}")))
         ),
         FakeCall(
             tuple(
@@ -458,51 +469,40 @@ def _restore_calls(
                     operands=(
                         "postgres",
                         "pg_restore",
-                        "--clean",
-                        "--if-exists",
                         "--no-owner",
                         "--single-transaction",
                         "--exit-on-error",
                         "-U",
                         "blank",
                         "-d",
-                        "blank",
-                        restore_inside,
-                    ),
-                )
-            )  # fmt: skip
-        ),
-        FakeCall(
-            tuple(
-                cs.argv(
-                    "exec",
-                    "-T",
-                    operands=(
-                        "postgres",
-                        "rm",
-                        "-f",
+                        "pridem_restore_new",
                         restore_inside,
                     ),
                 )
             )
+        ),  # fmt: skip
+        FakeCall(
+            tuple(
+                cs.argv("exec", "-T", operands=("postgres", "rm", "-f", restore_inside))
+            )
         ),
-        head_call(cs, head),
+        psql_call(cs, REVISION_SQL, head, database="pridem_restore_new"),
     ]
-    if head != HEAD:
-        return calls
+    if head != HEAD:  # red before the point of no return: the new one dropped
+        return [
+            *calls,
+            psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_new"),
+            *_started(cs),
+        ]
     return [
         *calls,
-        FakeCall(
-            tuple(
-                cs.argv(
-                    "start",
-                    operands=(
-                        "app",
-                        "frontend",
-                    ),
-                )
-            )
-        ),
+        config_call(cs),  # db_swap's check
+        psql_call(cs, SESSIONS_SQL, "0"),
+        psql_call(cs, SWAP_SQL),
+        psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_old WITH (FORCE)"),
+        psql_call(cs, NAMES_SQL, "blank", "postgres"),
+        psql_call(cs, REVISION_SQL, HEAD, database="blank"),
+        FakeCall(tuple(cs.argv("start", operands=("app", "frontend")))),
         running_call(cs, "app", "c-app"),
         running_call(cs, "frontend", "c-front"),
     ]
@@ -544,7 +544,11 @@ def test_db_restore_asks_the_server_s_name_on_any_role(
     run, nothing ran (an empty script). The pair: the box's name -- it runs.
 
     Changed by DM-94: the live database is dumped first (``db_dump`` of the
-    stack ``backup``), and ``db_restore`` names that dump (``insurance``)."""
+    stack ``backup``), and ``db_restore`` names that dump (``insurance``).
+
+    Changed by DM-186 (S9): ``db_restore`` restores into a new database
+    (its fact names it) and ``db_swap`` puts it in place, the point of no
+    return; the steps after it move one place on."""
     blank_box(tmp_path, role=role, name="box-1")
     path = _a_dump(tmp_path)
     for confirm in ([], ["--confirm", "box-2"]):
@@ -566,16 +570,23 @@ def test_db_restore_asks_the_server_s_name_on_any_role(
         ("db_dump", "ok"),
         ("stop_for_restore", "ok"),
         ("db_restore", "ok"),
+        ("db_swap", "ok"),
         ("start_restored", "ok"),
         ("start_stopped", "ok"),
     ]
     assert verdict.steps[2].verify == {
         "stack": STACK,
         "path": str(path),
+        "database": "pridem_restore_new",
         "insurance": str(insurance_path(tmp_path)),
         "alembic_head": HEAD,
     }
-    assert verdict.steps[4].verify == {"started": {}}
+    assert verdict.steps[3].verify == {
+        "stack": STACK,
+        "database": "blank",
+        "alembic_head": HEAD,
+    }
+    assert verdict.steps[5].verify == {"started": {}}
 
 
 def _a_dump(fs_root: Path, entry: str = STACK, run_id: str = RUN_ID) -> Path:
@@ -642,9 +653,13 @@ def test_a_restored_head_other_than_the_dump_s_is_red_past_the_point(
     tmp_path: Path, insured: None
 ) -> None:
     """The database is at another head than the manifest's after
-    ``pg_restore`` -- ``head-mismatch``, restore needed; nothing is started
-    again (the KNOWN CEILING of ``StartStopped``): no ``start`` in the
-    script."""
+    ``pg_restore`` -- ``head-mismatch``.
+
+    Changed by DM-186 (S9): the restore was into the live database, past the
+    point of no return -- restore needed, nothing started again. Now it is
+    into a new one, before ``db_swap``: the new one is dropped, the live one
+    untouched, no restore needed, and ``finally`` starts the services. The
+    name stays the test's."""
     blank_box(tmp_path, name="box-1")
     path = _a_dump(tmp_path)
     cs = compose(tmp_path)  # DM-94: the insurance dump first
@@ -663,8 +678,9 @@ def test_a_restored_head_other_than_the_dump_s_is_red_past_the_point(
         "head": HEAD,
         "current": "0002",
     }
-    assert [i.code for i in verdict.report.incomplete] == ["needed"]
-    assert verdict.steps[4].verify == {"started": {}}
+    assert not verdict.report.incomplete  # the live database untouched
+    assert verdict.steps[3].status == "skipped"  # db_swap: the point not crossed
+    assert verdict.steps[5].verify == {"started": {STACK: ["app", "frontend"]}}
 
 
 def test_a_red_stop_crosses_no_point_and_finally_starts_what_it_stopped(
@@ -683,9 +699,9 @@ def test_a_red_stop_crosses_no_point_and_finally_starts_what_it_stopped(
     assert code == 1
     assert verdict.steps[1].reason is not None
     assert verdict.steps[1].reason.code == "command-failed"
-    assert [s.status for s in verdict.steps[2:4]] == ["skipped", "skipped"]
+    assert [s.status for s in verdict.steps[2:5]] == ["skipped"] * 3  # DM-186: db_swap
     assert not verdict.report.incomplete
-    assert verdict.steps[4].verify == {"started": {STACK: ["app", "frontend"]}}
+    assert verdict.steps[5].verify == {"started": {STACK: ["app", "frontend"]}}
 
 
 def test_a_dump_changed_since_its_manifest_is_red_before_the_restore(
@@ -709,9 +725,9 @@ def test_a_dump_changed_since_its_manifest_is_red_before_the_restore(
     verdict = _verdict(out)
     assert verdict.steps[1].reason is not None
     assert verdict.steps[1].reason.code == "stop_for_restore:dump-drift"
-    assert [s.status for s in verdict.steps[2:4]] == ["skipped", "skipped"]
+    assert [s.status for s in verdict.steps[2:5]] == ["skipped"] * 3  # DM-186: db_swap
     assert not verdict.report.incomplete
-    assert verdict.steps[4].verify == {"started": {}}
+    assert verdict.steps[5].verify == {"started": {}}
 
 
 # --- backup and the entries of the box ------------------------------------------

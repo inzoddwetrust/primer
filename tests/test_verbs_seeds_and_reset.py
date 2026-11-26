@@ -14,6 +14,7 @@ from test_verbs_data import (
     _cli,
     _service,
     _verdict,
+    alive_call,
     compose,
     config_call,
     git_call,
@@ -71,18 +72,32 @@ def reset_calls(
     cs: ComposeStack, *, oid_after: str = NEW_OID, head_after: str = "0001"
 ) -> list[FakeCall]:
     """``db reset`` of the blank: its check (before anything is stopped), the
-    stop of all but the database, the reset and its migration, the start."""
+    stop of all but the database, the reset and its migration, the start.
+
+    Changed by DM-186: the head ``check`` reads is the code's (``alembic
+    heads`` of the app's image, B12), and the stop reads services running or
+    restarting (B15)."""
     check = [
         config_call(cs),
         *image_calls(cs),
+        FakeCall(
+            tuple(
+                cs.argv(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    operands=("app", "python", "-m", "alembic", "heads"),
+                )
+            ),
+            lines=lines("0001 (head)"),
+        ),
         psql_call(cs, OID_SQL, OID),
-        head_call(cs),
     ]
     calls = [
         *check,  # db_reset's check, run by stop_for_restore first
         config_call(cs),
-        running_call(cs, "app", "c-app"),
-        running_call(cs, "frontend", "c-front"),
+        alive_call(cs, "app", "c-app"),
+        alive_call(cs, "frontend", "c-front"),
         FakeCall(
             tuple(
                 cs.argv(
@@ -94,8 +109,8 @@ def reset_calls(
                 )
             )
         ),
-        running_call(cs, "app"),
-        running_call(cs, "frontend"),
+        alive_call(cs, "app"),
+        alive_call(cs, "frontend"),
         *check,  # db_reset's own
         psql_call(cs, 'DROP DATABASE "blank" WITH (FORCE)'),
         psql_call(cs, 'CREATE DATABASE "blank" OWNER "blank"'),

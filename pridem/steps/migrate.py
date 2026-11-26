@@ -348,6 +348,31 @@ STOP_TIMEOUT_S = COMMAND_TIMEOUT_S + 60
 """``compose stop`` waits each service's ``stop_grace_period``."""
 
 
+def alive(ctx: StepContext, compose: ComposeStack, services: list[str]) -> list[str]:
+    """Those of ``services`` with a container running or restarting, sorted:
+    what a stop for a restore or a migration must stop -- a restarting one
+    comes back up by its policy while the database is rewritten (DM-186,
+    B15)."""
+    found: list[str] = []
+    for service in services:
+        _, lines = out(
+            ctx,
+            compose.argv(
+                "ps",
+                "--status",
+                "running",
+                "--status",
+                "restarting",
+                "-q",
+                operands=(service,),
+            ),
+            timeout=COMMAND_TIMEOUT_S,
+        )
+        if any(line.strip() for line in lines):
+            found.append(service)
+    return sorted(found)
+
+
 def running(ctx: StepContext, compose: ComposeStack, services: list[str]) -> list[str]:
     """Those of ``services`` with a running container, sorted."""
     found: list[str] = []
@@ -460,7 +485,7 @@ class StopForMigrate(Step):
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         if not check.data.get("stop"):
             return Verified({"stack": self.compose.entry, "stopped": []})
-        still = running(ctx, self.compose, self.services)
+        still = alive(ctx, self.compose, self.services)  # restarting too (B15)
         if still:
             params: dict[str, Json] = {
                 "stack": self.compose.entry,

@@ -50,6 +50,7 @@ from pridem.steps.data import (
     DbMigrate,
     DbReset,
     DbRestore,
+    DbSwap,
     ProjectVerb,
     SeedPlan,
     SeedReset,
@@ -232,10 +233,12 @@ def _db(args: Strict, ctx: Context) -> int:
         restoring = DbRestore(
             compose, path=path, manifest=manifest, insurance=insurance.path
         )
+        swap = DbSwap(restoring)  # the point of no return (DM-186)
         steps: list[Step] = [
-            StopForRestore(restoring, stopped),
+            StopForRestore(restoring, stopped, acting=swap),
             restoring,
-            StartRestored(compose, stopped),
+            swap,
+            StartRestored(compose, stopped, order=4),
         ]
         return Planned(
             [

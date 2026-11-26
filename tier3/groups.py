@@ -99,6 +99,9 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_a_dump_of_the_blank_restores_what_was_in_it", "c"),
     ("test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was", "c"),
     ("test_tier3_a_reset_of_the_blank_makes_its_database_new", "c"),
+    # restore into a new database and the swap; reset by the code's head (DM-186)
+    ("test_probe_DM_186_S9_an_older_dump_restores_the_database_it_was", "c"),
+    ("test_probe_DM_186_B12_a_reset_is_green_ahead_of_and_behind_the_code", "c"),
     ("test_probe_DM_139_register_on_the_runner", "c"),
     ("test_probe_DM_141_agent_on_the_runner", "c"),
     ("test_probe_DM_141_no_verdict_lost_on_the_runner", "c"),
@@ -216,6 +219,9 @@ CHAINS: tuple[tuple[str, ...], ...] = (
      "test_tier3_a_dump_of_the_blank_restores_what_was_in_it",
      "test_tier3_a_restore_that_fails_half_way_leaves_the_database_as_it_was",
      "test_tier3_a_reset_of_the_blank_makes_its_database_new",
+     # DM-186: the restore into a new database, the reset by the code's head
+     "test_probe_DM_186_S9_an_older_dump_restores_the_database_it_was",
+     "test_probe_DM_186_B12_a_reset_is_green_ahead_of_and_behind_the_code",
      "test_probe_DM_139_register_on_the_runner",
      "test_probe_DM_141_agent_on_the_runner",
      "test_probe_DM_141_no_verdict_lost_on_the_runner"),

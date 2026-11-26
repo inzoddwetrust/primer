@@ -688,6 +688,14 @@ def running_call(cs: ComposeStack, service: str, *ids: str) -> FakeCall:
     return FakeCall(tuple(argv), lines=stdout(*ids))
 
 
+def alive_call(cs: ComposeStack, service: str, *ids: str) -> FakeCall:
+    """``ps`` of the stop's ``verify``: running or restarting (DM-186, B15)."""
+    argv = cs.argv(
+        "ps", "--status", "running", "--status", "restarting", "-q", operands=(service,)
+    )
+    return FakeCall(tuple(argv), lines=stdout(*ids))
+
+
 def test_stop_for_migrate_stops_before_the_migration_and_up_is_left_the_rest(
     tmp_path: Path, app: LiveApp
 ) -> None:
@@ -699,7 +707,8 @@ def test_stop_for_migrate_stops_before_the_migration_and_up_is_left_the_rest(
 
     Changed by DM-186 (B14): ``migrate`` reads its ``check`` once a run --
     ``stop_for_migrate`` asks it while the app still answers; the plan's own
-    ``check`` gets that answer, so the script has one check, not two."""
+    ``check`` gets that answer, so the script has one check, not two. And
+    (B15) the stop's ``verify`` reads services running or restarting."""
     app.health = health(alembic_head="0000")
     stack = stopping(app.port, "worker", "app")
     stop, migrate, start, _ = ladder(stack, tmp_path)
@@ -707,8 +716,8 @@ def test_stop_for_migrate_stops_before_the_migration_and_up_is_left_the_rest(
     script = [
         *migrate_check(cs, "0000"),
         stop_call(cs, "worker", "app"),
-        running_call(cs, "worker"),
-        running_call(cs, "app"),
+        alive_call(cs, "worker"),
+        alive_call(cs, "app"),
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
@@ -755,7 +764,8 @@ def test_nothing_is_stopped_when_migrate_has_nothing_to_do(
 
     Changed by DM-186 (B14): ``migrate`` reads its ``check`` once a run --
     ``stop_for_migrate`` asks it while the app still answers; the plan's own
-    ``check`` gets that answer, so the script has one check, not two."""
+    ``check`` gets that answer, so the script has one check, not two. And
+    (B15) the stop's ``verify`` reads services running or restarting."""
     stack = stopping(app.port, "worker")
     stop, migrate, start, _ = ladder(stack, tmp_path)
     cs = cs_of(stack, tmp_path)
@@ -804,7 +814,10 @@ def test_a_service_that_still_runs_after_stop_is_red_before_the_point(
 ) -> None:
     """Twin LACK: ``stop`` exits 0 but ``worker`` runs -- the step reads it
     back: ``stop_for_migrate:stop-failed``, no ``migrate``; ``finally``
-    starts the list."""
+    starts the list.
+
+    Changed by DM-186 (B15): the stop's ``verify`` reads services running or
+    restarting -- a restarting one comes back up by its policy."""
     app.health = health(alembic_head="0000")
     stack = stopping(app.port, "worker")
     stop, migrate, start, _ = ladder(stack, tmp_path)
@@ -812,7 +825,7 @@ def test_a_service_that_still_runs_after_stop_is_red_before_the_point(
     script = [
         *migrate_check(cs, "0000"),
         stop_call(cs, "worker"),
-        running_call(cs, "worker", "c-worker"),
+        alive_call(cs, "worker", "c-worker"),
         FakeCall(tuple(cs.argv("start", operands=("worker",)))),
         running_call(cs, "worker", "c-worker"),
     ]
@@ -831,7 +844,8 @@ def test_a_red_migrate_leaves_the_stopped_stopped(tmp_path: Path, app: LiveApp) 
 
     Changed by DM-186 (B14): ``migrate`` reads its ``check`` once a run --
     ``stop_for_migrate`` asks it while the app still answers; the plan's own
-    ``check`` gets that answer, so the script has one check, not two."""
+    ``check`` gets that answer, so the script has one check, not two. And
+    (B15) the stop's ``verify`` reads services running or restarting."""
     app.health = health(alembic_head="0000")
     stack = stopping(app.port, "worker")
     stop, migrate, start, _ = ladder(stack, tmp_path)
@@ -839,7 +853,7 @@ def test_a_red_migrate_leaves_the_stopped_stopped(tmp_path: Path, app: LiveApp) 
     script = [
         *migrate_check(cs, "0000"),
         stop_call(cs, "worker"),
-        running_call(cs, "worker"),
+        alive_call(cs, "worker"),
         migrate_call(cs, code=1),
     ]
     with FakeRunner(*script) as runner:

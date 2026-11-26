@@ -33,13 +33,18 @@ stack before the entry's, to the run's own ``backups/<run_id>/`` -- a red dump
 stops the ladder before anything is stopped, and the dump is the way back,
 said in the console before ``pg_restore`` and in the fact of ``db_restore``
 (``insurance``). Then it stops every service of the entry but the database
-(``stop_for_restore``: the app's connections would hold ``--clean``), restores
-with ``pg_restore --clean --if-exists --no-owner`` -- the point of no return
--- reads ``alembic current`` back against the manifest's head, and starts
-again what it stopped (``start_restored``: the same containers on the same
-release). A red step before ``db_restore`` acted -- ``start_stopped`` of
-``finally`` starts them; once it acted, they stay stopped (the KNOWN CEILING
-of ``StartStopped``, ``steps/migrate.py``).
+-- running or restarting (``stop_for_restore``, ``alive``: DM-186, B15) --
+restores into a new database beside the live one, ``pridem_restore_new``, in
+one transaction, and reads its revision back against the manifest
+(``db_restore``: a red step drops the new one, the live one untouched -- no
+point of no return). ``db_swap`` is the point of no return: no session in the
+live database (``database-busy`` before it), one transaction renames the live
+one ``pridem_restore_old`` and the new one the live name, the old one is
+dropped (``restore-old-left`` when it stays) -- the database is the dump,
+not the dump over what newer migrations made (DM-186, S9). ``start_restored``
+starts again what was stopped. A red step before ``db_swap`` acted --
+``start_stopped`` of ``finally`` starts them; once it acted, they stay stopped
+(the KNOWN CEILING of ``StartStopped``, ``steps/migrate.py``).
 
 KNOWN CEILING (DM-86, the keeping of dumps):
 1. mechanics: ``/opt/pridem/backups/`` grows by a directory per ``backup`` and
@@ -66,7 +71,7 @@ from pathlib import Path
 from typing import ClassVar, Literal, Protocol
 
 from pridem.events import Code, Json
-from pridem.runner import RunnerError, Stream
+from pridem.runner import TAIL_LINES, CommandFailed, RunnerError, Stream
 from pridem.stacks.env import write_private
 from pridem.steps.base import (
     NO_NETWORK,
@@ -97,6 +102,7 @@ from pridem.steps.migrate import (
     STOP_TIMEOUT_S,
     Acting,
     Stopped,
+    alive,
     running,
     unknown_head,
 )
@@ -120,6 +126,7 @@ class Wiping(Acting, Protocol):
 
 RESET_CODES: dict[str, str] = {
     "reset": "drop and make again the database of {entry}",
+    "alembic-heads": MIGRATE_VERB_CODES["alembic-heads"],
     "no-migrate": "{stack} has no migrate to bring the schema back",
     "database-name": "the database name {name} of {stack} is not a plain name",
     "not-reset": "the database of {stack} is the same one after the reset",
@@ -426,18 +433,21 @@ class DbDump(Step):
 
 
 class DbRestore(Step):
-    """A dump of ``db_dump`` into the entry's database -- the point of no
-    return of ``db restore``."""
+    """A dump of ``db_dump`` into a new database beside the live one --
+    ``RESTORE_NEW``: made, restored in one transaction, its revision read back
+    against the manifest. No point of no return: the live database is not
+    touched, and a red step drops the new one; ``db_swap`` puts it in the live
+    one's place (DM-186, S9)."""
 
     name = "db_restore"
-    title = "Restore the database"
+    title = "Restore the database beside the live one"
     order = 2
     modes = COMMAND
-    point_of_no_return = True
     codes: ClassVar[dict[str, str]] = {
         **{k: v for k, v in DbDump.codes.items() if k != "dump"},
-        "restore": "restore {path} into the database of {entry}",
+        "restore": "restore {path} into a new database beside the one of {entry}",
         "head-mismatch": "the database of {stack} is at {current}, the dump at {head}",
+        "database-name": RESET_CODES["database-name"],
     }
 
     def __init__(
@@ -456,7 +466,7 @@ class DbRestore(Step):
         the way back, named in the console before ``pg_restore`` and in the
         fact."""
         self.acted = False
-        """``act`` began: what ``stop_for_restore`` stopped stays stopped."""
+        """Never the point of no return: ``db_swap`` is (DM-186)."""
 
     def check(self, ctx: StepContext) -> CheckResult:
         """The file is what its manifest says, before anything is written."""
@@ -466,6 +476,7 @@ class DbRestore(Step):
         if self.manifest.get("sha256") != sha256_of(self.path):
             raise StepFailed("dump-drift", drift)
         found, _, _ = _found(ctx, self.compose)
+        _safe(self.compose, found)
         if not running(ctx, self.compose, [found.service]):  # R2-E13
             raise StepFailed(
                 "database-down", {"stack": self.compose.entry, "service": found.service}
@@ -478,54 +489,244 @@ class DbRestore(Step):
         would = {"entry": self.compose.entry, "path": str(self.path)}
         return CheckResult(True, local_code("restore", would), data)
 
-    def act(self, ctx: StepContext, check: CheckResult) -> None:
-        self.acted = True
+    def _db(self, check: CheckResult) -> Database:
         service, user, live = (str(check.data[k]) for k in ("service", "user", "live"))
+        return Database(service, user, live, "", "")
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        db = self._db(check)
         # a path inside the database's container, not on the box
         inside = f"/tmp/pridem-restore-{self.compose.entry}.dump"  # noqa: S108
-        exec_ = ("exec", "-T")  # the service among the operands, after --
         if self.insurance is not None:  # the way back, said before anything
             line = f"pridem: the database before the restore: {self.insurance}"
             ctx.on_line(Stream.STDOUT, line, False)
+        # what a restore cut short left: the new one, and an old one a swap
+        # that died before its drop left -- the live one is the restored one
+        for leftover in (RESTORE_NEW, RESTORE_OLD):
+            _psql(
+                ctx,
+                self.compose,
+                db,
+                f"DROP DATABASE IF EXISTS {leftover} WITH (FORCE)",
+            )
+        _psql(ctx, self.compose, db, f'CREATE DATABASE {RESTORE_NEW} OWNER "{db.user}"')
         try:
-            out(
-                ctx,
-                self.compose.argv(
-                    "cp", operands=(str(self.path), f"{service}:{inside}")
-                ),
-                timeout=DUMP_TIMEOUT_S,
-            )
-            # one transaction, stopped at the first error: a restore that fails
-            # half-way leaves the database as it was (DM-93, R2-S7)
-            restore = (
-                "pg_restore", "--clean", "--if-exists", "--no-owner",
-                "--single-transaction", "--exit-on-error",
-            )  # fmt: skip
-            out(
-                ctx,
-                self.compose.argv(
-                    *exec_, operands=(service, *restore, "-U", user, "-d", live, inside)
-                ),
-                timeout=DUMP_TIMEOUT_S,
-            )
-        finally:  # the copy in the container goes, the restore red or green
-            clean_inside(ctx, self.compose, service, inside)
+            try:
+                out(
+                    ctx,
+                    self.compose.argv(
+                        "cp", operands=(str(self.path), f"{db.service}:{inside}")
+                    ),
+                    timeout=DUMP_TIMEOUT_S,
+                )
+                # one transaction, stopped at the first error, into the new
+                # database: the live one is not touched (DM-93, DM-186)
+                restore = (
+                    "pg_restore", "--no-owner", "--single-transaction",
+                    "--exit-on-error",
+                )  # fmt: skip
+                out(
+                    ctx,
+                    self.compose.argv(
+                        "exec",
+                        "-T",
+                        operands=(
+                            db.service,
+                            *restore,
+                            "-U",
+                            db.user,
+                            "-d",
+                            RESTORE_NEW,
+                            inside,
+                        ),
+                    ),  # fmt: skip
+                    timeout=DUMP_TIMEOUT_S,
+                )
+            finally:  # the copy in the container goes, the restore red or green
+                clean_inside(ctx, self.compose, db.service, inside)
+        except BaseException:
+            self._drop_new(ctx, db)
+            raise
+
+    def _drop_new(self, ctx: StepContext, db: Database) -> None:
+        """The new database of a restore that failed: dropped; a drop that
+        fails is a line of the journal, never the step's cause."""
+        try:
+            _psql(ctx, self.compose, db, f"DROP DATABASE IF EXISTS {RESTORE_NEW}")
+        except RunnerError as error:
+            line = f"pridem: {RESTORE_NEW} left: {type(error).__name__}"
+            ctx.on_line(Stream.STDERR, line, False)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
-        fact: dict[str, Json] = {"stack": self.compose.entry, "path": str(self.path)}
+        db = self._db(check)
+        fact: dict[str, Json] = {
+            "stack": self.compose.entry,
+            "path": str(self.path),
+            "database": RESTORE_NEW,
+        }
         if self.insurance is not None:
             fact["insurance"] = str(self.insurance)
         head = self.manifest.get("alembic_head")
         if isinstance(head, str):
-            now = _head(ctx, self.compose)
+            now = _revision(ctx, self.compose, db, RESTORE_NEW)
+            if now != head:
+                self._drop_new(ctx, db)  # nothing put in the live one's place
+                params: dict[str, Json] = {
+                    "stack": self.compose.entry,
+                    "head": head,
+                    "current": now,
+                }
+                raise StepFailed("head-mismatch", params)
+            fact["alembic_head"] = head
+        return Verified(fact)
+
+
+class DbSwap(Step):
+    """The restored database in the live one's place -- the point of no return
+    of ``db restore`` (DM-186, S9): one transaction renames the live database
+    ``RESTORE_OLD`` and the restored one the live name, then the old one is
+    dropped.
+
+    ``check`` refuses while a session holds the live database
+    (``database-busy``): before the point of no return, nothing renamed. A
+    session that comes between the ``check`` and the swap makes PostgreSQL
+    refuse the rename itself -- after waiting 5 s for it to leave -- and the
+    transaction rolls back, both databases as they were (measured): then
+    ``act`` is red ``database-busy`` and nothing is changed.
+
+    KNOWN CEILING (the verdict of a swap refused in ``act``):
+    1. mechanics: the plan marks the point of no return crossed when ``act``
+       begins, so a swap PostgreSQL refused (a session between ``check`` and
+       ``act``) ends with ``restore/needed`` though no database was renamed;
+    2. status: acknowledged by design;
+    3. task: none -- the services are stopped (``alive``, B15): no session is
+       expected in that window;
+    4. trigger: a ``db_swap`` red with ``database-busy`` from ``act`` (its
+       fact has no ``database``) seen on a box;
+    5. agreed form of the fix: the plan marks the crossing by the step's word
+       -- a form of the plan for every step of a point of no return;
+    6. rejected: ``ALLOW_CONNECTIONS false`` on the live database before the
+       swap -- one more change to undo, and the same verdict when it fails.
+    """
+
+    name = "db_swap"
+    title = "Put the restored database in place"
+    order = 3
+    modes = COMMAND
+    point_of_no_return = True
+    codes: ClassVar[dict[str, str]] = {
+        "swap": "put the restored database in the place of the one of {entry}",
+        "database-busy": "{sessions} sessions hold the database of {stack}; "
+        "nothing is restored",
+        "not-swapped": "the database of {stack} is not the restored one",
+        "restore-old-left": "the database {database} of {stack}, the one before "
+        "the restore, is left",
+        "head-mismatch": "the database of {stack} is at {current}, the dump at {head}",
+        "no-app": DbDump.codes["no-app"],
+        "no-database-url": DbDump.codes["no-database-url"],
+        "test-db-is-live": DbDump.codes["test-db-is-live"],
+        "no-database-image": DbDump.codes["no-database-image"],
+    }
+
+    def __init__(self, restore: DbRestore) -> None:
+        self.restore = restore
+        self.compose = restore.compose
+        self.acted = False
+        """The swap is done: what ``stop_for_restore`` stopped stays stopped."""
+        self.old_left = False
+
+    def _sessions(self, ctx: StepContext, db: Database) -> int:
+        sql = (  # the names are [A-Za-z0-9_] only: _safe() refused the rest
+            f"SELECT count(*) FROM pg_stat_activity WHERE datname = '{db.live}'"  # noqa: S608
+        )
+        found = _psql(ctx, self.compose, db, sql)
+        return int(found[0]) if found and found[0].isdigit() else 0
+
+    def check(self, ctx: StepContext) -> CheckResult:
+        found, _, _ = _found(ctx, self.compose)
+        _safe(self.compose, found)
+        sessions = self._sessions(ctx, found)
+        if sessions:
+            params: dict[str, Json] = {
+                "stack": self.compose.entry,
+                "sessions": sessions,
+            }
+            raise StepFailed("database-busy", params)
+        data: dict[str, Json] = {
+            "service": found.service,
+            "user": found.user,
+            "live": found.live,
+        }
+        return CheckResult(
+            True, local_code("swap", {"entry": self.compose.entry}), data
+        )
+
+    def act(self, ctx: StepContext, check: CheckResult) -> None:
+        db = self.restore._db(check)
+        swap = (
+            f'BEGIN; ALTER DATABASE "{db.live}" RENAME TO {RESTORE_OLD}; '
+            f'ALTER DATABASE {RESTORE_NEW} RENAME TO "{db.live}"; COMMIT;'
+        )
+        argv = self.compose.argv(
+            "exec",
+            "-T",
+            operands=(
+                db.service,
+                "psql",
+                "-U",
+                db.user,
+                "-d",
+                "postgres",
+                "-tAc",
+                swap,
+            ),
+        )
+        code, lines = out(ctx, argv, expect=(0, 1), timeout=COMMAND_TIMEOUT_S)
+        if code != 0:
+            if any(BUSY_LINE in line for line in lines):
+                params: dict[str, Json] = {
+                    "stack": self.compose.entry,
+                    "sessions": self._sessions(ctx, db),
+                }
+                raise StepFailed("database-busy", params)  # rolled back: nothing
+            tail = tuple((Stream.STDOUT, line) for line in lines[-TAIL_LINES:])
+            raise CommandFailed(tuple(argv), code, (0,), tail)
+        self.acted = True
+        try:
+            _psql(
+                ctx,
+                self.compose,
+                db,
+                f"DROP DATABASE IF EXISTS {RESTORE_OLD} WITH (FORCE)",
+            )
+        except RunnerError as error:  # the data is safe: said, not the cause
+            self.old_left = True
+            line = f"pridem: {RESTORE_OLD} left: {type(error).__name__}"
+            ctx.on_line(Stream.STDERR, line, False)
+
+    def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
+        db = self.restore._db(check)
+        names = _names(ctx, self.compose, db)
+        if db.live not in names or RESTORE_NEW in names:
+            raise StepFailed("not-swapped", {"stack": self.compose.entry})
+        fact: dict[str, Json] = {"stack": self.compose.entry, "database": db.live}
+        head = self.restore.manifest.get("alembic_head")
+        if isinstance(head, str):
+            now = _revision(ctx, self.compose, db, db.live)
             if now != head:
                 params: dict[str, Json] = {
                     "stack": self.compose.entry,
                     "head": head,
-                    "current": now or "none",
+                    "current": now,
                 }
                 raise StepFailed("head-mismatch", params)
             fact["alembic_head"] = head
+        if RESTORE_OLD in names:
+            left: dict[str, Json] = {
+                "stack": self.compose.entry,
+                "database": RESTORE_OLD,
+            }
+            return Verified(fact, incomplete=Code("restore-old-left", left))
         return Verified(fact)
 
 
@@ -548,10 +749,16 @@ class StopForRestore(Step):
         "stop-failed": "{services} of {stack} still run after stop",
     }
 
-    def __init__(self, restore: "Wiping", stopped: Stopped) -> None:
+    def __init__(
+        self, restore: "Wiping", stopped: Stopped, *, acting: Acting | None = None
+    ) -> None:
         self.restore = restore
         self.compose = restore.compose
         self.stopped = stopped
+        self.acting = acting if acting is not None else restore
+        """Whose ``acted`` keeps the stopped stopped: ``db_swap`` for a
+        restore -- its point of no return (DM-186); the step itself for a
+        reset."""
         self.services: list[str] = []
 
     def check(self, ctx: StepContext) -> CheckResult:
@@ -560,7 +767,7 @@ class StopForRestore(Step):
         services = document.get("services")
         names = sorted(services) if isinstance(services, dict) else []
         self.services = [name for name in names if name != found.service]
-        live = running(ctx, self.compose, self.services)
+        live = alive(ctx, self.compose, self.services)  # restarting too (B15)
         if not live:
             return CheckResult(False, None, {})
         params: dict[str, Json] = {
@@ -571,12 +778,12 @@ class StopForRestore(Step):
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         stop = [str(name) for name in _list(check.data.get("stop"))]
-        self.stopped.entries.append((self.compose, stop, self.restore))
+        self.stopped.entries.append((self.compose, stop, self.acting))
         out(ctx, self.compose.argv("stop", operands=stop), timeout=STOP_TIMEOUT_S)
 
     def verify(self, ctx: StepContext, check: CheckResult) -> Verified:
         stop = [str(name) for name in _list(check.data.get("stop"))]
-        still = running(ctx, self.compose, stop)
+        still = alive(ctx, self.compose, stop)
         if still:
             params: dict[str, Json] = {
                 "stack": self.compose.entry,
@@ -767,17 +974,52 @@ def heads_of(lines: Sequence[str]) -> list[str]:
     return heads(lines)
 
 
-def _psql(ctx: StepContext, compose: ComposeStack, db: Database, sql: str) -> list[str]:
+def _psql(
+    ctx: StepContext,
+    compose: ComposeStack,
+    db: Database,
+    sql: str,
+    *,
+    database: str = "postgres",
+) -> list[str]:
     _, lines = out(
         ctx,
         compose.argv(
             "exec",
             "-T",
-            operands=(db.service, "psql", "-U", db.user, "-d", "postgres", "-tAc", sql),
+            operands=(db.service, "psql", "-U", db.user, "-d", database, "-tAc", sql),
         ),
         timeout=COMMAND_TIMEOUT_S,
     )
     return [line.strip() for line in lines if line.strip()]
+
+
+RESTORE_NEW = "pridem_restore_new"
+"""The database ``db_restore`` restores a dump into, beside the live one
+(DM-186, S9): ``pg_restore --clean`` over the live database left the tables of
+newer migrations in it (measured, PostgreSQL 16)."""
+RESTORE_OLD = "pridem_restore_old"
+"""The live database's name after ``db_swap``, until it is dropped."""
+BUSY_LINE = "is being accessed by other users"
+"""What PostgreSQL says to ``ALTER DATABASE ... RENAME`` of a database another
+session holds, after waiting 5 s for it to leave (PostgreSQL 16, measured):
+the transaction of the swap rolls back, both databases as they were."""
+
+
+def _revision(ctx: StepContext, compose: ComposeStack, db: Database, name: str) -> str:
+    """The revision ``alembic_version`` of the database ``name`` holds, read
+    by ``psql`` -- no alembic, no app; ``none`` -- none."""
+    sql = (
+        "SELECT CASE WHEN to_regclass('alembic_version') IS NULL THEN 'none' "
+        "ELSE (SELECT coalesce(max(version_num), 'none') FROM alembic_version) END"
+    )
+    found = _psql(ctx, compose, db, sql, database=name)
+    return found[0] if found else "none"
+
+
+def _names(ctx: StepContext, compose: ComposeStack, db: Database) -> list[str]:
+    sql = "SELECT datname FROM pg_database ORDER BY datname"
+    return _psql(ctx, compose, db, sql)
 
 
 def _oid(ctx: StepContext, compose: ComposeStack, db: Database) -> str:
@@ -827,15 +1069,26 @@ class DbReset(Step):
         _safe(self.compose, found)
         _migrate_argv(self.compose)
         image_is_current(ctx, self.compose, document)
+        # the head the new database is migrated to is the code's -- never the
+        # revision of the database it replaces, which may be behind or ahead
+        # of the code (DM-186, B12)
+        heads = _heads(ctx, self.compose)
+        if len(heads) != 1:
+            params: dict[str, Json] = {
+                "stack": self.compose.entry,
+                "count": len(heads),
+                "heads": list[Json](heads),
+            }
+            raise StepFailed("alembic-heads", params)
         data: dict[str, Json] = {
             "service": found.service,
             "user": found.user,
             "live": found.live,
             "oid": _oid(ctx, self.compose, found),
-            "head": _head(ctx, self.compose),
+            "head": heads[0],
         }
-        params: dict[str, Json] = {"entry": self.compose.entry}
-        return CheckResult(True, local_code("reset", params), data)
+        would: dict[str, Json] = {"entry": self.compose.entry}
+        return CheckResult(True, local_code("reset", would), data)
 
     def _db(self, check: CheckResult) -> Database:
         service, user, live = (str(check.data[k]) for k in ("service", "user", "live"))

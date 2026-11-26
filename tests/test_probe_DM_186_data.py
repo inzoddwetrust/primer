@@ -47,7 +47,7 @@ from test_verbs_data import (
     plan,
 )
 
-from pridem.events import Code
+from pridem.events import Code, PlanOutcome
 from pridem.interrupt import Interrupt
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner, OnLine, Result
@@ -377,3 +377,164 @@ def test_doctor_brings_no_database_up(tmp_path: Path, app: LiveApp) -> None:
     with FakeRunner(*silent) as runner:
         doctor, _ = run_entry([_migrate(tmp_path, app.port)], runner, mode="doctor")
     assert [d.reason.code for d in doctor.doctor_diff] == ["migrate:migrate"]
+
+
+# --- part B: S9, B15 on tier 1 (the live database: tier 3) -------------------------
+
+
+def _restore_box(tmp_path: Path) -> tuple[Path, ComposeStack, Path]:
+    from test_verbs_data import _a_dump
+
+    blank_box(tmp_path, name="box-1")
+    return tmp_path, compose(tmp_path), _a_dump(tmp_path)
+
+
+def test_probe_DM_186_B15_a_restarting_service_is_stopped_for_the_restore(
+    tmp_path: Path, insured: None
+) -> None:
+    """``frontend`` is restarting, not running: ``stop_for_restore`` stops it
+    too -- ``ps`` is asked for both states (the strict script), and the stop
+    names it -- and its ``verify`` reads none of them running or restarting."""
+    from test_verbs_data import (
+        _cli,
+        _restore_calls,
+        _verdict,
+        insurance_calls,
+    )
+
+    root, cs, path = _restore_box(tmp_path)
+    calls = [*insurance_calls(root, cs), *_restore_calls(cs, path)]
+    with _BringsOut(*calls, make=_dump) as runner:
+        code, out, _ = _cli(
+            root, ["db", "restore", STACK, str(path), "--confirm", "box-1"], runner
+        )
+    verdict = _verdict(out)
+    assert code == 0, verdict.steps
+    stop = {s.name: s.verify for s in verdict.steps}["stop_for_restore"]
+    assert stop == {"stack": STACK, "stopped": ["app", "frontend"]}
+
+
+def _swap_only(
+    tmp_path: Path, calls: Callable[[ComposeStack], list[FakeCall]]
+) -> tuple[PlanOutcome, bool]:
+    """``db_swap`` alone after a green ``db_restore``'s check data."""
+    from test_verbs_data import config_call
+
+    from pridem.steps.data import DbRestore, DbSwap
+    from pridem.steps.data import read_manifest as manifest_of
+
+    root, cs, path = _restore_box(tmp_path)
+    manifest = manifest_of(path.with_suffix(".json"))
+    assert manifest is not None
+    swap = DbSwap(DbRestore(cs, path=path, manifest=manifest))
+    with FakeRunner(config_call(cs), *calls(cs)) as runner:
+        outcome = plan([swap], runner)
+    return outcome, swap.acted
+
+
+def test_probe_DM_186_S9_a_session_in_the_live_database_stops_the_swap_before_the_point(
+    tmp_path: Path,
+) -> None:
+    """A session holds the live database: ``db_swap`` refuses in ``check``
+    (``database-busy``) -- before the point of no return: nothing renamed (no
+    swap in the strict script), no restore asked. The pair: none -- the swap,
+    the old one dropped, the restored one in place."""
+    from test_verbs_data import (
+        NAMES_SQL,
+        REVISION_SQL,
+        SESSIONS_SQL,
+        SWAP_SQL,
+        psql_call,
+    )
+
+    outcome, _ = _swap_only(
+        tmp_path / "x", lambda cs: [psql_call(cs, SESSIONS_SQL, "1")]
+    )
+    assert outcome.steps[0].reason == Code(
+        "db_swap:database-busy", {"stack": STACK, "sessions": 1}
+    )
+    assert not outcome.needs_restore
+    green, _ = _swap_only(
+        tmp_path / "y",
+        lambda cs: [
+            psql_call(cs, SESSIONS_SQL, "0"),
+            psql_call(cs, SWAP_SQL),
+            psql_call(cs, "DROP DATABASE IF EXISTS pridem_restore_old WITH (FORCE)"),
+            psql_call(cs, NAMES_SQL, "blank", "postgres"),
+            psql_call(cs, REVISION_SQL, HEAD, database="blank"),
+        ],
+    )
+    assert green.code is ExitCode.OK, green.steps
+
+
+def test_a_session_that_comes_before_the_swap_leaves_both_databases(
+    tmp_path: Path,
+) -> None:
+    """A session comes between ``check`` and the swap: PostgreSQL refuses the
+    rename (its line, measured) and the transaction rolls back -- red
+    ``database-busy`` from ``act``, no drop of the old one, the services not
+    kept stopped. The KNOWN CEILING of ``DbSwap``: the verdict says restore
+    needed (the plan crossed at ``act``)."""
+    from test_verbs_data import SESSIONS_SQL, SWAP_SQL, psql_call
+
+    def calls(cs: ComposeStack) -> list[FakeCall]:
+        refused = FakeCall(
+            psql_call(cs, SWAP_SQL).argv,
+            lines=stdout(
+                'ERROR:  database "blank" is being accessed by other users',
+                "DETAIL:  There is 1 other session using the database.",
+            ),
+            code=1,
+        )
+        return [
+            psql_call(cs, SESSIONS_SQL, "0"),
+            refused,
+            psql_call(cs, SESSIONS_SQL, "1"),
+        ]
+
+    outcome, acted = _swap_only(tmp_path, calls)
+    assert outcome.steps[0].reason == Code(
+        "db_swap:database-busy", {"stack": STACK, "sessions": 1}
+    )
+    assert not acted  # start_stopped starts the services again
+    assert outcome.needs_restore  # the ceiling
+
+
+def test_an_old_database_that_stays_is_said(tmp_path: Path) -> None:
+    """The swap is done, the drop of the old one fails: the restored one is
+    live (green), ``incomplete restore-old-left``."""
+    from test_verbs_data import (
+        NAMES_SQL,
+        REVISION_SQL,
+        SESSIONS_SQL,
+        SWAP_SQL,
+        psql_call,
+    )
+
+    def calls(cs: ComposeStack) -> list[FakeCall]:
+        drop = "DROP DATABASE IF EXISTS pridem_restore_old WITH (FORCE)"
+        return [
+            psql_call(cs, SESSIONS_SQL, "0"),
+            psql_call(cs, SWAP_SQL),
+            FakeCall(psql_call(cs, drop).argv, code=1),
+            psql_call(cs, NAMES_SQL, "blank", "postgres", "pridem_restore_old"),
+            psql_call(cs, REVISION_SQL, HEAD, database="blank"),
+        ]
+
+    outcome, _ = _swap_only(tmp_path, calls)
+    assert [e.reason for e in outcome.incomplete] == [
+        Code(
+            "db_swap:restore-old-left",
+            {"stack": STACK, "database": "pridem_restore_old"},
+        )
+    ]
+
+
+@pytest.fixture
+def insured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``db restore`` runs as ``INSURANCE_RUN`` (as ``test_verbs_data``)."""
+    from test_verbs_data import INSURANCE_RUN
+
+    from pridem.state import Box
+
+    monkeypatch.setattr(Box, "new_run_id", lambda self, now: INSURANCE_RUN)
