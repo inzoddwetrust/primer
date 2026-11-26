@@ -121,3 +121,34 @@ def test_a_service_that_does_not_start_is_a_refusal(tmp_path: Path) -> None:
     assert code == 1
     assert errors[0] == "install.sh: the agent's service did not start: see above"
     assert _calls(tmp_path) == ["register", "agent install"]
+
+
+def test_an_empty_token_is_no_token(tmp_path: Path) -> None:
+    """``PRIDEM_REGISTER_TOKEN=`` (empty): no registration, no service, said
+    why, exit 0 -- as with none. The pair: the same box with a token of one
+    letter or more asks ``pridem register``."""
+    _box(tmp_path, "passport.yaml")
+    code, screen, errors, _ = _install(tmp_path, PRIDEM_REGISTER_TOKEN="")
+    assert code == 0, errors
+    assert screen[-1] == (
+        "6/6 agent: not registered -- no PRIDEM_REGISTER_TOKEN; "
+        "the machine works without the Panel"
+    )
+    assert _calls(tmp_path) == []
+    other = tmp_path / "other"
+    other.mkdir()
+    _box(other, "passport.yaml")
+    code, _, errors, _ = _install(other, PRIDEM_REGISTER_TOKEN=TOKEN[:1])
+    assert code == 0, errors
+    assert _calls(other) == ["register", "agent install"]
+
+
+def test_an_empty_panel_is_the_machine_s_own(tmp_path: Path) -> None:
+    """``PRIDEM_PANEL=`` (empty): ``register`` with no ``--panel`` -- the
+    machine's Panel -- never ``--panel ''``."""
+    _box(tmp_path, "passport.yaml")
+    code, _, errors, _ = _install(
+        tmp_path, PRIDEM_REGISTER_TOKEN=TOKEN, PRIDEM_PANEL=""
+    )
+    assert code == 0, errors
+    assert _calls(tmp_path) == ["register", "agent install"]
