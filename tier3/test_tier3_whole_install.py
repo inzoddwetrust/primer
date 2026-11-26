@@ -5830,3 +5830,207 @@ def test_probe_DM_185_renew_leaves_a_ca_certificate(tmp_path: Path) -> None:
     assert entry.code == "ssl_renew:no-lineage", entry
     assert (TLS_DIR / "fullchain.pem").read_text() == cert
     assert served_once(FRONTEND, 443) == served == file_fingerprint(root)
+
+
+# --- DM-143: first contact -- one command installs the machine and its agent -----
+
+FIRST_TOKEN = "tier3-first-contact-token-dm143"  # noqa: S105 -- a test value
+INSTALL_SH = Path("/tmp/tier3/install.sh")  # noqa: S108 -- tier3.yml writes it there
+"""``install.sh`` of this run, its pins in place (``tier3.yml``)."""
+AGENT_UNIT = "pridem-agent.service"
+
+
+class _FirstContactPanel(_AgentPanel):
+    """The Panel of the first contact on the runner's loopback: the
+    registration (one token, used once, the box's public half kept for the
+    agent's signatures) and the agent's requests after it (``_AgentPanel``)."""
+
+    used: ClassVar[set[str]] = set()
+
+    def _answer(self, body: bytes) -> tuple[int, bytes]:
+        if self.path != "/agent/v1/register":
+            return super()._answer(body)
+        asked = RegisterRequest.model_validate_json(body)
+        token = asked.token.get_secret_value()
+        if token != FIRST_TOKEN:
+            return 404, Refusal(code="token-unknown").model_dump_json().encode()
+        if token in self.used:
+            return 410, Refusal(code="token-used").model_dump_json().encode()
+        self.used.add(token)
+        type(self).public = base64.b64decode(asked.box_key_public)
+        answer = RegisterResponse(
+            box_id="tier3-first-contact",
+            agent_url="https://127.0.0.1/agent/v1/",
+            heartbeat_s=5,
+            full_state_s=60,
+            poll_s=5,
+        )
+        return 201, answer.model_dump_json().encode()
+
+
+@pytest.fixture(scope="module")
+def first_contact() -> Iterator[tuple[type[_FirstContactPanel], str]]:
+    """The Panel of the first contact for the probes of DM-143, and its origin;
+    after them the agent's service is stopped and removed -- the box keeps no
+    service of a test."""
+    handler = type(
+        "Panel",
+        (_FirstContactPanel,),
+        {"used": set(), "queue": [], "seen": [], "lines": {}, "verdicts": {},
+         "beats": []},
+    )  # fmt: skip
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield handler, f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        _run(["systemctl", "disable", "--now", AGENT_UNIT], expect=(0, 1, 5))
+        Path("/etc/systemd/system", AGENT_UNIT).unlink(missing_ok=True)
+        _run(["systemctl", "daemon-reload"])
+        server.shutdown()
+        server.server_close()
+
+
+def _first_contact(**env: str) -> tuple[int, list[str], list[str]]:
+    """``bash install.sh`` of this run as the Panel's command runs it, with
+    ``env`` added to a clean environment: exit, screen, refusal."""
+    screen: list[str] = []
+    refusal: list[str] = []
+
+    def keep(stream: Stream, line: str, cut: bool) -> None:
+        (screen if stream is Stream.STDOUT else refusal).append(line)
+
+    result = SubprocessRunner().run(
+        ["bash", str(INSTALL_SH)],
+        expect=(0, 1),
+        timeout=600,
+        env={**clean_env(), **env},
+        on_line=keep,
+    )
+    return result.code, screen, refusal
+
+
+def _unit_says(prop: str) -> str:
+    [line] = _stdout(["systemctl", "show", "-p", prop, "--value", AGENT_UNIT])
+    return line.strip()
+
+
+def _beats_after(handler: type[_FirstContactPanel], count: int) -> float:
+    """Seconds until the Panel has more than ``count`` heartbeats."""
+    began = time.monotonic()
+    while len(handler.beats) <= count:
+        assert time.monotonic() - began < 120, ("no heartbeat", handler.seen)
+        time.sleep(0.5)
+    return round(time.monotonic() - began, 1)
+
+
+def test_probe_DM_143_no_token_installs_the_machine_and_says_why() -> None:
+    """``install.sh`` with no token on a box with its product: the machine as
+    it was, the sixth step says why there is no registration, no service, no
+    ``agent/``. Measured into the run's journal (``warnings.warn``): systemd
+    on this runner -- what the probes of DM-143 stand on (par0 14.3)."""
+    measured = {
+        "pid1": Path("/proc/1/comm").read_text().strip(),
+        "systemd": _stdout(["systemctl", "--version"])[0],
+        "state": _run(["systemctl", "is-system-running"], expect=(0, 1)),
+    }
+    warnings.warn(f"DM-143 measure: {measured}", stacklevel=1)
+    assert measured["pid1"] == "systemd"
+    code, screen, refusal = _first_contact()
+    assert code == 0, refusal
+    assert screen[-1] == (
+        "6/6 agent: not registered -- no PRIDEM_REGISTER_TOKEN; "
+        "the machine works without the Panel"
+    )
+    assert not Path("/opt/pridem/agent/registration.json").exists()
+    assert not Path("/etc/systemd/system", AGENT_UNIT).exists()
+
+
+def test_probe_DM_143_one_command_installs_registers_and_runs_the_agent(
+    first_contact: tuple[type[_FirstContactPanel], str],
+) -> None:
+    """The Panel's command on a box with its product: the machine stands, the
+    box is registered in the Panel, the agent runs as a service and the
+    Panel hears its heartbeat -- signed by the key the registration gave. The
+    token is on no line of the screen and of the install's log."""
+    handler, origin = first_contact
+    began = time.monotonic()
+    code, screen, refusal = _first_contact(
+        PRIDEM_REGISTER_TOKEN=FIRST_TOKEN, PRIDEM_PANEL=origin
+    )
+    assert code == 0, (screen, refusal)
+    assert screen[-1] == "6/6 agent: registered; its service runs"
+    [version] = _stdout([PRIDEM, "version"])
+    assert version.startswith("pridem ")
+    registration = json.loads(
+        Path("/opt/pridem/agent/registration.json").read_text(encoding="utf-8")
+    )
+    assert registration["box_id"] == "tier3-first-contact"
+    assert _unit_says("ActiveState") == "active"
+    heard = _beats_after(handler, 0)
+    log = Path("/var/log/pridem-install.log").read_text(encoding="utf-8")
+    for text in (*screen, *refusal, log):
+        assert FIRST_TOKEN not in text
+    warnings.warn(
+        f"DM-143 measure: the command {round(time.monotonic() - began, 1)} s, "
+        f"the first heartbeat {heard} s after it; screen {screen}",
+        stacklevel=1,
+    )
+
+
+def test_probe_DM_143_the_agent_service_survives_a_restart(
+    first_contact: tuple[type[_FirstContactPanel], str],
+) -> None:
+    """``systemctl restart`` -- a new process, heard again; ``kill -9`` of
+    the agent -- systemd starts it again (``Restart=always``), heard again. A
+    reboot is not made on a runner: what systemd starts on boot is read
+    instead -- the unit enabled, ``WantedBy=multi-user.target``, and
+    ``multi-user.target`` wanting it."""
+    handler, _ = first_contact
+    first = _unit_says("MainPID")
+    _run(["systemctl", "restart", AGENT_UNIT])
+    second = _unit_says("MainPID")
+    assert second not in ("0", first) and _unit_says("ActiveState") == "active"
+    _beats_after(handler, len(handler.beats))
+    os.kill(int(second), signal.SIGKILL)
+    began = time.monotonic()
+    while _unit_says("MainPID") in ("0", second):
+        assert time.monotonic() - began < 60, "systemd did not start it again"
+        time.sleep(0.5)
+    again = round(time.monotonic() - began, 1)
+    assert _unit_says("ActiveState") == "active"
+    _beats_after(handler, len(handler.beats))
+    assert _stdout(["systemctl", "is-enabled", AGENT_UNIT]) == ["enabled"]
+    unit = Path("/etc/systemd/system", AGENT_UNIT).read_text(encoding="utf-8")
+    assert "WantedBy=multi-user.target\n" in unit and "Restart=always\n" in unit
+    wanted = _stdout(
+        ["systemctl", "list-dependencies", "--plain", "--no-pager", "multi-user.target"]
+    )
+    assert any(line.strip() == AGENT_UNIT for line in wanted), wanted
+    warnings.warn(
+        f"DM-143 measure: started again {again} s after kill -9", stacklevel=1
+    )
+
+
+def test_probe_DM_143_a_used_token_is_refused(
+    first_contact: tuple[type[_FirstContactPanel], str],
+) -> None:
+    """The token of a registration the Panel took, again on a box without its
+    registration (the box died between the Panel's answer and its file,
+    DM-139): ``register:token-used``, ``install.sh`` refuses with why, and
+    no service starts."""
+    handler, origin = first_contact
+    _run(["systemctl", "stop", AGENT_UNIT])
+    registration = Path("/opt/pridem/agent/registration.json")
+    registration.rename(registration.with_suffix(".kept"))
+    try:
+        code, _, refusal = _first_contact(
+            PRIDEM_REGISTER_TOKEN=FIRST_TOKEN, PRIDEM_PANEL=origin
+        )
+    finally:
+        registration.with_suffix(".kept").rename(registration)
+    assert code == 1
+    assert refusal[0] == "install.sh: the box is not registered: see above"
+    assert any("token is used already" in line for line in refusal), refusal
+    assert _unit_says("ActiveState") != "active"
+    assert ("POST", "/agent/v1/register", 410) in handler.seen

@@ -67,9 +67,14 @@ STUBS = {
         'echo "Collecting pyyaml"\n'
         'echo "Successfully installed"\n'
         "EOF\n"
-        'cat > "$dir/bin/pridem" <<EOF\n'
+        "cat > \"$dir/bin/pridem\" <<'EOF'\n"
         "#!/bin/sh\n"
-        f'echo "pridem {VERSION}"\n'
+        f'[ "$1" = version ] && {{ echo "pridem {VERSION}"; exit 0; }}\n'
+        'echo "$*" >> "$STUB_CALLS"\n'
+        'echo "token=${PRIDEM_REGISTER_TOKEN:-}" >> "$STUB_CALLS.env"\n'
+        'echo "pridem: $1 says its own lines"\n'
+        '[ "$1" = register ] && exit "${REGISTER_EXIT:-0}"\n'
+        'exit "${SERVICE_EXIT:-0}"\n'
         "EOF\n"
         'chmod 755 "$dir/bin/pip" "$dir/bin/pridem"\n'
     ),
@@ -77,9 +82,13 @@ STUBS = {
 
 
 def _install(tmp: Path, **env: str) -> tuple[int, list[str], list[str], Path]:
-    """``install.sh`` with its pins, under ``PRIDEM_ROOT``: exit, screen, log."""
+    """``install.sh`` with its pins, under ``PRIDEM_ROOT``: exit, screen, log.
+    What the box had before -- files a test put under ``tmp/root`` -- stays.
+    The installed ``pridem`` is a stub: ``version`` answers, any other call
+    is kept in ``tmp/calls`` (its arguments) and ``tmp/calls.env`` (the
+    token it got in its environment)."""
     root = tmp / "root"
-    (root / "etc").mkdir(parents=True)
+    (root / "etc").mkdir(parents=True, exist_ok=True)
     (root / "etc" / "os-release").write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
     (root / "usr" / "local" / "bin").mkdir(parents=True)
     wheel = tmp / f"pridem-{VERSION}-py3-none-any.whl"
@@ -104,7 +113,12 @@ def _install(tmp: Path, **env: str) -> tuple[int, list[str], list[str], Path]:
         ["bash", str(tmp / "install.sh")],
         timeout=60,
         expect=(0, 1),
-        env={"PATH": f"{stubs}:/usr/bin:/bin", "PRIDEM_ROOT": str(root), **env},
+        env={
+            "PATH": f"{stubs}:/usr/bin:/bin",
+            "PRIDEM_ROOT": str(root),
+            "STUB_CALLS": str(tmp / "calls"),
+            **env,
+        },
         on_line=lambda s, line, cut: seen[s].append(line),
     )
     log = root / "var" / "log" / "pridem-install.log"
@@ -112,16 +126,20 @@ def _install(tmp: Path, **env: str) -> tuple[int, list[str], list[str], Path]:
 
 
 def test_a_green_install_shows_its_own_lines_and_logs_the_rest(tmp_path: Path) -> None:
-    """The screen: 1/5 ... 5/5, nothing of apt, git, curl or pip; the log
-    (0600) has their lines and the script's own."""
+    """The screen: 1/6 ... 6/6, nothing of apt, git, curl or pip; the log
+    (0600) has their lines and the script's own.
+
+    Changed by DM-143, on the dispatcher's word 26.11: the sixth step, the
+    agent -- with no token, said why."""
     code, screen, errors, log = _install(tmp_path)
     assert code == 0, errors
     assert [line.split(" ", 1)[0] for line in screen] == [
-        "1/5",
-        "2/5",
-        "3/5",
-        "4/5",
-        "5/5",
+        "1/6",
+        "2/6",
+        "3/6",
+        "4/6",
+        "5/6",
+        "6/6",
     ]
     assert errors == []
     written = log.read_text().splitlines()
@@ -129,9 +147,8 @@ def test_a_green_install_shows_its_own_lines_and_logs_the_rest(tmp_path: Path) -
     assert "Reading package lists... Done" in written
     assert any("detached HEAD" in line for line in written)
     assert "Successfully installed" in written
-    assert [
-        line for line in written if line[:3] in {"1/5", "2/5", "3/5", "4/5", "5/5"}
-    ] == screen
+    steps = {f"{n}/6" for n in range(1, 7)}
+    assert [line for line in written if line[:3] in steps] == screen
 
 
 def test_a_clone_that_fails_every_try_shows_why_the_tail_and_the_log(
@@ -139,10 +156,10 @@ def test_a_clone_that_fails_every_try_shows_why_the_tail_and_the_log(
 ) -> None:
     """``clone`` after its fifth try: the reason, the log's last lines -- the
     tries among them -- and the log's path, on the screen; the steps before
-    it as they were."""
+    it as they were. Changed by DM-143: six steps, not five."""
     code, screen, errors, log = _install(tmp_path, GIT_FAILS="1")
     assert code == 1
-    assert [line.split(" ", 1)[0] for line in screen] == ["1/5", "2/5"]
+    assert [line.split(" ", 1)[0] for line in screen] == ["1/6", "2/6"]
     assert errors[0] == f"install.sh: cannot clone file://{tmp_path}/repo.git at {TAG}"
     assert errors[1] == f"--- the last lines of {log} ---"
     assert any("failed (try 5 of 5)" in line for line in errors)
@@ -153,10 +170,11 @@ def test_a_command_that_fails_outside_a_condition_is_the_same_refusal(
     tmp_path: Path,
 ) -> None:
     """The wheel's checksum fails in a pipeline -- no ``fail`` of the script's,
-    the ``ERR`` trap: the same reason line, tail and path."""
+    the ``ERR`` trap: the same reason line, tail and path. Changed by DM-143:
+    six steps, not five."""
     code, screen, errors, log = _install(tmp_path, FAIL_SHA="pridem-")
     assert code == 1
-    assert [line.split(" ", 1)[0] for line in screen] == ["1/5", "2/5", "3/5"]
+    assert [line.split(" ", 1)[0] for line in screen] == ["1/6", "2/6", "3/6"]
     assert errors[0].startswith("install.sh: a command failed (exit 1, line ")
     assert any("FAILED" in line for line in errors)
     assert errors[-1] == f"Full log: {log}"

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Bootstrap of pridem on a clean Ubuntu 24.04 x86_64 box (TZ section 6.1).
 #
-# Five actions, no questions: check the host; install the packages; clone pridem
+# Six actions, no questions: check the host; install the packages; clone pridem
 # at the pinned commit; build the venv without an index; link `current` and
-# `pridem`. In the repository this file is a template: the release workflow
+# `pridem`; register the box and run its agent when the Panel gave a token. In
+# the repository this file is a template: the release workflow
 # substitutes the five pins below -- tag, commit, the wheel's sha256 and the two
 # sources, the repository and the wheel's address -- and publishes the result as
 # an asset of the GitHub Release, next to the pridem wheel; tier 3 substitutes a
@@ -17,7 +18,18 @@
 # not fail an install (DM-80). curl by its own retries, git clone by a loop,
 # apt by Acquire::Retries; the sha256 of every download is checked after it.
 #
-# The screen gets this script's own lines, 1/5 ... 5/5, and nothing else: what
+# First contact with the Panel (DM-143): the Panel shows one command --
+#   curl -fsSLO <install.sh> && PRIDEM_REGISTER_TOKEN=<t> PRIDEM_PANEL=<api> bash install.sh
+# The token comes in the environment alone: this script never reads it into a
+# variable, never prints it, never passes it as an argument -- `pridem
+# register` takes it from the environment it inherits. With the token and the
+# box's passport copy the box registers and its agent becomes a service; without
+# the token, or before the product is installed (no passport copy: the Panel
+# knows the server by its passport), the machine is all there is, said why --
+# the same command again after `pridem install` registers. A box registered
+# already keeps its registration and has its service made sure of.
+#
+# The screen gets this script's own lines, 1/6 ... 6/6, and nothing else: what
 # apt, git, curl and pip print goes to the install's log,
 # /var/log/pridem-install.log (0600, written anew on every run; /opt/pridem may
 # not be there yet). A refusal says why, then the log's last lines and its path
@@ -114,10 +126,10 @@ mkdir -p "$ROOT/var/log"
 (umask 077 && : >"$ROOT/var/log/pridem-install.log")
 exec >>"$ROOT/var/log/pridem-install.log" 2>&1
 LOG="$ROOT/var/log/pridem-install.log"
-say "1/5 host: Ubuntu 24.04 x86_64, root"
+say "1/6 host: Ubuntu 24.04 x86_64, root"
 
 if [[ -x $TARGET/venv/bin/pridem && $("$TARGET/venv/bin/pridem" version) == "pridem ${TAG#v}" ]]; then
-    say "2-4/5 pridem $TAG is installed already"
+    say "2-4/6 pridem $TAG is installed already"
 else
     # 2. Packages: apt waits for the dpkg lock instead of breaking it and asks
     #    nothing (no debconf dialog, needrestart restarts by itself) -- the two
@@ -134,13 +146,13 @@ else
         "$work/sops"
     echo "$SOPS_SHA256  $work/sops" | sha256sum -c --strict
     install -m 0755 "$work/sops" "$BIN/sops"
-    say "2/5 packages: python3 python3-venv git curl age sops $SOPS_VERSION"
+    say "2/6 packages: python3 python3-venv git curl age sops $SOPS_VERSION"
 
     # 3. The pinned clone: the tag must be the commit the release was built from.
     clone "$TAG" "$REPO.git" "$work/pridem"
     head=$(git -C "$work/pridem" rev-parse HEAD)
     [[ $head == "$COMMIT" ]] || fail "tag $TAG is $head, the pin is $COMMIT"
-    say "3/5 clone: $TAG at $COMMIT"
+    say "3/6 clone: $TAG at $COMMIT"
 
     # 4. The venv without an index: the runtime from wheels/ by the lock, the
     #    wheel of pridem from the Release; nothing is built here. A venv cannot
@@ -158,10 +170,30 @@ else
         "$work/pridem-${TAG#v}-py3-none-any.whl"
     version=$("$TARGET/venv/bin/pridem" version)
     [[ $version == "pridem ${TAG#v}" ]] || fail "installed pridem says '$version'"
-    say "4/5 venv: $TARGET/venv, $version"
+    say "4/6 venv: $TARGET/venv, $version"
 fi
 
 # 5. The links: `current` to this version, `pridem` on the PATH.
 ln -sfn "$TARGET" "$HOME_DIR/current"
 ln -sfn "$HOME_DIR/current/venv/bin/pridem" "$BIN/pridem"
-say "5/5 links: $HOME_DIR/current -> $TARGET, $BIN/pridem"
+say "5/6 links: $HOME_DIR/current -> $TARGET, $BIN/pridem"
+
+# 6. The agent (DM-143): registered already -- its service made sure of; else
+#    with a token and the passport copy -- register, then the service; else
+#    the machine alone, said why. The token stays in the environment.
+if [[ -f $HOME_DIR/agent/registration.json ]]; then
+    "$BIN/pridem" agent install || fail "the agent's service did not start: see above"
+    say "6/6 agent: registered already; its service runs"
+elif [[ -z ${PRIDEM_REGISTER_TOKEN:-} ]]; then
+    say "6/6 agent: not registered -- no PRIDEM_REGISTER_TOKEN; the machine works without the Panel"
+elif [[ ! -f $HOME_DIR/passport.yaml ]]; then
+    say "6/6 agent: not registered -- no passport copy yet: pridem install, then this command again"
+else
+    panel=()
+    if [[ -n ${PRIDEM_PANEL:-} ]]; then
+        panel=(--panel "$PRIDEM_PANEL")
+    fi
+    "$BIN/pridem" register "${panel[@]}" || fail "the box is not registered: see above"
+    "$BIN/pridem" agent install || fail "the agent's service did not start: see above"
+    say "6/6 agent: registered; its service runs"
+fi

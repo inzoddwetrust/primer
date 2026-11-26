@@ -8,7 +8,8 @@ names the command of the Panel's queue the agent runs the verb for (DM-138):
 its id goes to the journal's header, the lock and the verdict, the actor is
 the Panel; a verb without a verdict refuses it. ``--json`` may also follow the
 verb. ``pridem agent`` runs the box's agent (DM-141): it takes no argument
-and is no verb of ``VERBS``. Anything refused before a run -- an unknown verb,
+and is no verb of ``VERBS``; ``pridem agent install`` makes it the box's
+service (DM-143). Anything refused before a run -- an unknown verb,
 option or argument, a
 busy box -- exits 1 with a message on stderr and no verdict; a busy box with
 ``--json`` prints the refusal's object on stdout too
@@ -38,6 +39,7 @@ from typing import TextIO
 import click
 from pydantic import TypeAdapter, ValidationError
 
+from pridem.agent.install import install_service
 from pridem.agent.service import run_agent
 from pridem.events import ShortSecret, said
 from pridem.interrupt import Interrupt, Interrupted
@@ -84,6 +86,9 @@ _COMMAND_ID: TypeAdapter[str] = TypeAdapter(CommandId)
 AGENT = "agent"
 """``pridem agent`` -- the agent of the box (``pridem/agent/service.py``):
 not a verb of ``VERBS``, so never a command of the Panel's queue."""
+INSTALL = "install"
+"""``pridem agent install`` -- the agent's service (``pridem/agent/install.py``,
+DM-143), a plan with its verdict; ``--json`` prints it."""
 
 
 def _arguments(
@@ -151,6 +156,20 @@ def run(
         except click.ClickException as error:
             raise Refused(error.format_message()) from None
         if name == AGENT:  # the agent of the box: no verb of VERBS (DM-141)
+            if list(rest) == [INSTALL] and not by_timer and command is None:
+                return install_service(  # its service (DM-143)
+                    Context(
+                        root,
+                        out,
+                        err,
+                        as_json,
+                        runner if runner is not None else SubprocessRunner(interrupt),
+                        fs_root,
+                        False,
+                        interrupt,
+                        ask,
+                    )
+                )
             if as_json or by_timer or command is not None or rest:
                 raise Refused("agent takes no arguments and no flags")
             return run_agent(

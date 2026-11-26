@@ -154,6 +154,11 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_tier3_every_listed_service_reads_the_data", "j"),  # DM-100
     ("test_tier3_a_service_takes_a_point_of_the_product", "j"),  # DM-23
     ("test_tier3_an_entry_named_frontend_is_the_product_s_own", "j"),  # DM-102
+    # the last of j: first contact, the agent as a service (DM-143)
+    ("test_probe_DM_143_no_token_installs_the_machine_and_says_why", "j"),
+    ("test_probe_DM_143_one_command_installs_registers_and_runs_the_agent", "j"),
+    ("test_probe_DM_143_the_agent_service_survives_a_restart", "j"),
+    ("test_probe_DM_143_a_used_token_is_refused", "j"),
 )
 
 NEEDS_BOX = frozenset({"c", "e", "f", "g", "h", "i", "j"})
