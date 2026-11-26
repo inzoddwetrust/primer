@@ -3933,7 +3933,14 @@ class _AgentPanel(BaseHTTPRequestHandler):
     (``status``) given with its term, the lines kept by run and ``seq``, a
     verdict checked over its JSON object as the envelope carries it -- by
     ``runs/<id>/verdict`` or in a batch of ``history`` (the Panel at
-    ``29b3e35``)."""
+    ``29b3e35``).
+
+    Changed by DM-144, on the dispatcher's word 26.11: a signature that does
+    not hold is the Panel's refusal, ``401 signature-bad`` of contract 4, not
+    a handler that dies with the connection -- a planted wrong signature is
+    then a refusal the probe can see; the key a verdict is checked by is one
+    method (``_verdict_key``), for a Panel that checks it by another. On a
+    signature that holds nothing changed."""
 
     public: ClassVar[bytes] = b""
     queue: ClassVar[list[dict[str, object]]] = []
@@ -3954,10 +3961,14 @@ class _AgentPanel(BaseHTTPRequestHandler):
 
     do_GET = do_POST = _any  # noqa: N815
 
+    def _verdict_key(self) -> bytes:
+        """The key a verdict's envelope is checked by: the box's."""
+        return self.public
+
     def _keep(self, raw: dict[str, object]) -> str:
         envelope = VerdictEnvelope.model_validate(raw)
         try:
-            Ed25519PublicKey.from_public_bytes(self.public).verify(
+            Ed25519PublicKey.from_public_bytes(self._verdict_key()).verify(
                 base64.b64decode(envelope.signature),
                 verdict_bytes(raw["verdict"]),  # type: ignore[arg-type]
             )
@@ -3973,9 +3984,12 @@ class _AgentPanel(BaseHTTPRequestHandler):
     def _answer(self, body: bytes) -> tuple[int, bytes]:
         signed = signed_headers(dict(self.headers.items()))
         message = signing_string(self.command, self.path, signed.time, body)
-        Ed25519PublicKey.from_public_bytes(self.public).verify(
-            base64.b64decode(signed.signature), message.encode()
-        )  # a signature that does not hold fails the request: no answer
+        try:
+            Ed25519PublicKey.from_public_bytes(self.public).verify(
+                base64.b64decode(signed.signature), message.encode()
+            )
+        except InvalidSignature:
+            return 401, Refusal(code="signature-bad").model_dump_json().encode()
         where = self.path.removeprefix("/agent/v1/")
         if where == "heartbeat":
             self.beats.append(Heartbeat.model_validate_json(body).state is not None)
@@ -6176,3 +6190,246 @@ def test_probe_DM_143_a_used_token_is_refused(
     assert any("token is used already" in line for line in refusal), refusal
     assert _unit_says("ActiveState") != "active"
     assert ("POST", "/agent/v1/register", 410) in handler.seen
+
+
+# --- DM-144: the agent against the test Panel -- a planted defect, the Panel away
+#     in the middle of a run -----------------------------------------------------
+
+
+class _LosingPanel(_AgentPanel):
+    """A Panel that never holds the line ``LOST`` of a run -- as if the agent
+    had skipped that ``seq``: its answer stops before it."""
+
+    LOST: ClassVar[int] = 2
+
+    def _answer(self, body: bytes) -> tuple[int, bytes]:
+        status, answer = super()._answer(body)
+        if status == 200 and self.path.endswith("/events"):
+            held = self.lines[self.path.split("/")[4]]
+            held.pop(self.LOST, None)
+            last = 0
+            while last + 1 in held:
+                last += 1
+            return 200, json.dumps({"last_seq": last}).encode()
+        return status, answer
+
+
+class _ForeignVerdictPanel(_AgentPanel):
+    """A Panel that checks a verdict's envelope by another key than the
+    box's -- as if the box had signed the verdict with a key not its own; its
+    requests hold as they are."""
+
+    foreign: ClassVar[bytes] = (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
+
+    def _verdict_key(self) -> bytes:
+        return self.foreign
+
+
+class _AwayPanel(_AgentPanel):
+    """A Panel that goes away from a run the moment it gives its command:
+    ``503`` to every ``runs/...`` and ``history`` until the test brings it
+    back (``away`` false)."""
+
+    away: ClassVar[bool] = False
+    unanswered: ClassVar[list[str]] = []
+
+    def _answer(self, body: bytes) -> tuple[int, bytes]:
+        late = self.path.startswith("/agent/v1/runs/") or self.path.endswith("/history")
+        if self.away and late:
+            self.unanswered.append(self.path)
+            return 503, b""
+        status, answer = super()._answer(body)
+        if self.path.endswith("/commands/next") and status == 200:
+            type(self).away = True
+        return status, answer
+
+
+@pytest.fixture(scope="module")
+def registered_port() -> Iterator[int]:
+    """The box of this group registered in a Panel on the loopback: the port
+    every round of DM-144 serves its Panel on."""
+    handler = type(
+        "Panel",
+        (_FirstContactPanel,),
+        {"used": set(), "queue": [], "seen": [], "lines": {}, "verdicts": {},
+         "beats": []},
+    )  # fmt: skip
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    try:
+        result = SubprocessRunner().run(
+            [PRIDEM, "register", "--panel", f"http://127.0.0.1:{port}"],
+            timeout=120,
+            env={**clean_env(), "PRIDEM_REGISTER_TOKEN": FIRST_TOKEN},
+            on_line=lambda stream, line, cut: None,
+        )
+        assert result.code == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+    yield port
+
+
+def _round(
+    port: int,
+    base: type[_AgentPanel],
+    command_id: str,
+    until: Callable[[type[_AgentPanel]], bool],
+    wait_s: float,
+    public: bytes | None = None,
+) -> tuple[type[_AgentPanel], list[str], float]:
+    """One round of ``pridem agent`` against a Panel of ``base`` on ``port``
+    that gives ``status`` as ``command_id``: until ``until`` holds or
+    ``wait_s`` is over. The Panel, what the agent said, the seconds."""
+    seed = Path("/opt/pridem/agent/box.key").read_bytes()
+    own = Ed25519PrivateKey.from_private_bytes(seed).public_key()
+    expires = (datetime.now(UTC) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    command: dict[str, object] = {
+        "id": command_id,
+        "verb": "status",
+        "args": {},
+        "expires_at": expires,
+    }
+    handler = type(
+        "Panel",
+        (base,),
+        {
+            "public": public or own.public_bytes(Encoding.Raw, PublicFormat.Raw),
+            "queue": [command],
+            "seen": [],
+            "lines": {},
+            "verdicts": {},
+            "beats": [],
+        },
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    began = time.monotonic()
+    try:
+        with _an_agent() as said:
+            while time.monotonic() - began < wait_s and not until(handler):
+                time.sleep(0.5)
+    finally:
+        server.shutdown()
+        server.server_close()
+    return handler, said, round(time.monotonic() - began, 1)
+
+
+def _agent_round(handler: type[_AgentPanel], command_id: str) -> list[str]:
+    """The problems of a round, by evidence the Panel holds: none only with a
+    verdict of the command, verified by the box's key, its journal of two lines
+    or more held by ``seq`` from the first to the last, and no request
+    refused. The pair of every probe of DM-144: a planted defect names
+    itself here."""
+    problems: list[str] = []
+    refused = sorted({code for _, _, code in handler.seen if 400 <= code < 500})
+    if 401 in refused:
+        problems.append("signature-bad")
+    problems += [f"refused {code}" for code in refused if code != 401]
+    runs = [run for run, kept in handler.verdicts.items() if kept[1] == command_id]
+    if not runs:
+        return [*problems, "no verdict"]
+    [run] = runs
+    if not handler.verdicts[run][0]:
+        problems.append("verdict not verified")
+    journal = Path("/opt/pridem/journal") / f"{run}.jsonl"
+    written = len(journal.read_text(encoding="utf-8").splitlines())
+    if written < 2:
+        problems.append("too few lines")
+    held = sorted(handler.lines.get(run, {}))
+    if held != list(range(1, written + 1)):
+        gap = next((seq for seq in range(1, written + 1) if seq not in held), None)
+        problems.append(
+            f"seq gap after {gap - 1}" if gap is not None else "seq past the journal"
+        )
+    return problems
+
+
+def _a_verdict_of(command_id: str) -> Callable[[type[_AgentPanel]], bool]:
+    return lambda panel: any(kept[1] == command_id for kept in panel.verdicts.values())
+
+
+def test_probe_DM_144_a_planted_defect_reddens_the_agent_s_checks(
+    registered_port: int,
+) -> None:
+    """The checks of the agent against the Panel, with their planted defects
+    (par0 9: a check that cannot go red is no check). The Panel as it should
+    be: no problem. A Panel that knows another key -- the box's signature does
+    not hold: ``signature-bad``, and no verdict. A Panel that loses ``seq`` 2
+    -- a stream with a gap: ``seq gap after 1``, the verdict itself verified.
+    A Panel that checks the verdict by another key -- the verdict arrives:
+    ``verdict not verified``.
+    Measured into the run's journal first (par0 14.3): what the agent does on
+    ``401`` -- its lines, alive to the end of the round."""
+    right, _, spent_right = _round(
+        registered_port,
+        _AgentPanel,
+        "cmd-144-right",
+        _a_verdict_of("cmd-144-right"),
+        120,
+    )
+    foreign = Ed25519PrivateKey.generate().public_key()
+    wrong, said, spent_wrong = _round(
+        registered_port,
+        _AgentPanel,
+        "cmd-144-foreign",
+        lambda panel: len([s for s in panel.seen if s[2] == 401]) >= 3,
+        30,
+        public=foreign.public_bytes(Encoding.Raw, PublicFormat.Raw),
+    )
+    warnings.warn(
+        f"DM-144 measure: the agent on 401 -- {said}; requests {wrong.seen}",
+        stacklevel=1,
+    )
+    losing, _, spent_losing = _round(
+        registered_port, _LosingPanel, "cmd-144-gap", _a_verdict_of("cmd-144-gap"), 120
+    )
+    forged, _, _ = _round(
+        registered_port,
+        _ForeignVerdictPanel,
+        "cmd-144-forged",
+        _a_verdict_of("cmd-144-forged"),
+        120,
+    )
+    warnings.warn(
+        f"DM-144 measure: rounds {spent_right} s, {spent_wrong} s, {spent_losing} s",
+        stacklevel=1,
+    )
+    assert _agent_round(right, "cmd-144-right") == []
+    found = _agent_round(wrong, "cmd-144-foreign")
+    assert found == ["signature-bad", "no verdict"], found
+    assert not any("Traceback" in line for line in said), said
+    assert _agent_round(losing, "cmd-144-gap") == ["seq gap after 1"]
+    assert _agent_round(forged, "cmd-144-forged") == ["verdict not verified"]
+
+
+def test_probe_DM_144_the_panel_away_in_the_middle_of_a_run(
+    registered_port: int,
+) -> None:
+    """The Panel gives ``status`` and goes away from it that moment: ``503``
+    to its lines, its verdict and ``history``. The run goes on; the agent's
+    tries meet ``503``. The Panel back, the run reaches it whole -- every line
+    by ``seq``, the verdict verified: no problem left."""
+
+    def back_after_a_try(panel: type[_AgentPanel]) -> bool:
+        assert issubclass(panel, _AwayPanel)
+        if panel.unanswered:
+            panel.away = False  # the Panel is back once the agent met it away
+        return _a_verdict_of("cmd-144-away")(panel)
+
+    panel, said, spent = _round(
+        registered_port, _AwayPanel, "cmd-144-away", back_after_a_try, 120
+    )
+    assert issubclass(panel, _AwayPanel)
+    warnings.warn(
+        f"DM-144 measure: the Panel away mid-run, met at {panel.unanswered}; "
+        f"the verdict in {spent} s; said {said}",
+        stacklevel=1,
+    )
+    assert any("/runs/" in path for path in panel.unanswered), panel.unanswered
+    assert _agent_round(panel, "cmd-144-away") == []

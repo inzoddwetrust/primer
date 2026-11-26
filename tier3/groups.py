@@ -162,6 +162,10 @@ GROUPS: tuple[tuple[str, str], ...] = (
     # n -- a service of the edition, then a failed job on the repeat (DM-126)
     ("test_tier3_a_service_of_the_edition_goes_up_before_the_product", "n"),
     ("test_tier3_a_failed_job_runs_on_the_repeat", "n"),  # DM-126
+    # the last of n: the agent's checks with their planted defects, the Panel
+    # away in the middle of a run (DM-144)
+    ("test_probe_DM_144_a_planted_defect_reddens_the_agent_s_checks", "n"),
+    ("test_probe_DM_144_the_panel_away_in_the_middle_of_a_run", "n"),
     # o -- derive with no network, then a command of the Panel's queue and a busy
     # box that names it (DM-138)
     ("test_tier3_product_derive_reaches_nothing", "o"),
