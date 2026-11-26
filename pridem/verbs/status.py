@@ -129,4 +129,4 @@ def _run(args: Strict, ctx: Context) -> int:
     return int(verdict.exit_code)
 
 
-STATUS = Verb("status", NoArgs, _run)
+STATUS = Verb("status", NoArgs, _run, group="server")

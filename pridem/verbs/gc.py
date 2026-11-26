@@ -22,4 +22,4 @@ def _run(args: Strict, ctx: Context) -> int:
     return run_plan_verb(ctx, verb="gc", mode="gc", make=one_stack(GC_STACK, steps))
 
 
-GC = Verb("gc", NoArgs, _run, timer=True)
+GC = Verb("gc", NoArgs, _run, timer=True, group="host")

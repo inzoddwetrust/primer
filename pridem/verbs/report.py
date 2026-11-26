@@ -80,4 +80,5 @@ REPORT = Verb(
     verdict=False,
     options={"--llm": ("llm", "flag")},
     prints_json=True,
+    group="logs",
 )

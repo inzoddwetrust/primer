@@ -30,8 +30,6 @@ def _status(ctx: Context) -> int:
     """``ssl status``: read, as ``state`` -- no lock, no journal, no verdict."""
     if ctx.timer:
         raise Refused("ssl status is not run by a timer: --timer does not apply")
-    if ctx.command is not None:  # no verdict to carry it (DM-138)
-        raise Refused("ssl status writes no verdict: --command has nothing to carry")
     ssl = ssl_part(ctx)
     if ctx.json:
         ctx.out.write(ssl.model_dump_json(indent=2) + "\n")
@@ -56,4 +54,12 @@ def _run(args: Strict, ctx: Context) -> int:
     )
 
 
-SSL = Verb("ssl", SslArgs, _run, positionals=("action",), timer=True)
+SSL = Verb(
+    "ssl",
+    SslArgs,
+    _run,
+    positionals=("action",),
+    timer=True,
+    group="host",
+    no_verdict=(("action", ("status",)),),  # it reads: --command is refused
+)

@@ -549,5 +549,7 @@ def _run(args: Strict, ctx: Context) -> int:
     return 0
 
 
-STATE = Verb("state", NoArgs, _run, verdict=False, box=False, prints_json=True)
+STATE = Verb(
+    "state", NoArgs, _run, verdict=False, box=False, prints_json=True, group="server"
+)
 """``pridem state``: read, as ``logs`` and ``report`` -- no lock, no verdict."""

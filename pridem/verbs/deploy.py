@@ -48,7 +48,7 @@ from pridem.steps.history import last_deployed, previous_releases
 from pridem.steps.passport import Ask
 from pridem.steps.stand import ROLLBACK_CHECK
 from pridem.verbs.asker import terminal_asker
-from pridem.verbs.base import Context, OptionKind, Refused, Verb
+from pridem.verbs.base import Context, Destructive, OptionKind, Refused, Verb
 from pridem.verbs.plans import Wanted, deploy_plan, destroy_plan, source_of
 from pridem.verbs.run import Planned, Session, read_copy, run_plan_verb
 
@@ -168,7 +168,9 @@ def _plan_verb(name: str, mode: PlanMode) -> Callable[[Strict, Context], int]:
         ref = args.ref if isinstance(args, DeployArgs) else None
         new_secrets = False
         before: Callable[[Box], None] | None = None
-        if isinstance(args, ReinstallArgs):
+        if _PLAN_VERBS[name].destroys(_given(args)):  # the registry's mark
+            if not isinstance(args, ReinstallArgs):
+                raise TypeError(f"{name} is destructive and takes no --confirm")
             confirm = _asked_name(ctx, name, args.confirm, copy.passport or preread)
 
             def before(box: Box) -> None:
@@ -176,6 +178,7 @@ def _plan_verb(name: str, mode: PlanMode) -> Callable[[Strict, Context], int]:
                 copied = read_copy(ctx, replaced=replacing).passport
                 _named(name, confirm, copied or preread)
 
+        if isinstance(args, ReinstallArgs):
             new_secrets = args.new_secrets
         wanted = Wanted(
             mode=name if name in ("install", "reinstall", "doctor") else "deploy",
@@ -277,12 +280,14 @@ def _destroy(args: Strict, ctx: Context) -> int:
     copy = read_copy(ctx)
     confirm = args.confirm
     verb = "destroy --all" if args.all else "destroy"
-    named = _asked_name(ctx, verb, confirm, copy.passport)
+    destroys = DESTROY.destroys(_given(args))  # the registry's mark (DM-198)
+    named = _asked_name(ctx, verb, confirm, copy.passport) if destroys else ""
 
     def before(box: Box) -> None:
         """The server's name under the lock, on any role (the owner's decision
         of 17.11, DM-110; ``--all`` since DM-86): the copy read now (DM-24)."""
-        _named(verb, named, read_copy(ctx).passport)
+        if destroys:
+            _named(verb, named, read_copy(ctx).passport)
 
     def make(session: Session) -> Planned:
         return destroy_plan(session, ctx.fs_root, everything=args.all)
@@ -299,12 +304,19 @@ def _destroy(args: Strict, ctx: Context) -> int:
     )
 
 
-INSTALL = Verb("install", SourceArgs, _plan_verb("install", "install"), options=SOURCE)
+INSTALL = Verb(
+    "install",
+    SourceArgs,
+    _plan_verb("install", "install"),
+    options=SOURCE,
+    group="deploy",
+)
 UPDATE = Verb(
     "update",
     UpdateArgs,
     _plan_verb("update", "deploy"),
     options={**SOURCE, "--try": ("tries", "list")},
+    group="deploy",
 )
 DEPLOY = Verb(
     "deploy",
@@ -312,8 +324,15 @@ DEPLOY = Verb(
     _plan_verb("deploy", "deploy"),
     positionals=("ref",),
     options=SOURCE,
+    group="deploy",
 )
-DOCTOR = Verb("doctor", SourceArgs, _plan_verb("doctor", "doctor"), options=SOURCE)
+DOCTOR = Verb(
+    "doctor",
+    SourceArgs,
+    _plan_verb("doctor", "doctor"),
+    options=SOURCE,
+    group="server",
+)
 REINSTALL = Verb(
     "reinstall",
     ReinstallArgs,
@@ -323,11 +342,18 @@ REINSTALL = Verb(
         "--new-secrets": ("new_secrets", "flag"),
         "--confirm": ("confirm", "value"),
     },
+    group="deploy",
+    destructive=Destructive(always=True),
 )
-ROLLBACK = Verb("rollback", SourceArgs, _rollback, options=SOURCE)
+ROLLBACK = Verb("rollback", SourceArgs, _rollback, options=SOURCE, group="deploy")
 DESTROY = Verb(
     "destroy",
     DestroyArgs,
     _destroy,
     options={"--confirm": ("confirm", "value"), "--all": ("all", "flag")},
+    group="deploy",
+    destructive=Destructive(always=True),
 )
+
+_PLAN_VERBS = {verb.name: verb for verb in (INSTALL, UPDATE, DEPLOY, DOCTOR, REINSTALL)}
+"""The verbs ``_plan_verb`` runs, by name: each asks its own mark."""

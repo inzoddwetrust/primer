@@ -63,7 +63,7 @@ from pridem.steps.finalize import current_link
 from pridem.steps.gc import CONNECT_DIR
 from pridem.steps.migrate import StartStopped, StopForMigrate, Stopped
 from pridem.steps.tests import database
-from pridem.verbs.base import Context, NoArgs, Refused, Verb
+from pridem.verbs.base import Context, Destructive, NoArgs, Refused, Verb
 from pridem.verbs.run import (
     Planned,
     Session,
@@ -215,9 +215,11 @@ def _db(args: Strict, ctx: Context) -> int:
         raise Refused("db restore: names the dump to restore")
     path, manifest = _dump(ctx, compose, args.dump)
     confirm = args.confirm
+    destroys = DB.destroys({"action": args.action})  # the registry's mark
 
     def confirmed(box: Box) -> None:
-        _confirmed(ctx, verb, confirm)  # the copy read under the lock (DM-24)
+        if destroys:
+            _confirmed(ctx, verb, confirm)  # the copy read under the lock (DM-24)
 
     def restore(session: Session) -> Planned:
         """The live database dumped first, in a stack of its own before the
@@ -295,8 +297,11 @@ DB = Verb(
     _db,
     positionals=("action", "stack", "dump"),
     options={"--confirm": ("confirm", "value")},
+    group="data",
+    destructive=Destructive(when=(("action", ("restore", "reset")),)),
+    no_verdict=(("action", ("connect",)),),  # a session on a terminal
 )
-BACKUP = Verb("backup", NoArgs, _backup)
+BACKUP = Verb("backup", NoArgs, _backup, group="data")
 
 
 def _role(ctx: Context, verb: str) -> str:
@@ -313,7 +318,8 @@ def _resettable(
     (protocol 1.11), an entry with ``migrate`` -- the schema comes back."""
     if _role(ctx, verb) != "test":
         raise Refused(f"{verb}: runs on the role test only")
-    _confirmed(ctx, verb, confirm)
+    if DB.destroys({"action": "reset"}):  # the registry's mark (DM-198)
+        _confirmed(ctx, verb, confirm)
     if compose.stack.stacks[compose.entry].migrate is None:
         raise Refused(
             f"{verb}: {compose.entry} has no migrate to bring its schema back"
@@ -460,9 +466,12 @@ def _seed(args: Strict, ctx: Context) -> int:
         raise Refused(f"seed: {' and '.join(resets)} -- one reset at a time")
     if args.dry_run and (resets or args.confirm):
         raise Refused("seed --dry-run: runs nothing, so resets nothing")
-    if resets and args.confirm is None:
+    # the registry's mark (DM-198): a reset is what the server is named to
+    flags = {"reset": args.reset, "reset_only": args.reset_only}
+    destroys = SEED.destroys({**flags, "reset_all": args.reset_all})
+    if destroys and args.confirm is None:
         raise Refused(f"seed {resets[0]}: --confirm <server.name> to go on")
-    if not resets and args.confirm is not None:
+    if not destroys and args.confirm is not None:
         raise Refused("seed: --confirm goes with --reset, --reset-only or --reset-all")
     if args.reset_all:
         if args.stack is None or args.profile is not None:
@@ -502,7 +511,7 @@ def _seed(args: Strict, ctx: Context) -> int:
         role = _role(ctx, "seed")
         if roles is not None and role not in roles:
             raise Refused(f"seed: {profile} is not for the role {role}")
-        if resets:
+        if destroys:
             _confirmed(ctx, f"seed {resets[0]}", confirm)
 
     if args.dry_run:
@@ -561,7 +570,8 @@ def _seed_reset_all(ctx: Context, entry: str, confirm: str | None) -> int:
                 f"seed --reset-all: a seed of {compose.entry} is not for "
                 f"the role {role}"
             )
-        _confirmed(ctx, "seed --reset-all", confirm)
+        if SEED.destroys({"reset_all": True}):  # the registry's mark (DM-198)
+            _confirmed(ctx, "seed --reset-all", confirm)
 
     def make(session: Session) -> Planned:
         return Planned([StackSteps(compose.entry, [step], root=True)])
@@ -590,6 +600,10 @@ SEED = Verb(
         "--reset-all": ("reset_all", "flag"),
         "--confirm": ("confirm", "value"),
     },
+    group="data",
+    destructive=Destructive(
+        when=(("reset", (True,)), ("reset_only", (True,)), ("reset_all", (True,)))
+    ),
 )
 
 
@@ -637,7 +651,9 @@ def _verb(args: Strict, ctx: Context) -> int:
     if declared is None:
         raise Refused(f"verb: the product has no verb {args.name}")
     values = _values(args.name, list(declared.args), args.pairs)
-    if not declared.destructive and args.confirm is not None:
+    # the registry's mark (DM-198): the product says which of its verbs is
+    destroys = VERB.destructive.declared and declared.destructive
+    if not destroys and args.confirm is not None:
         raise Refused(f"verb {args.name}: --confirm is for a destructive verb")
     name, confirm = args.name, args.confirm
 
@@ -647,7 +663,7 @@ def _verb(args: Strict, ctx: Context) -> int:
         role = _role(ctx, "verb")
         if declared.roles is not None and role not in declared.roles:
             raise Refused(f"verb {name}: not for the role {role}")
-        if declared.destructive:
+        if destroys:
             _confirmed(ctx, f"verb {name}", confirm)
         known = box_secrets(ctx, read_copy(ctx).passport)
         if known.unread:
@@ -693,6 +709,8 @@ VERB = Verb(
     positionals=("name",),
     rest="pairs",
     options={"--confirm": ("confirm", "value")},
+    group="project",
+    destructive=Destructive(declared=True),  # ``destructive`` of its primer.yaml
 )
 
 
@@ -893,11 +911,28 @@ LOGS = Verb(
     rest="words",
     options={"-f": ("follow", "flag"), "--tail": ("tail", "value")},
     verdict=False,  # it reads, as report: no verdict, no lock (DM-86)
+    group="logs",
 )
-START = Verb("start", ServiceArgs, _action("start"), positionals=("stack", "service"))
-STOP = Verb("stop", ServiceArgs, _action("stop"), positionals=("stack", "service"))
+START = Verb(
+    "start",
+    ServiceArgs,
+    _action("start"),
+    positionals=("stack", "service"),
+    group="server",
+)
+STOP = Verb(
+    "stop",
+    ServiceArgs,
+    _action("stop"),
+    positionals=("stack", "service"),
+    group="server",
+)
 RESTART = Verb(
-    "restart", ServiceArgs, _action("restart"), positionals=("stack", "service")
+    "restart",
+    ServiceArgs,
+    _action("restart"),
+    positionals=("stack", "service"),
+    group="server",
 )
 
 

@@ -10,4 +10,4 @@ def _run(args: Strict, ctx: Context) -> int:
     return 0
 
 
-VERSION = Verb("version", NoArgs, _run, verdict=False)
+VERSION = Verb("version", NoArgs, _run, verdict=False, group="server")

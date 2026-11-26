@@ -119,6 +119,7 @@ def make_register(
         RegisterArgs,
         _run,
         options={"--panel": ("panel", "value")},
+        group="server",
     )
 
 

@@ -65,6 +65,43 @@ class Context:
 OptionKind = Literal["flag", "value", "list"]
 """``--x`` alone (``True``), ``--x <value>`` once, ``--x <value>`` any times."""
 
+Values = tuple[tuple[str, tuple[str | bool, ...]], ...]
+"""Values of a verb's arguments, as data: ``(field, values)`` pairs -- an
+argument of the verb's model and the values of it that are meant."""
+
+Group = Literal["server", "deploy", "data", "host", "logs", "project"]
+"""The group a verb is shown in -- the machine has no ``--help`` of groups;
+the names are those of the TZ's table of verbs (9.1), ``project`` -- the verbs
+a product declares."""
+
+GROUPS: tuple[Group, ...] = ("server", "deploy", "data", "host", "logs", "project")
+"""Every group, in the order they are shown."""
+
+
+def _among(values: Values, args: Mapping[str, object]) -> list[str | bool]:
+    """The values of ``args`` that ``values`` names, in the order of
+    ``values``. A word or a flag alone: a number is neither, ``1`` is no
+    ``True``."""
+    found: list[str | bool] = []
+    for name, meant in values:
+        given = args.get(name)
+        if isinstance(given, str | bool) and given in meant:
+            found.append(given)
+    return found
+
+
+@dataclass(frozen=True)
+class Destructive:
+    """Whether a verb destroys what cannot be made again -- the server is
+    named to it (``--confirm <server.name>``): ``always``; ``when`` an
+    argument has one of the values; ``declared`` -- the machine does not know,
+    the product says it of each verb it declares (``destructive`` in its
+    ``primer.yaml``). All three off -- never."""
+
+    always: bool = False
+    when: Values = ()
+    declared: bool = False
+
 
 @dataclass(frozen=True)
 class Verb:
@@ -79,6 +116,16 @@ class Verb:
     ``options`` -- its options after the verb, ``--name`` -> (the argument,
     its kind); ``prints_json`` -- whether ``--json`` applies, by default when
     the verb writes a verdict (``report`` prints a stored one).
+
+    Four marks say, as data, what the verb is to whoever offers or runs it --
+    the console, the box's agent, the Panel -- so none of them keeps a list of
+    its own (DM-198): ``group`` -- where it is shown; ``on_box`` -- whether it
+    works on a box at all (``check`` reads a repository at a path; ``state``
+    reads a box though it takes no lock, so ``box`` is not this);
+    ``destructive`` -- whether the server is named to it (``destroys``);
+    ``no_verdict`` -- the values of an argument with which a verb that writes
+    a verdict writes none (``ssl status``, ``db connect``: ``verdict`` is of
+    the whole verb, ``writes_verdict`` -- of a run of it).
     """
 
     name: str
@@ -91,7 +138,36 @@ class Verb:
     box: bool = True
     options: Mapping[str, tuple[str, OptionKind]] = field(default_factory=dict)
     prints_json: bool | None = None
+    group: Group = field(kw_only=True)
+    on_box: bool = True
+    destructive: Destructive = Destructive()
+    no_verdict: Values = ()
 
     @property
     def takes_json(self) -> bool:
         return self.verdict if self.prints_json is None else self.prints_json
+
+    def without_verdict(self, args: Mapping[str, object]) -> str | None:
+        """The words of a run with ``args`` that ends with no verdict --
+        ``state``, ``ssl status`` -- and ``None`` for one that ends with it.
+        ``args`` -- the arguments by their names, as a command line or a
+        command of the queue gives them."""
+        if not self.verdict:
+            return self.name
+        silent = _among(self.no_verdict, args)
+        if silent:
+            return " ".join([self.name, *(str(value) for value in silent)])
+        return None
+
+    def writes_verdict(self, args: Mapping[str, object]) -> bool:
+        """Whether a run with ``args`` ends with a verdict: only such a run
+        can carry a command of the Panel's queue (``--command``)."""
+        return self.without_verdict(args) is None
+
+    def destroys(self, args: Mapping[str, object]) -> bool | None:
+        """Whether a run with ``args`` is destructive -- the server is named
+        to it; ``None`` -- the product says (``Destructive.declared``)."""
+        mark = self.destructive
+        if mark.always or _among(mark.when, args):
+            return True
+        return None if mark.declared else False

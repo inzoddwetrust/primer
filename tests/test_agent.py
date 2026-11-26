@@ -382,13 +382,18 @@ def test_the_verbs_refused_as_unknown_are_those_with_no_verdict_agent_and_none()
 ):
     """Literally: the five verbs a command cannot carry (``ssl status`` writes
     no verdict though ``ssl`` has one), ``agent`` and a verb of no one's.
-    The pair: ``ssl renew`` passes."""
+    The pair: ``ssl renew`` passes.
+
+    Changed by DM-198 (the dispatcher's word at its gate): which run writes
+    no verdict is the registry's to say, and it says so of ``db connect`` too
+    -- a sixth, refused here as the others; the pair: ``db dump`` passes."""
     refused_ones: list[tuple[str, dict[str, Json]]] = [
         ("state", {}),
         ("version", {}),
         ("report", {"run_id": "2026-11-25T10:00:00Z-a3f9"}),
         ("logs", {"stack": "aivis"}),
         ("ssl", {"action": "status"}),
+        ("db", {"action": "connect", "stack": "aivis"}),
         ("agent", {}),
         ("teleport", {}),
     ]
@@ -396,6 +401,8 @@ def test_the_verbs_refused_as_unknown_are_those_with_no_verdict_agent_and_none()
         assert checked(_command(verb, args), NOW) == "verb-unknown", verb
     found = checked(_command("ssl", {"action": "renew"}), NOW)
     assert not isinstance(found, str) and found[1] == ["renew"]
+    found = checked(_command("db", {"action": "dump", "stack": "aivis"}), NOW)
+    assert not isinstance(found, str) and found[1] == ["dump", "aivis"]
 
 
 @pytest.mark.parametrize(

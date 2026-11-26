@@ -6,7 +6,7 @@ or argument, and a busy box, are refused before anything runs: exit 1, a
 message on stderr, no verdict (contract 2 v1.9).
 """
 
-from pridem.verbs.base import Context, Refused, Verb
+from pridem.verbs.base import GROUPS, Context, Destructive, Group, Refused, Verb
 from pridem.verbs.check import CHECK
 from pridem.verbs.data import BACKUP, DB, LOGS, RESTART, SEED, START, STOP, VERB
 from pridem.verbs.deploy import (
@@ -55,4 +55,4 @@ VERBS: dict[str, Verb] = {
     )
 }
 
-__all__ = ["VERBS", "Context", "Refused", "Verb"]
+__all__ = ["GROUPS", "VERBS", "Context", "Destructive", "Group", "Refused", "Verb"]

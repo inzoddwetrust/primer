@@ -2,11 +2,13 @@
 (``PRIMER-PANEL-TZ-2`` 6; DM-141): defence in depth, the Panel checked it
 too.
 
-- ``verb-unknown`` -- no verb of the machine by the name, or a verb that writes
-  no verdict: ``--command`` has nothing to carry there and the machine refuses
-  it before a run (``state``, ``version``, ``report``, ``logs``, and ``ssl``
-  with ``status``, which writes none though ``ssl`` renews with one). ``agent``
-  is no verb of ``VERBS`` at all.
+- ``verb-unknown`` -- no verb of the machine by the name, or a run of one that
+  writes no verdict: ``--command`` has nothing to carry there and the machine
+  refuses it before a run. Which run writes none is the registry's to say
+  (``Verb.writes_verdict``, DM-198) -- ``state``, ``version``, ``report``,
+  ``logs``, and ``ssl status`` and ``db connect``, which write none though
+  their verbs do; the agent keeps no list of its own. ``agent`` is no verb of
+  ``VERBS`` at all.
 - ``args-refused`` -- the verb's own argument model refuses the arguments, or
   they do not go on its command line (``argv_of``).
 - ``confirmation-missing`` -- ``confirm`` given (the server's name a person
@@ -79,18 +81,12 @@ def argv_of(verb: Verb, args: Mapping[str, Json]) -> list[str]:
     return [*given, *rest, *tail]
 
 
-def _writes_a_verdict(verb: Verb, args: Mapping[str, Json]) -> bool:
-    if not verb.verdict:
-        return False
-    return not (verb.name == "ssl" and args.get("action") == "status")
-
-
 def checked(
     command: Command, now: datetime
 ) -> tuple[Verb, list[str]] | CommandRefusalCode:
     """The verb and its command line, or the code the agent refuses with."""
     verb = VERBS.get(command.verb)
-    if verb is None or not _writes_a_verdict(verb, command.args):
+    if verb is None or not verb.writes_verdict(command.args):
         return "verb-unknown"
     try:
         verb.args.model_validate(command.args)

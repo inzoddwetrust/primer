@@ -466,5 +466,12 @@ def _run(args: Strict, ctx: Context) -> int:
 
 
 CHECK = Verb(
-    "check", CheckArgs, _run, positionals=("path",), rest="packages", box=False
+    "check",
+    CheckArgs,
+    _run,
+    positionals=("path",),
+    rest="packages",
+    box=False,
+    group="deploy",
+    on_box=False,  # a repository at a path, wherever it is
 )
