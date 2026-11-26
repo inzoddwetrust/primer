@@ -695,7 +695,11 @@ def test_stop_for_migrate_stops_before_the_migration_and_up_is_left_the_rest(
     ``check`` read by ``stop_for_migrate`` says stop: ``worker`` and the app
     itself (protocol 6.3 allows any service) stopped before ``migrate``,
     read back as not running; ``migrate`` green, past the point of no return:
-    ``start_stopped`` starts nothing -- ``up`` brings them up."""
+    ``start_stopped`` starts nothing -- ``up`` brings them up.
+
+    Changed by DM-186 (B14): ``migrate`` reads its ``check`` once a run --
+    ``stop_for_migrate`` asks it while the app still answers; the plan's own
+    ``check`` gets that answer, so the script has one check, not two."""
     app.health = health(alembic_head="0000")
     stack = stopping(app.port, "worker", "app")
     stop, migrate, start, _ = ladder(stack, tmp_path)
@@ -705,7 +709,6 @@ def test_stop_for_migrate_stops_before_the_migration_and_up_is_left_the_rest(
         stop_call(cs, "worker", "app"),
         running_call(cs, "worker"),
         running_call(cs, "app"),
-        *migrate_check(cs, "0000"),
         migrate_call(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
@@ -748,12 +751,15 @@ def test_nothing_is_stopped_when_migrate_has_nothing_to_do(
 ) -> None:
     """The running app is at the head: ``migrate`` needs no ``act``, so the
     step stops nothing (the strict script has no ``stop``). The pair is the
-    test above. An entry without the field asks docker nothing at all."""
+    test above. An entry without the field asks docker nothing at all.
+
+    Changed by DM-186 (B14): ``migrate`` reads its ``check`` once a run --
+    ``stop_for_migrate`` asks it while the app still answers; the plan's own
+    ``check`` gets that answer, so the script has one check, not two."""
     stack = stopping(app.port, "worker")
     stop, migrate, start, _ = ladder(stack, tmp_path)
     cs = cs_of(stack, tmp_path)
     script = [
-        *migrate_check(cs),
         *migrate_check(cs),
         alembic_call(cs, "current", f"{HEAD} (head)", deps=True),
     ]
@@ -821,7 +827,11 @@ def test_a_service_that_still_runs_after_stop_is_red_before_the_point(
 def test_a_red_migrate_leaves_the_stopped_stopped(tmp_path: Path, app: LiveApp) -> None:
     """The KNOWN CEILING of ``StartStopped``: ``stop`` green, ``migrate`` red
     -- restore needed, and nothing is started (no ``start`` in the strict
-    script): the old code on a schema that may be half migrated."""
+    script): the old code on a schema that may be half migrated.
+
+    Changed by DM-186 (B14): ``migrate`` reads its ``check`` once a run --
+    ``stop_for_migrate`` asks it while the app still answers; the plan's own
+    ``check`` gets that answer, so the script has one check, not two."""
     app.health = health(alembic_head="0000")
     stack = stopping(app.port, "worker")
     stop, migrate, start, _ = ladder(stack, tmp_path)
@@ -830,7 +840,6 @@ def test_a_red_migrate_leaves_the_stopped_stopped(tmp_path: Path, app: LiveApp) 
         *migrate_check(cs, "0000"),
         stop_call(cs, "worker"),
         running_call(cs, "worker"),
-        *migrate_check(cs, "0000"),
         migrate_call(cs, code=1),
     ]
     with FakeRunner(*script) as runner:

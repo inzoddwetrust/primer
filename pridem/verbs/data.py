@@ -57,6 +57,7 @@ from pridem.steps.data import (
     StartRestored,
     StopForRestore,
     backups_dir,
+    own_copy,
     read_manifest,
 )
 from pridem.steps.finalize import current_link
@@ -1017,7 +1018,9 @@ def _connect(args: DbArgs, ctx: Context, compose: ComposeStack) -> int:
     remove = compose.argv("exec", "-T", operands=(found.service, "rm", "-f", inside))
     try:
         lines_of(compose.argv("cp", operands=(f"{found.service}:{inside}", str(kept))))
-        kept.chmod(0o600)
+        # only a regular file, by one descriptor, no link followed (DM-186, S5)
+        if own_copy(kept) is None:
+            raise OSError("the log came out of the container as no regular file")
     except (RunnerError, OSError) as error:
         print(f"db connect: the session's log was not kept ({error})", file=ctx.err)
         # the log -- what the person read of the database -- never stays in the

@@ -9,6 +9,7 @@ from itertools import count
 from pathlib import Path
 
 import pytest
+from compose_support import current_lines
 from data_support import SHA, STACK, blank_box
 from plan_support import ListSink
 
@@ -200,7 +201,9 @@ def git_call(cs: ComposeStack, commit: str = SHA) -> FakeCall:
     return FakeCall(argv, lines=lines(commit))
 
 
-def head_call(cs: ComposeStack, head: str = HEAD) -> FakeCall:
+def head_call(cs: ComposeStack, head: str | None = HEAD) -> FakeCall:
+    """``alembic current --verbose``; ``head`` ``None`` -- an empty database,
+    the header alone (DM-186)."""
     argv = cs.argv(
         "run",
         "--rm",
@@ -210,9 +213,11 @@ def head_call(cs: ComposeStack, head: str = HEAD) -> FakeCall:
             "-m",
             "alembic",
             "current",
+            "--verbose",
         ),
     )
-    return FakeCall(tuple(argv), lines=lines(f"{head} (head)"))
+    revisions = () if head is None else (f"{head} (head)",)
+    return FakeCall(tuple(argv), lines=lines(*current_lines(*revisions)))
 
 
 def plan(
@@ -307,17 +312,27 @@ def test_db_dump_writes_the_dump_and_its_manifest_under_the_box(tmp_path: Path) 
 
 
 def test_an_empty_table_of_contents_is_red_and_no_dump_is_named(tmp_path: Path) -> None:
-    """Twin LACK: ``pg_restore --list`` reads no entry -- ``dump-empty``; no
-    ``<entry>.dump`` and no manifest: a dump without its manifest is none."""
+    """Twin LACK: ``pg_restore --list`` reads no entry.
+
+    Changed by DM-186 (REVIEW-0006 B13): it was ``dump-empty``, no dump; an
+    empty database dumps to no entry, and that is a dump -- the one a restore
+    after a failed first migration needs. Named, its manifest ``toc: 0``, no
+    ``alembic_head`` (the database has no revision). The name stays."""
     box = blank_box(tmp_path)
     cs = compose(tmp_path)
     directory = backups_dir(box.root, RUN_ID)
     step = DbDump(cs, directory=directory, run_id=RUN_ID)
-    with Copying(*dump_calls(cs, directory, toc=(";", "; nothing"))) as runner:
+    calls = [
+        *dump_calls(cs, directory, toc=(";", "; nothing")),
+        head_call(cs, None),
+        git_call(cs),
+    ]
+    with Copying(*calls) as runner:
         outcome = plan([step], runner)
-    assert outcome.steps[0].reason == Code("db_dump:dump-empty", {"stack": STACK})
-    assert not (directory / f"{STACK}.dump").exists()
-    assert not (directory / f"{STACK}.json").exists()
+    assert outcome.code is ExitCode.OK, outcome.steps
+    assert (directory / f"{STACK}.dump").exists()
+    manifest = json.loads((directory / f"{STACK}.json").read_text())
+    assert manifest["toc"] == 0 and "alembic_head" not in manifest
 
 
 def test_a_red_pg_dump_leaves_no_dump(tmp_path: Path) -> None:

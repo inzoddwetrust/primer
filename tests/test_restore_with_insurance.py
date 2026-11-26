@@ -26,6 +26,8 @@ from test_verbs_data import (
     compose,
     config_call,
     dump_calls,
+    git_call,
+    head_call,
     inside,
     insured,  # noqa: F401 -- the fixture
     plan,
@@ -259,15 +261,23 @@ def test_a_dump_that_fails_leaves_no_file_anywhere(tmp_path: Path, fails: str) -
 
 
 def test_an_empty_dump_leaves_no_partial(tmp_path: Path) -> None:
+    """Changed by DM-186 (REVIEW-0006 B13): a dump with no entry was
+    ``dump-empty``, red; it is the dump of an empty database -- named, so no
+    ``.partial`` is left either way. The name stays."""
     box = blank_box(tmp_path)
     cs = compose(tmp_path)
     directory = backups_dir(box.root, RUN_ID)
     step = DbDump(cs, directory=directory, run_id=RUN_ID)
-    with Copying(*dump_calls(cs, directory, toc=(";", "; nothing"))) as runner:
+    calls = [
+        *dump_calls(cs, directory, toc=(";", "; nothing")),
+        head_call(cs, None),
+        git_call(cs),
+    ]
+    with Copying(*calls) as runner:
         outcome = plan([step], runner)
-    assert outcome.steps[0].reason is not None
-    assert outcome.steps[0].reason.code == "db_dump:dump-empty"
+    assert outcome.steps[0].status == "ok", outcome.steps
     assert not (directory / f"{STACK}.dump.partial").exists()
+    assert (directory / f"{STACK}.dump").exists()
 
 
 def test_a_restore_that_fails_leaves_no_file_in_the_container(tmp_path: Path) -> None:

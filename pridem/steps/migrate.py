@@ -14,7 +14,11 @@ head is compared with the
 revision the running application reports (``/health.alembic_head``, TZ 11,
 read by ``observe`` of DM-15): the same -- no ``act``, the point of no return
 is not crossed; another, no answer, no running ``app`` (a first install) --
-``act``. ``check`` starts no database.
+``act``. With no answer, a plan that acts reads the database's own revision
+in ``check`` (``alembic current --verbose``, its database up by
+``depends_on``): one the code does not hold is ``db-ahead`` before the point of
+no return, which the plan crosses when ``act`` begins (DM-186, B14). ``check``
+of ``doctor`` starts no database.
 
 ``act`` runs the declared ``migrate`` in ``run --rm <app>`` -- its database
 comes up by ``depends_on`` -- and ``verify`` reads ``alembic current`` back:
@@ -35,6 +39,7 @@ service does.
 """
 
 import json
+import re
 import shlex
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -100,9 +105,16 @@ UNKNOWN_EXIT = 255
 """The exit of ``alembic`` that refused (``FAILED: ...``)."""
 
 UNKNOWN_HEAD = "FAILED: Can't locate revision identified by '{head}'"
+_UNKNOWN = re.compile(
+    r"^FAILED: Can't locate revision identified by '([0-9A-Za-z_]+)'$"
+)
 """What ``alembic show <head>`` prints, exit 255, for a revision its scripts do
 not hold (alembic 1.20, measured): the machine's only reading of a database
 ahead of the code -- another text is a failed command, never an ``act``."""
+
+ALEMBIC_UNREAD = "alembic current of {stack} said no revision in its own form"
+"""Its ``--verbose`` header missing: an output that is not alembic's answer is
+no revision and no empty database (DM-186, B16)."""
 
 DB_AHEAD = (
     "the database of {entry} is at {head}, which the code of this release does "
@@ -137,6 +149,7 @@ class Migrate(Step):
     point_of_no_return = True
     codes: ClassVar[dict[str, str]] = {
         "db-ahead": DB_AHEAD,
+        "alembic-unread": ALEMBIC_UNREAD,
         **NO_PASSPORT,
         **KEY_CODES,
         "migrate": "migrate {entry} to {head}",
@@ -169,6 +182,8 @@ class Migrate(Step):
         self.command = shlex.split(stage.migrate)
         self.app = stage.app.service
         self.acted = False
+        self.checked: CheckResult | None = None
+        """The one ``check`` of the run (B14)."""
         """``act`` has started: the point of no return of this entry is
         crossed, ``start_stopped`` starts nothing for it (DM-22)."""
         self.live: str | None = None
@@ -226,12 +241,27 @@ class Migrate(Step):
             env_file.unlink(missing_ok=True)
 
     def _current(self, ctx: StepContext) -> list[str]:
-        _, lines = out(
-            ctx,
-            self.compose.argv("run", "--rm", operands=(self.app, *ALEMBIC, "current")),
-            timeout=COMMAND_TIMEOUT_S,
+        """``alembic current --verbose`` of the database, in the image of the
+        code to run: its revisions in alembic's own form (B16); a revision the
+        code does not hold -- ``db-ahead`` (exit 255 and alembic's line); no
+        answer of alembic's -- ``alembic-unread`` (DM-186)."""
+        argv = self.compose.argv(
+            "run", "--rm", operands=(self.app, *ALEMBIC, "current", "--verbose")
         )
-        return current(lines)
+        code, lines = out(
+            ctx, argv, expect=(0, UNKNOWN_EXIT), timeout=COMMAND_TIMEOUT_S
+        )
+        if code == UNKNOWN_EXIT:
+            ahead = [m.group(1) for ln in lines if (m := _UNKNOWN.match(ln.strip()))]
+            if not ahead:
+                tail = tuple((Stream.STDOUT, line) for line in lines[-TAIL_LINES:])
+                raise CommandFailed(tuple(argv), code, (0,), tail)
+            params: dict[str, Json] = {"entry": self.compose.entry, "head": ahead[0]}
+            raise StepFailed("db-ahead", params)
+        found = current(lines)
+        if found is None:
+            raise StepFailed("alembic-unread", {"stack": self.compose.entry})
+        return found
 
     def target_head(self, ctx: StepContext) -> str:
         """The one alembic head of the target release's image; ``rollback``
@@ -251,6 +281,15 @@ class Migrate(Step):
         return found[0]
 
     def check(self, ctx: StepContext) -> CheckResult:
+        """Once a run: ``stop_for_migrate`` asks it first, while the app still
+        answers ``/health``; the plan's own ``check`` after the stop gets that
+        same answer -- read again, the stopped app said nothing and the guard
+        of ``db-ahead`` was passed over (DM-186, B14)."""
+        if self.checked is None:
+            self.checked = self._check(ctx)
+        return self.checked
+
+    def _check(self, ctx: StepContext) -> CheckResult:
         head = self.target_head(ctx)
         data: dict[str, Json] = {"head": head}
         live = running_head(ctx, self.compose)
@@ -264,13 +303,17 @@ class Migrate(Step):
                 raise StepFailed(
                     "db-ahead", {"entry": self.compose.entry, "head": live}
                 )
+        elif not ctx.doctor:
+            # no app said a head: the database's own revision, read here --
+            # before the plan crosses the point of no return at ``act`` -- by a
+            # plan that acts; ``doctor`` brings no container up (DM-186, B14).
+            # One the code does not hold is db-ahead here (``_current``).
+            self.had_data = bool(self._current(ctx))
         params: dict[str, Json] = {"entry": self.compose.entry, "head": head}
         return CheckResult(True, local_code("migrate", params), data)
 
     def act(self, ctx: StepContext, check: CheckResult) -> None:
         self.acted = True
-        if self.live is None:  # no app said a head: a first install, or one down
-            self.had_data = bool(self._current(ctx))
         out(
             ctx,
             self.compose.argv("run", "--rm", operands=(self.app, *self.command)),
@@ -331,6 +374,7 @@ release's (``steps/data.py``, DM-86)."""
 
 MIGRATE_VERB_CODES: dict[str, str] = {
     "db-ahead": DB_AHEAD,
+    "alembic-unread": ALEMBIC_UNREAD,
     "no-app": "{stack} has no app to run its migrations in",
     "no-migrate": "{stack} has no migrate",
     "migrate": "migrate {entry} from {current} to {head}",

@@ -278,11 +278,26 @@ def inspect_image_call(container: str, image: str) -> FakeCall:
     )
 
 
+CURRENT_HEADER = "Current revision(s) for postgresql://blank:***@postgres/blank:"
+
+
+def current_lines(*revisions: str) -> tuple[str, ...]:
+    """What ``alembic current --verbose`` prints (alembic 1.14, measured):
+    its header, then ``Rev: <revision>`` for each -- ``"<rev> (head)"`` is
+    given as the plain answer's form and becomes ``Rev: <rev> (head)``; no
+    revision -- the header alone (DM-186, B16)."""
+    return (CURRENT_HEADER, *(f"Rev: {revision}" for revision in revisions))
+
+
 def alembic_call(cs: ComposeStack, what: str, *lines: str, deps: bool) -> FakeCall:
+    """``alembic <what>`` in a throwaway app container. ``current`` is read
+    ``--verbose`` since DM-186: the lines given are its revisions."""
     throwaway = ("run", "--rm") if deps else ("run", "--rm", "--no-deps")
+    args = (what, "--verbose") if what == "current" else (what,)
+    printed = current_lines(*lines) if what == "current" else lines
     return FakeCall(
-        tuple(cs.argv(*throwaway, operands=("app", "python", "-m", "alembic", what))),
-        lines=stdout(*lines),
+        tuple(cs.argv(*throwaway, operands=("app", "python", "-m", "alembic", *args))),
+        lines=stdout(*printed),
     )
 
 

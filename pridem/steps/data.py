@@ -11,11 +11,17 @@ decodes and cuts lines -- and removes it from the container. The file goes to
 ``/opt/pridem/backups/<run_id>/<entry>.dump`` (0600, the directory 0700):
 under ``/opt/pridem``, which ``destroy`` and ``reinstall`` leave, not under
 ``/opt/<stack>``, which they remove -- the move of a box (DM-87) stands on it.
-It is written under ``<entry>.dump.partial`` and named only once its table of
-contents is read back non-empty; the manifest ``<entry>.json`` -- ``stack,
-entry, release, commit, alembic_head, bytes, sha256, toc`` (TZ 12) -- is
-written last: a dump without a manifest is no dump. ``verify`` reads the file
-and the manifest back: the same sha256 and size.
+The file ``compose cp`` brings out is taken only as a regular file, by one
+descriptor opened without following a link (``own_copy``: ``docker cp`` brings a
+link out as a link -- DM-186, S5). It is written under ``<entry>.dump.partial``
+and named only once its table of contents is read back -- an empty database
+dumps to no entry, and that is a dump too (B13); the manifest ``<entry>.json``
+-- ``stack, entry, release, commit, alembic_head, bytes, sha256, toc`` (TZ 12)
+-- is
+written last: a dump without a manifest is no dump. An ``alembic current``
+that fails after the dump was read leaves the dump and a manifest without
+``alembic_head``, said as ``head-unread`` (DM-186, E11). ``verify`` reads the
+file and the manifest back: the same sha256 and size.
 
 A dump that fails leaves nothing behind (R2-E15): the file in the
 container goes in ``finally``, red or green, and so does the ``.partial`` on
@@ -50,13 +56,16 @@ KNOWN CEILING (DM-86, the keeping of dumps):
 
 import hashlib
 import json
+import os
 import re
 import shlex
+import shutil
+import stat
 from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar, Literal, Protocol
 
-from pridem.events import Json
+from pridem.events import Code, Json
 from pridem.runner import RunnerError, Stream
 from pridem.stacks.env import write_private
 from pridem.steps.base import (
@@ -82,6 +91,7 @@ from pridem.steps.compose import (
 )
 from pridem.steps.migrate import (
     ALEMBIC,
+    ALEMBIC_UNREAD,
     IMAGE_CODES,
     MIGRATE_VERB_CODES,
     STOP_TIMEOUT_S,
@@ -148,19 +158,65 @@ def _found(
 
 
 def _head(ctx: StepContext, compose: ComposeStack) -> str | None:
-    """``alembic current`` of an entry that migrates; ``None`` -- it does not."""
+    """``alembic current --verbose`` of an entry that migrates, in alembic's
+    own form (DM-186, B16); ``None`` -- it does not migrate, or the database
+    has no one revision. An answer that is not alembic's -- ``alembic-unread``."""
     stage = compose.stack.stacks[compose.entry]
     if stage.migrate is None or compose.app_service is None:
         return None
     _, lines = out(
         ctx,
         compose.argv(
-            "run", "--rm", operands=(compose.app_service, *ALEMBIC, "current")
+            "run",
+            "--rm",
+            operands=(compose.app_service, *ALEMBIC, "current", "--verbose"),
         ),
         timeout=COMMAND_TIMEOUT_S,
     )
     heads = current(lines)
+    if heads is None:
+        raise StepFailed("alembic-unread", {"stack": compose.entry})
     return heads[0] if len(heads) == 1 else None
+
+
+def own_copy(path: Path) -> tuple[int, str] | None:
+    """A file ``compose cp`` took out of a container, made the box's: opened
+    with ``O_NOFOLLOW`` -- a link is never followed -- and only a regular file
+    is taken, ``0600`` by its descriptor (``fchmod``), its size and sha256 read
+    from that same descriptor: nothing can be put in its place between the
+    look and the change (DM-186, S5; ``docker cp`` brings a link out as a link,
+    measured). Anything else -- a link out of the container or into it, a
+    directory, a device -- is removed without following it and is ``None``:
+    nothing on the box but the entry itself is touched."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:  # ELOOP: a link; or nothing there
+        _remove_entry(path)
+        return None
+    try:
+        found = os.fstat(fd)
+        if not stat.S_ISREG(found.st_mode):
+            _remove_entry(path)
+            return None
+        os.fchmod(fd, 0o600)
+        digest = hashlib.sha256()
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return found.st_size, digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def _remove_entry(path: Path) -> None:
+    """The entry itself, whatever it is, never what it points to."""
+    try:
+        if stat.S_ISDIR(os.lstat(path).st_mode):
+            shutil.rmtree(path)  # it reads no link inside as a directory
+        else:
+            path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _toc(ctx: StepContext, path: Path, image: str) -> int:
@@ -240,7 +296,11 @@ class DbDump(Step):
         "test-db-is-live": "the database {live} cannot be told from its test one",
         "no-database-image": "the database service {service} names no image",
         "database-down": "the database {service} of {stack} is not running",
-        "dump-empty": "the dump of {stack} has no table of contents",
+        "container-file": "the file {path} of {stack} came out of its container "
+        "as no regular file; nothing on the box was changed",
+        "head-unread": "the dump {path} of {stack} is kept; its alembic revision "
+        "could not be read",
+        "alembic-unread": ALEMBIC_UNREAD,
         "dump-drift": "the dump of {stack} at {path} is not what was written",
     }
 
@@ -248,6 +308,9 @@ class DbDump(Step):
         self.compose = compose
         self.directory = directory
         self.run_id = run_id
+        self.head_unread = False
+        """``alembic current`` failed after the dump was read: the dump and its
+        manifest stay, without ``alembic_head`` (DM-186, E11)."""
 
     @property
     def path(self) -> Path:
@@ -305,18 +368,28 @@ class DbDump(Step):
                 )
             finally:  # the file in the container goes, the dump red or green
                 clean_inside(ctx, self.compose, service, inside)
-            partial.chmod(0o600)
+            owned = own_copy(partial)  # S5: no link, no chmod through one
+            if owned is None:
+                params: dict[str, Json] = {
+                    "stack": self.compose.entry,
+                    "path": str(partial),
+                }
+                raise StepFailed("container-file", params)
+            size, digest = owned
+            # an empty database dumps to no entry: a dump all the same (B13); a
+            # file pg_restore cannot read is red in _toc
             toc = _toc(ctx, partial, image)
-            if toc == 0:
-                raise StepFailed("dump-empty", {"stack": self.compose.entry})
-            head = _head(ctx, self.compose)
+            try:
+                head = _head(ctx, self.compose)
+            except (StepFailed, RunnerError):  # the dump is kept all the same (E11)
+                head, self.head_unread = None, True
             manifest: dict[str, Json] = {
                 "stack": self.compose.stack.name,
                 "entry": self.compose.entry,
                 "release": self.compose.ref,
                 "commit": release_commit(ctx, self.compose),  # a service's: not a tag
-                "bytes": partial.stat().st_size,
-                "sha256": sha256_of(partial),
+                "bytes": size,
+                "sha256": digest,
                 "toc": toc,
             }
             if head is not None:
@@ -345,6 +418,10 @@ class DbDump(Step):
         }
         if "alembic_head" in manifest:
             fact["alembic_head"] = manifest["alembic_head"]
+        if self.head_unread:  # kept, said (E11)
+            return Verified(fact, incomplete=Code("head-unread", {
+                "stack": self.compose.entry, "path": path,
+            }))  # fmt: skip
         return Verified(fact)
 
 

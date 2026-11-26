@@ -435,6 +435,7 @@ class Plan:
             on_line,
             self._interrupt,
             self._notice,
+            doctor=self._mode == "doctor",
         )
 
     def _record(self, phase: Phase, record: StepRecord) -> StepRecord:

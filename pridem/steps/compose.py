@@ -122,7 +122,12 @@ RUNNING_HASH_FORMAT = (
     f'{{{{index .Config.Labels "{CONFIG_HASH_LABEL}"}}}}'
 )
 _HEAD = re.compile(r"^(\S+) \(head\)")
-_CURRENT = re.compile(r"^([0-9A-Za-z_]+)(?: \(head\))?$")
+_CURRENT_HEADER = "Current revision(s) for "
+"""The first line ``alembic current --verbose`` always prints (alembic 1.14,
+measured): with no revision under it, the database has none."""
+_REV = re.compile(r"^Rev: ([0-9A-Za-z_]+)(?: \([a-z ]+\))*$")
+"""A revision of ``alembic current --verbose``, at the start of its line --
+the revision's docstring below it is indented (DM-186, B16)."""
 
 Stack = Product | Service
 
@@ -1372,5 +1377,11 @@ def heads(lines: Sequence[str]) -> list[str]:
     return [found.group(1) for line in lines if (found := _HEAD.match(line.strip()))]
 
 
-def current(lines: Sequence[str]) -> list[str]:
-    return [found.group(1) for line in lines if (found := _CURRENT.match(line.strip()))]
+def current(lines: Sequence[str]) -> list[str] | None:
+    """The revisions ``alembic current --verbose`` printed: its own lines
+    ``Rev: <id>`` only, never any one word of the output (DM-186, B16).
+    ``[]`` -- its header and no revision: the database has none; ``None`` --
+    no header: the output is not alembic's answer."""
+    if not any(line.startswith(_CURRENT_HEADER) for line in lines):
+        return None
+    return [found.group(1) for line in lines if (found := _REV.match(line.rstrip()))]

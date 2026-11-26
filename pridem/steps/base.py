@@ -115,6 +115,10 @@ class StepContext:
     notice: Callable[[Notice], None] = field(default=lambda notice: None)
     """What the step tells a person -- a key to add (DM-107): the console's
     block, and a ``notice`` line of the journal (DM-137)."""
+    doctor: bool = False
+    """The plan is ``doctor``: only ``check`` runs, and ``mode`` is the
+    ``deploy`` it diagnoses -- a ``check`` that would bring a container up for
+    a plan that acts asks this and does not (DM-186, B14)."""
 
 
 _T = TypeVar("_T")
