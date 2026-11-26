@@ -47,14 +47,26 @@ LEFT = ["sh", "-c", "setsid sleep 30 </dev/null >/dev/null 2>&1 & echo $!"]
 
 def _leave(box: Box) -> int:
     """A command under the lock leaves a process behind; ``pridem`` ends
-    normally. The pid of the process left."""
+    normally. The pid of the process left, once it is ``sleep``: ``$!`` is the
+    pid of ``setsid``, which then execs ``sleep`` under it (DM-201)."""
     seen: list[str] = []
     with box.lock("update 2026-11-12T10:00:00Z-a3f9 pid 7"):
         runner = SubprocessRunner()
         assert box.lock_fd is not None
         runner.hold(box.lock_fd)
         runner.run(LEFT, timeout=30, on_line=lambda s, line, c: seen.append(line))
-    return int(seen[0])
+    left = int(seen[0])
+    with deadline(5.0):
+        while _comm(left) != "sleep":
+            time.sleep(0.01)
+    return left
+
+
+def _comm(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return "gone"
 
 
 def _gone(pid: int) -> None:
@@ -79,16 +91,20 @@ def test_a_process_a_command_left_holds_the_box_after_a_normal_end(
     by its pid and name. The pair: once that process is gone, the box is free.
 
     Changed by DM-138: the lock's file as written is ``held``; ``holder`` is
-    the ``LockHolder`` a command writes as JSON."""
+    the ``LockHolder`` a command writes as JSON.
+
+    Changed by DM-201: the name was read twice -- by the refusal and by the
+    test -- and under load the two reads fell on both sides of ``setsid``
+    exec-ing ``sleep``. ``_leave`` waits for ``sleep``; the refusal is held
+    to it literally."""
     box = Box(tmp_path)
     left = _leave(box)
     try:
         with deadline(5.0), pytest.raises(BoxBusy) as busy, box.lock("status"):
             pass
         assert busy.value.held == "update 2026-11-12T10:00:00Z-a3f9 pid 7"
-        comm = Path(f"/proc/{left}/comm").read_text().strip()  # setsid, then sleep
-        assert busy.value.processes == (f"pid {left} ({comm})",)
-        assert f"held by pid {left} ({comm})" in str(busy.value)
+        assert busy.value.processes == (f"pid {left} (sleep)",)
+        assert f"held by pid {left} (sleep)" in str(busy.value)
     finally:
         _gone(left)
     with box.lock("status"):

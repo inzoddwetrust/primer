@@ -5034,7 +5034,13 @@ HOOK = """#!/bin/sh
 # DM-24: a git hook that leaves a process with the box lock's descriptor
 [ "$1" = committed ] || exit 0
 setsid sleep 20 </dev/null >/dev/null 2>&1 &
-echo $! > "{held}"
+left=$!
+echo $left > "{held}"
+# DM-201: $! is setsid's pid until it execs sleep -- wait for the name
+for _ in $(seq 100); do
+  [ "$(cat /proc/$left/comm 2>/dev/null)" = sleep ] && break
+  sleep 0.05
+done
 touch "{marker}"
 sleep 20
 """
@@ -5075,7 +5081,13 @@ def test_probe_DM_24_sigkill_leaves_the_lock_to_the_grandchild(
 
     FIX: ``fetch_root`` fetches only a commit whose release the box has not --
     the probe of DM-10, earlier in group ``a``, leaves ``BLANK_COMMIT`` there,
-    so the probe deploys a commit of its own the box has not fetched."""
+    so the probe deploys a commit of its own the box has not fetched.
+
+    Changed by DM-201, on the dispatcher's word 26.11: the window of ``exec``
+    -- ``$!`` of the hook is the pid of ``setsid`` until it execs ``sleep``
+    under the same pid, so the hook waits for ``/proc/<pid>/comm`` to be
+    ``sleep`` (5 s at most) before its marker. What the probe holds is as it
+    was: the refusal names ``pid <left> (sleep)``."""
     bare = OPT / "git"
     work = tmp_path / "dm24"
     hooks = work / "hooks"
