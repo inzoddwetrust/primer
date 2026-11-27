@@ -7,6 +7,7 @@ service after the switch; ``--from`` only to a file or the loopback; the
 agent ends after a green update it ran, not after a red one.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -109,6 +110,30 @@ def test_the_rest_of_a_broken_try_is_built_again(tmp_path: Path) -> None:
     assert (
         home / "current" / "venv" / "bin" / "pridem"
     ).read_text() == "version=0.1.12\n"
+
+
+def test_a_wheel_of_the_same_prefix_and_another_tail_is_refused(
+    tmp_path: Path,
+) -> None:
+    """DM-217: the pin ``WHEEL_SHA256`` shares the wheel's first 8 signs and
+    has another tail -- refused before the switch, as a wheel other in whole
+    is (``[wheel]`` of the probe): the whole digest is held, not a prefix. The
+    pair: the pin of the wheel in whole installs (the probe of DM-163)."""
+    home = _home(tmp_path)
+    box = Releases(releases("v0.1.11", "v0.1.12", v0_1_12=Spoil(sha256_tail=True)))
+    release = box.releases["v0.1.12"]
+    digest = hashlib.sha256(release.wheel).hexdigest()
+    pinned = release._pinned_sha256()  # noqa: SLF001 -- the pin the file carries
+    assert pinned[:8] == digest[:8] and pinned != digest
+    code, verdict, _ = _update(
+        tmp_path, box, "v0.1.12", "--from", FROM.format(tag="v0.1.12")
+    )
+    assert code == 1
+    reason = _failed(verdict)
+    assert (reason["code"], reason["pin"], reason["pinned"], reason["found"]) == (
+        "build:pin-differs", "sha256", pinned, digest,
+    )  # fmt: skip
+    assert tree(home) == ["v0.1.11", "current=v0.1.11"]
 
 
 def test_a_lower_release_is_a_rollback(tmp_path: Path) -> None:

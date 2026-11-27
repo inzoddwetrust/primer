@@ -45,6 +45,9 @@ class Spoil:
     """What the machine built says instead of its version."""
     schema: int = 1
     pip_fails: bool = False
+    sha256_tail: bool = False
+    """The pin ``WHEEL_SHA256`` is the wheel's first 8 signs and another tail
+    (DM-217): the wheel itself is the right one."""
 
 
 @dataclass
@@ -58,11 +61,18 @@ class Release:
     def version(self) -> str:
         return self.tag[1:]
 
+    def _pinned_sha256(self) -> str:
+        digest = hashlib.sha256(self.wheel).hexdigest()
+        if not self.spoil.sha256_tail:
+            return digest
+        tail = "".join("0" if sign != "0" else "1" for sign in digest[8:])
+        return digest[:8] + tail
+
     def install_sh(self, repo: str) -> str:
         pins = {
             "TAG": self.spoil.tag or self.tag,
             "COMMIT": self.commit,
-            "WHEEL_SHA256": hashlib.sha256(self.wheel).hexdigest(),
+            "WHEEL_SHA256": self._pinned_sha256(),
             "REPO": self.spoil.repo or repo,
             "WHEEL_URL": f"file:///srv/releases/{self.tag}/pridem-{self.version}"
             "-py3-none-any.whl",
