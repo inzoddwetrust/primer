@@ -122,8 +122,11 @@ product's `egress` must be a row of the list agreed with Primer for that
 product (below) --, the compose
 file of every stack by the machine's lists (`docker compose config`; the
 binary alone, no daemon, and the repository's `.env` is not read), every
-compose variable `${VAR:?}` and a key of `env`, and the `primer-package.yaml`
-of each package directory given. It writes nothing and needs no box and no
+compose variable `${VAR:?}` and a key of `env`, the `primer-package.yaml`
+of each package directory given, and every service `test.services` names
+against the compose of its stack (`tests:test-service-unknown`, the refusal
+of the tests' step on a box). It
+writes nothing and needs no box and no
 network; its verdict has the form of contract 2 with no journal, exit 0 green,
 1 red, 2 when `docker compose` is not found. `--json` prints the verdict.
 

@@ -1628,6 +1628,101 @@ def test_tier3_check_of_the_blank_and_of_a_planted_copy(tmp_path: Path) -> None:
     assert "compose:compose-forbidden" in found and "app: privileged" in found, found
 
 
+def _dm209_copy(checkout: Path, into: Path, services: list[str]) -> Path:
+    """A copy of the blank whose ``test.services`` names ``services``."""
+    shutil.copytree(checkout, into, ignore=shutil.ignore_patterns(".git"))
+    primer = into / "primer.yaml"
+    data = yaml.safe_load(primer.read_text(encoding="utf-8"))
+    data["stacks"][_dm209_entry(data)]["test"]["services"] = services
+    primer.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return into
+
+
+def _dm209_entry(data: object) -> str:
+    """The blank's entry with tests: it has two (measured at the pin), the
+    second -- of files -- has no ``test``."""
+    assert isinstance(data, dict) and isinstance(data["stacks"], dict)
+    [entry] = [
+        name
+        for name, part in data["stacks"].items()
+        if isinstance(part, dict) and "test" in part
+    ]
+    assert isinstance(entry, str)
+    return entry
+
+
+def _dm209_step(verdict: dict[str, object], stack: str, name: str) -> dict[str, object]:
+    """The step ``name`` of the entry ``stack``: a step a stack, two entries."""
+    steps = verdict["steps"]
+    assert isinstance(steps, list)
+    [step] = [
+        s
+        for s in steps
+        if isinstance(s, dict) and (s.get("stack"), s.get("name")) == (stack, name)
+    ]
+    assert isinstance(step, dict)
+    return step
+
+
+def test_tier3_check_refuses_a_test_service_its_compose_has_not(
+    tmp_path: Path,
+) -> None:
+    """DM-209, with the real ``docker compose`` of a box: a copy of the
+    blank whose ``test.services`` names ``nope`` -- exit 1, the step
+    ``tests`` red by ``tests:test-service-unknown``, the stack and the name in
+    it; naming the blank's database service -- exit 0, the step green; a
+    service added behind ``profiles:`` and named there -- red at ``compose``
+    by ``compose-forbidden`` (``<service>: profiles``) and ``tests``
+    skipped, as ``build`` on a box refuses it first."""
+    started = time.monotonic()
+    checkout = _blank(tmp_path)
+    data = yaml.safe_load((checkout / "primer.yaml").read_text(encoding="utf-8"))
+    entry = _dm209_entry(data)
+    compose = checkout / data["stacks"][entry]["compose"]
+    database = "postgres"
+    assert f"\n  {database}:\n" in compose.read_text(encoding="utf-8")
+
+    code, verdict = _check(_dm209_copy(checkout, tmp_path / "nope", ["nope"]))
+    assert (code, verdict["result"]) == (1, "red"), verdict
+    step = _dm209_step(verdict, entry, "tests")
+    assert step["status"] == "failed", step
+    assert step["reason"] == {
+        "code": "tests:test-service-unknown",
+        "stack": entry,
+        "services": ["nope"],
+    }, step
+
+    code, verdict = _check(_dm209_copy(checkout, tmp_path / "good", [database]))
+    assert (code, verdict["result"]) == (0, "green"), verdict
+    step = _dm209_step(verdict, entry, "tests")
+    assert (step["status"], step.get("verify")) == ("ok", {"services": [database]})
+
+    profiled = _dm209_copy(checkout, tmp_path / "profiled", ["cache"])
+    file = profiled / data["stacks"][entry]["compose"]
+    text = file.read_text(encoding="utf-8")
+    assert text.count("\nservices:\n") == 1
+    file.write_text(
+        text.replace(
+            "\nservices:\n",
+            "\nservices:\n"
+            "  cache:\n"
+            "    image: redis:7-alpine\n"
+            "    profiles: [cache]\n"
+            "    healthcheck:\n"
+            '      test: ["CMD", "redis-cli", "ping"]\n',
+        ),
+        encoding="utf-8",
+    )
+    code, verdict = _check(profiled)
+    assert (code, verdict["result"]) == (1, "red"), verdict
+    found = _dm209_step(verdict, entry, "compose")
+    reason = found["reason"]
+    assert isinstance(reason, dict) and reason["code"] == "compose:compose-forbidden"
+    assert "cache: profiles" in reason["found"], reason
+    assert _dm209_step(verdict, entry, "tests")["status"] == "skipped", verdict
+    warnings.warn(f"DM-209: {time.monotonic() - started:.0f} s", stacklevel=1)
+
+
 def test_tier3_compose_takes_a_single_quoted_value_as_it_is(tmp_path: Path) -> None:
     """R11: what a single-quoted value is to compose's ``--env-file``."""
     checkout = _blank(tmp_path)

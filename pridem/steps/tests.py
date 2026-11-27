@@ -13,7 +13,9 @@ The database service is brought up first by the same compose command as
 -- because on a first install nothing runs yet; with it, the services
 ``test.services`` names (rule 20: Redis, a queue), never the application or
 the frontend (the loader refuses those names, a name the compose does not
-have is ``test-service-unknown``). ``--no-recreate``: a container that is
+have is ``test-service-unknown`` -- by ``refuse_unknown_services``, the one
+rule of this step and of ``pridem check``, DM-209). ``--no-recreate``: a
+container that is
 there stays as it is, even when the release changes its image or its
 configuration -- recreating the live database before ``migrate`` (the point
 of no return) restarts it, and a new major of Postgres on the old data
@@ -43,6 +45,7 @@ import shlex
 import shutil
 import stat
 import xml.etree.ElementTree as ElementTree
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
@@ -217,6 +220,37 @@ def _take_junit(produced: Path, kept: Path) -> None:
         kept.write_bytes(source.read(JUNIT_LIMIT + 1))
 
 
+TEST_SERVICE_UNKNOWN = (
+    "test.services of {stack} names {services}, not services of its compose"
+)
+"""The text of ``test-service-unknown``, for the step and for ``pridem check``."""
+
+
+def unknown_services(names: Sequence[str], document: Mapping[str, Json]) -> list[str]:
+    """The names of ``test.services`` that are no service of the compose
+    ``document``, in the order written. A service behind ``profiles:`` never
+    reaches here: ``profiles`` is no key the machine's lists allow, and
+    ``refusal`` -- of ``build`` on a box, of ``compose`` in ``pridem check``
+    -- refuses it first (DM-209)."""
+    services = document.get("services")
+    known = set(services) if isinstance(services, dict) else set()
+    return [name for name in names if name not in known]
+
+
+def refuse_unknown_services(
+    entry: str, names: Sequence[str], document: Mapping[str, Json]
+) -> None:
+    """The one rule of ``test.services`` against the compose of its entry
+    (contract 3 item 28), for the step ``tests`` on a box and for ``pridem
+    check`` in a repository: ``test-service-unknown`` with every such name."""
+    unknown = unknown_services(names, document)
+    if unknown:
+        raise StepFailed(
+            "test-service-unknown",
+            {"stack": entry, "services": list[Json](unknown)},
+        )
+
+
 class Tests(Step):
     """The stack's tests, from the test target, in ``<live>_test``."""
 
@@ -241,8 +275,7 @@ class Tests(Step):
         "no-tests": "the tests ran no test",
         "failed": "{failed} of {total} tests failed",
         "no-test": "{stack} declares no test or no app",
-        "test-service-unknown": "test.services of {stack} names {services}, "
-        "not services of its compose",
+        "test-service-unknown": TEST_SERVICE_UNKNOWN,
     }
 
     def __init__(
@@ -294,14 +327,7 @@ class Tests(Step):
         document = config(ctx, self.compose)
         found = database(document, self.app)
         self.secrets.add([SecretStr(found.test_url)])
-        services = document.get("services")
-        known = set(services) if isinstance(services, dict) else set()
-        unknown = [name for name in self.services if name not in known]
-        if unknown:
-            raise StepFailed(
-                "test-service-unknown",
-                {"stack": self.compose.entry, "services": list[Json](unknown)},
-            )
+        refuse_unknown_services(self.compose.entry, self.services, document)
         if self.junit and junit_dir(self.run) is None:
             raise StepFailed("junit-path-unknown")
         return found, document

@@ -28,7 +28,15 @@ daemon and no network. One step each, in this order (``CHECKS``):
   ``incomplete compose:not-found``, exit 2;
 - ``packages`` -- the ``primer-package.yaml`` of every package directory given
   (``<slot>=<directory>``) by ``package_contract``; none given -- the step is
-  skipped and says which slots were not checked.
+  skipped and says which slots were not checked;
+- ``tests`` -- per stack whose ``test.services`` names services (DM-209):
+  each is a service of that stack's compose, by the function the step
+  ``tests`` refuses by on a box (``refuse_unknown_services``) and with its
+  code, ``tests:test-service-unknown`` -- a product learns of it in its CI,
+  not at its first deploy. The compose is the one ``compose`` read; a
+  compose that did not pass -- a service behind ``profiles:`` is one, by
+  ``refusal`` as in ``build`` -- leaves the step skipped. A stack that names
+  none has no such step.
 
 The verdict has the form of contract 2: no journal, so no ``log_ref``; both
 compositions are ``{pridem}``; the actor is the machine. It is printed --
@@ -82,6 +90,7 @@ from pridem.steps.compose import (
     variables,
 )
 from pridem.steps.sources import PACKAGE_CODES, package_contract
+from pridem.steps.tests import TEST_SERVICE_UNKNOWN, refuse_unknown_services
 from pridem.verbs.base import Context, Refused, Verb
 
 ACTOR = {"type": "machine", "via": "local"}
@@ -117,6 +126,7 @@ CODES: dict[str, dict[str, str]] = {
         "not-given": "no package directory was given: {slots} not checked",
         "manifest-unreadable": "the manifest of the package of {slot}: {cause}",
     },
+    "tests": {"test-service-unknown": TEST_SERVICE_UNKNOWN},
 }
 
 
@@ -302,10 +312,11 @@ def _read(checked: Checked, stack: Stack, entry: str) -> Read:
     return read
 
 
-def _composes(checked: Checked, stack: Stack) -> None:
+def _composes(checked: Checked, stack: Stack) -> dict[str, Read]:
     """The compose of every entry: read first, all of them -- where a package
     goes is checked against them all (``package_places``) -- then refused by
-    the function ``build`` refuses by."""
+    the function ``build`` refuses by. Returns what was read, for the checks
+    that stand on it (``_tests``)."""
     reads = {entry: _read(checked, stack, entry) for entry in stack.stacks}
     documents = {e: r.document for e, r in reads.items() if r.document is not None}
     places: list[str] = []
@@ -328,6 +339,49 @@ def _composes(checked: Checked, stack: Stack) -> None:
             }
 
         checked.steps.append(_record(entry, "compose", 3, run))
+    return reads
+
+
+def _test_services(stack: Stack, entry: str) -> list[str]:
+    """The services ``test.services`` of ``entry`` names; none -- no step."""
+    test = stack.stacks[entry].test
+    return [] if test is None else list(test.services or [])
+
+
+def _tests(checked: Checked, stack: Stack, reads: Mapping[str, Read] | None) -> None:
+    """``test.services`` of every entry that names any, against the compose
+    of that entry as ``compose`` read it (DM-209). ``reads`` -- ``None``
+    when there is no compose here to read with: the step is skipped by the
+    reason ``compose`` was. An entry whose ``compose`` did not pass is not
+    checked either: its services are not known."""
+    passed = {
+        record.stack
+        for record in checked.steps
+        if record.name == "compose" and record.status == "ok"
+    }
+    for entry in stack.stacks:
+        names = _test_services(stack, entry)
+        if not names:
+            continue
+        if reads is None:
+            reason = Code("compose:not-found")
+            checked.steps.append(StepRecord(entry, "tests", 5, "skipped", reason))
+            continue
+        document = reads[entry].document
+        if entry not in passed or document is None:
+            skip = after_failure("main", entry, "compose")
+            checked.steps.append(StepRecord(entry, "tests", 5, "skipped", skip))
+            continue
+
+        def run(
+            entry: str = entry,
+            names: list[str] = names,
+            document: dict[str, Json] = document,
+        ) -> Fact:
+            refuse_unknown_services(entry, names, document)
+            return {"services": list[Json](names)}
+
+        checked.steps.append(_record(entry, "tests", 5, run))
 
 
 def _services(document: Mapping[str, Json]) -> list[str]:
@@ -368,8 +422,9 @@ def _packages(checked: Checked, stack: Stack) -> None:
 
 
 CHECKS: tuple[Callable[[Checked, Stack], None], ...] = (_primer_lock,)
-"""The checks after ``primer.yaml`` that need nothing but it; ``compose`` and
-``packages`` follow. A next check of a repository is one more function."""
+"""The checks after ``primer.yaml`` that need nothing but it; ``compose``,
+``packages`` and ``tests`` follow. A next check of a repository is one more
+function."""
 
 
 def _run_checks(checked: Checked) -> None:
@@ -387,14 +442,16 @@ def _run_checks(checked: Checked) -> None:
         return
     for check in CHECKS:
         check(checked, stack)
+    reads: dict[str, Read] | None = None
     if _compose_found(checked.ctx):
-        _composes(checked, stack)
+        reads = _composes(checked, stack)
     else:
         reason = Code("compose:not-found")
         checked.incomplete.append(Incomplete("compose", reason))
         for entry in stack.stacks:
             checked.steps.append(StepRecord(entry, "compose", 3, "skipped", reason))
     _packages(checked, stack)
+    _tests(checked, stack, reads)
 
 
 def _given(pairs: Sequence[str]) -> dict[str, Path]:

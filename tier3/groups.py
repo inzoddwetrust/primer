@@ -74,6 +74,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("test_probe_DM_10_blank_is_fetched_by_ref_over_ssh", "a"),
     ("test_tier3_ssh_github_on_443_serves_the_pinned_keys", "a"),  # DM-188
     ("test_tier3_check_of_the_blank_and_of_a_planted_copy", "a"),
+    # test.services against the compose of its stack (DM-209)
+    ("test_tier3_check_refuses_a_test_service_its_compose_has_not", "a"),
     ("test_tier3_compose_takes_a_single_quoted_value_as_it_is", "a"),
     ("test_tier3_certbot_tag_has_the_pinned_digest", "a"),
     ("test_tier3_the_panel_s_host_through_the_machine_s_proxy", "a"),  # DM-146
