@@ -135,7 +135,11 @@ def test_probe_DM_182_S3_a_derived_value_is_checked_after_derive_env(
     """A value stands in the source of a bind: with the placeholder ``build``
     checks, the source is a path in the release -- green; with the value
     ``derive_env`` writes, it is the root of the host. The same check on the
-    final ``next.env`` names it -- ``derive_env.verify`` runs it."""
+    final ``next.env`` names it -- ``derive_env.verify`` runs it.
+
+    Changed by DM-220: the compose document names the services of the
+    fixture: the rule of DM-220 checks ``app.service`` and
+    ``frontend.service`` -- the file has the fixture's ``frontend``."""
     document = (
         "services:\n"
         "  app:\n"
@@ -145,6 +149,9 @@ def test_probe_DM_182_S3_a_derived_value_is_checked_after_derive_env(
         "      - type: bind\n"
         "        source: ${A:?}\n"
         "        target: /host\n"
+        "  frontend:\n"
+        "    image: busybox\n"
+        '    healthcheck: { test: ["CMD", "true"] }\n'
     )
     cs = _box(tmp_path, document, "A='<derived>'\n")
     ctx = StepContext(SubprocessRunner(), "install", "test", "blank", lambda *_: None)

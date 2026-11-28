@@ -25,7 +25,7 @@ user the service runs as -- and the override binds it read-only at ``path``.
 
 import os
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,14 +77,6 @@ def wanted(compose: ComposeStack, passport: Passport | None) -> list[Wanted]:
         value = given[key].get_secret_value()
         out_ += [Wanted(key, service, var.file.path, value) for service in services]
     return out_
-
-
-def unknown_services(found: Sequence[Wanted], services: set[str]) -> list[str]:
-    """Findings of the files' services compose does not have."""
-    return sorted(
-        {f"secret_file: no service {w.service}" for w in found}
-        - {f"secret_file: no service {s}" for s in services}
-    )
 
 
 def matching(compose: ComposeStack, item: Wanted) -> Path | None:

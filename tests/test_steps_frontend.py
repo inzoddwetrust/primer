@@ -294,7 +294,12 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
     anything is built. The pair: with the service, the package is no finding.
 
     Changed by DM-182: the compose check reads the executable form -- its calls are
-    in the scenario."""
+    in the scenario.
+
+    Changed by DM-220: the compose without ``frontend`` lacks the fixture's
+    ``frontend.service`` too -- the rule of DM-220 checks ``app.service`` and
+    ``frontend.service``: its finding beside the package's, one more, none
+    taken away."""
     stack = made(tmp_path, skin_product("css"))
     root, fetched, _ = skin_box(tmp_path)
     cs = ComposeStack(stack, ENTRY, root / "release", REF, SHA, root, staged=True)
@@ -322,7 +327,13 @@ def test_build_refuses_a_package_for_a_service_the_compose_lacks(
         outcome = run([step], runner)
     assert outcome.steps[0].reason == Code(
         "build:compose-forbidden",
-        {"stack": ENTRY, "found": ["frontend: packages.skin.mount (no such service)"]},
+        {
+            "stack": ENTRY,
+            "found": [
+                "frontend: no service frontend",
+                "frontend: packages.skin.mount (no such service)",
+            ],
+        },
     )
     whole = in_release(CONFIG, cs.release)  # the pair: a compose with frontend
     assert package_places(stack, {ENTRY: whole}) == []

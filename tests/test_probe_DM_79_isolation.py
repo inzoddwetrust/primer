@@ -8,7 +8,7 @@ two other flags. Both by the strict scenario: the command exactly, in order.
 
 from pathlib import Path
 
-from compose_support import executable_calls
+from compose_support import executable_calls, named
 from env_support import (
     COMMS_REPO,
     IMAGE,
@@ -24,7 +24,6 @@ from env_support import (
     service,
 )
 
-from pridem.events import Json
 from pridem.report.codes import ExitCode
 from pridem.runner import FakeCall, FakeRunner
 
@@ -77,7 +76,9 @@ def test_probe_DM_79_product_derive_has_no_network(tmp_path: Path) -> None:
     env_file = root / "opt" / "aivis" / "env" / "derive.env"
     first = render(made, root, fetched)
     step = derive(first, root)
-    blank: dict[str, Json] = {"name": "aivis", "services": {}}
+    # changed by DM-220: the compose document names the services of the
+    # fixture: the rule of DM-220 checks app.service and frontend.service
+    blank = named(step.build.compose, {"name": "aivis", "services": {}})
     with FakeRunner(
         _product_derive(env_file, "app", "derive", "one", value=ONE),
         _product_derive(env_file, "app", "derive", "two", value=TWO),

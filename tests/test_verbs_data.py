@@ -22,7 +22,7 @@ from pridem.runner import FakeCall, FakeRunner, OnLine, Result, Stream
 from pridem.stacks.schema import load_primer_yaml
 from pridem.state import Box
 from pridem.steps.base import Step
-from pridem.steps.compose import ComposeStack, forbidden
+from pridem.steps.compose import ComposeStack
 from pridem.steps.data import BackupScope, DbDump, backups_dir, sha256_of
 from pridem.verbs.data import box_entries, has_database_url
 
@@ -257,9 +257,13 @@ def test_a_job_among_several_dependencies_is_named_not_only_the_first(
 ) -> None:
     """DM-86, first item (acceptance of DM-22): ``app`` on ``postgres`` and
     ``init``, the job not first -- found. The pair: ``app`` on ``postgres``
-    alone."""
+    alone.
+
+    Changed by DM-220: the compose document names the services of the
+    fixture: the rule of DM-220 checks ``app.service`` and
+    ``frontend.service`` (``_forbidden``)."""
     from compose_support import HEALTHCHECK
-    from test_probe_DM_22_forms import _released, jobbed
+    from test_probe_DM_22_forms import _forbidden, _released, jobbed
 
     healthy: dict[str, Json] = {"image": "a@sha256:x", "healthcheck": HEALTHCHECK}
     on_both: dict[str, Json] = {
@@ -273,10 +277,10 @@ def test_a_job_among_several_dependencies_is_named_not_only_the_first(
     }
     needs = on_both["depends_on"]
     assert isinstance(needs, dict) and list(needs)[0] == "postgres"  # job not first
-    assert forbidden(cs, document) == ["app: depends on job init"]
+    assert _forbidden(cs, document) == ["app: depends on job init"]
     alone: dict[str, Json] = {**healthy, "depends_on": {"postgres": {}}}
     assert (
-        forbidden(cs, {"services": {"app": alone, "postgres": healthy, "init": job}})
+        _forbidden(cs, {"services": {"app": alone, "postgres": healthy, "init": job}})
         == []
     )
 

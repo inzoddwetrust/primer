@@ -155,6 +155,29 @@ def in_release(document: Mapping[str, Json], release: Path) -> dict[str, Json]:
     return loaded
 
 
+def named(cs: ComposeStack, document: Mapping[str, Json]) -> dict[str, Json]:
+    """``document`` with the services the entry's ``primer.yaml`` names -- its
+    ``app`` and ``frontend`` -- where it has none, each with an image and a
+    healthcheck. Changed by DM-220: the compose document names the services of the
+    fixture: the rule of DM-220 checks ``app.service`` and ``frontend.service``."""
+    stage = cs.stack.stacks[cs.entry]
+    out = dict(document)
+    services = dict(_services_of(document))
+    for part in (stage.app, stage.frontend):
+        if part is not None and part.service not in services:
+            services[part.service] = {
+                "image": f"{part.service}:1",
+                "healthcheck": HEALTHCHECK,
+            }
+    out["services"] = services
+    return out
+
+
+def _services_of(document: Mapping[str, Json]) -> dict[str, Json]:
+    services = document.get("services")
+    return dict(services) if isinstance(services, dict) else {}
+
+
 def config_call(cs: ComposeStack, document: Mapping[str, Json] = CONFIG) -> FakeCall:
     """``config`` of ``document``, its ``/r/`` paths in the release (DM-55:
     a build context out of the release is refused)."""

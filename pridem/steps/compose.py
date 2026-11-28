@@ -97,10 +97,10 @@ import yaml
 from pridem.events import Json, as_list
 from pridem.files import PathOutside, atomic_write, resolve_inside
 from pridem.runner import Stream, clean_env
-from pridem.stacks.env import env_file, own_entry, parse_env
+from pridem.stacks.env import env_file, file_keys, own_entry, parse_env
 from pridem.stacks.names import MACHINE_PREFIX
 from pridem.stacks.routes import alias, routed_services
-from pridem.stacks.schema import PROXY_VARIABLES, Product, Service
+from pridem.stacks.schema import PROXY_VARIABLES, Asked, Product, Service
 from pridem.stacks.seams import Pair
 from pridem.steps.base import StepContext, StepFailed
 
@@ -866,6 +866,64 @@ def _accepts_problems(compose: ComposeStack, services: Mapping[str, Json]) -> li
     ]
 
 
+def _named_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[str]:
+    """The services ``primer.yaml`` names in the entry's own compose and the
+    other sweeps do not (DM-220): its ``app``, its ``frontend``, the service
+    of each of its points, and the services of every secret file of the
+    stack's own entry -- every file the stack declares, whatever its option
+    and the passport: a name the file has wrong is wrong on every box. One
+    ``<field>: no service <s>`` each; for ``build`` on a box and ``pridem
+    check`` alike, as ``jobs`` and ``verbs``."""
+    stack = compose.stack
+    stage = stack.stacks[compose.entry]
+    found: list[str] = []
+    for field, part in (("app", stage.app), ("frontend", stage.frontend)):
+        if part is not None and part.service not in services:
+            found.append(f"{field}: no service {part.service}")
+    for name, point in stage.expose.items():
+        if point.service not in services:
+            found.append(f"expose.{name}: no service {point.service}")
+    if compose.entry == own_entry(stack):
+        files: set[str] = set()
+        for key in file_keys(stack):
+            var = stack.env[key]
+            if not isinstance(var, Asked) or var.file is None:
+                continue
+            named = var.file.services or [compose.app_service or "app"]
+            files |= {name for name in named if name not in services}
+        found += [f"secret_file: no service {name}" for name in sorted(files)]
+    return found
+
+
+def host_ports(
+    stack: Product | Service, documents: Mapping[str, Mapping[str, Json]]
+) -> list[str]:
+    """``host.ports`` of a service against the ports the compose ``documents``
+    of all its entries publish (DM-220; contract 3, additions 1.42: the
+    machine publishes exactly these ports): one ``host.ports: <port>/<proto>
+    not published`` for a port declared and published by none of them. The
+    other side -- a port published and not declared -- is each service's own
+    finding (``ports=<port>/<proto>``). A port declared twice is one port.
+    One function for ``build`` and ``pridem check``."""
+    if not isinstance(stack, Service) or stack.host is None:
+        return []
+    published: set[tuple[str, int]] = set()
+    for document in documents.values():
+        for body in _mapping(document.get("services")).values():
+            for port in as_list(_mapping(body).get("ports")):
+                entry = _mapping(port)
+                given = entry.get("published")
+                if given is not None and str(given).isdigit():
+                    published.add((str(entry.get("protocol", "tcp")), int(str(given))))
+    return sorted(
+        {
+            f"host.ports: {port.port}/{port.proto} not published"
+            for port in stack.host.ports
+            if (port.proto, int(port.port)) not in published
+        }
+    )
+
+
 def _stop_problems(compose: ComposeStack, services: Mapping[str, Json]) -> list[str]:
     """``stop_for_migrate`` (DM-22): a service compose has, and none that
     ``run --rm <app>`` of ``migrate`` would bring up again by ``depends_on``."""
@@ -899,6 +957,9 @@ def forbidden(compose: ComposeStack, document: Mapping[str, Json]) -> list[str]:
             problems.append("no healthcheck")  # protocol 3.4 (DM-22)
         found += [f"{name}: {problem}" for problem in problems]
     found += _job_problems(compose, services)
+    if "services" in document:  # a document not read (check: a variable
+        # wrong first) names no service: nothing to compare the names with
+        found += _named_problems(compose, services)
     found += _stop_problems(compose, services)
     found += _accepts_problems(compose, services)
     found += _verb_problems(compose, services)

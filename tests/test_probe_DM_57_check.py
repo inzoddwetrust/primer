@@ -273,11 +273,15 @@ def test_the_verdict_has_the_form_of_contract_2_with_no_journal(tmp_path: Path) 
     assert verdict["composition_before"] == verdict["composition_after"]
     composition = verdict["composition_before"]
     assert isinstance(composition, dict) and list(composition) == ["pridem"]
+    # changed by DM-220 (gate R3): the blank's tests run with report.junit
+    # on, and it has routes -- the steps tests and nginx
     assert [(s["name"], s["order"]) for s in _steps(verdict).values()] == [
         ("primer_yaml", 1),
         ("primer_lock", 2),
         ("compose", 3),
         ("packages", 4),
+        ("tests", 5),
+        ("nginx", 6),
     ]
     assert not list(tmp_path.rglob("*.jsonl")) and not (tmp_path / "opt").exists()
 
@@ -517,12 +521,16 @@ ARGS_FORMS: list[tuple[str, Json, Json]] = [
 
 
 def _build(args: Json, key: bool) -> dict[str, Json]:
+    """Changed by DM-220: the compose document names the services of the
+    fixture: the rule of DM-220 checks ``app.service`` and
+    ``frontend.service`` -- the fixture's ``frontend`` beside ``app``."""
     build: dict[str, Json] = {"context": "/r/backend"}
     if key:
         build["args"] = args
     app: dict[str, Json] = {"image": "app:1", "build": build}
     app["healthcheck"] = {"test": ["CMD", "true"]}  # protocol 3.4 (DM-22)
-    return {"services": {"app": app}}
+    front: dict[str, Json] = {"image": "frontend:1", "healthcheck": app["healthcheck"]}
+    return {"services": {"app": app, "frontend": front}}
 
 
 @pytest.mark.parametrize(("form", "raw", "printed"), ARGS_FORMS)

@@ -22,21 +22,29 @@ daemon and no network. One step each, in this order (``CHECKS``):
   written -- gives what ``refusal`` refuses: the codes and parameters of
   ``build`` on the box, from one dictionary, with the places of the packages
   against the compose of every stack (``package_places``: a service of
-  another stack is that stack's; one in none is a finding of each). The
+  another stack is that stack's; one in none is a finding of each) and a
+  service's ``host.ports`` against the ports they publish (``host_ports``,
+  DM-220: equal both ways). The
   product's ``config`` is read without the machine's override: the machine's
   ``PRIMER_EDITION`` is not a ``build.args`` of the product. No compose --
   ``incomplete compose:not-found``, exit 2;
 - ``packages`` -- the ``primer-package.yaml`` of every package directory given
   (``<slot>=<directory>``) by ``package_contract``; none given -- the step is
   skipped and says which slots were not checked;
-- ``tests`` -- per stack whose ``test.services`` names services (DM-209):
-  each is a service of that stack's compose, by the function the step
-  ``tests`` refuses by on a box (``refuse_unknown_services``) and with its
-  code, ``tests:test-service-unknown`` -- a product learns of it in its CI,
-  not at its first deploy. The compose is the one ``compose`` read; a
-  compose that did not pass -- a service behind ``profiles:`` is one, by
-  ``refusal`` as in ``build`` -- leaves the step skipped. A stack that names
-  none has no such step.
+- ``tests`` -- per stack whose ``test.services`` names services (DM-209)
+  or whose ``test`` runs with ``report.junit`` on (DM-220): each service is
+  a service of that stack's compose, and ``test.run`` has ``--junitxml=``,
+  by the functions the step ``tests`` refuses by on a box
+  (``refuse_unknown_services``, ``refuse_junit``) and with its codes,
+  ``tests:test-service-unknown`` and ``tests:junit-path-unknown`` -- a
+  product learns of it in its CI, not at its first deploy. The compose is
+  the one ``compose`` read; a compose that did not pass -- a service behind
+  ``profiles:`` is one, by ``refusal`` as in ``build`` -- leaves the step of
+  a stack that names services skipped. A stack with neither has no step;
+- ``nginx`` -- the targets of a product's routes (DM-220), by the function
+  and the codes of ``nginx`` on a box (``routes.targets``):
+  ``nginx:route-target-unknown``, ``nginx:route-ambiguous``. One step for
+  the product; none with no routes, none for a service.
 
 The verdict has the form of contract 2: no journal, so no ``log_ref``; both
 compositions are ``{pridem}``; the actor is the machine. It is printed --
@@ -78,6 +86,7 @@ from pridem.stacks.env import file_keys
 from pridem.stacks.loader import ContractError
 from pridem.stacks.lock import check_lock, load_primer_lock
 from pridem.stacks.package import PACKAGE_FILE
+from pridem.stacks.routes import targets
 from pridem.stacks.schema import Product, Service, egress_hosts, load_primer_yaml
 from pridem.steps.base import StepContext, StepFailed
 from pridem.steps.compose import (
@@ -85,12 +94,20 @@ from pridem.steps.compose import (
     ComposeStack,
     config,
     env_files,
+    host_ports,
     package_places,
     refusal,
     variables,
 )
+from pridem.steps.nginx import Nginx
 from pridem.steps.sources import PACKAGE_CODES, package_contract
-from pridem.steps.tests import TEST_SERVICE_UNKNOWN, refuse_unknown_services
+from pridem.steps.tests import (
+    TEST_SERVICE_UNKNOWN,
+    Tests,
+    junit_dir,
+    refuse_junit,
+    refuse_unknown_services,
+)
 from pridem.verbs.base import Context, Refused, Verb
 
 ACTOR = {"type": "machine", "via": "local"}
@@ -126,7 +143,13 @@ CODES: dict[str, dict[str, str]] = {
         "not-given": "no package directory was given: {slots} not checked",
         "manifest-unreadable": "the manifest of the package of {slot}: {cause}",
     },
-    "tests": {"test-service-unknown": TEST_SERVICE_UNKNOWN},
+    "tests": {
+        "test-service-unknown": TEST_SERVICE_UNKNOWN,
+        "junit-path-unknown": Tests.codes["junit-path-unknown"],
+    },
+    "nginx": {
+        code: Nginx.codes[code] for code in ("route-target-unknown", "route-ambiguous")
+    },
 }
 
 
@@ -321,7 +344,9 @@ def _composes(checked: Checked, stack: Stack) -> dict[str, Read]:
     documents = {e: r.document for e, r in reads.items() if r.document is not None}
     places: list[str] = []
     if len(documents) == len(reads):  # an entry unread could hold any service
-        places = package_places(stack, documents)
+        # where packages go and which ports are published: the stack's, over
+        # all its entries -- the functions build refuses by (DM-220)
+        places = [*package_places(stack, documents), *host_ports(stack, documents)]
     for entry, read in reads.items():
         compose = ComposeStack(stack, entry, checked.root, "check", "", checked.root)
 
@@ -343,25 +368,38 @@ def _composes(checked: Checked, stack: Stack) -> dict[str, Read]:
 
 
 def _test_services(stack: Stack, entry: str) -> list[str]:
-    """The services ``test.services`` of ``entry`` names; none -- no step."""
+    """The services ``test.services`` of ``entry`` names."""
     test = stack.stacks[entry].test
     return [] if test is None else list(test.services or [])
 
 
 def _tests(checked: Checked, stack: Stack, reads: Mapping[str, Read] | None) -> None:
-    """``test.services`` of every entry that names any, against the compose
-    of that entry as ``compose`` read it (DM-209). ``reads`` -- ``None``
-    when there is no compose here to read with: the step is skipped by the
-    reason ``compose`` was. An entry whose ``compose`` did not pass is not
-    checked either: its services are not known."""
+    """The tests of every entry, by the rules of the step ``tests`` on a box:
+    ``test.services`` against the compose of the entry as ``compose`` read it
+    (DM-209), and ``--junitxml=`` in ``test.run`` when ``report.junit`` is
+    on (DM-220). An entry with neither has no step. ``reads`` -- ``None``
+    when there is no compose here to read with: an entry that names
+    services is skipped by the reason ``compose`` was, as one whose
+    ``compose`` did not pass -- its services are not known; the junit alone
+    needs no compose."""
     passed = {
         record.stack
         for record in checked.steps
         if record.name == "compose" and record.status == "ok"
     }
-    for entry in stack.stacks:
+    for entry, stage in stack.stacks.items():
         names = _test_services(stack, entry)
+        junit = stage.test is not None and stack.report.junit
+        if not names and not junit:
+            continue
+        run_text = "" if stage.test is None else stage.test.run
         if not names:
+
+            def junit_only(run_text: str = run_text) -> Fact:
+                refuse_junit(True, run_text)
+                return {"junit": junit_dir(run_text)}
+
+            checked.steps.append(_record(entry, "tests", 5, junit_only))
             continue
         if reads is None:
             reason = Code("compose:not-found")
@@ -377,11 +415,37 @@ def _tests(checked: Checked, stack: Stack, reads: Mapping[str, Read] | None) -> 
             entry: str = entry,
             names: list[str] = names,
             document: dict[str, Json] = document,
+            junit: bool = junit,
+            run_text: str = run_text,
         ) -> Fact:
             refuse_unknown_services(entry, names, document)
+            refuse_junit(junit, run_text)
+            if junit:
+                return {"services": list[Json](names), "junit": junit_dir(run_text)}
             return {"services": list[Json](names)}
 
         checked.steps.append(_record(entry, "tests", 5, run))
+
+
+def _routes(checked: Checked, stack: Stack) -> None:
+    """The targets of a product's routes (DM-220): each route goes to the
+    ``app`` or the ``frontend`` of exactly one of its entries -- the function
+    and the codes of ``nginx`` on a box (``routes.targets``), one step for
+    the product. That service is in its compose is ``compose``'s finding.
+    A product with no routes, and a service, have no step."""
+    if not isinstance(stack, Product) or stack.host is None or not stack.host.routes:
+        return
+
+    def run(product: Product = stack) -> Fact:
+        found = targets(product)
+        return {
+            "routes": {
+                name: f"{target.entry}/{target.service}:{target.port}"
+                for name, target in sorted(found.items())
+            }
+        }
+
+    checked.steps.append(_record(stack.name, "nginx", 6, run))
 
 
 def _services(document: Mapping[str, Json]) -> list[str]:
@@ -452,6 +516,7 @@ def _run_checks(checked: Checked) -> None:
             checked.steps.append(StepRecord(entry, "compose", 3, "skipped", reason))
     _packages(checked, stack)
     _tests(checked, stack, reads)
+    _routes(checked, stack)
 
 
 def _given(pairs: Sequence[str]) -> dict[str, Path]:

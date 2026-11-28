@@ -31,6 +31,7 @@ from compose_support import (
     executable_calls,
     image_call,
     in_release,
+    named,
     raw_config_call,
     run,
 )
@@ -78,10 +79,13 @@ def released(root: Path) -> ComposeStack:
 
 def app(**body: Json) -> dict[str, Json]:
     """A compose document with one service ``app`` and ``postgres`` beside it,
-    each with its healthcheck (protocol 3.4, DM-22)."""
+    each with its healthcheck (protocol 3.4, DM-22). Changed by DM-220: the
+    fixture's ``frontend`` too -- the compose document names the services of the
+    fixture: the rule of DM-220 checks ``app.service`` and ``frontend.service``."""
     return {
         "services": {
             "app": {"image": "app:1", "healthcheck": HEALTHCHECK, **body},
+            "frontend": {"image": "frontend:1", "healthcheck": HEALTHCHECK},
             "postgres": {"image": "postgres:16", "healthcheck": HEALTHCHECK},
         }
     }
@@ -216,7 +220,8 @@ def test_every_key_of_the_list_is_green(tmp_path: Path) -> None:
         "shm_size": "268435456",
     }
     assert set(body) == SERVICE_KEYS
-    assert forbidden(cs, {"services": {"app": body}}) == []
+    # changed by DM-220: named() -- the fixture's frontend beside app
+    assert forbidden(cs, named(cs, {"services": {"app": body}})) == []
 
 
 SERVICE_OFF = [
@@ -597,7 +602,8 @@ def test_the_dispatchers_macvlan_and_plugin_document_is_red(tmp_path: Path) -> N
         "networks": {"lan": {"driver": "macvlan", "driver_opts": {"parent": "eth0"}}},
         "volumes": {"remote": {"driver": "some/plugin"}},
     }
-    assert forbidden(released(tmp_path), document) == [
+    cs = released(tmp_path)  # changed by DM-220: named() -- see compose_support
+    assert forbidden(cs, named(cs, document)) == [
         "networks.lan: driver=macvlan",
         "networks.lan: driver_opts",
         "volumes.remote: driver=some/plugin",
@@ -668,7 +674,11 @@ def test_a_package_goes_into_a_service_the_compose_has(tmp_path: Path) -> None:
     assert package_places(product, {"blank": app()}) == []
     data["packages"]["skin"]["mount"] = [{"service": "frontend", "path": "/srv/skin"}]
     product = PRIMER_YAML.validate_python(data)
-    assert package_places(product, {"blank": app()}) == [
+    alone = app()  # changed by DM-220: app() has the fixture's frontend now
+    services = alone["services"]
+    assert isinstance(services, dict)
+    del services["frontend"]
+    assert package_places(product, {"blank": alone}) == [
         "frontend: packages.skin.mount (no such service)"
     ]
 
@@ -692,4 +702,5 @@ def test_only_services_are_read_and_every_finding_is_named(tmp_path: Path) -> No
         "app: privileged",
         "postgres: cap_add",
     ]
-    assert forbidden(cs, {"x-common": {"privileged": True}}) == []
+    # changed by DM-220: named() -- the fixture's services
+    assert forbidden(cs, named(cs, {"x-common": {"privileged": True}})) == []

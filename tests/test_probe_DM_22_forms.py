@@ -32,6 +32,7 @@ from compose_support import (
     inspect_image_call,
     live,
     migrate_call,
+    named,
     observe_calls,
     ps_call,
     run,
@@ -409,6 +410,14 @@ def test_an_entry_of_jobs_alone_brings_nothing_else_up(tmp_path: Path) -> None:
 # --- healthcheck and the job's service in compose -------------------------------------
 
 
+def _forbidden(cs: ComposeStack, document: dict[str, Json]) -> list[str]:
+    """``forbidden`` of ``document`` with the fixture's services (``named``).
+    Changed by DM-220: the compose document names the services of the
+    fixture: the rule of DM-220 checks ``app.service`` and
+    ``frontend.service``."""
+    return forbidden(cs, named(cs, document))
+
+
 def _released(tmp_path: Path, stack: Product) -> ComposeStack:
     cs = cs_of(stack, tmp_path)
     cs.release.mkdir(parents=True, exist_ok=True)
@@ -432,11 +441,11 @@ def test_a_service_without_a_healthcheck_is_named(tmp_path: Path, check: Json) -
     document: dict[str, Json] = {
         "services": {"app": healthy, "worker": body, "init": job}
     }
-    assert forbidden(cs, document) == ["worker: no healthcheck"]
+    assert _forbidden(cs, document) == ["worker: no healthcheck"]
     fixed: dict[str, Json] = {
         "services": {"app": healthy, "worker": healthy, "init": job}
     }
-    assert forbidden(cs, fixed) == []
+    assert _forbidden(cs, fixed) == []
 
 
 def test_a_job_with_a_healthcheck_is_green_and_a_service_named_by_no_job_is_not(
@@ -447,16 +456,16 @@ def test_a_job_with_a_healthcheck_is_green_and_a_service_named_by_no_job_is_not(
     healthy: dict[str, Json] = {"image": "a@sha256:x", "healthcheck": HEALTHCHECK}
     bare: dict[str, Json] = {"image": "j@sha256:x"}
     document: dict[str, Json] = {"services": {"app": healthy, "init": healthy}}
-    assert forbidden(_released(tmp_path, jobbed()), document) == []
+    assert _forbidden(_released(tmp_path, jobbed()), document) == []
     plain = made(data())
     plain_doc: dict[str, Json] = {"services": {"app": healthy, "init": bare}}
-    assert forbidden(_released(tmp_path, plain), plain_doc) == ["init: no healthcheck"]
+    assert _forbidden(_released(tmp_path, plain), plain_doc) == ["init: no healthcheck"]
 
 
 def test_a_job_whose_service_is_not_in_compose_is_named(tmp_path: Path) -> None:
     healthy: dict[str, Json] = {"image": "a@sha256:x", "healthcheck": HEALTHCHECK}
     cs = _released(tmp_path, jobbed())
-    assert forbidden(cs, {"services": {"app": healthy}}) == [
+    assert _forbidden(cs, {"services": {"app": healthy}}) == [
         "jobs.init: no service init"
     ]
 
@@ -927,13 +936,13 @@ def test_stop_for_migrate_names_a_service_compose_has_and_migrate_does_not_need(
         }
     }
     stack = made(data(stop_for_migrate=["postgres", "pgbouncer", "ghost", "worker"]))
-    assert forbidden(_released(tmp_path, stack), document) == [
+    assert _forbidden(_released(tmp_path, stack), document) == [
         "pgbouncer: stopped for migrate, migrate needs it",
         "postgres: stopped for migrate, migrate needs it",
         "stop_for_migrate: no service ghost",
     ]
     green = made(data(stop_for_migrate=["worker"]))
-    assert forbidden(_released(tmp_path, green), document) == []
+    assert _forbidden(_released(tmp_path, green), document) == []
 
 
 # --- FIX: no service depends on a job, a job does not restart; the final check ----
@@ -949,16 +958,16 @@ def test_a_service_that_depends_on_a_job_is_named(tmp_path: Path) -> None:
     job: dict[str, Json] = {"image": "j@sha256:x"}
     on_job: dict[str, Json] = {**healthy, "depends_on": {"init": {}}}
     cs = _released(tmp_path, jobbed())
-    assert forbidden(cs, {"services": {"app": on_job, "init": job}}) == [
+    assert _forbidden(cs, {"services": {"app": on_job, "init": job}}) == [
         "app: depends on job init"
     ]
-    assert forbidden(cs, {"services": {"app": healthy, "init": job}}) == []
+    assert _forbidden(cs, {"services": {"app": healthy, "init": job}}) == []
     two = made(data(jobs={"init": {"service": "init"}, "seed": {"service": "seed"}}))
     seed: dict[str, Json] = {**job, "depends_on": {"init": {}}}
     document: dict[str, Json] = {
         "services": {"app": healthy, "init": job, "seed": seed}
     }
-    assert forbidden(_released(tmp_path, two), document) == []
+    assert _forbidden(_released(tmp_path, two), document) == []
 
 
 @pytest.mark.parametrize(
@@ -979,7 +988,7 @@ def test_a_job_has_no_restart_but_no(
     if policy is not None:
         job["restart"] = policy
     document: dict[str, Json] = {"services": {"app": healthy, "init": job}}
-    assert forbidden(_released(tmp_path, jobbed()), document) == found
+    assert _forbidden(_released(tmp_path, jobbed()), document) == found
 
 
 class _Undone(Step):

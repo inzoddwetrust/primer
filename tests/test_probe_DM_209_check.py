@@ -43,6 +43,7 @@ from pridem.steps.tests import (
 from pridem.verbs.check import CODES
 
 SHA = "a" * 40
+JUNIT = "/tmp"  # noqa: S108 -- where the blank's --junitxml= writes, a fact
 TEXT = "test.services of {stack} names {services}, not services of its compose"
 
 
@@ -125,14 +126,17 @@ def test_probe_DM_209_check_refuses_a_test_service_the_compose_does_not_have(
     code, verdict, _ = check(root, green_calls(root))
     assert code == 1 and verdict["result"] == "red"
     steps = _steps(verdict)
+    # changed by DM-220 (gate R3): the blank has routes -- the step nginx last
     assert list(steps) == [
         "blank/primer_yaml",
         "blank/primer_lock",
         "blank/compose",
         "blank/packages",
         "blank/tests",
+        "blank/nginx",
     ]
-    assert [step["status"] for step in steps.values()] == ["ok"] * 4 + ["failed"]
+    statuses = [step["status"] for step in steps.values()]
+    assert statuses == ["ok"] * 4 + ["failed", "ok"]
     assert steps["blank/tests"]["order"] == 5
     reason = _reason(verdict, "blank/tests")
     assert reason["code"] == "tests:test-service-unknown"
@@ -144,7 +148,11 @@ def test_probe_DM_209_check_refuses_a_test_service_the_compose_does_not_have(
     assert dict(on_box.reason.params) == _params(reason)
     # one text of the catalog, written out here
     assert TEST_SERVICE_UNKNOWN == TEXT == Tests.codes["test-service-unknown"]
-    assert CODES["tests"] == {"test-service-unknown": TEXT}
+    # changed by DM-220: the step tests of check says junit-path-unknown too
+    assert CODES["tests"] == {
+        "test-service-unknown": TEXT,
+        "junit-path-unknown": "report.junit is on and the test run has no --junitxml=",
+    }
     catalog = with_steps(ENGLISH, CODES.items())
     assert catalog["tests:test-service-unknown"] == TEXT
     # the pair
@@ -152,7 +160,11 @@ def test_probe_DM_209_check_refuses_a_test_service_the_compose_does_not_have(
     code, verdict, _ = check(root, green_calls(root))
     assert code == 0 and verdict["result"] == "green"
     assert _steps(verdict)["blank/tests"]["status"] == "ok"
-    assert _steps(verdict)["blank/tests"]["verify"] == {"services": ["postgres"]}
+    # changed by DM-220: the blank's report.junit is on -- the fact says its dir
+    assert _steps(verdict)["blank/tests"]["verify"] == {
+        "services": ["postgres"],
+        "junit": JUNIT,
+    }
     assert _on_a_box(root, BLANK) is None
 
 
@@ -189,7 +201,10 @@ def test_a_service_behind_a_profile_is_refused_before_the_rule_alike(
     raw, document = (_with_service(d, "cache") for d in (RAW, BLANK))
     code, verdict, _ = check(root, green_calls(root, raw, document))
     assert code == 0, _steps(verdict)
-    assert _steps(verdict)["blank/tests"]["verify"] == {"services": ["cache"]}
+    assert _steps(verdict)["blank/tests"]["verify"] == {
+        "services": ["cache"],
+        "junit": JUNIT,  # changed by DM-220: report.junit of the blank is on
+    }
     assert _on_a_box(root, document) is None
     raw, document = in_release(raw, root), in_release(document, root)
     assert refusal(compose, document, raw, []) is None
@@ -211,11 +226,16 @@ def test_check_and_the_box_ask_one_function(
     assert _on_a_box(root, BLANK) is None
 
 
-def test_a_stack_that_names_no_service_has_no_step_of_tests(tmp_path: Path) -> None:
-    """Twin EMPTINESS: ``test`` without ``services`` -- the verdict of
-    ``check`` is the four steps it was. ``services: []`` is the loader's: red
-    at ``primer_yaml`` (the list's own form, ``too_short``), the step
-    ``tests`` never there."""
+def test_a_stack_that_names_no_service_has_its_tests_by_junit_alone(
+    tmp_path: Path,
+) -> None:
+    """Twin EMPTINESS: ``test`` without ``services`` -- no service is checked.
+    ``services: []`` is the loader's: red at ``primer_yaml`` (the list's own
+    form, ``too_short``), the step ``tests`` never there.
+
+    Changed by DM-220 (gate R3; was "...has_no_step_of_tests"): the step
+    ``tests`` is there for ``report.junit`` too, which the blank has on --
+    the step checks the junit alone, its fact the directory, no services."""
     root = repo(tmp_path)
     code, verdict, _ = check(root, green_calls(root))
     assert code == 0
@@ -224,7 +244,10 @@ def test_a_stack_that_names_no_service_has_no_step_of_tests(tmp_path: Path) -> N
         "blank/primer_lock",
         "blank/compose",
         "blank/packages",
+        "blank/tests",
+        "blank/nginx",
     ]
+    assert _steps(verdict)["blank/tests"]["verify"] == {"junit": JUNIT}
     _named(root, [])
     code, verdict, _ = check(root, [])
     assert code == 1

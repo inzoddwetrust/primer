@@ -336,7 +336,12 @@ def test_a_service_whose_alias_is_another_entry_s_alias_is_reserved(
 ) -> None:
     """``velo`` + ``storage-app`` is ``velo-storage`` + ``app`` on ``pridem``:
     the alias, whole (DM-78). The bare name of the service is a DNS name too
-    -- that half stays (``test_names_the_machine_gives_are_reserved``)."""
+    -- that half stays (``test_names_the_machine_gives_are_reserved``).
+
+    Changed by DM-220: the compose document names the services of the
+    fixture: the rule of DM-220 checks ``app.service`` and
+    ``frontend.service`` (``named``)."""
+    from compose_support import named
     from test_steps_build_mode import compose, made, velo_data
 
     from pridem.steps.compose import forbidden
@@ -351,4 +356,4 @@ def test_a_service_whose_alias_is_another_entry_s_alias_is_reserved(
     (tmp_path / "release").mkdir(exist_ok=True)
     body = {"image": "x@sha256:x", "healthcheck": {"test": ["CMD", "true"]}}
     document: dict[str, object] = {"services": {"storage-app": body, "web": body}}
-    assert forbidden(cs, document) == ["storage-app: name reserved"]  # type: ignore[arg-type]
+    assert forbidden(cs, named(cs, document)) == ["storage-app: name reserved"]  # type: ignore[arg-type]

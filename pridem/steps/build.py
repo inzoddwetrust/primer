@@ -87,6 +87,7 @@ from pridem.steps.compose import (
     config,
     env_files,
     executable,
+    host_ports,
     image_of,
     out,
     override_text,
@@ -241,14 +242,15 @@ class Build(Step):
     def _documents(
         self, ctx: StepContext, document: dict[str, Json]
     ) -> dict[str, Mapping[str, Json]]:
-        """The ``config`` of every entry of the product, this one's given."""
+        """The ``config`` of every entry of the stack, this one's given: where
+        a package goes (a product's) and which ports are published (a
+        service's, DM-220) is the stack's, not one compose's."""
         compose = self.compose
         found: dict[str, Mapping[str, Json]] = {compose.entry: document}
-        if isinstance(compose.stack, Product):
-            for entry in sorted(compose.stack.stacks):
-                if entry != compose.entry:
-                    other = replace(compose, entry=entry)
-                    found[entry] = config(ctx, other)
+        for entry in sorted(compose.stack.stacks):
+            if entry != compose.entry:
+                other = replace(compose, entry=entry)
+                found[entry] = config(ctx, other)
         return found
 
     def _rendered(
@@ -266,17 +268,15 @@ class Build(Step):
         one code."""
         compose = self.compose
         document = config(ctx, compose)
-        places_found = package_places(compose.stack, self._documents(ctx, document))
+        documents = self._documents(ctx, document)
+        places_found = package_places(compose.stack, documents)
+        ports_found = host_ports(compose.stack, documents)  # DM-220
         files = secret_files.wanted(compose, self._passport())
-        named = document.get("services")
-        files_found = secret_files.unknown_services(
-            files, set(named) if isinstance(named, dict) else set()
-        )
         # the check reads what compose would execute: every profile, the env
         # file as compose reads it (DM-182); the build's own document stays
         # the one compose starts
         found = executable(ctx, compose)
-        refused = checked(compose, found, [*places_found, *files_found, *also])
+        refused = checked(compose, found, [*places_found, *ports_found, *also])
         if refused is not None:
             raise StepFailed(*refused)
         bodies = document.get("services")

@@ -136,10 +136,14 @@ product (below) --, the compose
 file of every stack by the machine's lists (`docker compose config`; the
 binary alone, no daemon, and the repository's `.env` is not read), every
 compose variable `${VAR:?}` and a key of `env`, the `primer-package.yaml`
-of each package directory given, and every service `test.services` names
-against the compose of its stack (`tests:test-service-unknown`, the refusal
-of the tests' step on a box). It
-writes nothing and needs no box and no
+of each package directory given, every name and port `primer.yaml` gives
+the compose of its stack -- `app`, `frontend`, the points, the secret files,
+`host.ports` both ways, and every service `test.services` names
+(`compose:compose-forbidden`, `tests:test-service-unknown`) --, the
+`--junitxml=` of the tests when `report.junit` is on
+(`tests:junit-path-unknown`) and the target of every route
+(`nginx:route-target-unknown`): the refusals of the box's steps, word for
+word. It writes nothing and needs no box and no
 network; its verdict has the form of contract 2 with no journal, exit 0 green,
 1 red, 2 when `docker compose` is not found. `--json` prints the verdict.
 

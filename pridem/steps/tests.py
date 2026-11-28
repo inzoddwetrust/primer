@@ -251,6 +251,15 @@ def refuse_unknown_services(
         )
 
 
+def refuse_junit(junit: bool, run: str) -> None:
+    """``report.junit`` on and ``test.run`` with no ``--junitxml=``: the machine
+    has no file to read the tests' junit from -- ``junit-path-unknown``. The
+    one rule of this step and of ``pridem check`` (DM-220), as
+    ``refuse_unknown_services``."""
+    if junit and junit_dir(run) is None:
+        raise StepFailed("junit-path-unknown")
+
+
 class Tests(Step):
     """The stack's tests, from the test target, in ``<live>_test``."""
 
@@ -328,8 +337,7 @@ class Tests(Step):
         found = database(document, self.app)
         self.secrets.add([SecretStr(found.test_url)])
         refuse_unknown_services(self.compose.entry, self.services, document)
-        if self.junit and junit_dir(self.run) is None:
-            raise StepFailed("junit-path-unknown")
+        refuse_junit(self.junit, self.run)
         return found, document
 
     def check(self, ctx: StepContext) -> CheckResult:

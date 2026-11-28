@@ -214,8 +214,16 @@ def derive(
     return DeriveEnv(render, Built(compose, image, built))
 
 
-CHECKED_DOCUMENT: dict[str, Json] = {"name": "comms", "services": {}}
-"""What ``config`` prints of the comms fixture: nothing for the check to name."""
+CHECKED_DOCUMENT: dict[str, Json] = {
+    "name": "comms",
+    "services": {
+        "comms-app": {"image": "comms-app:1", "healthcheck": {"test": ["CMD", "true"]}}
+    },
+}
+"""What ``config`` prints of the comms fixture: nothing for the check to name.
+Changed by DM-220: the compose document names the services of the fixture:
+the rule of DM-220 checks ``app.service`` and ``frontend.service`` -- the
+fixture's ``app`` is ``comms-app``."""
 
 
 def checked_calls(
