@@ -34,7 +34,10 @@ jobs:
           python-version: "3.12"
       # Runtime exactly as boxes get it: from wheels/ by the lock, with hashes.
       - run: python -m pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
-      - run: python -m pip install --no-deps -e .
+      # The build backend by its lock, with hashes, before the package: the
+      # editable install builds with it, nothing from the index (DM-187, D1).
+      - run: python -m pip install --require-hashes -r requirements-build.lock
+      - run: python -m pip install --no-index --no-deps --no-build-isolation -e .
       # Dev tools by their lock, with hashes (DM-82): the lock is compiled with
       # requirements.lock as its constraints, so it pins the runtime as above.
       - run: python -m pip install --require-hashes -r requirements-dev.lock
@@ -52,7 +55,10 @@ jobs:
           python-version: "3.12"
       # Runtime exactly as boxes get it: from wheels/ by the lock, with hashes.
       - run: python -m pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
-      - run: python -m pip install --no-deps -e .
+      # The build backend by its lock, with hashes, before the package: the
+      # editable install builds with it, nothing from the index (DM-187, D1).
+      - run: python -m pip install --require-hashes -r requirements-build.lock
+      - run: python -m pip install --no-index --no-deps --no-build-isolation -e .
       # Dev tools by their lock, with hashes (DM-82): the lock is compiled with
       # requirements.lock as its constraints, so it pins the runtime as above.
       - run: python -m pip install --require-hashes -r requirements-dev.lock
@@ -70,7 +76,10 @@ jobs:
           python-version: "3.12"
       # Runtime exactly as boxes get it: from wheels/ by the lock, with hashes.
       - run: python -m pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
-      - run: python -m pip install --no-deps -e .
+      # The build backend by its lock, with hashes, before the package: the
+      # editable install builds with it, nothing from the index (DM-187, D1).
+      - run: python -m pip install --require-hashes -r requirements-build.lock
+      - run: python -m pip install --no-index --no-deps --no-build-isolation -e .
       # Dev tools by their lock, with hashes (DM-82): the lock is compiled with
       # requirements.lock as its constraints, so it pins the runtime as above.
       - run: python -m pip install --require-hashes -r requirements-dev.lock

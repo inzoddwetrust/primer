@@ -388,10 +388,14 @@ def test_release_builds_only_after_tier1_of_the_same_commit() -> None:
     """Changed by DM-119, on the dispatcher's word: the owner's decision -- the
     button of the release; one logic of both ways through ``TAG`` and ``SHA``.
     The triggers stay an exact equality: a third way to a release, not agreed
-    -- a push to a branch, say -- turns this red."""
+    -- a push to a branch, say -- turns this red.
+
+    Changed by DM-187 (S8): the button alone -- the owner's decision of DM-125
+    ("the button makes the tag"); a pushed tag releases nothing, tag.yml reads
+    it (tag-moved)."""
     document = _release()
     triggers = document.get(True, document.get("on"))  # YAML reads `on` as true
-    assert triggers == {"push": {"tags": ["v*"]}, "workflow_dispatch": None}
+    assert triggers == {"workflow_dispatch": None}
     jobs = document["jobs"]
     assert isinstance(jobs, dict)
     release = jobs["release"]

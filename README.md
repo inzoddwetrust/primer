@@ -61,7 +61,8 @@ cd <absolute path>/pridem
 python3.12 -m venv .venv
 export PATH=<absolute path>/pridem/.venv/bin:$PATH
 pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
-pip install --no-deps -e .
+pip install --require-hashes -r requirements-build.lock
+pip install --no-index --no-deps --no-build-isolation -e .
 pip install --require-hashes -r requirements-dev.lock
 ruff check . && ruff format --check . && mypy . && pytest -q
 ```
@@ -108,10 +109,22 @@ by `file://` -- and installs the machine as on a box; then the `tier3/` probes
 run as root against `/usr/local/bin/pridem`.
 
 A release (`.github/workflows/release.yml`) is a tag `v{__version__}` on the
-first parent of `main`. Tier 1 runs on the tag's commit first; then the wheel
-is built and the GitHub Release gets two assets: the wheel and `install.sh`
-with its pins set to the tag, its commit, the wheel's sha256 and the GitHub
-addresses.
+first parent of `main`, made by its button alone (Actions, release, Run
+workflow on `main`). Tier 1 runs on the commit first; then the wheel is built,
+the tag is made where it is not, and the GitHub Release gets three assets: the
+wheel, `install.sh` with its pins set to the tag, its commit, the wheel's
+sha256 and the GitHub addresses, and `SHA256SUMS` -- the sums of both. Check
+`install.sh` by them before you run it:
+
+```
+curl -fsSLO https://github.com/inzoddwetrust/primer/releases/download/<tag>/install.sh
+curl -fsSLO https://github.com/inzoddwetrust/primer/releases/download/<tag>/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+A tag pushed by hand releases nothing: `.github/workflows/tag.yml` reads it
+against the release of that tag and is red when the tag has none or names
+another commit than the release's (`tag-moved`).
 
 ## `pridem check` in a project's CI
 

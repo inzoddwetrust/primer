@@ -53,7 +53,13 @@ LOCK_HASH = re.compile(r"--hash=sha256:([0-9a-f]{64})")
 Command = tuple[int, list[str]]
 
 RUNTIME_COMMENT = "      # Runtime exactly as boxes get it"
-PACKAGE_STEP = "      - run: python -m pip install --no-deps -e .\n"
+PACKAGE_STEP = (
+    "      - run: python -m pip install"
+    " --no-index --no-deps --no-build-isolation -e .\n"
+)
+BUILD_STEP = (
+    "      - run: python -m pip install --require-hashes -r requirements-build.lock\n"
+)
 DEV_STEP = (
     "      - run: python -m pip install --require-hashes -r requirements-dev.lock\n"
 )
@@ -129,10 +135,13 @@ def _install_kind(tokens: list[str]) -> str | None:
         and _file(tokens, "-r", "requirements.lock")
     ):
         return "runtime"
-    if "--no-deps" in tokens and (
-        _has(tokens, "-e", ".") or _has(tokens, "-e", "$GITHUB_WORKSPACE")
+    if (
+        "--no-deps" in tokens
+        and "--no-index" in tokens
+        and "--no-build-isolation" in tokens
+        and (_has(tokens, "-e", ".") or _has(tokens, "-e", "$GITHUB_WORKSPACE"))
     ):
-        return "package"
+        return "package"  # built by the backend of the build lock (DM-187)
     if hashed and _file(tokens, "-r", "requirements-dev.lock"):
         return "dev"
     if hashed and _file(tokens, "-r", "requirements-build.lock"):
@@ -165,6 +174,8 @@ def ci_problems(text: str) -> list[str]:
                     found.setdefault(kind, index)
         if found:
             installing += 1
+        if "package" in found and not found.get("build", index + 1) < found["package"]:
+            problems.append(f"{name}: the package before its build backend")
         if "dev" in found:
             if "runtime" not in found or "package" not in found:
                 problems.append(
@@ -308,9 +319,16 @@ def runtime_problems(lock_text: str) -> list[str]:
 
 
 def test_probe_DM_41_ci_runs_on_locked_versions() -> None:
+    """Changed by DM-187 (D1), the dispatcher's word on its gate: the package
+    is installed with no index and no build isolation, after the build
+    backend by ``requirements-build.lock`` with hashes -- an editable install
+    with build isolation fetched ``flit_core`` from the index, unpinned
+    (measured). What the probe holds is the same: every install by a lock
+    with hashes or with no dependencies; the literal of the step changed."""
     files = {f.name: f.read_text() for f in sorted(WORKFLOWS.glob("*.yml"))}
-    # the pair: all three workflows install packages, and each passes
-    assert sorted(files) == ["ci.yml", "release.yml", "tier3.yml"]
+    # the pair: every workflow installs packages, and each passes -- tag.yml
+    # since DM-187 (the guard of a pushed tag)
+    assert sorted(files) == ["ci.yml", "release.yml", "tag.yml", "tier3.yml"]
     for name, workflow in files.items():
         assert ci_problems(workflow) == [], name
     text = CI.read_text()
@@ -335,6 +353,10 @@ def test_probe_DM_41_ci_runs_on_locked_versions() -> None:
         ),
         "package last": text.replace(PACKAGE_STEP, "", 1).replace(
             DEV_STEP, DEV_STEP + PACKAGE_STEP, 1
+        ),
+        "package with build isolation": text.replace(" --no-build-isolation", "", 1),
+        "package before its build backend": text.replace(BUILD_STEP, "", 1).replace(
+            PACKAGE_STEP, PACKAGE_STEP + BUILD_STEP, 1
         ),
         "a conditional install": text.replace(
             DEV_STEP,
@@ -486,7 +508,9 @@ def test_no_checkout_keeps_the_job_token() -> None:
         count, problems = checkout_problems(file.read_text())
         assert problems == [], file.name
         total += count
-    assert total == 8  # the pair: ci 4, release 2, tier3 2 (plan, box)
+    # the pair: ci 4, release 2, tag 1 (DM-187: the guard of a pushed tag),
+    # tier3 2 (plan, box)
+    assert total == 9
     text = CI.read_text()
     flag = "          persist-credentials: false\n"
     planted = {

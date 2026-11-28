@@ -97,6 +97,11 @@ jobs:
     needs: plan
     if: needs.plan.outputs.groups != '[]'
     runs-on: ubuntu-24.04
+    # The secrets of the stand -- the deploy key of primer-blank, the login of
+    # Docker Hub -- live in the environment stand, which only main may use
+    # (DM-187, D3): a run on main that is no pull request is in it; any other
+    # run is in none and has no secrets, as a pull request.
+    environment: ${{ (github.ref == 'refs/heads/main' && github.event_name != 'pull_request') && 'stand' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -175,10 +180,13 @@ jobs:
         run: |
           python3 -m venv /tmp/t3
           /tmp/t3/bin/python -m pip install --no-index --find-links "$GITHUB_WORKSPACE/wheels" --require-hashes -r "$GITHUB_WORKSPACE/requirements.lock"
-          /tmp/t3/bin/python -m pip install --no-deps -e "$GITHUB_WORKSPACE"
+          # the build backend by its lock first: the editable install builds
+          # with it, nothing from the index (DM-187, D1)
+          /tmp/t3/bin/python -m pip install --require-hashes -r "$GITHUB_WORKSPACE/requirements-build.lock"
+          /tmp/t3/bin/python -m pip install --no-index --no-deps --no-build-isolation -e "$GITHUB_WORKSPACE"
           /tmp/t3/bin/python -m pip install --require-hashes -r "$GITHUB_WORKSPACE/requirements-dev.lock"
       - name: the deploy key of primer-blank, from the CI secrets (DM-10)
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           PRIMER_BLANK_DEPLOY_KEY: ${{ secrets.PRIMER_BLANK_DEPLOY_KEY }}
         run: |
@@ -195,7 +203,7 @@ jobs:
         run: |
           (umask 077 && printf 'Authorization: Bearer %s\n' "$GITHUB_API_TOKEN" > "$RUNNER_TEMP/github_api_header")
       - name: docker hub, the login of root, from the CI secrets (DM-164)
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -221,7 +229,7 @@ jobs:
             | sudo sh -c 'umask 077 && cat > /root/.docker/config.json'
           sudo stat -c '%n %a %s bytes' /root/.docker /root/.docker/config.json
       - name: docker hub, the pull limit, anonymous and signed in (DM-164)
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         continue-on-error: true
         run: |
           # A measure, never a gate: Docker Hub's headers of the pull limit for
@@ -249,10 +257,10 @@ jobs:
           auth=$(sudo python3 -c 'import json; print(json.load(open("/root/.docker/config.json"))["auths"]["https://index.docker.io/v1/"]["auth"])')
           echo "::add-mask::$auth"
           limit "signed in" -H "Authorization: Basic $auth"
-      - name: docker hub, anonymous on a pull request (DM-164)
-        if: github.event_name == 'pull_request'
+      - name: docker hub, anonymous off the stand (DM-164)
+        if: ${{ !(github.ref == 'refs/heads/main' && github.event_name != 'pull_request') }}
         run: |
-          echo "docker hub: anonymous on a pull request (no secrets, DM-82)"
+          echo "docker hub: anonymous -- a pull request or a run off main has no secrets (DM-82, DM-187)"
       - name: tier 3 probes
         env:
           TIER3_GROUP: ${{ matrix.group }}
@@ -260,13 +268,13 @@ jobs:
           PRIMER_GITHUB_API_HEADER_FILE: ${{ runner.temp }}/github_api_header
         run: |
           deselect=()
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            echo "pull_request: no secrets, so no deploy key -- DM-10 is not run"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "$GITHUB_EVENT_NAME on $GITHUB_REF: no secrets, so no deploy key -- DM-10 is not run"
             deselect=(-k "not test_probe_DM_10_blank_is_fetched_by_ref_over_ssh")
           fi
           sudo --preserve-env=PRIMER_DEPLOY_KEY_FILE,PRIMER_GITHUB_API_HEADER_FILE /tmp/t3/bin/python -m pytest -q -p no:cacheprovider --durations=0 --rootdir "$GITHUB_WORKSPACE" --tier3-group "$TIER3_GROUP" "${deselect[@]}" "$GITHUB_WORKSPACE/tier3"
       - name: docker hub, the pull limit after the probes (DM-164)
-        if: always() && github.event_name != 'pull_request'
+        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         continue-on-error: true
         run: |
           # A measure, never a gate: Docker Hub's headers of the pull limit for
@@ -294,6 +302,22 @@ jobs:
           auth=$(sudo python3 -c 'import json; print(json.load(open("/root/.docker/config.json"))["auths"]["https://index.docker.io/v1/"]["auth"])')
           echo "::add-mask::$auth"
           limit "signed in" -H "Authorization: Basic $auth"
+      # Last of what the secrets are for: they leave the runner, red or green
+      # (DM-187, D3) -- the deploy key, the API header of the job token, and
+      # root's docker login -- and that they left is read back.
+      - name: the secrets of the stand leave the runner
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/deploy_key" "$RUNNER_TEMP/github_api_header"
+          sudo rm -rf /root/.docker
+          left=0
+          for path in "$RUNNER_TEMP/deploy_key" "$RUNNER_TEMP/github_api_header" /root/.docker; do
+            if sudo test -e "$path"; then
+              echo "$path is still on the runner"
+              left=1
+            fi
+          done
+          exit "$left"
       - name: apt's downloads to the cache
         if: always()
         run: |

@@ -1,0 +1,55 @@
+name: tag
+
+# A pushed tag v* is no release (DM-187, S8): a release is made by the button
+# of release.yml alone (DM-125), which makes its tag by POST git/refs. A tag
+# pushed by hand -- new, or moved onto another commit -- is read here against
+# the release of that tag: none -- tag-not-released; a tag at another commit
+# than the commit the release's install.sh pins -- tag-moved
+# (tools/release_tag.py). Red, loud: a moved tag breaks every install of that
+# release (install.sh and self-update refuse a tag that is not their COMMIT).
+# The rule of the repository on tags v* (no update, no deletion) is what keeps
+# a tag from moving; this is the alarm when it does.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tag:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
+      - run: python -m pip install --require-hashes -r requirements-build.lock
+      - run: python -m pip install --no-index --no-deps --no-build-isolation -e .
+      - name: a pushed tag is a release's, at its commit (DM-187, S8)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "tag-not-released: $tag -- a release is made by the button (DM-125)"
+            exit 1
+          fi
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern install.sh --dir "$RUNNER_TEMP/release"
+          commit=$(sed -n 's/^COMMIT="\([0-9a-f]\{40\}\)"$/\1/p' "$RUNNER_TEMP/release/install.sh")
+          if [ -z "$commit" ]; then
+            echo "the install.sh of $tag pins no COMMIT"
+            exit 1
+          fi
+          python tools/release_tag.py "https://github.com/$GITHUB_REPOSITORY.git" "$tag" "$commit"
+

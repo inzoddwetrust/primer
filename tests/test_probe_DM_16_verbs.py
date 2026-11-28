@@ -215,6 +215,8 @@ def workflow_problems(text: str) -> list[str]:
 
 
 def test_tier3_steps_read_the_repository_only_after_checkout() -> None:
+    """Changed by DM-187 (D1): the probes' venv reads the build lock too, so
+    the relative read is planted in the first of the two only."""
     text = TIER3.read_text()
     assert workflow_problems(text) == []
     assert "$GITHUB_WORKSPACE/requirements-build.lock" in text  # the check sees reads
@@ -230,7 +232,9 @@ def test_tier3_steps_read_the_repository_only_after_checkout() -> None:
     )
     assert late != text and any("before checkout" in p for p in workflow_problems(late))
     relative = text.replace(
-        '-r "$GITHUB_WORKSPACE/requirements-build.lock"', "-r requirements-build.lock"
+        '-r "$GITHUB_WORKSPACE/requirements-build.lock"',
+        "-r requirements-build.lock",
+        1,
     )
     assert relative != text
     assert workflow_problems(relative) == [

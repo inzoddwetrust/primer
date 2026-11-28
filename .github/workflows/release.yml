@@ -1,25 +1,29 @@
 name: release
 
 # A release of the machine is a tag v{__version__} on the first parent of main
-# (TZ section 10.2). Two ways in, one logic (DM-119): the button -- Actions,
-# release, Run workflow on main -- releases the head of main as v{__version__}
-# in this run alone (a tag the job token makes starts no other workflow), and
-# a pushed tag vX.Y.Z releases its commit. The first step of the release job
-# names the tag and the commit -- TAG and SHA, every later step reads them --
-# and refuses, before anything is made: a tag not of the form vX.Y.Z; on the
-# button, a run off main, a tag that exists, a version not after the last.
-# Tier 1 runs on the commit first, with every check of ci.yml. The pinned
-# build backend is installed before any step holds the job token; on that
-# commit the run of ci.yml (a push to main) must have finished green, and a run
-# of tier3.yml where every group ran green -- a push of some groups is never a
-# release's (DM-125; by a push or by Run workflow) -- no waiting. Only then the wheel is built and install.sh
-# gets its pins; the release is published last, and it makes the tag on the
-# button's way: a build that fails leaves no tag and no release. No checkout
-# keeps the job token in .git/config (DM-82).
+# (TZ section 10.2), made by the button alone -- Actions, release, Run
+# workflow on main (DM-125; DM-187 closed the way of a pushed tag, DM-119).
+# The first step of the release job names the tag and the commit -- TAG and
+# SHA, every later step reads them -- and refuses, before anything is made: a
+# run off main, a tag that exists, a version not after the last. Tier 1 runs
+# on the commit first, with every check of ci.yml. The pinned build backend,
+# the runtime and the package are installed before any step holds the job
+# token; on that commit the run of ci.yml (a push to main) must have finished
+# green, and a run of tier3.yml where every group ran green -- a push of some
+# groups is never a release's (DM-125; by a push or by Run workflow) -- no
+# waiting. Only then the wheel is built, install.sh gets its pins and
+# SHA256SUMS the sums of both (DM-187, D2). The tag is made then, by POST
+# git/refs, which GitHub refuses when the ref is there -- the check and the
+# make in one (D7) -- and the release is published on it (--verify-tag, no
+# --target: a tag made by someone else in the meantime is never taken). A
+# release that fails after the tag deletes the tag it made, only if it is
+# still its own. The release job is in the environment release (main only,
+# D2). No checkout keeps the job token in .git/config (DM-82).
+#
+# A pushed tag v* releases nothing: tag.yml reads it against the release of
+# that tag (S8).
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
@@ -45,7 +49,10 @@ jobs:
           python-version: "3.12"
       # Runtime exactly as boxes get it: from wheels/ by the lock, with hashes.
       - run: python -m pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
-      - run: python -m pip install --no-deps -e .
+      # The build backend by its lock, with hashes, before the package: the
+      # editable install builds with it, nothing from the index (DM-187, D1).
+      - run: python -m pip install --require-hashes -r requirements-build.lock
+      - run: python -m pip install --no-index --no-deps --no-build-isolation -e .
       # Dev tools by their lock, with hashes (DM-82): the lock is compiled with
       # requirements.lock as its constraints, so it pins the runtime as above.
       - run: python -m pip install --require-hashes -r requirements-dev.lock
@@ -97,6 +104,7 @@ jobs:
   release:
     needs: tier1
     runs-on: ubuntu-24.04
+    environment: release  # main only (DM-187, D2)
     permissions:
       contents: write
       actions: read
@@ -113,38 +121,29 @@ jobs:
       # a path, an asset name.
       - name: the tag and the commit of this release
         run: |
-          case "$GITHUB_EVENT_NAME" in
-            push)
-              tag="$GITHUB_REF_NAME"
-              ;;
-            workflow_dispatch)
-              if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-                echo "the release is run on main, not $GITHUB_REF"
-                exit 1
-              fi
-              version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' pridem/__init__.py)
-              tag="v$version"
-              ;;
-            *)
-              echo "a release by $GITHUB_EVENT_NAME is none"
-              exit 1
-              ;;
-          esac
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+            echo "a release is made by the button alone, not by $GITHUB_EVENT_NAME"
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "the release is run on main, not $GITHUB_REF"
+            exit 1
+          fi
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' pridem/__init__.py)
+          tag="v$version"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "tag '$tag' is not vX.Y.Z"
             exit 1
           fi
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
-              echo "$tag exists: this version is released -- raise __version__"
-              exit 1
-            fi
-            git tag --list "v*" > "$RUNNER_TEMP/tags"
-            last=$({ grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' "$RUNNER_TEMP/tags" || true; } | sort -V | tail -n 1)
-            if [ -n "$last" ] && [ "$(printf '%s\n%s\n' "$last" "$tag" | sort -V | tail -n 1)" != "$tag" ]; then
-              echo "$tag is not after $last"
-              exit 1
-            fi
+          if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+            echo "$tag exists: this version is released -- raise __version__"
+            exit 1
+          fi
+          git tag --list "v*" > "$RUNNER_TEMP/tags"
+          last=$({ grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' "$RUNNER_TEMP/tags" || true; } | sort -V | tail -n 1)
+          if [ -n "$last" ] && [ "$(printf '%s\n%s\n' "$last" "$tag" | sort -V | tail -n 1)" != "$tag" ]; then
+            echo "$tag is not after $last"
+            exit 1
           fi
           echo "TAG=$tag" >> "$GITHUB_ENV"
           echo "SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
@@ -168,6 +167,9 @@ jobs:
             exit 1
           fi
       - run: python -m pip install --require-hashes -r requirements-build.lock
+      # the runtime and the package for tools/release_tag.py, before the token
+      - run: python -m pip install --no-index --find-links wheels/ --require-hashes -r requirements.lock
+      - run: python -m pip install --no-index --no-deps --no-build-isolation -e .
       - name: ci and tier 3 are green on this commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -212,12 +214,48 @@ jobs:
             exit 1
           fi
       - run: shellcheck dist/install.sh
-      # Last: the release, and with it the tag on the button's way (--target);
-      # a pushed tag is there already, and --target leaves it as it is.
-      - name: GitHub Release with the wheel and install.sh
+      # The sums of the wheel and install.sh: the anchor a person checks
+      # install.sh by (sha256sum -c --ignore-missing SHA256SUMS; DM-187, D2).
+      - name: SHA256SUMS of the release
+        run: |
+          (cd dist && sha256sum "pridem-${TAG#v}-py3-none-any.whl" install.sh > SHA256SUMS)
+          cat dist/SHA256SUMS
+      # The tag, made here and only here: POST git/refs is refused (422) when
+      # the ref is there -- the check and the make in one (DM-187, D7).
+      - name: the tag, made where it is not
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$TAG" --target "$SHA" \
-            "dist/pridem-${TAG#v}-py3-none-any.whl" dist/install.sh \
-            --title "pridem $TAG" --notes "pridem $TAG at $SHA"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$TAG" -f "sha=$SHA" > /dev/null
+          echo "TAG_MADE=1" >> "$GITHUB_ENV"
+          echo "$TAG made at $SHA"
+      # Last: the release, on the tag this run made (--verify-tag, no
+      # --target: a tag made by someone else is never taken).
+      - name: GitHub Release with the wheel, install.sh and SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "pridem $TAG at $SHA"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --verify-tag \
+            "dist/pridem-${TAG#v}-py3-none-any.whl" dist/install.sh dist/SHA256SUMS \
+            --title "pridem $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+      # A release that failed after its tag: the tag goes -- only when it is
+      # still the one this run made (tools/release_tag.py says same).
+      - name: the tag of a failed release goes
+        if: failure() && env.TAG_MADE == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if python tools/release_tag.py "https://github.com/$GITHUB_REPOSITORY.git" "$TAG" "$SHA"; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG"
+            echo "$TAG deleted: the release failed"
+          else
+            echo "$TAG is not this run's: it stays"
+          fi

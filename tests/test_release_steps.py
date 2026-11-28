@@ -75,17 +75,17 @@ def _pushed(tmp: Path, tag: str) -> dict[str, str]:
 def test_only_a_tag_of_the_form_vxyz_is_released(tmp_path: Path) -> None:
     """Changed by DM-119: the form is checked in the step that names the tag
     and the commit; a pushed tag that passes becomes ``TAG``, its commit
-    ``SHA``."""
+    ``SHA``.
+
+    Changed by DM-187 (S8): a release is made by the button alone -- the
+    owner's decision of DM-125 -- so a pushed tag, of the form or not, is
+    refused in that first step, before any name is given; the button's tag
+    is ``v{__version__}`` (the tests of the button below)."""
     step = _step("release.yml", "release", TAG_STEP)
-    for tag in ("v1.2.3", "v0.0.0", "v10.20.30"):
-        (tmp_path / "env").write_text("")
-        assert _bash(step, _pushed(tmp_path, tag))[0] == 0, tag
-        named = (tmp_path / "env").read_text().splitlines()
-        assert named == [f"TAG={tag}", f"SHA={'a' * 40}"]
-    for tag in ("v1/e", "v1.2", "1.2.3", "v1.2.3 x", "v1.2.3-rc1", "v1.2.3\nv", ""):
+    for tag in ("v1.2.3", "v0.0.0", "v1/e", "v1.2.3-rc1", ""):
         (tmp_path / "env").write_text("")
         code, said = _bash(step, _pushed(tmp_path, tag))
-        assert code == 1 and "is not vX.Y.Z" in said, (tag, said)
+        assert code == 1 and "a release is made by the button alone" in said, said
         assert (tmp_path / "env").read_text() == ""
 
 

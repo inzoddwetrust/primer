@@ -34,6 +34,10 @@ GATE = "ci and tier 3 are green on this commit"
 GATED = ("ci.yml", "tier3.yml")
 SECRET = re.compile(r"\$\{\{[^}]*\bsecrets\b")
 NOT_ON_PULL_REQUESTS = "github.event_name != 'pull_request'"
+STAND = "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
+"""The condition of a step with a secret of the stand (DM-187): main, and no
+pull request -- the secrets live in the environment stand, main only."""
+STAND_ENVIRONMENT = f"${{{{ ({STAND}) && 'stand' || '' }}}}"
 UNSAFE_TRIGGERS = ("pull_request_target", "workflow_run")
 SHA = "0123456789abcdef0123456789abcdef01234567"
 DM_10 = "test_probe_DM_10_blank_is_fetched_by_ref_over_ssh"
@@ -78,6 +82,27 @@ def _steps(text: str, job: str) -> list[dict[str, object]]:
     return steps
 
 
+TAG_CLEANUP = "the tag of a failed release goes"
+
+
+def _tag_cleanup(name: str, job: dict[str, object], key: str) -> object:
+    """The one conditional step of a release (DM-187, D7): last, on a failure
+    after this run made its tag -- it deletes that tag when it is still its
+    own. ``None`` for anything else."""
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    last = steps[-1]
+    if (
+        name == "release"
+        and key == "if"
+        and isinstance(last, dict)
+        and last.get("name") == TAG_CLEANUP
+        and last.get("if") == "failure() && env.TAG_MADE == '1'"
+    ):
+        return last
+    return None
+
+
 def gate_problems(text: str) -> list[str]:
     """What the release workflow ``text`` lacks to release only a commit with a
     green tier 3."""
@@ -92,7 +117,7 @@ def gate_problems(text: str) -> list[str]:
             if key in job:
                 problems.append(f"{job_name}: the job has {key}:")
             for step in job["steps"]:
-                if key in step:
+                if key in step and step is not _tag_cleanup(job_name, job, key):
                     problems.append(f"{job_name}: a step has {key}:")
     names = [
         str(step.get("name", step.get("run", step.get("uses"))))
@@ -270,7 +295,11 @@ def test_the_gate_comes_first_with_its_permission() -> None:
     """Changed by DM-125 (on the dispatcher's word): the gate asks ci.yml and
     tier3.yml by their runs' addresses, and decides tier 3 by tier3/groups.py
     --full-run -- a planted gate without it, taking the newest run whatever groups
-    it ran, is refused; the defect without ci is planted in the new form."""
+    it ran, is refused; the defect without ci is planted in the new form.
+
+    Changed by DM-187 (D7): the one conditional step a release may have is the
+    last, deleting on a failure the tag this run made; any other is refused,
+    and so is that step anywhere but last."""
     text = _text("release.yml")
     assert gate_problems(text) == []
     planted = {
@@ -304,6 +333,10 @@ def test_the_gate_comes_first_with_its_permission() -> None:
     planted["the gate without a full run"] = text.replace(
         "tier3/groups.py --full-run", "tier3/groups.py --affected"
     )
+    cleanup = [s for s in steps if s.get("name") == TAG_CLEANUP]
+    early = yaml.safe_load(text)
+    early["jobs"]["release"]["steps"] = cleanup + [s for s in steps if s not in cleanup]
+    planted["the cleanup not last"] = yaml.safe_dump(early)
     for label, defect in planted.items():
         assert defect != text, label
         assert gate_problems(defect) != [], label
@@ -377,10 +410,14 @@ def secret_problems(text: str) -> list[str]:
     for job_name, job in jobs.items():
         if job.get("secrets") == "inherit":
             problems.append(f"{job_name}: secrets: inherit")
+        in_stand = job.get("environment") == STAND_ENVIRONMENT
         for step in job.get("steps", []):
             env = step.get("env")
-            if step.get("if") == NOT_ON_PULL_REQUESTS and isinstance(env, dict):
-                allowed.extend(env.values())
+            if isinstance(env, dict) and SECRET.search(json.dumps(env)):
+                if not in_stand:
+                    problems.append(f"{job_name}: a secret off the environment stand")
+                if step.get("if") == STAND:
+                    allowed.extend(env.values())
 
     def walk(node: object, where: str) -> None:
         if any(node is value for value in allowed):
@@ -415,7 +452,12 @@ def test_ci_and_tier3_run_on_pull_requests_without_secrets() -> None:
     """Changed by DM-164, on the dispatcher's word 24.11: tier 3 holds three
     secrets -- the deploy key of DM-10 and the Docker Hub login's user and
     token, one step each kept from pull requests; it held one. What the test
-    holds is as it was."""
+    holds is as it was.
+
+    Changed by DM-187 (D3): a step with a secret runs on main alone and not on
+    a pull request (``STAND``), in a job of the environment stand -- a run off
+    main by ``workflow_dispatch`` got them. Planted: the old condition (off
+    main), the job without its environment."""
     for name in ("ci.yml", "tier3.yml"):
         assert trigger_problems(_text(name)) == [], name
     assert secret_problems(_text("release.yml")) == []
@@ -431,8 +473,12 @@ def test_ci_and_tier3_run_on_pull_requests_without_secrets() -> None:
         "tier3 without pull_request": tier3.replace(
             "  pull_request:\n    branches: [main]\n", ""
         ),
-        "a secret on a pull request": tier3.replace(
-            "        if: github.event_name != 'pull_request'\n", ""
+        "a secret on a pull request": tier3.replace(f"        if: {STAND}\n", "", 1),
+        "a secret off main": tier3.replace(
+            f"        if: {STAND}\n", f"        if: {NOT_ON_PULL_REQUESTS}\n", 1
+        ),
+        "a secret off the environment": tier3.replace(
+            f"    environment: {STAND_ENVIRONMENT}\n", ""
         ),
         "secrets by index": tier3.replace(
             "          TIER3_GROUP: ${{ matrix.group }}\n",
@@ -469,8 +515,9 @@ def deselect_problems(text: str) -> list[str]:
     the deploy key, by its name, and say so."""
     [probes] = [s for s in _steps(text, "box") if s.get("name") == "tier 3 probes"]
     run = str(probes["run"])
-    guarded = re.search(
-        r'if \[ "\$GITHUB_EVENT_NAME" = pull_request \]; then\n(.*?)\n\s*fi\n',
+    guarded = re.search(  # DM-187: a run off main is a pull request's
+        r'if \[ "\$GITHUB_EVENT_NAME" = pull_request \] '
+        r'\|\| \[ "\$GITHUB_REF" != refs/heads/main \]; then\n(.*?)\n\s*fi\n',
         run,
         re.S,
     )
@@ -487,13 +534,16 @@ def deselect_problems(text: str) -> list[str]:
 
 
 def test_a_pull_request_leaves_out_only_the_probe_with_the_key() -> None:
+    """Changed by DM-187 (D3): a run off main has no secrets either, so it
+    leaves the probe out as a pull request does."""
     text = _text("tier3.yml")
     assert deselect_problems(text) == []
     sources = (REPO / "tier3" / "test_tier3_sources.py").read_text(encoding="utf-8")
     assert f"def {DM_10}(" in sources  # the name left out is the probe's
     planted = {
         "no -k": text.replace(f'deselect=(-k "not {DM_10}")', "deselect=()"),
-        "silent": re.sub(r'\n\s*echo "pull_request: no secrets.*', "", text),
+        "silent": re.sub(r'\n\s*echo "\$GITHUB_EVENT_NAME on .*', "", text),
+        "on main only": text.replace(' || [ "$GITHUB_REF" != refs/heads/main ]', ""),
         "not passed": text.replace(' "${deselect[@]}"', ""),
     }
     for label, defect in planted.items():
