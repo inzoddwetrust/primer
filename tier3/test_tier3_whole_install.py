@@ -1673,7 +1673,10 @@ def test_tier3_check_refuses_a_test_service_its_compose_has_not(
     it; naming the blank's database service -- exit 0, the step green; a
     service added behind ``profiles:`` and named there -- red at ``compose``
     by ``compose-forbidden`` (``<service>: profiles``) and ``tests``
-    skipped, as ``build`` on a box refuses it first."""
+    skipped, as ``build`` on a box refuses it first.
+
+    Changed by DM-220 (FIX): the fact of the step ``tests`` carries the
+    directory of the junit as well -- ``report.junit`` of the blank is on."""
     started = time.monotonic()
     checkout = _blank(tmp_path)
     data = yaml.safe_load((checkout / "primer.yaml").read_text(encoding="utf-8"))
@@ -1695,7 +1698,14 @@ def test_tier3_check_refuses_a_test_service_its_compose_has_not(
     code, verdict = _check(_dm209_copy(checkout, tmp_path / "good", [database]))
     assert (code, verdict["result"]) == (0, "green"), verdict
     step = _dm209_step(verdict, entry, "tests")
-    assert (step["status"], step.get("verify")) == ("ok", {"services": [database]})
+    # changed by DM-220 (FIX, the dispatcher's word): the step tests of check
+    # says the junit too -- the blank's report.junit is on, its --junitxml=
+    # writes to /tmp
+    junit = "/tmp"  # noqa: S108 -- a fact of the blank's test.run, no file made
+    assert (step["status"], step.get("verify")) == (
+        "ok",
+        {"services": [database], "junit": junit},
+    )
 
     profiled = _dm209_copy(checkout, tmp_path / "profiled", ["cache"])
     file = profiled / data["stacks"][entry]["compose"]
